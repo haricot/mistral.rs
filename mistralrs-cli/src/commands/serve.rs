@@ -157,6 +157,8 @@ pub(crate) fn convert_to_model_selected(model_type: &ModelType) -> Result<ModelS
                 }
             }
 
+            let disable_vision = multimodal.text_only || multimodal.disable_vision;
+            let disable_audio = multimodal.text_only || multimodal.disable_audio;
             // Use Run (auto-loader) for auto mode without explicit quantized format
             Ok(ModelSelected::Run {
                 model_id: model.model_id.clone(),
@@ -175,6 +177,8 @@ pub(crate) fn convert_to_model_selected(model_type: &ModelType) -> Result<ModelS
                 imatrix: quantization.imatrix.clone(),
                 calibration_file: quantization.calibration_file.clone(),
                 max_edge: multimodal.max_edge,
+                disable_vision,
+                disable_audio,
                 max_seq_len: device.max_seq_len,
                 max_batch_size: device.max_batch_size,
                 max_num_images: multimodal.max_num_images,
@@ -202,32 +206,38 @@ pub(crate) fn convert_to_model_selected(model_type: &ModelType) -> Result<ModelS
             device,
             cache: _,
             multimodal,
-        } => Ok(ModelSelected::MultimodalPlain {
-            model_id: model.model_id.clone(),
-            tokenizer_json: model
-                .tokenizer
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string()),
-            arch: None,
-            dtype: model.dtype,
-            topology: device
-                .topology
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string()),
-            write_uqff: None,
-            from_uqff: quantization.from_uqff.clone(),
-            max_edge: multimodal.max_edge,
-            calibration_file: quantization.calibration_file.clone(),
-            imatrix: quantization.imatrix.clone(),
-            max_seq_len: device.max_seq_len,
-            max_batch_size: device.max_batch_size,
-            max_num_images: multimodal.max_num_images.unwrap_or(1),
-            max_image_length: multimodal.max_image_length.unwrap_or(1024),
-            hf_cache_path: device.hf_cache.clone(),
-            matformer_config_path: None,
-            matformer_slice_name: None,
-            organization: quantization.isq_organization,
-        }),
+        } => {
+            let disable_vision = multimodal.text_only || multimodal.disable_vision;
+            let disable_audio = multimodal.text_only || multimodal.disable_audio;
+            Ok(ModelSelected::MultimodalPlain {
+                model_id: model.model_id.clone(),
+                tokenizer_json: model
+                    .tokenizer
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string()),
+                arch: None,
+                dtype: model.dtype,
+                topology: device
+                    .topology
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string()),
+                write_uqff: None,
+                from_uqff: quantization.from_uqff.clone(),
+                max_edge: multimodal.max_edge,
+                disable_vision,
+                disable_audio,
+                calibration_file: quantization.calibration_file.clone(),
+                imatrix: quantization.imatrix.clone(),
+                max_seq_len: device.max_seq_len,
+                max_batch_size: device.max_batch_size,
+                max_num_images: multimodal.max_num_images.unwrap_or(1),
+                max_image_length: multimodal.max_image_length.unwrap_or(1024),
+                hf_cache_path: device.hf_cache.clone(),
+                matformer_config_path: None,
+                matformer_slice_name: None,
+                organization: quantization.isq_organization,
+            })
+        }
 
         ModelType::Diffusion { model, device: _ } => Ok(ModelSelected::DiffusionPlain {
             model_id: model.model_id.clone(),

@@ -171,6 +171,19 @@ pub struct QuantizeMultimodalOptions {
     #[arg(long)]
     pub max_edge: Option<u32>,
 
+    /// Disable vision loading for supported multimodal models.
+    /// On Gemma 4 this also disables video, which shares the vision tower.
+    #[arg(long)]
+    pub disable_vision: bool,
+
+    /// Disable audio loading for supported multimodal models.
+    #[arg(long)]
+    pub disable_audio: bool,
+
+    /// Convenience flag to disable all non-text modalities for supported multimodal models.
+    #[arg(long)]
+    pub text_only: bool,
+
     /// Maximum number of images per request
     #[arg(long)]
     pub max_num_images: Option<usize>,
@@ -257,6 +270,19 @@ pub struct QuantizeDefaultOptions {
     #[arg(long)]
     pub max_edge: Option<u32>,
 
+    /// Disable vision loading for supported multimodal models.
+    /// On Gemma 4 this also disables video, which shares the vision tower.
+    #[arg(long)]
+    pub disable_vision: bool,
+
+    /// Disable audio loading for supported multimodal models.
+    #[arg(long)]
+    pub disable_audio: bool,
+
+    /// Convenience flag to disable all non-text modalities for supported multimodal models.
+    #[arg(long)]
+    pub text_only: bool,
+
     /// Maximum number of images per request
     #[arg(long)]
     pub max_num_images: Option<usize>,
@@ -308,6 +334,9 @@ impl QuantizeDefaultOptions {
             },
             multimodal: QuantizeMultimodalOptions {
                 max_edge: self.max_edge,
+                disable_vision: self.disable_vision,
+                disable_audio: self.disable_audio,
+                text_only: self.text_only,
                 max_num_images: self.max_num_images,
                 max_image_length: self.max_image_length,
             },

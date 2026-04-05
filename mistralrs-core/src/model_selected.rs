@@ -99,6 +99,17 @@ pub enum ModelSelected {
         #[arg(short = 'e', long)]
         max_edge: Option<u32>,
 
+        /// Disable vision loading for supported multimodal models.
+        /// On Gemma 4 this also disables video, which shares the vision tower.
+        #[arg(long)]
+        #[serde(default)]
+        disable_vision: bool,
+
+        /// Disable audio loading for supported multimodal models.
+        #[arg(long)]
+        #[serde(default)]
+        disable_audio: bool,
+
         /// Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.
         #[arg(long, default_value_t = AutoDeviceMapParams::DEFAULT_MAX_SEQ_LEN)]
         max_seq_len: usize,
@@ -615,6 +626,17 @@ pub enum ModelSelected {
         /// This is only supported on the Qwen2-VL and Idefics models. Others handle this internally.
         #[arg(short = 'e', long)]
         max_edge: Option<u32>,
+
+        /// Disable vision loading for supported multimodal models.
+        /// On Gemma 4 this also disables video, which shares the vision tower.
+        #[arg(long)]
+        #[serde(default)]
+        disable_vision: bool,
+
+        /// Disable audio loading for supported multimodal models.
+        #[arg(long)]
+        #[serde(default)]
+        disable_audio: bool,
 
         /// Generate and utilize an imatrix to enhance GGUF quantizations.
         #[arg(short, long)]

@@ -149,6 +149,19 @@ pub struct MultimodalOptions {
     #[arg(long)]
     pub max_edge: Option<u32>,
 
+    /// Disable vision loading for supported multimodal models.
+    /// On Gemma 4 this also disables video, which shares the vision tower.
+    #[arg(long)]
+    pub disable_vision: bool,
+
+    /// Disable audio loading for supported multimodal models.
+    #[arg(long)]
+    pub disable_audio: bool,
+
+    /// Convenience flag to disable all non-text modalities for supported multimodal models.
+    #[arg(long)]
+    pub text_only: bool,
+
     /// Maximum number of images per request
     #[arg(long)]
     pub max_num_images: Option<usize>,
