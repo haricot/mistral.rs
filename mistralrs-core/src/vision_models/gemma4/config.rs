@@ -332,7 +332,7 @@ serde_default_fn!(usize, eoa_token_id, 258883);
 #[allow(dead_code)]
 pub struct Gemma4Config {
     pub text_config: Gemma4TextConfig,
-    pub vision_config: Gemma4VisionConfig,
+    pub vision_config: Option<Gemma4VisionConfig>,
     pub audio_config: Option<Gemma4AudioConfig>,
     #[serde(default = "image_token_id")]
     pub image_token_id: usize,

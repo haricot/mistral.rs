@@ -95,6 +95,10 @@ impl ClippableLinear {
         Ok(out)
     }
 
+    fn get_isq_layers(&mut self) -> Vec<(&mut Arc<dyn QuantMethod>, Option<usize>)> {
+        vec![(&mut self.inner, None)]
+    }
+
     fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let uvb = UnVarBuilder::new();
         if self.has_linear_prefix {
@@ -211,6 +215,10 @@ struct PatchEmbedder {
 }
 
 impl PatchEmbedder {
+    pub fn get_isq_layers(&mut self) -> Vec<(&mut Arc<dyn QuantMethod>, Option<usize>)> {
+        self.input_proj.get_isq_layers()
+    }
+
     fn new(cfg: &Gemma4VisionConfig, vb: ShardedVarBuilder) -> Result<Self> {
         let ps = cfg.patch_size;
         let input_proj = ClippableLinear::new(ps * ps * 3, cfg.hidden_size, vb.pp("input_proj"))?;
@@ -416,6 +424,15 @@ impl VisionAttention {
         uvb.pp("k_norm").add(&self.k_norm);
         uvb.to_safetensors()
     }
+
+    fn get_isq_layers(&mut self) -> Vec<(&mut Arc<dyn QuantMethod>, Option<usize>)> {
+        vec![
+            (&mut self.q_proj.inner, None),
+            (&mut self.k_proj.inner, None),
+            (&mut self.v_proj.inner, None),
+            (&mut self.o_proj.inner, None),
+        ]
+    }
 }
 
 // ── VisionMlp ───────────────────────────────────────────────────────────────
@@ -457,6 +474,14 @@ impl VisionMlp {
         uvb.pp("down_proj")
             .extend(self.down_proj.residual_tensors());
         uvb.to_safetensors()
+    }
+
+    fn get_isq_layers(&mut self) -> Vec<(&mut Arc<dyn QuantMethod>, Option<usize>)> {
+        vec![
+            (&mut self.gate_proj.inner, None),
+            (&mut self.up_proj.inner, None),
+            (&mut self.down_proj.inner, None),
+        ]
     }
 }
 
@@ -540,6 +565,12 @@ impl VisionEncoderLayer {
         uvb.pp("post_feedforward_layernorm")
             .add(&self.post_feedforward_layernorm);
         uvb.to_safetensors()
+    }
+
+    fn get_isq_layers(&mut self) -> Vec<(&mut Arc<dyn QuantMethod>, Option<usize>)> {
+        let mut tensors = self.self_attn.get_isq_layers();
+        tensors.extend(self.mlp.get_isq_layers());
+        tensors
     }
 }
 
@@ -779,5 +810,13 @@ impl VisionTower {
         }
 
         uvb.to_safetensors()
+    }
+
+    pub fn get_isq_layers(&mut self) -> Vec<(&mut Arc<dyn QuantMethod>, Option<usize>)> {
+        let mut layers = self.patch_embedder.get_isq_layers();
+        for layer in self.encoder_layers.iter_mut() {
+            layers.extend(layer.get_isq_layers());
+        }
+        layers
     }
 }

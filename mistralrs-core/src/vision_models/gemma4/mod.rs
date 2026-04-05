@@ -89,26 +89,28 @@ impl Gemma4Model {
 
         let (vision_tower, embed_vision) = if disabled_modalities.vision {
             (None, None)
-        } else {
+        } else if let Some(ref vision_cfg) = cfg.vision_config {
             let vision_tower = vision::VisionTower::new(
-                &cfg.vision_config,
+                vision_cfg,
                 normal_loading_metadata
                     .mapper
                     .set_nm_device(vb.pp("vision_tower"), false)
                     .set_dtype(vision_dtype),
             )?;
 
-            let vis_hidden = cfg.vision_config.hidden_size;
+            let vis_hidden = vision_cfg.hidden_size;
             let embed_vision = multimodal_embedding::Gemma4MultimodalEmbedder::new(
                 vis_hidden,
                 text_hidden,
-                cfg.vision_config.rms_norm_eps,
+                vision_cfg.rms_norm_eps,
                 normal_loading_metadata
                     .mapper
                     .set_nm_device(vb.pp("embed_vision"), false)
                     .set_dtype(vision_dtype),
             )?;
             (Some(vision_tower), Some(embed_vision))
+        } else {
+            (None, None)
         };
 
         let (audio_tower, embed_audio) = if disabled_modalities.audio {

@@ -7347,9 +7347,9 @@ impl MultimodalModelLoader for Gemma4Loader {
         let cfg: Gemma4Config = serde_json::from_str(config).expect("Failed to parse Gemma4Config");
         Arc::new(Gemma4Processor::new(
             processor_config.unwrap_or_default(),
-            cfg.vision_config.patch_size,
-            cfg.vision_config.pooling_kernel_size,
-            cfg.vision_config.default_output_length,
+            cfg.vision_config.as_ref().map_or(14, |v| v.patch_size),
+            cfg.vision_config.as_ref().map_or(2, |v| v.pooling_kernel_size),
+            cfg.vision_config.as_ref().map_or(1024, |v| v.default_output_length),
             self.supports_vision(),
             self.supports_audio(&cfg),
         ))
@@ -7475,22 +7475,23 @@ impl DeviceMappedModelLoader for Gemma4Loader {
         };
 
         let cfg: Gemma4Config = serde_json::from_str(config)?;
-        let vc = &cfg.vision_config;
 
-        let max_patches =
-            vc.default_output_length * vc.pooling_kernel_size * vc.pooling_kernel_size;
         let (max_vision_attn, max_vision_hidden) = if self.supports_vision() {
-            (
-                max_batch_size
-                    * max_num_images
-                    * vc.num_attention_heads
-                    * max_patches
-                    * max_patches,
-                max_batch_size
-                    * max_num_images
-                    * max_patches
-                    * vc.hidden_size.max(vc.intermediate_size),
-            )
+            cfg.vision_config.as_ref().map_or((0, 0), |vc| {
+                let max_patches =
+                    vc.default_output_length * vc.pooling_kernel_size * vc.pooling_kernel_size;
+                (
+                    max_batch_size
+                        * max_num_images
+                        * vc.num_attention_heads
+                        * max_patches
+                        * max_patches,
+                    max_batch_size
+                        * max_num_images
+                        * max_patches
+                        * vc.hidden_size.max(vc.intermediate_size),
+                )
+            })
         } else {
             (0, 0)
         };
@@ -7533,7 +7534,6 @@ impl DeviceMappedModelLoader for Gemma4Loader {
     ) -> Result<usize> {
         let cfg: Gemma4Config = serde_json::from_str(config)?;
         let tc = &cfg.text_config;
-        let vc = &cfg.vision_config;
 
         let text_elems = {
             let embed_tokens = tc.hidden_size * tc.vocab_size;
@@ -7566,25 +7566,27 @@ impl DeviceMappedModelLoader for Gemma4Loader {
                 + per_layer_projection_norm
         };
 
-        let vision_layer_elems = {
-            let quantized = vc.hidden_size * vc.num_attention_heads * vc.head_dim
-                + 3 * (vc.hidden_size * vc.num_key_value_heads * vc.head_dim)
-                + 2 * (vc.hidden_size * vc.intermediate_size)
-                + vc.intermediate_size * vc.hidden_size;
-            let norms = 2 * vc.head_dim + 4 * vc.hidden_size;
-            // Gemma 4 UQFF only quantizes the language model today.
-            // Vision and audio towers remain in `residual.safetensors`, so their
-            // memory footprint must be estimated at full precision.
-            quantized + norms
-        };
         let vision_elems = if self.supports_vision() {
-            let patch_embed = vc.patch_size * vc.patch_size * 3 * vc.hidden_size;
-            let position_embedding_table = 2 * vc.position_embedding_size * vc.hidden_size;
-            let patch_embedder = patch_embed + position_embedding_table;
-            let encoder = vc.num_hidden_layers * vision_layer_elems;
-            let embed_vision = vc.hidden_size * tc.hidden_size;
+            cfg.vision_config.as_ref().map_or(0, |vc| {
+                let vision_layer_elems = {
+                    let quantized = vc.hidden_size * vc.num_attention_heads * vc.head_dim
+                        + 3 * (vc.hidden_size * vc.num_key_value_heads * vc.head_dim)
+                        + 2 * (vc.hidden_size * vc.intermediate_size)
+                        + vc.intermediate_size * vc.hidden_size;
+                    let norms = 2 * vc.head_dim + 4 * vc.hidden_size;
+                    // Gemma 4 UQFF only quantizes the language model today.
+                    // Vision and audio towers remain in `residual.safetensors`, so their
+                    // memory footprint must be estimated at full precision.
+                    quantized + norms
+                };
+                let patch_embed = vc.patch_size * vc.patch_size * 3 * vc.hidden_size;
+                let position_embedding_table = 2 * vc.position_embedding_size * vc.hidden_size;
+                let patch_embedder = patch_embed + position_embedding_table;
+                let encoder = vc.num_hidden_layers * vision_layer_elems;
+                let embed_vision = vc.hidden_size * tc.hidden_size;
 
-            patch_embedder + encoder + embed_vision
+                patch_embedder + encoder + embed_vision
+            })
         } else {
             0
         };
@@ -7751,19 +7753,18 @@ impl DeviceMappedModelLoader for Gemma4Loader {
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         let cfg: Gemma4Config = serde_json::from_str(config)?;
         let tc = &cfg.text_config;
-
-        let cfg = ModelConfigMetadata {
+        let res = ModelConfigMetadata {
             max_seq_len: tc.max_position_embeddings,
             num_layers: tc.num_hidden_layers,
             hidden_size: tc.hidden_size,
             num_kv_heads: tc.num_key_value_heads,
             num_attn_heads: tc.num_attention_heads,
-            sliding_window: Some(tc.sliding_window),
+            sliding_window: Some(tc.sliding_window_pattern),
             k_head_dim: tc.global_head_dim,
             v_head_dim: tc.global_head_dim,
             kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
         };
 
-        Ok(Box::new(cfg))
+        Ok(Box::new(res))
     }
 }
