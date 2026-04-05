@@ -354,6 +354,8 @@ pub async fn tune_model(
         imatrix: None,
         calibration_file: None,
         max_edge: None,
+        disable_vision: false,
+        disable_audio: false,
         max_seq_len,
         max_batch_size,
         max_num_images: request.max_num_images,

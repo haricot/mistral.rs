@@ -84,7 +84,9 @@ pub(crate) fn get_device_layers_for_loader(
     )
 }
 use mistralrs_quant::IsqType;
-pub use multimodal::{MultimodalLoader, MultimodalLoaderBuilder, MultimodalSpecificConfig};
+pub use multimodal::{
+    DisabledModalities, MultimodalLoader, MultimodalLoaderBuilder, MultimodalSpecificConfig,
+};
 pub use normal::{NormalLoader, NormalLoaderBuilder, NormalSpecificConfig};
 pub(crate) use paths::{get_chat_template, get_model_paths, get_xlora_paths};
 pub use paths::{AdapterPaths, LoraAdapterPaths};

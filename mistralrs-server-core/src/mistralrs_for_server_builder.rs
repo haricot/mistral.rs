@@ -109,6 +109,7 @@ pub mod defaults {
     pub const TOKEN_SOURCE: mistralrs_core::TokenSource = mistralrs_core::TokenSource::CacheToken;
     pub const SEARCH_CALLBACK: Option<Arc<mistralrs_core::SearchCallback>> = None;
     pub const PAGED_CACHE_TYPE: PagedCacheType = PagedCacheType::Auto;
+    pub const DUMMY_RUN: bool = true;
 }
 
 /// A builder for creating a mistral.rs instance with configured options for the mistral.rs server.
@@ -237,6 +238,9 @@ pub struct MistralRsForServerBuilder {
 
     /// PagedAttention KV cache type
     paged_cache_type: PagedCacheType,
+
+    /// Run a dummy prompt after model load to warm up the engine.
+    dummy_run: bool,
 }
 
 impl Default for MistralRsForServerBuilder {
@@ -269,6 +273,7 @@ impl Default for MistralRsForServerBuilder {
             search_callback: defaults::SEARCH_CALLBACK,
             mcp_client_config: None,
             paged_cache_type: defaults::PAGED_CACHE_TYPE,
+            dummy_run: defaults::DUMMY_RUN,
         }
     }
 }
@@ -457,6 +462,12 @@ impl MistralRsForServerBuilder {
         if let Some(in_situ_quant) = in_situ_quant {
             self = self.with_in_situ_quant(in_situ_quant);
         }
+        self
+    }
+
+    /// Enable or disable the post-load dummy prompt.
+    pub fn with_dummy_run(mut self, dummy_run: bool) -> Self {
+        self.dummy_run = dummy_run;
         self
     }
 
@@ -699,6 +710,7 @@ impl MistralRsForServerBuilder {
         .with_opt_log(self.log)
         .with_no_kv_cache(self.no_kv_cache)
         .with_prefix_cache_n(self.prefix_cache_n)
+        .with_dummy_run(self.dummy_run)
         .with_loader_config(loader_config);
 
         // Add MCP client configuration if provided
@@ -833,6 +845,7 @@ impl MistralRsForServerBuilder {
         .with_opt_log(self.log.clone())
         .with_no_kv_cache(self.no_kv_cache)
         .with_prefix_cache_n(self.prefix_cache_n);
+        builder = builder.with_dummy_run(self.dummy_run);
         if first_primary_id != first_pipeline_name {
             builder = builder.with_model_id(first_primary_id.clone());
         }
