@@ -110,7 +110,8 @@ pub use pipeline::hf::{hf_home_dir, hf_hub_cache_dir, hf_token_path};
 pub use pipeline::{
     chat_template::ChatTemplate, expand_isq_value, parse_isq_value, AdapterPaths, AnyMoeLoader,
     AnyMoePipeline, AutoDeviceMapParams, AutoLoader, AutoLoaderBuilder, DiffusionGenerationParams,
-    DiffusionLoader, DiffusionLoaderBuilder, DiffusionLoaderType, EmbeddingLoader,
+    DiffusionLoader, DiffusionLoaderBuilder, DiffusionLoaderType, DisabledModalities,
+    EmbeddingLoader,
     EmbeddingLoaderBuilder, EmbeddingLoaderType, EmbeddingModelPaths, EmbeddingSpecificConfig,
     GGMLLoader, GGMLLoaderBuilder, GGMLSpecificConfig, GGUFLoader, GGUFLoaderBuilder,
     GGUFSpecificConfig, GemmaLoader, Idefics2Loader, IsqOrganization, LLaVALoader, LLaVANextLoader,
@@ -399,6 +400,7 @@ pub struct MistralRsBuilder {
     tool_callbacks_with_tools: tools::ToolCallbacksWithTools,
     mcp_client_config: Option<McpClientConfig>,
     loader_config: Option<ModelLoaderConfig>,
+    dummy_run: bool,
 }
 
 impl MistralRsBuilder {
@@ -427,6 +429,7 @@ impl MistralRsBuilder {
             tool_callbacks_with_tools: HashMap::new(),
             mcp_client_config: None,
             loader_config: None,
+            dummy_run: true,
         }
     }
 
@@ -505,6 +508,12 @@ impl MistralRsBuilder {
     /// Configure MCP client to connect to external MCP servers.
     pub fn with_mcp_client(mut self, config: McpClientConfig) -> Self {
         self.mcp_client_config = Some(config);
+        self
+    }
+
+    /// Enable or disable the post-load dummy prompt used to warm up the engine.
+    pub fn with_dummy_run(mut self, dummy_run: bool) -> Self {
+        self.dummy_run = dummy_run;
         self
     }
 
@@ -648,6 +657,7 @@ impl MistralRs {
             mut tool_callbacks_with_tools,
             mcp_client_config,
             loader_config,
+            dummy_run,
         } = config;
 
         mistralrs_quant::cublaslt::maybe_init_cublas_lt_wrapper(
@@ -763,6 +773,7 @@ impl MistralRs {
 
         // Do a dummy run
         if !distributed::is_daemon()
+            && dummy_run
             && is_multi_threaded
             && matches!(
                 engine_instance.category,

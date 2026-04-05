@@ -50,6 +50,35 @@ impl safetensors::tensor::View for CowBytesView<'_> {
     }
 }
 
+fn flush_uqff_shard(
+    parent: &std::path::Path,
+    file_stem: &str,
+    shard_index: usize,
+    current_chunk: &mut Vec<(String, Vec<u8>)>,
+) -> candle_core::Result<()> {
+    let mut shard_path = parent.to_path_buf();
+    shard_path.push(format!("{file_stem}-{shard_index}.uqff"));
+    info!(
+        "Writing shard {} to `{}`",
+        shard_index,
+        shard_path.display()
+    );
+
+    let shard_views = current_chunk
+        .iter()
+        .map(|(name, tensor)| {
+            (
+                name.clone(),
+                CowBytesView::new(Cow::Borrowed(tensor.as_slice())),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    safetensors::serialize_to_file(shard_views, None, &shard_path)?;
+    current_chunk.clear();
+    Ok(())
+}
+
 use anyhow::Result;
 use candle_core::{quantized, Context, Device, Tensor};
 use indicatif::{MultiProgress, ParallelProgressIterator, ProgressBar, ProgressStyle};
@@ -512,6 +541,8 @@ pub trait IsqModel {
 
             let total_tensors = tensors.len();
 
+            let serialize_artifacts = write_artifacts.is_some();
+
             if apply_quantization {
                 let imatrix_to_weight: Vec<Option<Vec<f32>>> =
                     if let Some(mut imatrix_to_weight) = imatrix_to_weight_map.take() {
@@ -565,7 +596,9 @@ pub trait IsqModel {
 
                 let mut devices_and_dtypes = Vec::new();
                 for (_, layer_num) in &tensors {
-                    let device = if let Some(ref layers) = layers {
+                    let device = if serialize_artifacts {
+                        Device::Cpu
+                    } else if let Some(ref layers) = layers {
                         if let Some(layer) = layer_num {
                             layers
                                 .get(*layer)
@@ -616,6 +649,11 @@ pub trait IsqModel {
 
                 if matches!(imatrix_source, Some(ImatrixDataSource::Collected)) {
                     // Collected imatrix means that the model is potentially on the gpu already
+                    minimum_max_threads = 1;
+                }
+                if serialize_artifacts {
+                    // UQFF generation does not benefit from quantizing onto mapped GPU devices,
+                    // and running this path serially reduces peak memory pressure.
                     minimum_max_threads = 1;
                 }
 
@@ -708,75 +746,6 @@ pub trait IsqModel {
                         .progress_chars("#>-"),
                 );
 
-                // Metal and CUDA require serialization on the current thread because GPU contexts are thread-local.
-                // Using a rayon thread pool (even with n_threads=1) creates a new thread without the GPU context.
-                #[cfg(any(feature = "metal", feature = "cuda"))]
-                let quantized_values: candle_core::Result<Vec<_>> = {
-                    tensors
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, (layer, _))| layer.isq_serde_supported())
-                        .map(|(i, (layer, _))| {
-                            if !silent {
-                                bar.inc(1);
-                            }
-                            Ok((
-                                i.to_string(),
-                                match layer.serialize()? {
-                                    Cow::Borrowed(_) => unreachable!(),
-                                    Cow::Owned(owned) => owned,
-                                },
-                            ))
-                        })
-                        .collect()
-                };
-
-                #[cfg(not(any(feature = "metal", feature = "cuda")))]
-                let quantized_values: candle_core::Result<Vec<_>> = {
-                    let pool = rayon::ThreadPoolBuilder::new()
-                        .num_threads(2)
-                        .build()
-                        .map_err(candle_core::Error::msg)?;
-
-                    pool.install(|| {
-                        use rayon::iter::IntoParallelRefIterator;
-                        if silent {
-                            tensors
-                                .par_iter()
-                                .enumerate()
-                                .filter(|(_, (layer, _))| layer.isq_serde_supported())
-                                .map(|(i, (layer, _))| {
-                                    Ok((
-                                        i.to_string(),
-                                        match layer.serialize()? {
-                                            Cow::Borrowed(_) => unreachable!(),
-                                            Cow::Owned(owned) => owned,
-                                        },
-                                    ))
-                                })
-                                .collect::<candle_core::Result<Vec<_>>>()
-                        } else {
-                            tensors
-                                .par_iter()
-                                .enumerate()
-                                .progress_with(bar)
-                                .filter(|(_, (layer, _))| layer.isq_serde_supported())
-                                .map(|(i, (layer, _))| {
-                                    Ok((
-                                        i.to_string(),
-                                        match layer.serialize()? {
-                                            Cow::Borrowed(_) => unreachable!(),
-                                            Cow::Owned(owned) => owned,
-                                        },
-                                    ))
-                                })
-                                .collect::<candle_core::Result<Vec<_>>>()
-                        }
-                    })
-                };
-
-                let quantized_values = quantized_values?;
-
                 let parent = serialized
                     .parent()
                     .context("Target UQFF path must have a filename!")?;
@@ -789,42 +758,45 @@ pub trait IsqModel {
                     .to_string_lossy()
                     .to_string();
 
-                // Shard quantized values by cumulative byte size, max MAX_UQFF_SIZE_BYTES per file
-                let mut current_chunk = Vec::new();
+                // Stream quantized tensors shard-by-shard to avoid holding all serialized
+                // UQFF payloads in memory at once.
+                let mut current_chunk: Vec<(String, Vec<u8>)> = Vec::new();
                 let mut current_bytes: usize = 0;
                 let mut shard_index = 0;
 
-                // Every 10GB, flush the file. Then save any remaining tensors
-                for (name, tensor) in quantized_values.iter() {
+                // Metal and CUDA require serialization on the current thread because GPU
+                // contexts are thread-local. Keeping this loop serial also reduces peak RAM
+                // usage for `quantize`, since we only retain one shard worth of serialized
+                // tensors at a time.
+                for (i, (layer, _)) in tensors.iter().enumerate() {
+                    if !layer.isq_serde_supported() {
+                        continue;
+                    }
+                    if !silent {
+                        bar.inc(1);
+                    }
+
+                    let name = i.to_string();
+                    let tensor = match layer.serialize()? {
+                        Cow::Borrowed(_) => unreachable!(),
+                        Cow::Owned(owned) => owned,
+                    };
                     let tensor_bytes = tensor.len();
+
                     if !current_chunk.is_empty()
                         && current_bytes + tensor_bytes > MAX_UQFF_SIZE_BYTES
                     {
-                        let mut shard_path = parent.to_path_buf();
-                        shard_path.push(format!("{file_stem}-{shard_index}.uqff"));
-                        info!(
-                            "Writing shard {} to `{}`",
-                            shard_index,
-                            shard_path.display()
-                        );
-                        safetensors::serialize_to_file(current_chunk.clone(), None, &shard_path)?;
+                        flush_uqff_shard(parent, &file_stem, shard_index, &mut current_chunk)?;
                         shard_index += 1;
-                        current_chunk.clear();
                         current_bytes = 0;
                     }
+
                     current_bytes += tensor_bytes;
-                    current_chunk.push((name, CowBytesView::new(Cow::Borrowed(tensor))));
+                    current_chunk.push((name, tensor));
                 }
 
                 if !current_chunk.is_empty() {
-                    let mut shard_path = parent.to_path_buf();
-                    shard_path.push(format!("{file_stem}-{shard_index}.uqff"));
-                    info!(
-                        "Writing final shard {} to `{}`",
-                        shard_index,
-                        shard_path.display()
-                    );
-                    safetensors::serialize_to_file(current_chunk.clone(), None, &shard_path)?;
+                    flush_uqff_shard(parent, &file_stem, shard_index, &mut current_chunk)?;
                 }
 
                 let residual = match organization {

@@ -1,9 +1,9 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use std::{f32::consts::PI, ops::Mul, str::FromStr, sync::Arc};
+use std::{borrow::Cow, f32::consts::PI, ops::Mul, str::FromStr, sync::Arc};
 
 use candle_core::{
-    quantized::{QMatMul, QTensor},
+    quantized::{GgmlDType, QMatMul, QStorage, QTensor},
     Context, DType, Device, IndexOp, Result, Tensor, D,
 };
 use candle_nn::{
@@ -13,8 +13,9 @@ use candle_nn::{
 use float8::F8E4M3;
 use half::{bf16, f16};
 use mistralrs_quant::{
-    AfqLayer, ColumnParallelLayer, Convolution, QuantMethod, QuantizedConfig, RowParallelLayer,
-    ShardedVarBuilder,
+    get_immediate_isq, immediate_isq_match, log::once_log_warn, should_apply_immediate_isq,
+    AfqLayer, ColumnParallelLayer, Convolution, GgufMatMul, QuantMethod, QuantMethodConfig,
+    QuantizedConfig, RowParallelLayer, ShardedVarBuilder,
 };
 use serde::{Deserialize, Serialize};
 
@@ -53,6 +54,289 @@ pub fn embedding(
         vb.get_with_hints((in_size, out_size), "weight", Default::default())?
     };
     Ok(Embedding::new(embeddings, out_size))
+}
+
+pub fn vocab_store(
+    in_size: usize,
+    out_size: usize,
+    vb: ShardedVarBuilder,
+    config: &Option<QuantizedConfig>,
+) -> Result<Box<dyn VocabStore>> {
+    if let Some(immediate_isq) = immediate_isq_match(&vb) {
+        let prefix = vb.prefix();
+        let cpu_embedding = embedding(
+            in_size,
+            out_size,
+            vb.clone().set_device(Device::Cpu),
+            config,
+        )?;
+        if let Some(store) = QuantizedVocabStore::from_immediate_isq(
+            cpu_embedding.embeddings().clone(),
+            &prefix,
+            immediate_isq.ty,
+            immediate_isq.device.unwrap_or_else(|| vb.device().clone()),
+        )? {
+            return Ok(Box::new(store));
+        }
+
+        let fallback_device = vb.device().clone();
+        return Ok(Box::new(TensorVocabStore::from_tensor(
+            cpu_embedding.embeddings().to_device(&fallback_device)?,
+        )));
+    }
+
+    if should_apply_immediate_isq(&vb) {
+        once_log_warn(format!(
+            "Immediate ISQ matched `{}` without a concrete override; keeping tensor-backed vocabulary storage.",
+            vb.prefix()
+        ));
+    }
+    Ok(Box::new(TensorVocabStore::new(embedding(
+        in_size, out_size, vb, config,
+    )?)))
+}
+
+pub fn vocab_embedding(
+    scale: f64,
+    in_size: usize,
+    out_size: usize,
+    vb: ShardedVarBuilder,
+    config: &Option<QuantizedConfig>,
+) -> Result<VocabEmbedding> {
+    Ok(VocabEmbedding::from_boxed_store(
+        scale,
+        vocab_store(in_size, out_size, vb, config)?,
+    ))
+}
+
+/// Storage backend for vocabulary lookups.
+///
+/// `TensorVocabStore` keeps the current behavior, while this trait leaves a
+/// dedicated injection point for alternate backends such as memory-mapped or
+/// quantized stores.
+pub trait VocabStore: Module + Send + Sync {
+    fn embeddings(&self) -> Option<&Tensor> {
+        None
+    }
+
+    fn dequantized_embeddings(&self) -> Result<Option<Tensor>> {
+        Ok(self.embeddings().cloned())
+    }
+
+    fn tied_output_projection(&self) -> Option<Arc<dyn QuantMethod>> {
+        None
+    }
+
+    fn replace_embeddings(&mut self, _embeddings: Tensor) -> Result<()> {
+        candle_core::bail!("This vocabulary store does not support replacing embeddings.")
+    }
+}
+
+pub struct TensorVocabStore {
+    embeddings: Tensor,
+}
+
+impl TensorVocabStore {
+    pub fn new(embedding: Embedding) -> Self {
+        Self::from_tensor(embedding.embeddings().clone())
+    }
+
+    pub fn from_tensor(embeddings: Tensor) -> Self {
+        Self { embeddings }
+    }
+
+    pub fn embeddings(&self) -> &Tensor {
+        &self.embeddings
+    }
+}
+
+impl Module for TensorVocabStore {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let embedding = Embedding::new(self.embeddings.clone(), self.embeddings.dim(D::Minus1)?);
+        xs.apply(&embedding)
+    }
+}
+
+impl VocabStore for TensorVocabStore {
+    fn embeddings(&self) -> Option<&Tensor> {
+        Some(&self.embeddings)
+    }
+
+    fn replace_embeddings(&mut self, embeddings: Tensor) -> Result<()> {
+        self.embeddings = embeddings;
+        Ok(())
+    }
+}
+
+pub struct QuantizedVocabStore {
+    quantized_bytes: Arc<[u8]>,
+    dtype: GgmlDType,
+    output_dtype: DType,
+    vocab_size: usize,
+    hidden_size: usize,
+    row_bytes: usize,
+    tied_output_projection: Option<Arc<dyn QuantMethod>>,
+}
+
+impl QuantizedVocabStore {
+    fn ggml_fallback_dtype(dtype: GgmlDType) -> Option<GgmlDType> {
+        match dtype {
+            GgmlDType::Q2K | GgmlDType::Q3K => Some(GgmlDType::Q4_0),
+            GgmlDType::Q4K => Some(GgmlDType::Q4_1),
+            GgmlDType::Q5K => Some(GgmlDType::Q5_0),
+            GgmlDType::Q6K => Some(GgmlDType::Q5_1),
+            GgmlDType::Q8K => Some(GgmlDType::Q8_1),
+            _ => None,
+        }
+    }
+
+    fn resolve_ggml_dtype(hidden_size: usize, requested: GgmlDType) -> Option<GgmlDType> {
+        if hidden_size > 0 && hidden_size.is_multiple_of(requested.block_size()) {
+            return Some(requested);
+        }
+        Self::ggml_fallback_dtype(requested)
+            .and_then(|fallback| Self::resolve_ggml_dtype(hidden_size, fallback))
+    }
+
+    fn new(
+        quantized_bytes: Vec<u8>,
+        dtype: GgmlDType,
+        output_dtype: DType,
+        vocab_size: usize,
+        hidden_size: usize,
+        tied_output_projection: Option<Arc<dyn QuantMethod>>,
+    ) -> Result<Self> {
+        let row_bytes = (hidden_size / dtype.block_size()) * dtype.type_size();
+        if row_bytes == 0 {
+            candle_core::bail!(
+                "Quantized vocabulary row size is zero for hidden size {hidden_size} and dtype {dtype:?}."
+            );
+        }
+        let expected_bytes = vocab_size * row_bytes;
+        if quantized_bytes.len() != expected_bytes {
+            candle_core::bail!(
+                "Quantized vocabulary size mismatch: expected {expected_bytes} bytes, got {}.",
+                quantized_bytes.len()
+            );
+        }
+
+        Ok(Self {
+            quantized_bytes: quantized_bytes.into(),
+            dtype,
+            output_dtype,
+            vocab_size,
+            hidden_size,
+            row_bytes,
+            tied_output_projection,
+        })
+    }
+
+    fn from_immediate_isq(
+        embeddings: Tensor,
+        prefix: &str,
+        ty: mistralrs_quant::IsqType,
+        target_device: Device,
+    ) -> Result<Option<Self>> {
+        let Ok(requested_dtype) = GgmlDType::try_from(ty) else {
+            once_log_warn(format!(
+                "Immediate ISQ `{ty}` is not yet supported for vocabulary lookups at `{prefix}`; keeping tensor-backed embeddings."
+            ));
+            return Ok(None);
+        };
+
+        let Some(dtype) = Self::resolve_ggml_dtype(embeddings.dim(D::Minus1)?, requested_dtype)
+        else {
+            once_log_warn(format!(
+                "Skipping immediate vocab ISQ for `{prefix}` because hidden size {} is incompatible with `{ty}` and its fallbacks.",
+                embeddings.dim(D::Minus1)?,
+            ));
+            return Ok(None);
+        };
+
+        let initial = QTensor::quantize(&embeddings, dtype)?;
+        let quantized_bytes = initial.data()?.into_owned();
+        let guard = get_immediate_isq()
+            .map(|params| params.guard)
+            .unwrap_or_default();
+        let _acquired_quantize_guard = guard.acquire(&target_device);
+        let qstorage = QStorage::from_data(
+            Cow::Borrowed(quantized_bytes.as_slice()),
+            &target_device,
+            dtype,
+        )?;
+        let q_weight = Arc::new(QTensor::new(qstorage, embeddings.shape())?);
+        let tied_output_projection = Arc::new(GgufMatMul::new(QuantMethodConfig::Gguf {
+            q_weight,
+            b: None,
+        })?) as Arc<dyn QuantMethod>;
+        let (vocab_size, hidden_size) = embeddings.dims2()?;
+
+        Ok(Some(Self::new(
+            quantized_bytes,
+            dtype,
+            embeddings.dtype(),
+            vocab_size,
+            hidden_size,
+            Some(tied_output_projection),
+        )?))
+    }
+
+    fn quantized_rows_tensor(&self, ids: &[u32], device: &Device) -> Result<QTensor> {
+        let mut row_data = Vec::with_capacity(ids.len() * self.row_bytes);
+        for &id in ids {
+            let row_idx = usize::try_from(id)?;
+            if row_idx >= self.vocab_size {
+                candle_core::bail!(
+                    "Vocabulary id {row_idx} is out of range for vocab size {}.",
+                    self.vocab_size
+                );
+            }
+            let start = row_idx * self.row_bytes;
+            let end = start + self.row_bytes;
+            row_data.extend_from_slice(&self.quantized_bytes[start..end]);
+        }
+
+        let qstorage = QStorage::from_data(Cow::Owned(row_data), device, self.dtype)?;
+        QTensor::new(qstorage, (ids.len(), self.hidden_size))
+    }
+}
+
+impl Module for QuantizedVocabStore {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let mut final_dims = xs.dims().to_vec();
+        final_dims.push(self.hidden_size);
+
+        let flat_ids = xs
+            .flatten_all()?
+            .to_device(&Device::Cpu)?
+            .to_dtype(DType::U32)?;
+        let flat_ids = flat_ids.to_vec1::<u32>()?;
+        let values = self
+            .quantized_rows_tensor(&flat_ids, xs.device())?
+            .dequantize(xs.device())?
+            .to_dtype(self.output_dtype)?;
+        values.reshape(final_dims)
+    }
+}
+
+impl VocabStore for QuantizedVocabStore {
+    fn dequantized_embeddings(&self) -> Result<Option<Tensor>> {
+        let qstorage = QStorage::from_data(
+            Cow::Borrowed(self.quantized_bytes.as_ref()),
+            &Device::Cpu,
+            self.dtype,
+        )?;
+        let qtensor = QTensor::new(qstorage, (self.vocab_size, self.hidden_size))?;
+        Ok(Some(
+            qtensor
+                .dequantize(&Device::Cpu)?
+                .to_dtype(self.output_dtype)?,
+        ))
+    }
+
+    fn tied_output_projection(&self) -> Option<Arc<dyn QuantMethod>> {
+        self.tied_output_projection.clone()
+    }
 }
 
 pub fn layer_norm<C: Into<LayerNormConfig>>(
@@ -3051,27 +3335,121 @@ impl Module for ReflectionPad2d {
     }
 }
 
-pub struct ScaledEmbedding {
+pub struct VocabEmbedding {
     scale: f64,
-    pub embedding: Tensor,
+    store: Box<dyn VocabStore>,
 }
 
-impl ScaledEmbedding {
-    pub fn new(scale: f64, embedding: Embedding) -> Self {
-        Self {
-            scale,
-            embedding: embedding.embeddings().clone(),
+impl VocabEmbedding {
+    pub fn new(scale: f64, store: impl VocabStore + 'static) -> Self {
+        Self::from_boxed_store(scale, Box::new(store))
+    }
+
+    pub fn from_boxed_store(scale: f64, store: Box<dyn VocabStore>) -> Self {
+        Self { scale, store }
+    }
+
+    pub fn from_embedding(scale: f64, embedding: Embedding) -> Self {
+        Self::from_boxed_store(scale, Box::new(TensorVocabStore::new(embedding)))
+    }
+
+    pub fn tensor_embeddings(&self) -> Option<&Tensor> {
+        self.store.embeddings()
+    }
+
+    pub fn embeddings(&self) -> Result<&Tensor> {
+        match self.store.embeddings() {
+            Some(embeddings) => Ok(embeddings),
+            None => candle_core::bail!(
+                "This vocabulary store does not expose tensor-backed embeddings."
+            ),
         }
     }
 
-    pub fn embeddings(&self) -> &Tensor {
-        &self.embedding
+    pub fn dequantized_embeddings(&self) -> Result<Option<Tensor>> {
+        self.store.dequantized_embeddings()
+    }
+
+    pub fn replace_embeddings(&mut self, embeddings: Tensor) -> Result<()> {
+        self.store.replace_embeddings(embeddings)
+    }
+
+    pub fn tied_output_projection(&self) -> Option<Arc<dyn QuantMethod>> {
+        self.store.tied_output_projection()
     }
 }
 
-impl Module for ScaledEmbedding {
+impl Module for VocabEmbedding {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let embedding = Embedding::new(self.embedding.clone(), self.embedding.dim(D::Minus1)?);
-        xs.apply(&embedding)? * self.scale
+        self.store.forward(xs)? * self.scale
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{QuantizedVocabStore, TensorVocabStore, VocabEmbedding};
+    use candle_core::{quantized::GgmlDType, Device, Result, Tensor};
+    use candle_nn::{Embedding, Module};
+
+    #[test]
+    fn tensor_vocab_store_matches_embedding_lookup() -> Result<()> {
+        let device = Device::Cpu;
+        let weights = Tensor::new(&[[1f32, 2.], [3., 4.], [5., 6.]], &device)?;
+        let ids = Tensor::new(&[0u32, 2], &device)?;
+
+        let store = TensorVocabStore::new(Embedding::new(weights, 2));
+        let looked_up = store.forward(&ids)?.to_vec2::<f32>()?;
+
+        assert_eq!(looked_up, vec![vec![1., 2.], vec![5., 6.]]);
+        Ok(())
+    }
+
+    #[test]
+    fn vocab_embedding_scales_and_allows_tensor_replacement() -> Result<()> {
+        let device = Device::Cpu;
+        let weights = Tensor::new(&[[1f32, 2.], [3., 4.]], &device)?;
+        let replacement = Tensor::new(&[[10f32, 20.], [30., 40.]], &device)?;
+        let ids = Tensor::new(&[1u32], &device)?;
+
+        let mut embedding = VocabEmbedding::from_embedding(0.5, Embedding::new(weights, 2));
+        let before = embedding.forward(&ids)?.to_vec2::<f32>()?;
+        assert_eq!(before, vec![vec![1.5, 2.]]);
+
+        embedding.replace_embeddings(replacement)?;
+        let after = embedding.forward(&ids)?.to_vec2::<f32>()?;
+        assert_eq!(after, vec![vec![15., 20.]]);
+        Ok(())
+    }
+
+    #[test]
+    fn quantized_vocab_store_matches_quantized_lookup_rows() -> Result<()> {
+        let device = Device::Cpu;
+        let hidden = 32usize;
+        let weights = Tensor::from_vec(
+            (0..(3 * hidden)).map(|v| v as f32).collect::<Vec<_>>(),
+            (3, hidden),
+            &device,
+        )?;
+        let ids = Tensor::new(&[2u32, 0], &device)?;
+
+        let store = QuantizedVocabStore::from_immediate_isq(
+            weights.clone(),
+            "embed_tokens",
+            mistralrs_quant::IsqType::Q4_0,
+            device.clone(),
+        )?
+        .expect("Q4_0 should support 32-wide vocab rows");
+
+        let expected = store
+            .dequantized_embeddings()?
+            .expect("quantized store should dequantize")
+            .index_select(&ids, 0)?
+            .to_vec2::<f32>()?;
+        let actual = store.forward(&ids)?.to_vec2::<f32>()?;
+
+        assert_eq!(actual, expected);
+        assert!(store.tied_output_projection().is_some());
+        assert_eq!(store.dtype, GgmlDType::Q4_0);
+        Ok(())
     }
 }

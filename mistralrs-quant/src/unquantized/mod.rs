@@ -32,6 +32,18 @@ fn use_legacy_bf16_fallback(a: &Tensor) -> bool {
 }
 
 fn bf16_safe_matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
+    if a.device().is_cpu() && (a.dtype() == DType::BF16 || b.dtype() == DType::BF16) {
+        let original_dtype = if a.dtype() == DType::BF16 {
+            DType::BF16
+        } else {
+            b.dtype()
+        };
+        return a
+            .to_dtype(DType::F32)?
+            .matmul(&b.to_dtype(DType::F32)?)?
+            .to_dtype(original_dtype);
+    }
+
     a.matmul(b)
 }
 
@@ -121,19 +133,13 @@ impl QuantMethod for UnquantLinear {
                     matmul_result.broadcast_add(&b)
                 }
                 DeviceLocation::Cpu => {
-                    #[cfg(feature = "accelerate")]
-                    {
-                        let original_dtype = a.dtype();
+                    if a.dtype() == DType::BF16 || w.dtype() == DType::BF16 {
                         let a_f32 = a.to_dtype(DType::F32)?;
                         let w_f32 = w.t()?.to_dtype(DType::F32)?;
                         let b_f32 = b.to_dtype(DType::F32)?;
                         let matmul_result = a_f32.matmul(&w_f32)?;
-                        matmul_result
-                            .broadcast_add(&b_f32)?
-                            .to_dtype(original_dtype)
-                    }
-                    #[cfg(not(feature = "accelerate"))]
-                    {
+                        matmul_result.broadcast_add(&b_f32)?.to_dtype(DType::BF16)
+                    } else {
                         let matmul_result = a.matmul(&w.t()?)?;
                         matmul_result.broadcast_add(&b)
                     }
@@ -162,19 +168,7 @@ impl QuantMethod for UnquantLinear {
                     }
                 }
                 DeviceLocation::Metal { .. } => bf16_safe_matmul(a, &w.t()?),
-                DeviceLocation::Cpu => {
-                    #[cfg(feature = "accelerate")]
-                    {
-                        let original_dtype = a.dtype();
-                        a.to_dtype(DType::F32)?
-                            .matmul(&w.t()?.to_dtype(DType::F32)?)?
-                            .to_dtype(original_dtype)
-                    }
-                    #[cfg(not(feature = "accelerate"))]
-                    {
-                        a.matmul(&w.t()?)
-                    }
-                }
+                DeviceLocation::Cpu => bf16_safe_matmul(a, &w.t()?),
             }
         }
     }
@@ -570,6 +564,57 @@ impl QuantizedSerde for UnquantLinear {
             }),
             b,
         ))
+    }
+}
+
+#[cfg(test)]
+mod cpu_tests {
+    use candle_core::{DType, Device, Result, Tensor};
+    use candle_nn::Linear;
+
+    use super::*;
+
+    fn assert_close(lhs: &Tensor, rhs: &Tensor, max_abs_diff: f32) -> Result<()> {
+        let max_diff = (lhs.to_dtype(DType::F32)? - rhs.to_dtype(DType::F32)?)?
+            .abs()?
+            .max_all()?
+            .to_vec0::<f32>()?;
+        assert!(
+            max_diff <= max_abs_diff,
+            "max abs diff {max_diff} exceeded tolerance {max_abs_diff}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_forward_bf16_on_cpu_casts_through_f32() -> Result<()> {
+        let device = Device::Cpu;
+
+        let input = Tensor::randn(0., 1., (2, 8), &device)?
+            .to_dtype(DType::BF16)?
+            .contiguous()?;
+        let weight = Tensor::randn(0., 1., (6, 8), &device)?
+            .to_dtype(DType::BF16)?
+            .contiguous()?;
+        let bias = Tensor::randn(0., 1., 6, &device)?
+            .to_dtype(DType::BF16)?
+            .contiguous()?;
+
+        let layer = UnquantLinear::new(QuantMethodConfig::Unquantized(Linear::new(
+            weight.clone(),
+            Some(bias.clone()),
+        )))?;
+
+        let actual = layer.forward(&input)?;
+        let expected = input
+            .to_dtype(DType::F32)?
+            .matmul(&weight.t()?.to_dtype(DType::F32)?)?
+            .broadcast_add(&bias.to_dtype(DType::F32)?)?
+            .to_dtype(DType::BF16)?;
+
+        assert_eq!(actual.dtype(), DType::BF16);
+        assert_close(&actual, &expected, 1e-2)?;
+        Ok(())
     }
 }
 
