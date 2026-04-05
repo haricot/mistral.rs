@@ -65,6 +65,9 @@ use tokenizers::Tokenizer;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
+const UQFF_CONFIG_JSON: &str = "config.json";
+const UQFF_CONFIG_TEXT_JSON: &str = "config_text.json";
+
 pub struct MultimodalPipeline {
     model: Box<dyn MultimodalModel + Send + Sync>,
     tokenizer: Arc<Tokenizer>,
@@ -852,6 +855,28 @@ impl Loader for MultimodalLoader {
             } else {
                 info!("Serializing existing ISQ tensors without additional quantization.");
             }
+            let mut uqff_config = config.clone();
+            if self.config.disabled_modalities.vision || self.config.disabled_modalities.audio {
+                if let Ok(mut cfg_json) = serde_json::from_str::<serde_json::Value>(&uqff_config) {
+                    if let Some(obj) = cfg_json.as_object_mut() {
+                        if self.config.disabled_modalities.vision {
+                            obj.remove("vision_config");
+                        }
+                        if self.config.disabled_modalities.audio {
+                            obj.remove("audio_config");
+                        }
+                        if let Ok(new_cfg) = serde_json::to_string(&cfg_json) {
+                            uqff_config = new_cfg;
+                        }
+                    }
+                }
+            }
+            let uqff_config_filename = if self.config.disabled_modalities.any() {
+                UQFF_CONFIG_TEXT_JSON
+            } else {
+                UQFF_CONFIG_JSON
+            };
+
             model.quantize(
                 in_situ_quant,
                 device.clone(),
@@ -865,7 +890,8 @@ impl Loader for MultimodalLoader {
                     tokenizer: &tokenizer,
                     template_filename: paths.get_template_filename(),
                     generation_config: paths.get_gen_conf_filename(),
-                    config: config.clone(),
+                    config: uqff_config,
+                    config_filename: uqff_config_filename,
                     processor_filename: paths.get_processor_config(),
                     preprocessor_filename: paths.get_preprocessor_config(),
                     modules: None,
@@ -1001,6 +1027,7 @@ impl IsqPipelineMixin for MultimodalPipeline {
                     template_filename: &self.template_filename,
                     generation_config: self.generation_config.as_ref(),
                     config: self.config.clone(),
+                    config_filename: "config.json",
                     processor_filename: &self.processor_filename,
                     preprocessor_filename: &self.preprocessor_filename,
                     modules: None,
