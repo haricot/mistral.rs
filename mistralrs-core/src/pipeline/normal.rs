@@ -537,7 +537,9 @@ impl Loader for NormalLoader {
             .as_ref()
             .is_some_and(|topology| topology.requires_post_quantization());
 
-        let allow_immediate_cli = self.config.imatrix.is_none()
+        let writing_uqff = self.config.write_uqff.is_some();
+        let allow_immediate_cli = !writing_uqff
+            && self.config.imatrix.is_none()
             && self.config.calibration_file.is_none()
             && in_situ_quant.is_some();
 
@@ -555,9 +557,13 @@ impl Loader for NormalLoader {
             if immediate_predicates.is_empty() {
                 warn!("No predicates for this model and ISQ setting detected. ISQ will not be applied to any weights!");
             }
+        } else if writing_uqff && in_situ_quant.is_some() {
+            info!(
+                "Deferring ISQ until after model load for UQFF generation to reduce peak memory."
+            );
         }
 
-        let use_immediate = allow_immediate_cli || has_override_isq;
+        let use_immediate = !writing_uqff && (allow_immediate_cli || has_override_isq);
         if use_immediate {
             let (pool, num_threads) = mistralrs_quant::create_isq_thread_pool(immediate_ty);
             info!("Applying immediate ISQ in parallel on {num_threads} threads.");

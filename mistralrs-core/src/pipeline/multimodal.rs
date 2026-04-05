@@ -107,6 +107,25 @@ pub struct MultimodalLoader {
     lora_adapter_ids: Option<Vec<String>>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DisabledModalities {
+    pub vision: bool,
+    pub audio: bool,
+}
+
+impl DisabledModalities {
+    pub fn new(disable_vision: bool, disable_audio: bool) -> Self {
+        Self {
+            vision: disable_vision,
+            audio: disable_audio,
+        }
+    }
+
+    pub fn any(self) -> bool {
+        self.vision || self.audio
+    }
+}
+
 #[derive(Default)]
 /// A builder for a loader for a multimodal (non-quantized) model.
 pub struct MultimodalLoaderBuilder {
@@ -127,6 +146,7 @@ pub struct MultimodalSpecificConfig {
     pub write_uqff: Option<PathBuf>,
     pub from_uqff: Option<Vec<PathBuf>>,
     pub max_edge: Option<u32>,
+    pub disabled_modalities: DisabledModalities,
     pub imatrix: Option<PathBuf>,
     pub calibration_file: Option<PathBuf>,
     pub hf_cache_path: Option<PathBuf>,
@@ -169,6 +189,7 @@ impl MultimodalLoaderBuilder {
     }
 
     pub fn build(self, loader: Option<MultimodalLoaderType>) -> Box<dyn Loader> {
+        let disabled_modalities = self.config.disabled_modalities;
         let loader: Box<dyn MultimodalModelLoader> = match loader {
             Some(MultimodalLoaderType::Phi3V) => Box::new(Phi3VLoader),
             Some(MultimodalLoaderType::Idefics2) => Box::new(Idefics2Loader),
@@ -189,8 +210,8 @@ impl MultimodalLoaderBuilder {
             Some(MultimodalLoaderType::Qwen3_5) => Box::new(Qwen3_5Loader),
             Some(MultimodalLoaderType::Qwen3_5Moe) => Box::new(Qwen3_5MoeLoader),
             Some(MultimodalLoaderType::Voxtral) => Box::new(VoxtralLoader),
-            Some(MultimodalLoaderType::Gemma4) => Box::new(Gemma4Loader),
-            None => Box::new(AutoMultimodalLoader),
+            Some(MultimodalLoaderType::Gemma4) => Box::new(Gemma4Loader::new(disabled_modalities)),
+            None => Box::new(AutoMultimodalLoader::new(disabled_modalities)),
         };
         Box::new(MultimodalLoader {
             inner: loader,
@@ -514,7 +535,9 @@ impl Loader for MultimodalLoader {
             .as_ref()
             .is_some_and(|topology| topology.requires_post_quantization());
 
-        let allow_immediate_cli = self.config.imatrix.is_none()
+        let writing_uqff = self.config.write_uqff.is_some();
+        let allow_immediate_cli = !writing_uqff
+            && self.config.imatrix.is_none()
             && self.config.calibration_file.is_none()
             && in_situ_quant.is_some();
 
@@ -532,9 +555,13 @@ impl Loader for MultimodalLoader {
             if immediate_predicates.is_empty() {
                 warn!("No predicates for this model and ISQ setting detected. ISQ will not be applied to any weights!");
             }
+        } else if writing_uqff && in_situ_quant.is_some() {
+            info!(
+                "Deferring ISQ until after model load for UQFF generation to reduce peak memory."
+            );
         }
 
-        let use_immediate = allow_immediate_cli || has_override_isq;
+        let use_immediate = !writing_uqff && (allow_immediate_cli || has_override_isq);
         if use_immediate {
             let (pool, num_threads) = mistralrs_quant::create_isq_thread_pool(immediate_ty);
             info!("Applying immediate ISQ in parallel on {num_threads} threads.");
