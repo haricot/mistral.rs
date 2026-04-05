@@ -16,7 +16,7 @@ use crate::{
     },
     pipeline::{
         text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
-        EitherCache, IsqModel, MultimodalModel, NormalLoadingMetadata,
+        DisabledModalities, EitherCache, IsqModel, MultimodalModel, NormalLoadingMetadata,
     },
     utils::unvarbuilder::UnVarBuilder,
 };
@@ -48,8 +48,8 @@ pub struct Gemma4SpecificArgs {
 
 pub struct Gemma4Model {
     language_model: TextModel,
-    vision_tower: vision::VisionTower,
-    embed_vision: multimodal_embedding::Gemma4MultimodalEmbedder,
+    vision_tower: Option<vision::VisionTower>,
+    embed_vision: Option<multimodal_embedding::Gemma4MultimodalEmbedder>,
     audio_tower: Option<audio::AudioModel>,
     embed_audio: Option<multimodal_embedding::Gemma4MultimodalEmbedder>,
     cfg: Gemma4Config,
@@ -73,6 +73,7 @@ impl Gemma4Model {
         cfg: &Gemma4Config,
         vb: ShardedVarBuilder,
         is_gptx: bool,
+        disabled_modalities: DisabledModalities,
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Self> {
@@ -84,28 +85,35 @@ impl Gemma4Model {
             vb.dtype()
         };
         let audio_dtype = DType::F32;
-
-        let vision_tower = vision::VisionTower::new(
-            &cfg.vision_config,
-            normal_loading_metadata
-                .mapper
-                .set_nm_device(vb.pp("vision_tower"), false)
-                .set_dtype(vision_dtype),
-        )?;
-
-        let vis_hidden = cfg.vision_config.hidden_size;
         let text_hidden = cfg.text_config.hidden_size;
-        let embed_vision = multimodal_embedding::Gemma4MultimodalEmbedder::new(
-            vis_hidden,
-            text_hidden,
-            cfg.vision_config.rms_norm_eps,
-            normal_loading_metadata
-                .mapper
-                .set_nm_device(vb.pp("embed_vision"), false)
-                .set_dtype(vision_dtype),
-        )?;
 
-        let (audio_tower, embed_audio) = if let Some(ref audio_cfg) = cfg.audio_config {
+        let (vision_tower, embed_vision) = if disabled_modalities.vision {
+            (None, None)
+        } else {
+            let vision_tower = vision::VisionTower::new(
+                &cfg.vision_config,
+                normal_loading_metadata
+                    .mapper
+                    .set_nm_device(vb.pp("vision_tower"), false)
+                    .set_dtype(vision_dtype),
+            )?;
+
+            let vis_hidden = cfg.vision_config.hidden_size;
+            let embed_vision = multimodal_embedding::Gemma4MultimodalEmbedder::new(
+                vis_hidden,
+                text_hidden,
+                cfg.vision_config.rms_norm_eps,
+                normal_loading_metadata
+                    .mapper
+                    .set_nm_device(vb.pp("embed_vision"), false)
+                    .set_dtype(vision_dtype),
+            )?;
+            (Some(vision_tower), Some(embed_vision))
+        };
+
+        let (audio_tower, embed_audio) = if disabled_modalities.audio {
+            (None, None)
+        } else if let Some(ref audio_cfg) = cfg.audio_config {
             let tower = audio::AudioModel::new(
                 audio_cfg,
                 normal_loading_metadata
@@ -150,6 +158,20 @@ impl Gemma4Model {
         })
     }
 
+    fn vision_modules(
+        &self,
+    ) -> Result<(
+        &vision::VisionTower,
+        &multimodal_embedding::Gemma4MultimodalEmbedder,
+    )> {
+        match (&self.vision_tower, &self.embed_vision) {
+            (Some(vision_tower), Some(embed_vision)) => Ok((vision_tower, embed_vision)),
+            _ => candle_core::bail!(
+                "Gemma 4 was loaded with vision disabled. Remove image/video inputs or omit `--disable-vision`/`--text-only`."
+            ),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn forward(
         &self,
@@ -174,6 +196,7 @@ impl Gemma4Model {
         let mut input_embeds = self.language_model.embed_tokens(input_ids)?;
 
         if let Some(ref pixel_values) = pixel_values {
+            let (vision_tower, embed_vision) = self.vision_modules()?;
             let image_mask = input_ids
                 .to_dtype(DType::F32)?
                 .eq(self.cfg.image_token_id as f64)?;
@@ -211,11 +234,9 @@ impl Gemma4Model {
                 if !miss_indices.is_empty() {
                     for &idx in &miss_indices {
                         let single_pv = crop_image(pixel_values.get(idx)?.unsqueeze(0)?, idx)?;
-                        let vision_features = self
-                            .vision_tower
-                            .forward(&[single_pv.to_dtype(self.vision_dtype)?])?;
-                        let feats = self
-                            .embed_vision
+                        let vision_features =
+                            vision_tower.forward(&[single_pv.to_dtype(self.vision_dtype)?])?;
+                        let feats = embed_vision
                             .forward(&vision_features)?
                             .to_dtype(input_embeds.dtype())?
                             .squeeze(0)?;
@@ -243,14 +264,13 @@ impl Gemma4Model {
                             .and_then(|t| crop_image(t, i))
                     })
                     .collect::<Result<Vec<_>>>()?;
-                let vision_features = self.vision_tower.forward(
+                let vision_features = vision_tower.forward(
                     &per_image_tensors
                         .iter()
                         .map(|t| t.to_dtype(self.vision_dtype))
                         .collect::<Result<Vec<_>>>()?,
                 )?;
-                let embeds = self
-                    .embed_vision
+                let embeds = embed_vision
                     .forward(&vision_features)?
                     .to_dtype(input_embeds.dtype())?
                     .squeeze(0)?;
@@ -268,6 +288,14 @@ impl Gemma4Model {
                 x_flat = x_flat.scatter_add(&indices, &diff, 0)?;
                 input_embeds = x_flat.reshape(input_embeds.shape())?;
             }
+        }
+
+        if (audio_mel.is_some() || audio_mel_mask.is_some())
+            && (self.audio_tower.is_none() || self.embed_audio.is_none())
+        {
+            candle_core::bail!(
+                "Gemma 4 was loaded with audio disabled. Remove audio inputs or omit `--disable-audio`/`--text-only`."
+            );
         }
 
         if let (
@@ -375,6 +403,7 @@ impl Gemma4Model {
 
         // ── Video embedding (same vision tower as images) ──────────────
         if let Some(ref vid_pixel_values) = video_pixel_values {
+            let (vision_tower, embed_vision) = self.vision_modules()?;
             let video_mask = input_ids
                 .to_dtype(DType::F32)?
                 .eq(self.cfg.video_token_id as f64)?;
@@ -413,11 +442,9 @@ impl Gemma4Model {
                 if !miss_indices.is_empty() {
                     for &idx in &miss_indices {
                         let single_pv = crop_frame(vid_pixel_values.get(idx)?.unsqueeze(0)?, idx)?;
-                        let vision_features = self
-                            .vision_tower
-                            .forward(&[single_pv.to_dtype(self.vision_dtype)?])?;
-                        let feats = self
-                            .embed_vision
+                        let vision_features =
+                            vision_tower.forward(&[single_pv.to_dtype(self.vision_dtype)?])?;
+                        let feats = embed_vision
                             .forward(&vision_features)?
                             .to_dtype(input_embeds.dtype())?
                             .squeeze(0)?;
@@ -446,14 +473,13 @@ impl Gemma4Model {
                             .and_then(|t| crop_frame(t, i))
                     })
                     .collect::<Result<Vec<_>>>()?;
-                let vision_features = self.vision_tower.forward(
+                let vision_features = vision_tower.forward(
                     &per_frame_tensors
                         .iter()
                         .map(|t| t.to_dtype(self.vision_dtype))
                         .collect::<Result<Vec<_>>>()?,
                 )?;
-                let embeds = self
-                    .embed_vision
+                let embeds = embed_vision
                     .forward(&vision_features)?
                     .to_dtype(input_embeds.dtype())?
                     .squeeze(0)?;
@@ -517,16 +543,20 @@ impl IsqModel for Gemma4Model {
         let uvb_language = uvb_model.pp("language_model");
         uvb_language.extend(self.language_model.residual_tensors());
 
-        let uvb_vision = uvb_model.pp("vision_tower");
-        uvb_vision.extend(self.vision_tower.residual_tensors());
+        if let Some(ref vision_tower) = self.vision_tower {
+            let uvb_vision = uvb_model.pp("vision_tower");
+            uvb_vision.extend(vision_tower.residual_tensors());
+        }
 
         if let Some(ref audio) = self.audio_tower {
             let uvb_audio = uvb_model.pp("audio_tower");
             uvb_audio.extend(audio.residual_tensors());
         }
 
-        let uvb_embed_vision = uvb_model.pp("embed_vision");
-        uvb_embed_vision.extend(self.embed_vision.residual_tensors());
+        if let Some(ref embed_vision) = self.embed_vision {
+            let uvb_embed_vision = uvb_model.pp("embed_vision");
+            uvb_embed_vision.extend(embed_vision.residual_tensors());
+        }
 
         if let Some(ref embed_audio) = self.embed_audio {
             let uvb_embed_audio = uvb_model.pp("embed_audio");

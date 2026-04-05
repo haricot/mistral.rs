@@ -3,7 +3,6 @@
 use std::{collections::HashMap, sync::Arc};
 
 use candle_core::{DType, Device, IndexOp, Module, Result, Tensor, D};
-use candle_nn::Embedding;
 use mistralrs_quant::{
     ColumnParallelLayer, QuantMethod, QuantMethodConfig, ReplicatedLayer, RowParallelLayer,
     ShardedVarBuilder, UnquantLinear,
@@ -14,8 +13,8 @@ use crate::{
     attention::SdpaParams,
     device_map::{DeviceMappedMask, DeviceMapper},
     layers::{
-        embedding, Activation, CausalMasker, MatMul, Mlp, RmsNorm, RotaryEmbedding,
-        ScaledEmbedding, Sdpa,
+        vocab_embedding, vocab_store, Activation, CausalMasker, MatMul, Mlp, RmsNorm,
+        RotaryEmbedding, Sdpa, VocabEmbedding, VocabStore,
     },
     layers_masker::PastKvLenCache,
     moe::{MoEExperts, MoEExpertsConfig},
@@ -1038,13 +1037,13 @@ impl ModelConfigLike for Gemma4ModelConfigLike {
 
 #[allow(dead_code)]
 pub struct TextModel {
-    embed_tokens: ScaledEmbedding,
+    embed_tokens: VocabEmbedding,
     layers: Vec<DecoderLayer>,
     norm: RmsNorm,
     lm_head: Arc<dyn QuantMethod>,
     lm_head_is_tied: bool,
     // PLE global
-    embed_tokens_per_layer: Option<Embedding>,
+    embed_tokens_per_layer: Option<Box<dyn VocabStore>>,
     per_layer_model_projection: Option<Arc<dyn QuantMethod>>,
     per_layer_projection_norm: Option<RmsNorm>,
     hidden_size_per_layer_input: usize,
@@ -1086,15 +1085,13 @@ impl TextModel {
         let mapper = normal_loading_metadata.mapper;
 
         let vb_m = vb;
-        let embed_tokens = ScaledEmbedding::new(
+        let embed_tokens = vocab_embedding(
             (cfg.hidden_size as f64).sqrt(),
-            embedding(
-                cfg.vocab_size,
-                cfg.hidden_size,
-                mapper.set_nm_device(vb_m.pp("embed_tokens"), false),
-                &cfg.quantization_config,
-            )?,
-        );
+            cfg.vocab_size,
+            cfg.hidden_size,
+            mapper.set_nm_device(vb_m.pp("embed_tokens"), false),
+            &cfg.quantization_config,
+        )?;
 
         // Build RoPE instances per device
         let _partial_rotary_dim =
@@ -1200,14 +1197,14 @@ impl TextModel {
                 false,
                 mapper.set_nm_device(vb_m.pp("lm_head"), normal_loading_metadata.loading_isq),
             )?
+        } else if let Some(tied_output_projection) = embed_tokens.tied_output_projection() {
+            tied_output_projection
         } else {
-            // Keep Gemma 4's tied output projection in BF16. Quantizing the
-            // enormous tied lm_head destabilizes low-bit decoding first, which is
-            // especially visible around rare control tokens.
+            // Without a quantized vocab store, keep Gemma 4's tied output projection in BF16.
             Arc::new(UnquantLinear::new(QuantMethodConfig::Unquantized(
                 candle_nn::Linear::new(
                     mapper.cast_nm_device(
-                        embed_tokens.embeddings(),
+                        embed_tokens.embeddings()?,
                         false, // Tied lm_head is excluded from ISQ, so always place on target device
                     )?,
                     None,
@@ -1220,10 +1217,12 @@ impl TextModel {
         let ple_vocab = cfg.vocab_size_per_layer_input.unwrap_or(cfg.vocab_size);
         let (embed_tokens_per_layer, per_layer_model_projection, per_layer_projection_norm) =
             if ple_dim > 0 {
-                let ple_emb_vb = mapper.set_nm_device(vb_m.pp("embed_tokens_per_layer"), false);
-                let ple_emb_weight =
-                    ple_emb_vb.get((ple_vocab, cfg.num_hidden_layers * ple_dim), "weight")?;
-                let ple_emb = Embedding::new(ple_emb_weight, cfg.num_hidden_layers * ple_dim);
+                let ple_emb = vocab_store(
+                    ple_vocab,
+                    cfg.num_hidden_layers * ple_dim,
+                    mapper.set_nm_device(vb_m.pp("embed_tokens_per_layer"), false),
+                    &cfg.quantization_config,
+                )?;
 
                 let ple_proj = mistralrs_quant::linear_no_bias(
                     cfg.hidden_size,
@@ -1650,9 +1649,8 @@ impl IsqModel for TextModel {
         &dyn DeviceMapper,
     ) {
         let mut tensors = Vec::new();
-        // Keep Gemma 4's tied output projection in BF16. Quantizing the
-        // enormous tied lm_head destabilizes low-bit decoding first, which is
-        // especially visible around rare control tokens.
+        // Tied vocab projections are either owned by the quantized vocab store
+        // at load time or intentionally kept out of post-load ISQ.
         if !self.lm_head_is_tied {
             tensors.push((&mut self.lm_head, None));
         }
@@ -1700,9 +1698,7 @@ impl IsqModel for TextModel {
         uvb_m.pp("norm").add(&self.norm);
 
         if let Some(ref emb) = self.embed_tokens_per_layer {
-            uvb_m
-                .pp("embed_tokens_per_layer")
-                .add_tensor("weight", emb.embeddings().clone());
+            uvb_m.pp("embed_tokens_per_layer").add(emb);
         }
         if let Some(ref norm) = self.per_layer_projection_norm {
             uvb_m.pp("per_layer_projection_norm").add(norm);
