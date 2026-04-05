@@ -12,8 +12,8 @@ use crate::{
     attention::SdpaParams,
     device_map::{DeviceMappedMask, DeviceMapper},
     layers::{
-        self, embedding, Activation, CausalMasker, Gemma3nRotaryEmbedding, MatMul, RmsNorm,
-        RotaryEmbedding, ScaledEmbedding, Sdpa,
+        self, vocab_embedding, Activation, CausalMasker, Gemma3nRotaryEmbedding, MatMul, RmsNorm,
+        RotaryEmbedding, Sdpa, VocabEmbedding,
     },
     matformer::MatformerSliceConfig,
     paged_attention::{AttentionImplementation, ModelConfigMetadata},
@@ -941,8 +941,8 @@ pub(crate) fn handle_matformer_slicing(
 }
 
 pub struct TextModel {
-    embed_tokens: ScaledEmbedding,
-    embed_tokens_per_layer: ScaledEmbedding,
+    embed_tokens: VocabEmbedding,
+    embed_tokens_per_layer: VocabEmbedding,
     layers: Vec<DecoderLayer>,
     norm: RmsNorm,
     lm_head: Arc<dyn QuantMethod>,
@@ -994,15 +994,13 @@ impl TextModel {
 
         // Use float32 for embedding scale factor
         let embed_scale = (cfg.hidden_size as f64).sqrt();
-        let embed_tokens = ScaledEmbedding::new(
+        let embed_tokens = vocab_embedding(
             embed_scale,
-            embedding(
-                cfg.vocab_size,
-                cfg.hidden_size,
-                mapper.set_nm_device(vb.pp("embed_tokens"), false),
-                &cfg.quantization_config,
-            )?,
-        );
+            cfg.vocab_size,
+            cfg.hidden_size,
+            mapper.set_nm_device(vb.pp("embed_tokens"), false),
+            &cfg.quantization_config,
+        )?;
         // Use float32 for per-layer embedding scale factor
         let per_layer_embed_scale = (cfg.hidden_size_per_layer_input as f64).sqrt();
         // Keep embed_tokens_per_layer on CPU if not using Metal
@@ -1011,27 +1009,26 @@ impl TextModel {
         } else {
             vb.pp("embed_tokens_per_layer").set_device(Device::Cpu)
         };
-        let mut embed_tokens_per_layer = ScaledEmbedding::new(
+        let mut embed_tokens_per_layer = vocab_embedding(
             per_layer_embed_scale,
-            embedding(
-                cfg.vocab_size_per_layer_input,
-                cfg.hidden_size_per_layer_input * orig_num_hidden_layers,
-                embed_tokens_per_layer_vb,
-                &cfg.quantization_config,
-            )?,
-        );
+            cfg.vocab_size_per_layer_input,
+            cfg.hidden_size_per_layer_input * orig_num_hidden_layers,
+            embed_tokens_per_layer_vb,
+            &cfg.quantization_config,
+        )?;
         if let Some(kept_layers_indices) = &kept_layers_indices {
-            let embedding = embed_tokens_per_layer.embedding.clone();
+            let embedding = embed_tokens_per_layer.embeddings()?.clone();
             let embedding_reshaped = embedding.reshape((
                 embedding.dim(0)?,
                 orig_num_hidden_layers,
                 embedding.dim(1)? / orig_num_hidden_layers,
             ))?;
 
-            embed_tokens_per_layer.embedding = embedding_reshaped
+            let sliced_embedding = embedding_reshaped
                 .index_select(kept_layers_indices, 1)?
                 .reshape((embedding_reshaped.dim(0)?, ()))?
                 .contiguous()?;
+            embed_tokens_per_layer.replace_embeddings(sliced_embedding)?;
         }
 
         let mut global_ropes = HashMap::new();
@@ -1146,7 +1143,7 @@ impl TextModel {
         } else {
             ReplicatedLayer::from_linear(candle_nn::Linear::new(
                 mapper.cast_nm_device(
-                    embed_tokens.embeddings(),
+                    embed_tokens.embeddings()?,
                     normal_loading_metadata.loading_isq,
                 )?,
                 None,
