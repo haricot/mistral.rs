@@ -171,6 +171,26 @@ impl QuantMethod for UnquantLinear {
         let (_num_experts, out_features, _in_features) = w.dims3()?;
 
         match a.dims() {
+            // Gathered MoE hidden states: [b, s, k, hidden]
+            &[b_size, seq_len, num_experts_per_tok, hidden_dim] => {
+                let (_b, _s, k) = indices.dims3()?;
+                if k != num_experts_per_tok {
+                    candle_core::bail!(
+                        "UnquantLinear::gather_forward: input top-k ({num_experts_per_tok}) does not match indices top-k ({k})"
+                    );
+                }
+
+                let flat_indices = indices.reshape((b_size * seq_len * num_experts_per_tok,))?;
+                let selected_w = w.index_select(&flat_indices, 0)?;
+                let a_flat = a.reshape((b_size * seq_len * num_experts_per_tok, hidden_dim))?;
+
+                let result = a_flat
+                    .unsqueeze(1)?
+                    .matmul(&selected_w.transpose(1, 2)?)?
+                    .squeeze(1)?;
+
+                result.reshape((b_size, seq_len, num_experts_per_tok, out_features))
+            }
             // Metal path: 5D input (b_size, seq_len, 1, 1, hidden_dim)
             &[b_size, seq_len, 1, 1, hidden_dim] => {
                 let (_b, _s, num_experts_per_tok) = indices.dims3()?;
