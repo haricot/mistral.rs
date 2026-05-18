@@ -210,8 +210,12 @@ impl MultimodalLoaderBuilder {
             Some(MultimodalLoaderType::Gemma3n) => Box::new(Gemma3nLoader),
             Some(MultimodalLoaderType::Qwen3VL) => Box::new(Qwen3VLLoader),
             Some(MultimodalLoaderType::Qwen3VLMoE) => Box::new(Qwen3VLMoELoader),
-            Some(MultimodalLoaderType::Qwen3_5) => Box::new(Qwen3_5Loader),
-            Some(MultimodalLoaderType::Qwen3_5Moe) => Box::new(Qwen3_5MoeLoader),
+            Some(MultimodalLoaderType::Qwen3_5) => {
+                Box::new(Qwen3_5Loader::new(disabled_modalities))
+            }
+            Some(MultimodalLoaderType::Qwen3_5Moe) => {
+                Box::new(Qwen3_5MoeLoader::new(disabled_modalities))
+            }
             Some(MultimodalLoaderType::Voxtral) => Box::new(VoxtralLoader),
             Some(MultimodalLoaderType::Gemma4) => Box::new(Gemma4Loader::new(disabled_modalities)),
             None => Box::new(AutoMultimodalLoader::new(disabled_modalities)),

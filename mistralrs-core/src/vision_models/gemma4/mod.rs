@@ -10,6 +10,7 @@ use text::TextModel;
 use crate::{
     amoe::AnyMoeBaseModelMixin,
     device_map::DeviceMapper,
+    layers::VocabStore,
     paged_attention::{
         encoder_cache::EncoderCacheManager, AttentionImplementation, ModelConfigLike,
         ModelConfigMetadata,
@@ -19,7 +20,6 @@ use crate::{
         DisabledModalities, EitherCache, IsqModel, MultimodalModel, NormalLoadingMetadata,
     },
     utils::unvarbuilder::UnVarBuilder,
-    layers::VocabStore,
 };
 
 pub(crate) mod audio;

@@ -774,8 +774,14 @@ impl Qwen3_5TextModel {
                         let pool_device = gdn_cache.recurrent_state.device().clone();
                         xs = layer.forward_linear(&xs, &mut gdn_cache)?;
 
-                        pool.scatter_conv_state(indices, &gdn_cache.conv_state.to_device(&pool_device)?)?;
-                        pool.scatter_recurrent_state(indices, &gdn_cache.recurrent_state.to_device(&pool_device)?)?;
+                        pool.scatter_conv_state(
+                            indices,
+                            &gdn_cache.conv_state.to_device(&pool_device)?,
+                        )?;
+                        pool.scatter_recurrent_state(
+                            indices,
+                            &gdn_cache.recurrent_state.to_device(&pool_device)?,
+                        )?;
 
                         let delta = gdn_cache.seqlen_offset.saturating_sub(first_offset);
                         for &idx in &indices_vec {
@@ -854,8 +860,6 @@ impl IsqModel for Qwen3_5TextModel {
                     tensors.push((&mut attn.o_proj, Some(i)));
                 }
                 LayerImpl::LinearAttention(gdn) => {
-                    tensors.push((&mut gdn.in_proj_qkvz, Some(i)));
-                    tensors.push((&mut gdn.in_proj_ba, Some(i)));
                     tensors.push((&mut gdn.out_proj, Some(i)));
                 }
             }
@@ -885,6 +889,18 @@ impl IsqModel for Qwen3_5TextModel {
                     uvb_l.pp("self_attn").pp("k_norm").add(&attn.k_norm);
                 }
                 LayerImpl::LinearAttention(gdn) => {
+                    uvb_l.pp("linear_attn").add_tensor(
+                        "in_proj_qkvz.weight",
+                        gdn.in_proj_qkvz
+                            .dequantize_w()
+                            .expect("failed to dequantize Qwen3.5 GDN in_proj_qkvz"),
+                    );
+                    uvb_l.pp("linear_attn").add_tensor(
+                        "in_proj_ba.weight",
+                        gdn.in_proj_ba
+                            .dequantize_w()
+                            .expect("failed to dequantize Qwen3.5 GDN in_proj_ba"),
+                    );
                     uvb_l
                         .pp("linear_attn")
                         .add_tensor("conv1d.weight", gdn.conv1d_weight.clone());
@@ -903,5 +919,27 @@ impl IsqModel for Qwen3_5TextModel {
         }
 
         uvb.to_safetensors()
+    }
+
+    fn imatrix_names(&self) -> candle_core::Result<Vec<Option<String>>> {
+        let mut names = Vec::new();
+        names.push(None);
+        for (i, layer) in self.layers.iter().enumerate() {
+            match &layer.layer_impl {
+                LayerImpl::FullAttention(_) => {
+                    names.push(Some(format!("blk.{i}.attn_q.weight")));
+                    names.push(Some(format!("blk.{i}.attn_k.weight")));
+                    names.push(Some(format!("blk.{i}.attn_v.weight")));
+                    names.push(Some(format!("blk.{i}.attn_output.weight")));
+                }
+                LayerImpl::LinearAttention(_) => {
+                    names.push(None);
+                }
+            }
+            names.push(Some(format!("blk.{i}.ffn_gate.weight")));
+            names.push(Some(format!("blk.{i}.ffn_up.weight")));
+            names.push(Some(format!("blk.{i}.ffn_down.weight")));
+        }
+        Ok(names)
     }
 }

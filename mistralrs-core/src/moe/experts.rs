@@ -45,7 +45,8 @@ impl MoEExpertsBackend {
         quantization_config: &Option<QuantizedConfig>,
     ) -> Self {
         let has_immediate_isq = mistralrs_quant::get_immediate_isq().is_some();
-        let use_fast = device.is_metal()
+        let use_fast = loading_isq
+            || device.is_metal()
             || (device.is_cuda()
                 && (loading_isq || quantization_config.is_some() || has_immediate_isq));
 

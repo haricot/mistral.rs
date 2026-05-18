@@ -192,9 +192,12 @@ impl VocabStore for TensorVocabStore {
         device: Device,
     ) -> Result<Option<Box<dyn VocabStore>>> {
         let prefix = "isq_vocab_quantization"; // Internal dummy prefix
-        if let Some(store) =
-            QuantizedVocabStore::from_immediate_isq(self.embeddings.clone(), prefix, isq_type, device)?
-        {
+        if let Some(store) = QuantizedVocabStore::from_immediate_isq(
+            self.embeddings.clone(),
+            prefix,
+            isq_type,
+            device,
+        )? {
             Ok(Some(Box::new(store)))
         } else {
             Ok(None)

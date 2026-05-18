@@ -369,8 +369,10 @@ impl AutoMultimodalLoader {
             MultimodalLoaderType::Gemma3n => Box::new(Gemma3nLoader),
             MultimodalLoaderType::Qwen3VL => Box::new(Qwen3VLLoader),
             MultimodalLoaderType::Qwen3VLMoE => Box::new(Qwen3VLMoELoader),
-            MultimodalLoaderType::Qwen3_5 => Box::new(Qwen3_5Loader),
-            MultimodalLoaderType::Qwen3_5Moe => Box::new(Qwen3_5MoeLoader),
+            MultimodalLoaderType::Qwen3_5 => Box::new(Qwen3_5Loader::new(self.disabled_modalities)),
+            MultimodalLoaderType::Qwen3_5Moe => {
+                Box::new(Qwen3_5MoeLoader::new(self.disabled_modalities))
+            }
             MultimodalLoaderType::Voxtral => Box::new(VoxtralLoader),
             MultimodalLoaderType::Gemma4 => Box::new(Gemma4Loader::new(self.disabled_modalities)),
         })
@@ -6318,7 +6320,18 @@ impl DeviceMappedModelLoader for Qwen3VLMoELoader {
 /// [`MultimodalLoader`] for a Qwen3.5 dense (hybrid GDN + full attention) model.
 ///
 /// [`MultimodalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.MultimodalLoader.html
-pub struct Qwen3_5Loader;
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Qwen3_5Loader {
+    disabled_modalities: DisabledModalities,
+}
+
+impl Qwen3_5Loader {
+    pub fn new(disabled_modalities: DisabledModalities) -> Self {
+        Self {
+            disabled_modalities,
+        }
+    }
+}
 
 pub struct Qwen3_5Prefixer;
 
@@ -6340,6 +6353,7 @@ impl MultimodalModelLoader for Qwen3_5Loader {
             &cfg,
             vb,
             self.is_gptx(config),
+            self.disabled_modalities,
             normal_loading_metadata,
             attention_mechanism,
         )?))
@@ -6420,7 +6434,11 @@ impl DeviceMappedModelLoader for Qwen3_5Loader {
         let cfg: Qwen3_5Config = serde_json::from_str(config)?;
 
         let img_seq_len = {
-            let cfg = &cfg.vision_config;
+            let Some(cfg) = cfg.vision_config.as_ref() else {
+                let cfg = &cfg.text_config;
+                let max_seq_len = max_seq_len.min(&ATTENTION_CHUNK_SIZE);
+                return Ok(max_batch_size * cfg.num_attention_heads * max_seq_len * max_seq_len);
+            };
             let grid_t = 1;
             let grid_h = (max_image_shape.0 / cfg.patch_size) / cfg.spatial_merge_size;
             let grid_w = (max_image_shape.1 / cfg.patch_size) / cfg.spatial_merge_size;
@@ -6454,7 +6472,9 @@ impl DeviceMappedModelLoader for Qwen3_5Loader {
         let cfg: Qwen3_5Config = serde_json::from_str(config)?;
 
         let img_seq_len = {
-            let cfg = &cfg.vision_config;
+            let Some(cfg) = cfg.vision_config.as_ref() else {
+                return Ok(0);
+            };
             let grid_t = 1;
             let grid_h = max_image_shape.0 / cfg.patch_size;
             let grid_w = max_image_shape.1 / cfg.patch_size;
@@ -6462,7 +6482,7 @@ impl DeviceMappedModelLoader for Qwen3_5Loader {
         };
 
         let max_vision_attn = {
-            let cfg = &cfg.vision_config;
+            let cfg = cfg.vision_config.as_ref().unwrap();
             (max_batch_size * max_num_images) * cfg.num_heads * img_seq_len * img_seq_len
         };
 
@@ -6490,8 +6510,12 @@ impl DeviceMappedModelLoader for Qwen3_5Loader {
             embed_tokens + lm_head + norm
         };
 
+        let Some(vision_cfg) = cfg.vision_config.as_ref() else {
+            return Ok(text_elems * dtype.size_in_bytes());
+        };
+
         let (patch_merger, deepstack_mergers) = {
-            let cfg = &cfg.vision_config;
+            let cfg = vision_cfg;
             let hidden_size = cfg.hidden_size * cfg.spatial_merge_size.pow(2);
 
             let mlp0 = hidden_size * hidden_size + hidden_size;
@@ -6508,7 +6532,7 @@ impl DeviceMappedModelLoader for Qwen3_5Loader {
         };
 
         let patch_embed = {
-            let cfg = &cfg.vision_config;
+            let cfg = vision_cfg;
             let conv_cfg = Conv3dConfig {
                 stride: cfg.patch_size,
                 ..Default::default()
@@ -6523,12 +6547,12 @@ impl DeviceMappedModelLoader for Qwen3_5Loader {
         };
 
         let pos_embed = {
-            let cfg = &cfg.vision_config;
+            let cfg = vision_cfg;
             cfg.num_position_embeddings * cfg.hidden_size
         };
 
         let encoder_layer = {
-            let cfg = &cfg.vision_config;
+            let cfg = vision_cfg;
             let norm1 = cfg.hidden_size + bias_if!(true, cfg.hidden_size);
             let norm2 = cfg.hidden_size + bias_if!(true, cfg.hidden_size);
 
@@ -6546,7 +6570,7 @@ impl DeviceMappedModelLoader for Qwen3_5Loader {
             + deepstack_mergers
             + patch_embed
             + pos_embed
-            + encoder_layer * cfg.vision_config.depth;
+            + encoder_layer * vision_cfg.depth;
 
         Ok(elems * dtype.size_in_bytes())
     }
@@ -6653,7 +6677,18 @@ impl DeviceMappedModelLoader for Qwen3_5Loader {
 /// [`MultimodalLoader`] for a Qwen3.5 MoE (hybrid GDN + full attention) model.
 ///
 /// [`MultimodalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.MultimodalLoader.html
-pub struct Qwen3_5MoeLoader;
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Qwen3_5MoeLoader {
+    disabled_modalities: DisabledModalities,
+}
+
+impl Qwen3_5MoeLoader {
+    pub fn new(disabled_modalities: DisabledModalities) -> Self {
+        Self {
+            disabled_modalities,
+        }
+    }
+}
 
 pub struct Qwen3_5MoePrefixer;
 
@@ -6675,6 +6710,7 @@ impl MultimodalModelLoader for Qwen3_5MoeLoader {
             &cfg,
             vb,
             self.is_gptx(config),
+            self.disabled_modalities,
             normal_loading_metadata,
             attention_mechanism,
         )?))
@@ -6799,7 +6835,11 @@ impl DeviceMappedModelLoader for Qwen3_5MoeLoader {
         let cfg: Qwen3_5MoeConfig = serde_json::from_str(config)?;
 
         let img_seq_len = {
-            let cfg = &cfg.vision_config;
+            let Some(cfg) = cfg.vision_config.as_ref() else {
+                let cfg = &cfg.text_config;
+                let max_seq_len = max_seq_len.min(&ATTENTION_CHUNK_SIZE);
+                return Ok(max_batch_size * cfg.num_attention_heads * max_seq_len * max_seq_len);
+            };
             let grid_t = 1;
             let grid_h = (max_image_shape.0 / cfg.patch_size) / cfg.spatial_merge_size;
             let grid_w = (max_image_shape.1 / cfg.patch_size) / cfg.spatial_merge_size;
@@ -6833,7 +6873,9 @@ impl DeviceMappedModelLoader for Qwen3_5MoeLoader {
         let cfg: Qwen3_5MoeConfig = serde_json::from_str(config)?;
 
         let img_seq_len = {
-            let cfg = &cfg.vision_config;
+            let Some(cfg) = cfg.vision_config.as_ref() else {
+                return Ok(0);
+            };
             let grid_t = 1;
             let grid_h = max_image_shape.0 / cfg.patch_size;
             let grid_w = max_image_shape.1 / cfg.patch_size;
@@ -6841,7 +6883,7 @@ impl DeviceMappedModelLoader for Qwen3_5MoeLoader {
         };
 
         let max_vision_attn = {
-            let cfg = &cfg.vision_config;
+            let cfg = cfg.vision_config.as_ref().unwrap();
             (max_batch_size * max_num_images) * cfg.num_heads * img_seq_len * img_seq_len
         };
 
@@ -6869,8 +6911,12 @@ impl DeviceMappedModelLoader for Qwen3_5MoeLoader {
             embed_tokens + lm_head + norm
         };
 
+        let Some(vision_cfg) = cfg.vision_config.as_ref() else {
+            return Ok(text_elems * dtype.size_in_bytes());
+        };
+
         let (patch_merger, deepstack_mergers) = {
-            let cfg = &cfg.vision_config;
+            let cfg = vision_cfg;
             let hidden_size = cfg.hidden_size * cfg.spatial_merge_size.pow(2);
 
             let mlp0 = hidden_size * hidden_size + hidden_size;
@@ -6887,7 +6933,7 @@ impl DeviceMappedModelLoader for Qwen3_5MoeLoader {
         };
 
         let patch_embed = {
-            let cfg = &cfg.vision_config;
+            let cfg = vision_cfg;
             let conv_cfg = Conv3dConfig {
                 stride: cfg.patch_size,
                 ..Default::default()
@@ -6902,12 +6948,12 @@ impl DeviceMappedModelLoader for Qwen3_5MoeLoader {
         };
 
         let pos_embed = {
-            let cfg = &cfg.vision_config;
+            let cfg = vision_cfg;
             cfg.num_position_embeddings * cfg.hidden_size
         };
 
         let encoder_layer = {
-            let cfg = &cfg.vision_config;
+            let cfg = vision_cfg;
             let norm1 = cfg.hidden_size + bias_if!(true, cfg.hidden_size);
             let norm2 = cfg.hidden_size + bias_if!(true, cfg.hidden_size);
 
@@ -6925,7 +6971,7 @@ impl DeviceMappedModelLoader for Qwen3_5MoeLoader {
             + deepstack_mergers
             + patch_embed
             + pos_embed
-            + encoder_layer * cfg.vision_config.depth;
+            + encoder_layer * vision_cfg.depth;
 
         Ok(elems * dtype.size_in_bytes())
     }
@@ -7348,8 +7394,12 @@ impl MultimodalModelLoader for Gemma4Loader {
         Arc::new(Gemma4Processor::new(
             processor_config.unwrap_or_default(),
             cfg.vision_config.as_ref().map_or(14, |v| v.patch_size),
-            cfg.vision_config.as_ref().map_or(2, |v| v.pooling_kernel_size),
-            cfg.vision_config.as_ref().map_or(1024, |v| v.default_output_length),
+            cfg.vision_config
+                .as_ref()
+                .map_or(2, |v| v.pooling_kernel_size),
+            cfg.vision_config
+                .as_ref()
+                .map_or(1024, |v| v.default_output_length),
             self.supports_vision(),
             self.supports_audio(&cfg),
         ))

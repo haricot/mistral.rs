@@ -113,7 +113,7 @@ impl TextConfig {
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct Config {
     pub text_config: TextConfig,
-    pub vision_config: VisionConfig,
+    pub vision_config: Option<VisionConfig>,
     pub image_token_id: u32,
     pub video_token_id: u32,
     pub vision_start_token_id: u32,

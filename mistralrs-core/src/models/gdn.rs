@@ -327,7 +327,8 @@ impl GatedDeltaNet {
             a_log = a_log.to_device(target_dev)?;
         }
 
-        let in_proj_qkvz = mistralrs_quant::ReplicatedLayer::from_linear(Linear::new(qkvz_w, None))?;
+        let in_proj_qkvz =
+            mistralrs_quant::ReplicatedLayer::from_linear(Linear::new(qkvz_w, None))?;
         let in_proj_ba = mistralrs_quant::ReplicatedLayer::from_linear(Linear::new(ba_w, None))?;
 
         let norm = RmsNormGated::new(
@@ -803,9 +804,7 @@ impl GatedDeltaNet {
         let new_len = hidden_new.dim(2)?;
         cache.conv_state = hidden_new.narrow(2, new_len - state_len, state_len)?;
 
-        let weight = conv_weight
-            .squeeze(1)?
-            .to_dtype(hidden_new.dtype())?;
+        let weight = conv_weight.squeeze(1)?.to_dtype(hidden_new.dtype())?;
         let mut conv_outputs = Vec::with_capacity(seq_len);
         let total_len = hidden_new.dim(2)?;
         for i in (total_len - seq_len)..total_len {

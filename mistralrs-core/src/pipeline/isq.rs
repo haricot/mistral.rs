@@ -463,81 +463,81 @@ pub trait IsqModel {
         multi_progress: Arc<MultiProgress>,
     ) -> candle_core::Result<()> {
         let mut imatrix_source = imatrix_source;
-        let imatrix_to_weight_map: Option<HashMap<usize, Option<Vec<f32>>>> =
-            if apply_quantization {
-                match imatrix_source.take() {
-                    Some(ImatrixDataSource::File(imatrix)) => {
-                        let ext = imatrix.extension().ok_or(candle_core::Error::msg(
-                            "Expected an extension for the imatrix source file.",
-                        ))?;
-                        if ext == "cimatrix" {
-                            info!(
-                                "Loading collected imatrix source file: `{}`",
-                                imatrix.display()
-                            );
-                            let data = CollectedImatrixData::load_imatrix(imatrix)?;
-                            info!(
-                                "Quantizing with collected imatrix data, {} imatrix weights",
-                                data.0.iter().filter(|(_, x)| x.is_some()).count()
-                            );
-                            Some(data.0)
-                        } else {
-                            if ext != "imatrix" {
-                                warn!("Imatrix source file extension is {ext:?}, expected .imatrix/.cimatrix. Assuming GGUF specification");
-                            }
-                            info!(
-                                "Loading GGUF-format imatrix source file: `{}`",
-                                imatrix.display()
-                            );
-                            let mut imatrix_data =
-                                quantized::imatrix_file::load_imatrix(imatrix.clone())?;
-                            let imatrix_mapping = self
-                                .imatrix_names()?
-                                .into_iter()
-                                .enumerate()
-                                .collect::<HashMap<_, _>>();
-
-                            let layer_to_weight = imatrix_mapping
-                                .into_iter()
-                                .map(|(i, name)| {
-                                    if let Some(name) = name {
-                                        (i, Some(imatrix_data.remove(&name).unwrap()))
-                                    } else {
-                                        (i, None)
-                                    }
-                                })
-                                .collect::<HashMap<_, _>>();
-                            info!(
-                                "Quantizing with imatrix file `{}`, {} imatrix weights",
-                                imatrix.display(),
-                                layer_to_weight.iter().filter(|(_, x)| x.is_some()).count()
-                            );
-                            Some(layer_to_weight)
-                        }
-                    }
-                    Some(ImatrixDataSource::Collected) => {
-                        let data = match organization {
-                            IsqOrganization::Default => self.extract_imatrix_data()?,
-                            IsqOrganization::MoeExpertsOnly => {
-                                self.extract_imatrix_data_moe_experts_only()?
-                            }
-                        };
-                        // Save the collected imatrix data so users can reuse it
-                        let count = data.0.iter().filter(|(_, x)| x.is_some()).count();
-                        let save_path = format!("collected-{count}.cimatrix");
-                        info!("Saving collected imatrix data to `{save_path}`");
-                        data.save_imatrix(save_path)?;
-                        info!("Quantizing with collected imatrix data, {count} imatrix weights");
+        let imatrix_to_weight_map: Option<HashMap<usize, Option<Vec<f32>>>> = if apply_quantization
+        {
+            match imatrix_source.take() {
+                Some(ImatrixDataSource::File(imatrix)) => {
+                    let ext = imatrix.extension().ok_or(candle_core::Error::msg(
+                        "Expected an extension for the imatrix source file.",
+                    ))?;
+                    if ext == "cimatrix" {
+                        info!(
+                            "Loading collected imatrix source file: `{}`",
+                            imatrix.display()
+                        );
+                        let data = CollectedImatrixData::load_imatrix(imatrix)?;
+                        info!(
+                            "Quantizing with collected imatrix data, {} imatrix weights",
+                            data.0.iter().filter(|(_, x)| x.is_some()).count()
+                        );
                         Some(data.0)
+                    } else {
+                        if ext != "imatrix" {
+                            warn!("Imatrix source file extension is {ext:?}, expected .imatrix/.cimatrix. Assuming GGUF specification");
+                        }
+                        info!(
+                            "Loading GGUF-format imatrix source file: `{}`",
+                            imatrix.display()
+                        );
+                        let mut imatrix_data =
+                            quantized::imatrix_file::load_imatrix(imatrix.clone())?;
+                        let imatrix_mapping = self
+                            .imatrix_names()?
+                            .into_iter()
+                            .enumerate()
+                            .collect::<HashMap<_, _>>();
+
+                        let layer_to_weight = imatrix_mapping
+                            .into_iter()
+                            .map(|(i, name)| {
+                                if let Some(name) = name {
+                                    (i, Some(imatrix_data.remove(&name).unwrap()))
+                                } else {
+                                    (i, None)
+                                }
+                            })
+                            .collect::<HashMap<_, _>>();
+                        info!(
+                            "Quantizing with imatrix file `{}`, {} imatrix weights",
+                            imatrix.display(),
+                            layer_to_weight.iter().filter(|(_, x)| x.is_some()).count()
+                        );
+                        Some(layer_to_weight)
                     }
-                    None => None,
                 }
-            } else {
-                if imatrix_source.is_some() {
-                    info!("Imatrix source provided but quantization disabled; ignoring input.");
+                Some(ImatrixDataSource::Collected) => {
+                    let data = match organization {
+                        IsqOrganization::Default => self.extract_imatrix_data()?,
+                        IsqOrganization::MoeExpertsOnly => {
+                            self.extract_imatrix_data_moe_experts_only()?
+                        }
+                    };
+                    // Save the collected imatrix data so users can reuse it
+                    let count = data.0.iter().filter(|(_, x)| x.is_some()).count();
+                    let save_path = format!("collected-{count}.cimatrix");
+                    info!("Saving collected imatrix data to `{save_path}`");
+                    data.save_imatrix(save_path)?;
+                    info!("Quantizing with collected imatrix data, {count} imatrix weights");
+                    Some(data.0)
                 }
-                None
-            };
+                None => None,
+            }
+        } else {
+            if imatrix_source.is_some() {
+                info!("Imatrix source provided but quantization disabled; ignoring input.");
+            }
+            None
+        };
 
         let _t_start_all = Instant::now();
         let mut _total_tensors_len = 0;
@@ -704,7 +704,13 @@ pub trait IsqModel {
                             .for_each(|(((tensor, _), (device, dtype)), imatrix_weight)| {
                                 **tensor = tensor
                                     .clone()
-                                    .apply_isq(dtype, device.clone(), &n_quantized, imatrix_weight, guard.clone())
+                                    .apply_isq(
+                                        dtype,
+                                        device.clone(),
+                                        &n_quantized,
+                                        imatrix_weight,
+                                        guard.clone(),
+                                    )
                                     .unwrap();
                                 device.synchronize().unwrap();
                             });
@@ -728,9 +734,15 @@ pub trait IsqModel {
         }
 
         if let Some(serialized) = write_artifacts {
-            let parent = serialized.parent().context("Target UQFF path must have a filename!")?;
+            let parent = serialized
+                .parent()
+                .context("Target UQFF path must have a filename!")?;
             std::fs::create_dir_all(parent)?;
-            let file_stem = serialized.file_stem().context("Target UQFF path must have a file stem!")?.to_string_lossy().to_string();
+            let file_stem = serialized
+                .file_stem()
+                .context("Target UQFF path must have a file stem!")?
+                .to_string_lossy()
+                .to_string();
 
             let layer_len = match organization {
                 IsqOrganization::Default => self.get_layers().0.len(),
@@ -741,7 +753,12 @@ pub trait IsqModel {
 
             let bar = ProgressBar::new(total_isq_items as u64);
             configure_progress_bar(&bar);
-            bar.set_style(ProgressStyle::default_bar().template("[{elapsed_precise}] [{bar:40.red/magenta}] {pos}/{len} ({eta})").unwrap().progress_chars("#>-"));
+            bar.set_style(
+                ProgressStyle::default_bar()
+                    .template("[{elapsed_precise}] [{bar:40.red/magenta}] {pos}/{len} ({eta})")
+                    .unwrap()
+                    .progress_chars("#>-"),
+            );
 
             let mut current_chunk = Vec::new();
             let mut current_bytes = 0;
@@ -754,9 +771,16 @@ pub trait IsqModel {
                     IsqOrganization::MoeExpertsOnly => self.get_layers_moe_experts_only(),
                 };
                 for (i, (layer, _)) in layer_tensors.iter().enumerate() {
-                    if !layer.isq_serde_supported() { continue; }
-                    if !silent { bar.inc(1); }
-                    let data = match layer.serialize()? { Cow::Borrowed(_) => unreachable!(), Cow::Owned(owned) => owned };
+                    if !layer.isq_serde_supported() {
+                        continue;
+                    }
+                    if !silent {
+                        bar.inc(1);
+                    }
+                    let data = match layer.serialize()? {
+                        Cow::Borrowed(_) => unreachable!(),
+                        Cow::Owned(owned) => owned,
+                    };
                     let dlen = data.len();
                     if !current_chunk.is_empty() && current_bytes + dlen > MAX_UQFF_SIZE_BYTES {
                         flush_uqff_shard(parent, &file_stem, shard_index, &mut current_chunk)?;
@@ -773,8 +797,12 @@ pub trait IsqModel {
                 let vocab_tensors = self.get_isq_vocab();
                 let layer_count = layer_len;
                 for (i, (vocab, _)) in vocab_tensors.into_iter().enumerate() {
-                    if !vocab.isq_serde_supported() { continue; }
-                    if !silent { bar.inc(1); }
+                    if !vocab.isq_serde_supported() {
+                        continue;
+                    }
+                    if !silent {
+                        bar.inc(1);
+                    }
 
                     let vocab_device = Device::Cpu;
 
@@ -808,11 +836,17 @@ pub trait IsqModel {
             // 3. Serialize Residuals, Configs, Tokenizer, etc.
             let residual = match organization {
                 IsqOrganization::Default => self.residual_tensors(),
-                IsqOrganization::MoeExpertsOnly => self.residual_tensors_moe_experts_only().unwrap_or(self.residual_tensors()),
+                IsqOrganization::MoeExpertsOnly => self
+                    .residual_tensors_moe_experts_only()
+                    .unwrap_or(self.residual_tensors()),
             };
-            
+
             let residual_out = parent.join(UQFF_RESIDUAL_SAFETENSORS);
-            info!("Serializing {} residual tensors to `{}`.", residual.len(), residual_out.display());
+            info!(
+                "Serializing {} residual tensors to `{}`.",
+                residual.len(),
+                residual_out.display()
+            );
             safetensors::serialize_to_file(residual, None, &residual_out)?;
 
             let config_out = parent.join(full_ser.config_filename.clone());
@@ -821,12 +855,20 @@ pub trait IsqModel {
 
             let tokenizer_out = parent.join("tokenizer.json");
             info!("Serializing tokenizer to `{}`.", tokenizer_out.display());
-            serde_json::to_writer_pretty(File::create(&tokenizer_out)?, full_ser.tokenizer).map_err(candle_core::Error::msg)?;
+            serde_json::to_writer_pretty(File::create(&tokenizer_out)?, full_ser.tokenizer)
+                .map_err(candle_core::Error::msg)?;
 
             if let Some(tf) = full_ser.template_filename {
                 let template = std::fs::read(&tf).map_err(candle_core::Error::msg)?;
-                let dest = if tf.extension().map(|e| e.to_str()) == Some(Some("jinja")) { parent.join("chat_template.jinja") } else { parent.join("tokenizer_config.json") };
-                info!("Serializing chat template / tokenizer config to `{}`.", dest.display());
+                let dest = if tf.extension().map(|e| e.to_str()) == Some(Some("jinja")) {
+                    parent.join("chat_template.jinja")
+                } else {
+                    parent.join("tokenizer_config.json")
+                };
+                info!(
+                    "Serializing chat template / tokenizer config to `{}`.",
+                    dest.display()
+                );
                 std::fs::write(dest, template).map_err(candle_core::Error::msg)?;
             }
 
@@ -849,17 +891,24 @@ pub trait IsqModel {
                 if let Some(paths) = full_ser.module_paths {
                     for module in paths {
                         if let Some(path) = match module {
-                            EmbeddingModulePaths::Transformer { path } |
-                            EmbeddingModulePaths::Pooling { path, .. } |
-                            EmbeddingModulePaths::Dense { path, .. } |
-                            EmbeddingModulePaths::Normalize { path } => Some(path),
+                            EmbeddingModulePaths::Transformer { path }
+                            | EmbeddingModulePaths::Pooling { path, .. }
+                            | EmbeddingModulePaths::Dense { path, .. }
+                            | EmbeddingModulePaths::Normalize { path } => Some(path),
                         } {
-                            if path.is_empty() { continue; }
+                            if path.is_empty() {
+                                continue;
+                            }
                             let module_dir = parent.join(path.as_str());
                             std::fs::create_dir_all(&module_dir)?;
                             match module {
-                                EmbeddingModulePaths::Pooling { config, .. } => { std::fs::copy(config, module_dir.join("config.json"))?; }
-                                EmbeddingModulePaths::Dense { config, model, .. } => { std::fs::copy(config, module_dir.join("config.json"))?; std::fs::copy(model, module_dir.join("model.safetensors"))?; }
+                                EmbeddingModulePaths::Pooling { config, .. } => {
+                                    std::fs::copy(config, module_dir.join("config.json"))?;
+                                }
+                                EmbeddingModulePaths::Dense { config, model, .. } => {
+                                    std::fs::copy(config, module_dir.join("config.json"))?;
+                                    std::fs::copy(model, module_dir.join("model.safetensors"))?;
+                                }
                                 _ => {}
                             }
                         }

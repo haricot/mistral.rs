@@ -994,8 +994,14 @@ impl Model {
                         let pool_device = gdn_cache.recurrent_state.device().clone();
                         x = layer.forward_linear(&x, &mut gdn_cache)?;
 
-                        pool.scatter_conv_state(indices, &gdn_cache.conv_state.to_device(&pool_device)?)?;
-                        pool.scatter_recurrent_state(indices, &gdn_cache.recurrent_state.to_device(&pool_device)?)?;
+                        pool.scatter_conv_state(
+                            indices,
+                            &gdn_cache.conv_state.to_device(&pool_device)?,
+                        )?;
+                        pool.scatter_recurrent_state(
+                            indices,
+                            &gdn_cache.recurrent_state.to_device(&pool_device)?,
+                        )?;
 
                         let delta = gdn_cache.seqlen_offset.saturating_sub(first_offset);
                         for &idx in &indices_vec {
