@@ -15,7 +15,7 @@ use half::{bf16, f16};
 use mistralrs_quant::{
     get_immediate_isq, immediate_isq_match, log::once_log_warn, should_apply_immediate_isq,
     AfqLayer, ColumnParallelLayer, Convolution, GgufMatMul, QuantMethod, QuantMethodConfig,
-    QuantizedConfig, RowParallelLayer, ShardedVarBuilder,
+    QuantizedConfig, QuantizedSerdeType, RowParallelLayer, ShardedVarBuilder,
 };
 use serde::{Deserialize, Serialize};
 
@@ -130,6 +130,25 @@ pub trait VocabStore: Module + Send + Sync {
     fn replace_embeddings(&mut self, _embeddings: Tensor) -> Result<()> {
         candle_core::bail!("This vocabulary store does not support replacing embeddings.")
     }
+
+    fn is_quantized(&self) -> bool {
+        false
+    }
+
+    fn quantize(
+        &self,
+        _isq_type: mistralrs_quant::IsqType,
+        _device: Device,
+    ) -> Result<Option<Box<dyn VocabStore>>> {
+        Ok(None)
+    }
+
+    fn isq_serde_supported(&self) -> bool {
+        false
+    }
+    fn serialize_vocab(&self) -> Result<Vec<u8>> {
+        candle_core::bail!("`serialize_vocab` not supported for this VocabStore")
+    }
 }
 
 pub struct TensorVocabStore {
@@ -165,6 +184,21 @@ impl VocabStore for TensorVocabStore {
     fn replace_embeddings(&mut self, embeddings: Tensor) -> Result<()> {
         self.embeddings = embeddings;
         Ok(())
+    }
+
+    fn quantize(
+        &self,
+        isq_type: mistralrs_quant::IsqType,
+        device: Device,
+    ) -> Result<Option<Box<dyn VocabStore>>> {
+        let prefix = "isq_vocab_quantization"; // Internal dummy prefix
+        if let Some(store) =
+            QuantizedVocabStore::from_immediate_isq(self.embeddings.clone(), prefix, isq_type, device)?
+        {
+            Ok(Some(Box::new(store)))
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -299,6 +333,113 @@ impl QuantizedVocabStore {
         let qstorage = QStorage::from_data(Cow::Owned(row_data), device, self.dtype)?;
         QTensor::new(qstorage, (ids.len(), self.hidden_size))
     }
+
+    pub fn serialize_vocab(&self) -> Result<Vec<u8>> {
+        let mut buffer = Vec::new();
+        // Version
+        buffer.extend(&mistralrs_quant::UQFF_VERSION.to_le_bytes());
+        // Type (7 = Vocab)
+        buffer.push(QuantizedSerdeType::Vocab as u8);
+        // GGML Dtype
+        buffer.push(self.dtype as u8);
+        // Output Dtype (Candle)
+        let output_dtype_u8 = match self.output_dtype {
+            DType::F32 => 0,
+            DType::F16 => 1,
+            DType::BF16 => 2,
+            _ => candle_core::bail!("Unsupported output dtype for vocabulary serialization"),
+        };
+        buffer.push(output_dtype_u8);
+        // Vocab size (u32)
+        buffer.extend(&(self.vocab_size as u32).to_le_bytes());
+        // Hidden size (u32)
+        buffer.extend(&(self.hidden_size as u32).to_le_bytes());
+        // Data length (u32)
+        buffer.extend(&(self.quantized_bytes.len() as u32).to_le_bytes());
+        // Data
+        buffer.extend(self.quantized_bytes.as_ref());
+
+        Ok(buffer)
+    }
+
+    pub fn deserialize_vocab(data: &[u8], device: &Device) -> Result<Box<dyn VocabStore>> {
+        use std::io::{Cursor, Read};
+
+        let mut reader = Cursor::new(data);
+        let mut u32_buf = [0u8; 4];
+
+        reader.read_exact(&mut u32_buf)?;
+        let version = u32::from_le_bytes(u32_buf);
+        if version != mistralrs_quant::UQFF_VERSION {
+            candle_core::bail!("UQFF version mismatch in vocabulary artifact");
+        }
+
+        let mut u8_buf = [0u8; 1];
+        reader.read_exact(&mut u8_buf)?;
+        let serde_type = u8_buf[0];
+        if serde_type != QuantizedSerdeType::Vocab as u8 {
+            candle_core::bail!("Expected Vocab artifact type, got {serde_type}");
+        }
+
+        reader.read_exact(&mut u8_buf)?;
+        let dtype_u8 = u8_buf[0];
+        let dtype = match dtype_u8 {
+            0 => GgmlDType::F32,
+            1 => GgmlDType::F16,
+            2 => GgmlDType::Q4_0,
+            3 => GgmlDType::Q4_1,
+            6 => GgmlDType::Q5_0,
+            7 => GgmlDType::Q5_1,
+            8 => GgmlDType::Q8_0,
+            9 => GgmlDType::Q8_1,
+            10 => GgmlDType::Q2K,
+            11 => GgmlDType::Q3K,
+            12 => GgmlDType::Q4K,
+            13 => GgmlDType::Q5K,
+            14 => GgmlDType::Q6K,
+            15 => GgmlDType::Q8K,
+            30 => GgmlDType::BF16,
+            _ => candle_core::bail!("Unknown GGML dtype discriminator {dtype_u8}"),
+        };
+
+        reader.read_exact(&mut u8_buf)?;
+        let output_dtype_u8 = u8_buf[0];
+        let output_dtype = match output_dtype_u8 {
+            0 => DType::F32,
+            1 => DType::F16,
+            2 => DType::BF16,
+            _ => candle_core::bail!("Unknown output dtype in vocabulary artifact"),
+        };
+
+        reader.read_exact(&mut u32_buf)?;
+        let vocab_size = u32::from_le_bytes(u32_buf) as usize;
+
+        reader.read_exact(&mut u32_buf)?;
+        let hidden_size = u32::from_le_bytes(u32_buf) as usize;
+
+        reader.read_exact(&mut u32_buf)?;
+        let data_len = u32::from_le_bytes(u32_buf) as usize;
+
+        let mut quantized_bytes = vec![0u8; data_len];
+        reader.read_exact(&mut quantized_bytes)?;
+
+        // Reconstruct tied output projection
+        let qstorage = QStorage::from_data(Cow::Borrowed(&quantized_bytes), device, dtype)?;
+        let q_weight = Arc::new(QTensor::new(qstorage, (vocab_size, hidden_size))?);
+        let tied_output_projection = Arc::new(GgufMatMul::new(QuantMethodConfig::Gguf {
+            q_weight,
+            b: None,
+        })?) as Arc<dyn QuantMethod>;
+
+        Ok(Box::new(Self::new(
+            quantized_bytes,
+            dtype,
+            output_dtype,
+            vocab_size,
+            hidden_size,
+            Some(tied_output_projection),
+        )?))
+    }
 }
 
 impl Module for QuantizedVocabStore {
@@ -320,6 +461,14 @@ impl Module for QuantizedVocabStore {
 }
 
 impl VocabStore for QuantizedVocabStore {
+    fn is_quantized(&self) -> bool {
+        true
+    }
+
+    fn isq_serde_supported(&self) -> bool {
+        true
+    }
+
     fn dequantized_embeddings(&self) -> Result<Option<Tensor>> {
         let qstorage = QStorage::from_data(
             Cow::Borrowed(self.quantized_bytes.as_ref()),
@@ -1588,7 +1737,11 @@ impl Qwen3VLRotaryEmbedding {
         // freqs: (3, batch, head_dim/2, 1) @ (3, batch, 1, seq_len) -> (3, batch, head_dim/2, seq_len)
         // -> transpose -> (3, batch, seq_len, head_dim/2)
         let freqs = inv_freq_expanded
-            .matmul(&position_ids_expanded.to_dtype(inv_freq_expanded.dtype())?)?
+            .matmul(
+                &position_ids_expanded
+                    .to_device(inv_freq_expanded.device())?
+                    .to_dtype(inv_freq_expanded.dtype())?,
+            )?
             .transpose(2, 3)?;
 
         // Apply interleaved MRoPE: start with temporal, overwrite H and W at interleaved positions
@@ -3337,7 +3490,7 @@ impl Module for ReflectionPad2d {
 
 pub struct VocabEmbedding {
     scale: f64,
-    store: Box<dyn VocabStore>,
+    pub store: Box<dyn VocabStore>,
 }
 
 impl VocabEmbedding {

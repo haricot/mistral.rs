@@ -19,6 +19,7 @@ use crate::{
         DisabledModalities, EitherCache, IsqModel, MultimodalModel, NormalLoadingMetadata,
     },
     utils::unvarbuilder::UnVarBuilder,
+    layers::VocabStore,
 };
 
 pub(crate) mod audio;
@@ -527,6 +528,7 @@ impl Gemma4Model {
     }
 }
 
+// Marker: IsqModel implementation
 impl IsqModel for Gemma4Model {
     fn get_layers(
         &mut self,
@@ -534,7 +536,19 @@ impl IsqModel for Gemma4Model {
         Vec<(&mut Arc<dyn QuantMethod>, Option<usize>)>,
         &dyn DeviceMapper,
     ) {
-        let (tensors, mapper) = self.language_model.get_layers();
+        let (mut tensors, mapper) = self.language_model.get_layers();
+        if let Some(ref mut vision_tower) = self.vision_tower {
+            tensors.extend(vision_tower.get_isq_layers());
+        }
+        if let Some(ref mut audio_tower) = self.audio_tower {
+            tensors.extend(audio_tower.get_isq_layers());
+        }
+        if let Some(ref mut embed_vision) = self.embed_vision {
+            tensors.extend(embed_vision.get_isq_layers());
+        }
+        if let Some(ref mut embed_audio) = self.embed_audio {
+            tensors.extend(embed_audio.get_isq_layers());
+        }
         (tensors, mapper)
     }
 
@@ -550,9 +564,9 @@ impl IsqModel for Gemma4Model {
             uvb_vision.extend(vision_tower.residual_tensors());
         }
 
-        if let Some(ref audio) = self.audio_tower {
+        if let Some(ref audio_tower) = self.audio_tower {
             let uvb_audio = uvb_model.pp("audio_tower");
-            uvb_audio.extend(audio.residual_tensors());
+            uvb_audio.extend(audio_tower.residual_tensors());
         }
 
         if let Some(ref embed_vision) = self.embed_vision {
@@ -568,7 +582,11 @@ impl IsqModel for Gemma4Model {
         uvb.to_safetensors()
     }
 
-    fn imatrix_names(&self) -> candle_core::Result<Vec<Option<String>>> {
+    fn get_isq_vocab(&mut self) -> Vec<(&mut Box<dyn VocabStore>, Option<usize>)> {
+        self.language_model.get_isq_vocab()
+    }
+
+    fn imatrix_names(&self) -> Result<Vec<Option<String>>> {
         self.language_model.imatrix_names()
     }
 }

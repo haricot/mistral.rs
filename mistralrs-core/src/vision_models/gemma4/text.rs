@@ -1217,10 +1217,18 @@ impl TextModel {
         let ple_vocab = cfg.vocab_size_per_layer_input.unwrap_or(cfg.vocab_size);
         let (embed_tokens_per_layer, per_layer_model_projection, per_layer_projection_norm) =
             if ple_dim > 0 {
+                // Gemma 4's global PLE embedding table is extremely large. Keep it on
+                // CPU on non-Metal backends so it does not force text layers onto CPU
+                // during auto device mapping on smaller GPUs.
+                let ple_emb_vb = if normal_loading_metadata.real_device.is_metal() {
+                    mapper.set_nm_device(vb_m.pp("embed_tokens_per_layer"), false)
+                } else {
+                    vb_m.pp("embed_tokens_per_layer").set_device(Device::Cpu)
+                };
                 let ple_emb = vocab_store(
                     ple_vocab,
                     cfg.num_hidden_layers * ple_dim,
-                    mapper.set_nm_device(vb_m.pp("embed_tokens_per_layer"), false),
+                    ple_emb_vb,
                     &cfg.quantization_config,
                 )?;
 
@@ -1399,7 +1407,18 @@ impl TextModel {
         let (b, seq, _) = inputs_embeds.dims3()?;
 
         // 1. Token-level per-layer embeddings: [b, seq, num_layers * ple_dim]
-        let embedded = ple_emb.forward(ple_input_ids)?;
+        let embedded = if ple_emb
+            .embeddings()
+            .is_some_and(|embeddings| embeddings.device().is_cpu())
+            && !ple_input_ids.device().is_cpu()
+        {
+            let ple_input_ids_cpu = ple_input_ids.to_device(&Device::Cpu)?;
+            ple_emb
+                .forward(&ple_input_ids_cpu)?
+                .to_device(ple_input_ids.device())?
+        } else {
+            ple_emb.forward(ple_input_ids)?
+        };
         // Scale by sqrt(ple_dim)
         let embedded = (embedded * (ple_dim as f64).sqrt())?;
         // Reshape to [b, seq, num_layers, ple_dim]
@@ -1690,15 +1709,28 @@ impl IsqModel for TextModel {
         (tensors, &*self.mapper)
     }
 
+    fn get_isq_vocab(&mut self) -> Vec<(&mut Box<dyn VocabStore>, Option<usize>)> {
+        let mut vocabs = Vec::new();
+        vocabs.push((&mut self.embed_tokens.store, None));
+        if let Some(ref mut ple) = self.embed_tokens_per_layer {
+            vocabs.push((ple, None));
+        }
+        vocabs
+    }
+
     fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let uvb = UnVarBuilder::new();
+        let uvb_m = &uvb;
 
-        let uvb_m = uvb;
-        uvb_m.pp("embed_tokens").add(&self.embed_tokens);
+        if !self.embed_tokens.store.is_quantized() {
+            uvb_m.pp("embed_tokens").add(&self.embed_tokens);
+        }
         uvb_m.pp("norm").add(&self.norm);
 
         if let Some(ref emb) = self.embed_tokens_per_layer {
-            uvb_m.pp("embed_tokens_per_layer").add(emb);
+            if !emb.is_quantized() {
+                uvb_m.pp("embed_tokens_per_layer").add(emb);
+            }
         }
         if let Some(ref norm) = self.per_layer_projection_norm {
             uvb_m.pp("per_layer_projection_norm").add(norm);

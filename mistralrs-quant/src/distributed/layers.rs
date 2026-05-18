@@ -318,6 +318,9 @@ impl QuantizedSerde for RowParallelLayer {
             QuantizedSerdeType::Afq => AfqLayer::deserialize_ext_bias(data, device, guard)?,
             QuantizedSerdeType::F8Q8 => F8Q8Linear::deserialize_ext_bias(data, device, guard)?,
             QuantizedSerdeType::Mxfp4 => MXFP4Layer::deserialize_ext_bias(data, device, guard)?,
+            QuantizedSerdeType::Vocab => {
+                candle_core::bail!("Vocab artifact type is not supported for RowParallelLayer")
+            }
         };
         Ok(Arc::new(Self {
             weight,
@@ -646,6 +649,9 @@ impl QuantizedSerde for ColumnParallelLayer {
             QuantizedSerdeType::Afq => AfqLayer::deserialize_ext_bias(data, device, guard)?,
             QuantizedSerdeType::F8Q8 => F8Q8Linear::deserialize_ext_bias(data, device, guard)?,
             QuantizedSerdeType::Mxfp4 => MXFP4Layer::deserialize_ext_bias(data, device, guard)?,
+            QuantizedSerdeType::Vocab => {
+                candle_core::bail!("Vocab artifact type is not supported for ColumnParallelLayer")
+            }
         };
         Ok(Arc::new(Self { weight, bias }))
     }
@@ -974,6 +980,9 @@ impl QuantizedSerde for ReplicatedLayer {
             QuantizedSerdeType::Afq => AfqLayer::deserialize(data, device, comm, guard)?,
             QuantizedSerdeType::F8Q8 => F8Q8Linear::deserialize(data, device, comm, guard)?,
             QuantizedSerdeType::Mxfp4 => MXFP4Layer::deserialize(data, device, comm, guard)?,
+            QuantizedSerdeType::Vocab => {
+                candle_core::bail!("Vocab artifact type is not supported for ReplicatedLayer")
+            }
         };
         Ok(Arc::new(Self(deserialized)))
     }

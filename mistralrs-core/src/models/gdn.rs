@@ -4,7 +4,7 @@
 //!
 //! Used by both Qwen3 Next (text-only) and Qwen3.5 MoE (multimodal) models.
 
-use candle_core::{DType, Device, IndexOp, Module, Result, Tensor, D};
+use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
 use candle_nn::Linear;
 use mistralrs_quant::{MatMul, QuantMethod, QuantizedConfig, RowParallelLayer, ShardedVarBuilder};
 use std::sync::Arc;
@@ -215,8 +215,8 @@ pub fn gated_delta_rule_recurrence(
 // ====================== Gated Delta Net layer ======================
 
 pub struct GatedDeltaNet {
-    pub in_proj_qkvz: Linear,
-    pub in_proj_ba: Linear,
+    pub in_proj_qkvz: Arc<dyn QuantMethod>,
+    pub in_proj_ba: Arc<dyn QuantMethod>,
     pub conv1d_weight: Tensor,
     pub dt_bias: Tensor,
     pub a_log: Tensor,
@@ -327,8 +327,8 @@ impl GatedDeltaNet {
             a_log = a_log.to_device(target_dev)?;
         }
 
-        let in_proj_qkvz = Linear::new(qkvz_w, None);
-        let in_proj_ba = Linear::new(ba_w, None);
+        let in_proj_qkvz = mistralrs_quant::ReplicatedLayer::from_linear(Linear::new(qkvz_w, None))?;
+        let in_proj_ba = mistralrs_quant::ReplicatedLayer::from_linear(Linear::new(ba_w, None))?;
 
         let norm = RmsNormGated::new(
             head_v_dim,
@@ -370,8 +370,16 @@ impl GatedDeltaNet {
         let v_per_group = self.num_v_heads / self.num_k_heads;
 
         // 1. Project input
-        let mixed_qkvz = self.in_proj_qkvz.forward(x)?;
-        let mixed_ba = self.in_proj_ba.forward(x)?;
+        let mut x_q = x.clone();
+        if let Some(t) = self.in_proj_qkvz.quantized_act_type() {
+            x_q = x_q.to_dtype(t)?;
+        }
+        let mut mixed_qkvz = MatMul.qmethod_matmul(&x_q, &*self.in_proj_qkvz)?;
+        let mut mixed_ba = MatMul.qmethod_matmul(&x_q, &*self.in_proj_ba)?;
+        if self.in_proj_qkvz.quantized_act_type().is_some() {
+            mixed_qkvz = mixed_qkvz.to_dtype(dtype)?;
+            mixed_ba = mixed_ba.to_dtype(dtype)?;
+        }
 
         // 2. Grouped head layout
         let group_size_qkvz = 2 * self.head_k_dim + 2 * v_per_group * self.head_v_dim;
@@ -492,28 +500,50 @@ impl GatedDeltaNet {
         let k = l2_norm(&k, 1e-6)?;
 
         // 9. Apply recurrence
+        let mut recurrent_state = cache.recurrent_state.to_device(q.device())?;
         let y = {
             #[cfg(feature = "cuda")]
             {
                 if q.device().is_cuda() {
-                    self.recurrence_cuda(&q, &k, &v, &g, &beta, batch_size, seq_len, cache, dtype)?
+                    self.recurrence_cuda(
+                        &q,
+                        &k,
+                        &v,
+                        &g,
+                        &beta,
+                        batch_size,
+                        seq_len,
+                        &mut recurrent_state,
+                        dtype,
+                    )?
                 } else {
-                    gated_delta_rule_recurrence(&q, &k, &v, &g, &beta, &mut cache.recurrent_state)?
+                    gated_delta_rule_recurrence(&q, &k, &v, &g, &beta, &mut recurrent_state)?
                 }
             }
             #[cfg(feature = "metal")]
             {
                 if q.device().is_metal() {
-                    self.recurrence_metal(&q, &k, &v, &g, &beta, batch_size, seq_len, cache, dtype)?
+                    self.recurrence_metal(
+                        &q,
+                        &k,
+                        &v,
+                        &g,
+                        &beta,
+                        batch_size,
+                        seq_len,
+                        &mut recurrent_state,
+                        dtype,
+                    )?
                 } else {
-                    gated_delta_rule_recurrence(&q, &k, &v, &g, &beta, &mut cache.recurrent_state)?
+                    gated_delta_rule_recurrence(&q, &k, &v, &g, &beta, &mut recurrent_state)?
                 }
             }
             #[cfg(not(any(feature = "cuda", feature = "metal")))]
             {
-                gated_delta_rule_recurrence(&q, &k, &v, &g, &beta, &mut cache.recurrent_state)?
+                gated_delta_rule_recurrence(&q, &k, &v, &g, &beta, &mut recurrent_state)?
             }
         };
+        cache.recurrent_state = recurrent_state;
 
         cache.seqlen_offset += seq_len;
 
@@ -543,11 +573,13 @@ impl GatedDeltaNet {
         let a_f = a.to_dtype(DType::F32)?;
         let dt_bias_expanded = self
             .dt_bias
+            .to_device(a.device())?
             .to_dtype(DType::F32)?
             .unsqueeze(0)?
             .unsqueeze(0)?;
         let g = self
             .a_log
+            .to_device(a.device())?
             .to_dtype(DType::F32)?
             .exp()?
             .neg()?
@@ -568,7 +600,7 @@ impl GatedDeltaNet {
         beta: &Tensor,
         batch_size: usize,
         seq_len: usize,
-        cache: &mut GdnLayerCache,
+        state: &mut Tensor,
         dtype: DType,
     ) -> Result<Tensor> {
         let num_heads = self.num_v_heads;
@@ -604,8 +636,7 @@ impl GatedDeltaNet {
             .reshape((batch_size * num_heads, seq_len))?
             .contiguous()?;
 
-        let mut state_flat = cache
-            .recurrent_state
+        let mut state_flat = state
             .to_dtype(DType::F32)?
             .reshape((batch_size * num_heads, k_head, v_head))?
             .contiguous()?;
@@ -631,9 +662,9 @@ impl GatedDeltaNet {
             )?
         };
 
-        cache.recurrent_state = state_flat
+        *state = state_flat
             .reshape((batch_size, num_heads, k_head, v_head))?
-            .to_dtype(cache.recurrent_state.dtype())?;
+            .to_dtype(state.dtype())?;
 
         out_bh
             .reshape((batch_size, num_heads, seq_len, v_head))?
@@ -652,7 +683,7 @@ impl GatedDeltaNet {
         beta: &Tensor,
         batch_size: usize,
         seq_len: usize,
-        cache: &mut GdnLayerCache,
+        state: &mut Tensor,
         dtype: DType,
     ) -> Result<Tensor> {
         let num_heads = self.num_v_heads;
@@ -688,8 +719,7 @@ impl GatedDeltaNet {
             .reshape((batch_size * num_heads, seq_len))?
             .contiguous()?;
 
-        let mut state_flat = cache
-            .recurrent_state
+        let mut state_flat = state
             .to_dtype(DType::F32)?
             .reshape((batch_size * num_heads, k_head, v_head))?
             .contiguous()?;
@@ -715,9 +745,9 @@ impl GatedDeltaNet {
             )?
         };
 
-        cache.recurrent_state = state_flat
+        *state = state_flat
             .reshape((batch_size, num_heads, k_head, v_head))?
-            .to_dtype(cache.recurrent_state.dtype())?;
+            .to_dtype(state.dtype())?;
 
         out_bh
             .reshape((batch_size, num_heads, seq_len, v_head))?
@@ -730,15 +760,15 @@ impl GatedDeltaNet {
     fn causal_conv1d_update(&self, x: &Tensor, cache: &mut GdnLayerCache) -> Result<Tensor> {
         let (_batch, seq_len, _conv_dim) = x.dims3()?;
         let x_t = x.transpose(1, 2)?.contiguous()?;
+        let conv_weight = self.conv1d_weight.to_device(x.device())?;
+        let conv_state = cache.conv_state.to_device(x.device())?;
 
         #[cfg(feature = "cuda")]
         if x_t.device().is_cuda() {
-            let weight = self
-                .conv1d_weight
+            let weight = conv_weight
                 .squeeze(1)?
                 .to_dtype(x_t.dtype())?
                 .contiguous()?;
-            let conv_state = cache.conv_state.contiguous()?;
             let (output, new_conv_state) = crate::cuda::gdn::causal_conv1d_cuda(
                 &x_t,
                 &weight,
@@ -752,12 +782,10 @@ impl GatedDeltaNet {
 
         #[cfg(feature = "metal")]
         if x_t.device().is_metal() {
-            let weight = self
-                .conv1d_weight
+            let weight = conv_weight
                 .squeeze(1)?
                 .to_dtype(x_t.dtype())?
                 .contiguous()?;
-            let conv_state = cache.conv_state.contiguous()?;
             let (output, new_conv_state) = crate::metal::gdn::causal_conv1d_metal(
                 &x_t,
                 &weight,
@@ -770,13 +798,12 @@ impl GatedDeltaNet {
         }
 
         // CPU fallback
-        let state_len = cache.conv_state.dim(2)?;
-        let hidden_new = Tensor::cat(&[cache.conv_state.clone(), x_t], 2)?;
+        let state_len = conv_state.dim(2)?;
+        let hidden_new = Tensor::cat(&[conv_state, x_t], 2)?;
         let new_len = hidden_new.dim(2)?;
         cache.conv_state = hidden_new.narrow(2, new_len - state_len, state_len)?;
 
-        let weight = self
-            .conv1d_weight
+        let weight = conv_weight
             .squeeze(1)?
             .to_dtype(hidden_new.dtype())?;
         let mut conv_outputs = Vec::with_capacity(seq_len);
@@ -796,18 +823,19 @@ impl GatedDeltaNet {
     fn causal_conv1d_full(&self, x: &Tensor, cache: &mut GdnLayerCache) -> Result<Tensor> {
         let (batch_size, seq_len, conv_dim) = x.dims3()?;
         let x_t = x.transpose(1, 2)?.contiguous()?;
+        let conv_weight = self.conv1d_weight.to_device(x.device())?;
+        let conv_state = cache.conv_state.to_device(x.device())?;
 
         #[cfg(feature = "cuda")]
         if x_t.device().is_cuda() {
-            let weight = self
-                .conv1d_weight
+            let weight = conv_weight
                 .squeeze(1)?
                 .to_dtype(x_t.dtype())?
                 .contiguous()?;
             let (output, new_conv_state) = crate::cuda::gdn::causal_conv1d_cuda(
                 &x_t,
                 &weight,
-                &cache.conv_state,
+                &conv_state,
                 self.conv_kernel_size,
                 false,
             )?;
@@ -817,15 +845,14 @@ impl GatedDeltaNet {
 
         #[cfg(feature = "metal")]
         if x_t.device().is_metal() {
-            let weight = self
-                .conv1d_weight
+            let weight = conv_weight
                 .squeeze(1)?
                 .to_dtype(x_t.dtype())?
                 .contiguous()?;
             let (output, new_conv_state) = crate::metal::gdn::causal_conv1d_metal(
                 &x_t,
                 &weight,
-                &cache.conv_state,
+                &conv_state,
                 false,
                 self.conv_kernel_size,
             )?;
@@ -855,7 +882,7 @@ impl GatedDeltaNet {
             2,
         )?;
 
-        let weight = self.conv1d_weight.squeeze(1)?.to_dtype(padded_t.dtype())?;
+        let weight = conv_weight.squeeze(1)?.to_dtype(padded_t.dtype())?;
 
         let mut conv_outputs = Vec::with_capacity(seq_len);
         for i in 0..seq_len {

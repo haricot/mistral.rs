@@ -397,6 +397,9 @@ impl Loader for MultimodalLoader {
                                 }
                                 QuantizedSerdeType::F8Q8 => IsqType::F8Q8.pack_factor(dtype),
                                 QuantizedSerdeType::Mxfp4 => IsqType::MXFP4.pack_factor(dtype),
+                                QuantizedSerdeType::Vocab => {
+                                    anyhow::bail!("Vocab artifact type is not supported in multimodal pipeline packing")
+                                }
                             };
                             total_pack_factors += pack_factor;
                         }

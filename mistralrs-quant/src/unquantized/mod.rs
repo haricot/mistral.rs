@@ -653,6 +653,80 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy, Debug)]
+    struct ModelShapedBf16Case {
+        name: &'static str,
+        batch: usize,
+        seq_len: usize,
+        in_features: usize,
+        out_features: usize,
+        expect_gemv: bool,
+    }
+
+    const MODEL_SHAPED_BF16_CASES: [ModelShapedBf16Case; 7] = [
+        // Gemma4 E2B-it: sliding-attention q_proj = 1536 -> 8 * 256 = 2048
+        ModelShapedBf16Case {
+            name: "gemma4_decode_sliding_q_proj",
+            batch: 1,
+            seq_len: 1,
+            in_features: 1536,
+            out_features: 2048,
+            expect_gemv: true,
+        },
+        // Gemma4 E2B-it: full-attention q_proj = 1536 -> 8 * 512 = 4096
+        ModelShapedBf16Case {
+            name: "gemma4_decode_full_q_proj",
+            batch: 1,
+            seq_len: 1,
+            in_features: 1536,
+            out_features: 4096,
+            expect_gemv: true,
+        },
+        ModelShapedBf16Case {
+            name: "gemma4_prefill_full_q_proj",
+            batch: 1,
+            seq_len: 18,
+            in_features: 1536,
+            out_features: 4096,
+            expect_gemv: false,
+        },
+        // Gemma4 E2B-it: double-wide MLP on KV-shared layers = 1536 -> 12288
+        ModelShapedBf16Case {
+            name: "gemma4_prefill_double_wide_mlp_gate",
+            batch: 1,
+            seq_len: 18,
+            in_features: 1536,
+            out_features: 12288,
+            expect_gemv: false,
+        },
+        // Qwen3.5-2B: q_gate projection = 2048 -> 8 * 256 * 2 = 4096
+        ModelShapedBf16Case {
+            name: "qwen3_5_decode_q_gate_proj",
+            batch: 1,
+            seq_len: 1,
+            in_features: 2048,
+            out_features: 4096,
+            expect_gemv: true,
+        },
+        ModelShapedBf16Case {
+            name: "qwen3_5_prefill_q_gate_proj",
+            batch: 1,
+            seq_len: 18,
+            in_features: 2048,
+            out_features: 4096,
+            expect_gemv: false,
+        },
+        // Qwen3.5-2B: dense MLP gate/up projection = 2048 -> 6144
+        ModelShapedBf16Case {
+            name: "qwen3_5_prefill_mlp_gate",
+            batch: 1,
+            seq_len: 18,
+            in_features: 2048,
+            out_features: 6144,
+            expect_gemv: false,
+        },
+    ];
+
     fn assert_close(lhs: &Tensor, rhs: &Tensor, max_abs_diff: f32) -> Result<()> {
         let max_diff = (lhs.to_dtype(DType::F32)? - rhs.to_dtype(DType::F32)?)?
             .abs()?
@@ -663,6 +737,182 @@ mod tests {
             "max abs diff {max_diff} exceeded tolerance {max_abs_diff}"
         );
         Ok(())
+    }
+
+    fn max_abs_diff(lhs: &Tensor, rhs: &Tensor) -> Result<f32> {
+        let lhs = lhs.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
+        let rhs = rhs.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
+        (&lhs - &rhs)?.abs()?.max_all()?.to_vec0::<f32>()
+    }
+
+    fn relative_l2_error(lhs: &Tensor, rhs: &Tensor) -> Result<f32> {
+        let lhs = lhs.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
+        let rhs = rhs.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
+        let numerator = (&lhs - &rhs)?.sqr()?.sum_all()?.to_vec0::<f32>()?.sqrt();
+        let denominator = rhs.sqr()?.sum_all()?.to_vec0::<f32>()?.sqrt().max(1e-6);
+        Ok(numerator / denominator)
+    }
+
+    fn assert_relative_close(
+        case_name: &str,
+        actual: &Tensor,
+        expected: &Tensor,
+        max_rel_l2: f32,
+    ) -> Result<()> {
+        let rel_l2 = relative_l2_error(actual, expected)?;
+        let max_diff = max_abs_diff(actual, expected)?;
+        assert!(
+            rel_l2 <= max_rel_l2,
+            "{case_name}: relative L2 error {rel_l2} exceeded tolerance {max_rel_l2} (max abs diff {max_diff})"
+        );
+        Ok(())
+    }
+
+    fn build_case_tensors(
+        case: ModelShapedBf16Case,
+        device: &Device,
+    ) -> Result<(Tensor, Tensor, UnquantLinear, Tensor)> {
+        let input = Tensor::randn(
+            0.,
+            1.,
+            (case.batch, case.seq_len, case.in_features),
+            &Device::Cpu,
+        )
+        .map_err(|err| {
+            candle_core::Error::Msg(format!("{}: input randn failed ({err})", case.name))
+        })?
+        .to_dtype(DType::BF16)
+        .map_err(|err| {
+            candle_core::Error::Msg(format!("{}: input CPU to BF16 failed ({err})", case.name))
+        })?
+        .to_device(device)
+        .map_err(|err| {
+            candle_core::Error::Msg(format!("{}: input copy to CUDA failed ({err})", case.name))
+        })?
+        .contiguous()
+        .map_err(|err| {
+            candle_core::Error::Msg(format!("{}: input contiguous failed ({err})", case.name))
+        })?;
+        let weight = Tensor::randn(0., 1., (case.out_features, case.in_features), &Device::Cpu)
+            .map_err(|err| {
+                candle_core::Error::Msg(format!("{}: weight randn failed ({err})", case.name))
+            })?
+            .to_dtype(DType::BF16)
+            .map_err(|err| {
+                candle_core::Error::Msg(format!("{}: weight CPU to BF16 failed ({err})", case.name))
+            })?
+            .to_device(device)
+            .map_err(|err| {
+                candle_core::Error::Msg(format!(
+                    "{}: weight copy to CUDA failed ({err})",
+                    case.name
+                ))
+            })?
+            .contiguous()
+            .map_err(|err| {
+                candle_core::Error::Msg(format!("{}: weight contiguous failed ({err})", case.name))
+            })?;
+        let layer = UnquantLinear::new(QuantMethodConfig::Unquantized(Linear::new(
+            weight.clone(),
+            None,
+        )))
+        .map_err(|err| {
+            candle_core::Error::Msg(format!(
+                "{}: UnquantLinear construction failed ({err})",
+                case.name
+            ))
+        })?;
+        let expected = input
+            .to_device(&Device::Cpu)
+            .map_err(|err| {
+                candle_core::Error::Msg(format!("{}: input copy to CPU failed ({err})", case.name))
+            })?
+            .to_dtype(DType::F32)
+            .map_err(|err| {
+                candle_core::Error::Msg(format!("{}: input CPU to F32 failed ({err})", case.name))
+            })?
+            .matmul(
+                &weight
+                    .to_device(&Device::Cpu)
+                    .map_err(|err| {
+                        candle_core::Error::Msg(format!(
+                            "{}: weight copy to CPU failed ({err})",
+                            case.name
+                        ))
+                    })?
+                    .to_dtype(DType::F32)
+                    .map_err(|err| {
+                        candle_core::Error::Msg(format!(
+                            "{}: weight CPU to F32 failed ({err})",
+                            case.name
+                        ))
+                    })?
+                    .broadcast_left(case.batch)
+                    .map_err(|err| {
+                        candle_core::Error::Msg(format!(
+                            "{}: weight broadcast_left failed ({err})",
+                            case.name
+                        ))
+                    })?
+                    .t()
+                    .map_err(|err| {
+                        candle_core::Error::Msg(format!(
+                            "{}: weight transpose failed ({err})",
+                            case.name
+                        ))
+                    })?,
+            )
+            .map_err(|err| {
+                candle_core::Error::Msg(format!(
+                    "{}: CPU F32 reference matmul failed ({err})",
+                    case.name
+                ))
+            })?;
+        Ok((input, weight, layer, expected))
+    }
+
+    fn run_model_shaped_case(
+        case: ModelShapedBf16Case,
+        force_candle_matmul: bool,
+    ) -> Result<(Tensor, Tensor)> {
+        let device = Device::new_cuda(0)?;
+        maybe_init_cublas_lt_wrapper(device.clone());
+
+        let (input, weight, layer, expected) = build_case_tensors(case, &device)?;
+        assert_eq!(
+            crate::gemv::should_use_gemv(&input, &weight),
+            case.expect_gemv,
+            "{}: unexpected GEMV selection for shape {:?} -> ({}, {})",
+            case.name,
+            input.dims(),
+            case.out_features,
+            case.in_features,
+        );
+
+        let _controllers = if force_candle_matmul {
+            Some(FallbackControllerGuard::force_candle_matmul())
+        } else {
+            None
+        };
+        let actual = layer.forward(&input).map_err(|err| {
+            candle_core::Error::Msg(format!(
+                "{}: forward failed in {} path ({err})",
+                case.name,
+                if force_candle_matmul {
+                    "forced Candle matmul"
+                } else {
+                    "default"
+                }
+            ))
+        })?;
+        assert_eq!(
+            actual.dtype(),
+            DType::BF16,
+            "{}: output dtype changed",
+            case.name
+        );
+
+        Ok((actual, expected))
     }
 
     #[test]
@@ -725,6 +975,68 @@ mod tests {
 
         assert_eq!(actual.dtype(), DType::BF16);
         assert_close(&actual, &expected, 1e-2)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_model_shaped_bf16_default_path_matches_f32_reference() -> Result<()> {
+        let _lock = CUDA_FALLBACK_TEST_LOCK.lock().unwrap();
+
+        for case in MODEL_SHAPED_BF16_CASES {
+            eprintln!("running {}", case.name);
+            let (actual, expected) = run_model_shaped_case(case, false)?;
+            assert_relative_close(case.name, &actual, &expected, 5e-2)?;
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_model_shaped_bf16_candle_matmul_matches_f32_reference() -> Result<()> {
+        let _lock = CUDA_FALLBACK_TEST_LOCK.lock().unwrap();
+
+        for case in MODEL_SHAPED_BF16_CASES {
+            eprintln!("running {}", case.name);
+            let (actual, expected) = run_model_shaped_case(case, true)?;
+            assert_relative_close(case.name, &actual, &expected, 5e-2)?;
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "diagnostic probe for legacy BF16 CUDA path selection on model-shaped matmuls"]
+    fn test_model_shaped_bf16_path_probe() -> Result<()> {
+        let _lock = CUDA_FALLBACK_TEST_LOCK.lock().unwrap();
+
+        for case in MODEL_SHAPED_BF16_CASES {
+            let device = Device::new_cuda(0)?;
+            maybe_init_cublas_lt_wrapper(device.clone());
+            let (input, _weight, layer, expected) = build_case_tensors(case, &device)?;
+
+            let default_actual = layer.forward(&input).map_err(|err| {
+                candle_core::Error::Msg(format!("{}: default forward failed ({err})", case.name))
+            })?;
+            let candle_actual = {
+                let _controllers = FallbackControllerGuard::force_candle_matmul();
+                layer.forward(&input).map_err(|err| {
+                    candle_core::Error::Msg(format!(
+                        "{}: forced Candle matmul forward failed ({err})",
+                        case.name
+                    ))
+                })?
+            };
+
+            eprintln!(
+                "{}: default rel_l2={:.6}, default max_abs={:.6}, candle rel_l2={:.6}, candle max_abs={:.6}",
+                case.name,
+                relative_l2_error(&default_actual, &expected)?,
+                max_abs_diff(&default_actual, &expected)?,
+                relative_l2_error(&candle_actual, &expected)?,
+                max_abs_diff(&candle_actual, &expected)?,
+            );
+        }
+
         Ok(())
     }
 }

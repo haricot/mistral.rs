@@ -7546,7 +7546,7 @@ impl DeviceMappedModelLoader for Gemma4Loader {
 
             let ple_dim = tc.hidden_size_per_layer_input.unwrap_or(0);
             let ple_vocab = tc.vocab_size_per_layer_input.unwrap_or(tc.vocab_size);
-            let embed_tokens_per_layer = if ple_dim > 0 {
+            let embed_tokens_per_layer = if ple_dim > 0 && cfg!(feature = "metal") {
                 ple_vocab * tc.num_hidden_layers * ple_dim
             } else {
                 0

@@ -84,7 +84,9 @@ pub use utils::gptoss_swiglu_interleaved;
 pub use utils::isq::apply_immediate_isq;
 pub use utils::softmax_with_sinks;
 pub use utils::{fused_glu, GluActivationType};
-pub use utils::{log, BitWiseOp, CumSumOp, LeftshiftOp, NonZeroOp, SortOp, UQFF_QUANT_TYPE_OFFSET};
+pub use utils::{
+    log, BitWiseOp, CumSumOp, LeftshiftOp, NonZeroOp, SortOp, UQFF_QUANT_TYPE_OFFSET, UQFF_VERSION,
+};
 pub use vector_fp8::{fp8_vector_dequantize, fp8_vector_quantize};
 
 use candle_nn::{Conv1d, Conv2d, Linear, Module};
@@ -851,6 +853,7 @@ pub enum QuantizedSerdeType {
     Afq = 4,
     F8Q8 = 5,
     Mxfp4 = 6,
+    Vocab = 7,
 }
 
 impl TryFrom<usize> for QuantizedSerdeType {
@@ -864,6 +867,7 @@ impl TryFrom<usize> for QuantizedSerdeType {
             4 => Ok(Self::Afq),
             5 => Ok(Self::F8Q8),
             6 => Ok(Self::Mxfp4),
+            7 => Ok(Self::Vocab),
             other => candle_core::bail!("QuantizedSerdeType {other} is invalid."),
         }
     }

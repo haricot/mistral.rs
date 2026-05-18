@@ -32,6 +32,7 @@ struct ClippableLinear {
     input_max: Option<f64>,
     output_min: Option<f64>,
     output_max: Option<f64>,
+    #[allow(dead_code)]
     has_linear_prefix: bool,
 }
 
@@ -79,7 +80,7 @@ impl ClippableLinear {
             input_max,
             output_min,
             output_max,
-            has_linear_prefix,
+            has_linear_prefix: has_linear_prefix,
         })
     }
 
@@ -99,13 +100,9 @@ impl ClippableLinear {
         vec![(&mut self.inner, None)]
     }
 
+    #[allow(dead_code)]
     fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let uvb = UnVarBuilder::new();
-        if self.has_linear_prefix {
-            uvb.pp("linear").add(&self.inner);
-        } else {
-            uvb.add(&self.inner);
-        }
         if let Some(v) = self.input_min {
             uvb.add_tensor(
                 "input_min",
@@ -297,7 +294,7 @@ impl PatchEmbedder {
         patches + pos_emb
     }
 
-    fn residual_tensors(&self) -> Vec<(String, Tensor)> {
+    pub fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let uvb = UnVarBuilder::new();
         uvb.pp("input_proj")
             .extend(self.input_proj.residual_tensors());
@@ -414,7 +411,7 @@ impl VisionAttention {
         self.o_proj.forward(&attn_output)
     }
 
-    fn residual_tensors(&self) -> Vec<(String, Tensor)> {
+    pub fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let uvb = UnVarBuilder::new();
         uvb.pp("q_proj").extend(self.q_proj.residual_tensors());
         uvb.pp("k_proj").extend(self.k_proj.residual_tensors());
@@ -425,13 +422,13 @@ impl VisionAttention {
         uvb.to_safetensors()
     }
 
-    fn get_isq_layers(&mut self) -> Vec<(&mut Arc<dyn QuantMethod>, Option<usize>)> {
-        vec![
-            (&mut self.q_proj.inner, None),
-            (&mut self.k_proj.inner, None),
-            (&mut self.v_proj.inner, None),
-            (&mut self.o_proj.inner, None),
-        ]
+    pub fn get_isq_layers(&mut self) -> Vec<(&mut Arc<dyn QuantMethod>, Option<usize>)> {
+        let mut tensors = Vec::new();
+        tensors.extend(self.q_proj.get_isq_layers());
+        tensors.extend(self.k_proj.get_isq_layers());
+        tensors.extend(self.v_proj.get_isq_layers());
+        tensors.extend(self.o_proj.get_isq_layers());
+        tensors
     }
 }
 
@@ -466,7 +463,7 @@ impl VisionMlp {
         self.down_proj.forward(&(gate * up)?)
     }
 
-    fn residual_tensors(&self) -> Vec<(String, Tensor)> {
+    pub fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let uvb = UnVarBuilder::new();
         uvb.pp("gate_proj")
             .extend(self.gate_proj.residual_tensors());
@@ -476,12 +473,12 @@ impl VisionMlp {
         uvb.to_safetensors()
     }
 
-    fn get_isq_layers(&mut self) -> Vec<(&mut Arc<dyn QuantMethod>, Option<usize>)> {
-        vec![
-            (&mut self.gate_proj.inner, None),
-            (&mut self.up_proj.inner, None),
-            (&mut self.down_proj.inner, None),
-        ]
+    pub fn get_isq_layers(&mut self) -> Vec<(&mut Arc<dyn QuantMethod>, Option<usize>)> {
+        let mut tensors = Vec::new();
+        tensors.extend(self.gate_proj.get_isq_layers());
+        tensors.extend(self.up_proj.get_isq_layers());
+        tensors.extend(self.down_proj.get_isq_layers());
+        tensors
     }
 }
 
@@ -552,11 +549,8 @@ impl VisionEncoderLayer {
         residual + xs
     }
 
-    fn residual_tensors(&self) -> Vec<(String, Tensor)> {
+    pub fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let uvb = UnVarBuilder::new();
-        uvb.pp("self_attn")
-            .extend(self.self_attn.residual_tensors());
-        uvb.pp("mlp").extend(self.mlp.residual_tensors());
         uvb.pp("input_layernorm").add(&self.input_layernorm);
         uvb.pp("post_attention_layernorm")
             .add(&self.post_attention_layernorm);
@@ -567,7 +561,7 @@ impl VisionEncoderLayer {
         uvb.to_safetensors()
     }
 
-    fn get_isq_layers(&mut self) -> Vec<(&mut Arc<dyn QuantMethod>, Option<usize>)> {
+    pub fn get_isq_layers(&mut self) -> Vec<(&mut Arc<dyn QuantMethod>, Option<usize>)> {
         let mut tensors = self.self_attn.get_isq_layers();
         tensors.extend(self.mlp.get_isq_layers());
         tensors
@@ -791,6 +785,14 @@ impl VisionTower {
         Ok(hidden_states.unsqueeze(0)?)
     }
 
+    pub fn get_isq_layers(&mut self) -> Vec<(&mut Arc<dyn QuantMethod>, Option<usize>)> {
+        let mut layers = self.patch_embedder.get_isq_layers();
+        for layer in self.encoder_layers.iter_mut() {
+            layers.extend(layer.get_isq_layers());
+        }
+        layers
+    }
+
     pub fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let uvb = UnVarBuilder::new();
 
@@ -810,13 +812,5 @@ impl VisionTower {
         }
 
         uvb.to_safetensors()
-    }
-
-    pub fn get_isq_layers(&mut self) -> Vec<(&mut Arc<dyn QuantMethod>, Option<usize>)> {
-        let mut layers = self.patch_embedder.get_isq_layers();
-        for layer in self.encoder_layers.iter_mut() {
-            layers.extend(layer.get_isq_layers());
-        }
-        layers
     }
 }

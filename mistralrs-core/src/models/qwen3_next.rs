@@ -295,12 +295,12 @@ impl FullAttention {
             let v = v
                 .reshape((b_sz, seq_len, self.num_kv_heads, self.head_dim))?
                 .transpose(1, 2)?;
-            (q, k, v)
+            (q.contiguous()?, k.contiguous()?, v.contiguous()?)
         } else {
             let q = q.reshape((b_sz, self.num_heads, seq_len, self.head_dim))?;
             let k = k.reshape((b_sz, self.num_kv_heads, seq_len, self.head_dim))?;
             let v = v.reshape((b_sz, self.num_kv_heads, seq_len, self.head_dim))?;
-            (q, k, v)
+            (q.contiguous()?, k.contiguous()?, v.contiguous()?)
         };
 
         // Apply QK norm
@@ -327,9 +327,9 @@ impl FullAttention {
         let mut y = match &self.paged_attn {
             Some(paged_attn) => match metadata {
                 Some(((key_cache, value_cache), input_metadata)) => paged_attn.forward(
-                    &q,
-                    &k,
-                    &v,
+                    &q.contiguous()?,
+                    &k.contiguous()?,
+                    &v.contiguous()?,
                     attention_mask.clone().as_ref(),
                     Some(key_cache),
                     Some(value_cache),
@@ -354,11 +354,11 @@ impl FullAttention {
                 }
             },
             None => {
-                let (k, v) = kv_cache.append(&k, &v)?;
+                let (cache_k, cache_v) = kv_cache.append(&k, &v)?;
                 Sdpa.run_attention(
-                    &q,
-                    &k,
-                    &v,
+                    &q.contiguous()?,
+                    &cache_k.contiguous()?,
+                    &cache_v.contiguous()?,
                     attention_mask.clone().as_ref(),
                     Some(flash_params),
                     &self.sdpa_params,
@@ -991,10 +991,11 @@ impl Model {
                             seqlen_offset: first_offset,
                         };
 
+                        let pool_device = gdn_cache.recurrent_state.device().clone();
                         x = layer.forward_linear(&x, &mut gdn_cache)?;
 
-                        pool.scatter_conv_state(indices, &gdn_cache.conv_state)?;
-                        pool.scatter_recurrent_state(indices, &gdn_cache.recurrent_state)?;
+                        pool.scatter_conv_state(indices, &gdn_cache.conv_state.to_device(&pool_device)?)?;
+                        pool.scatter_recurrent_state(indices, &gdn_cache.recurrent_state.to_device(&pool_device)?)?;
 
                         let delta = gdn_cache.seqlen_offset.saturating_sub(first_offset);
                         for &idx in &indices_vec {
@@ -1044,6 +1045,8 @@ impl IsqModel for Model {
                     tensors.push((&mut attn.o_proj, Some(i)));
                 }
                 LayerImpl::LinearAttention(gdn) => {
+                    tensors.push((&mut gdn.in_proj_qkvz, Some(i)));
+                    tensors.push((&mut gdn.in_proj_ba, Some(i)));
                     tensors.push((&mut gdn.out_proj, Some(i)));
                 }
             }
@@ -1073,14 +1076,6 @@ impl IsqModel for Model {
                     uvb_l.pp("self_attn").pp("k_norm").add(&attn.k_norm);
                 }
                 LayerImpl::LinearAttention(gdn) => {
-                    uvb_l
-                        .pp("linear_attn")
-                        .pp("in_proj_qkvz")
-                        .add_tensor("weight", gdn.in_proj_qkvz.weight().clone());
-                    uvb_l
-                        .pp("linear_attn")
-                        .pp("in_proj_ba")
-                        .add_tensor("weight", gdn.in_proj_ba.weight().clone());
                     uvb_l
                         .pp("linear_attn")
                         .add_tensor("conv1d.weight", gdn.conv1d_weight.clone());
