@@ -1,8 +1,42 @@
 #include "cuda_bf16.h"
 #include "cuda_fp16.h"
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstdint>
 #include <cuda_runtime.h>
+
+#define CUDA_CHECK(call)                                                       \
+  do {                                                                         \
+    cudaError_t err = call;                                                    \
+    if (err != cudaSuccess) {                                                  \
+      fprintf(stderr, "CUDA error at %s:%d: %s\n", __FILE__, __LINE__,         \
+              cudaGetErrorString(err));                                        \
+      exit(err);                                                               \
+    }                                                                          \
+  } while (0)
+
+static int max_dynamic_shared_memory_bytes() {
+  int device = 0;
+  if (cudaGetDevice(&device) != cudaSuccess) {
+    cudaGetLastError();
+    return 48 * 1024;
+  }
+
+  int max_smem = 0;
+  cudaError_t err = cudaDeviceGetAttribute(
+      &max_smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, device);
+  if (err != cudaSuccess || max_smem <= 0) {
+    cudaGetLastError();
+    err = cudaDeviceGetAttribute(&max_smem, cudaDevAttrMaxSharedMemoryPerBlock,
+                                 device);
+    if (err != cudaSuccess || max_smem <= 0) {
+      cudaGetLastError();
+      return 48 * 1024;
+    }
+  }
+  return max_smem;
+}
 
 // ============================================================================
 // Kernel 1: gated_delta_rule_recurrence (optimized)
@@ -205,6 +239,7 @@ extern "C" void gated_delta_rule_recurrence(const float *q, const float *k,
     gated_delta_rule_recurrence_kernel_tiled<BK, BV>
         <<<grid, block, 0, custream>>>(q, k, v, g, beta, state, output, seq_len,
                                        v_dim);
+    CUDA_CHECK(cudaGetLastError());
   } else if (k_dim == 64) {
     // Fast path for models with k_dim=64
     constexpr int BK = 64;
@@ -214,6 +249,7 @@ extern "C" void gated_delta_rule_recurrence(const float *q, const float *k,
     gated_delta_rule_recurrence_kernel_tiled<BK, BV>
         <<<grid, block, 0, custream>>>(q, k, v, g, beta, state, output, seq_len,
                                        v_dim);
+    CUDA_CHECK(cudaGetLastError());
   } else {
     // Fallback for other k_dim values (runtime loop, still V-tiled)
     constexpr int BV = 64;
@@ -224,6 +260,7 @@ extern "C" void gated_delta_rule_recurrence(const float *q, const float *k,
     gated_delta_rule_recurrence_kernel_fallback<BV, MAX_K>
         <<<grid, block, smem, custream>>>(q, k, v, g, beta, state, output,
                                           seq_len, k_dim, v_dim);
+    CUDA_CHECK(cudaGetLastError());
   }
 }
 
@@ -428,30 +465,42 @@ extern "C" void chunked_gated_delta_rule_recurrence(
     constexpr int BV = 64;
     // Shared memory: BT*BK + BT*BT + BT + BT + BK floats
     size_t smem = (BT * BK + BT * BT + 2 * BT + BK) * sizeof(float);
+    if (smem > static_cast<size_t>(max_dynamic_shared_memory_bytes())) {
+      gated_delta_rule_recurrence(q, k, v, g, beta, state, output, bh, seq_len,
+                                  k_dim, v_dim, stream);
+      return;
+    }
 
     // Request extended shared memory
     auto kernel = chunked_gated_delta_rule_kernel<BT, BK, BV>;
-    cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                         smem);
+    CUDA_CHECK(cudaFuncSetAttribute(
+        kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
 
     dim3 grid((v_dim + BV - 1) / BV, bh);
     dim3 block(BV);
     kernel<<<grid, block, smem, custream>>>(q, k, v, g, beta, state, output,
                                             seq_len, v_dim);
+    CUDA_CHECK(cudaGetLastError());
   } else if (k_dim == 64) {
     constexpr int BT = 64;
     constexpr int BK = 64;
     constexpr int BV = 64;
     size_t smem = (BT * BK + BT * BT + 2 * BT + BK) * sizeof(float);
+    if (smem > static_cast<size_t>(max_dynamic_shared_memory_bytes())) {
+      gated_delta_rule_recurrence(q, k, v, g, beta, state, output, bh, seq_len,
+                                  k_dim, v_dim, stream);
+      return;
+    }
 
     auto kernel = chunked_gated_delta_rule_kernel<BT, BK, BV>;
-    cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                         smem);
+    CUDA_CHECK(cudaFuncSetAttribute(
+        kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
 
     dim3 grid((v_dim + BV - 1) / BV, bh);
     dim3 block(BV);
     kernel<<<grid, block, smem, custream>>>(q, k, v, g, beta, state, output,
                                             seq_len, v_dim);
+    CUDA_CHECK(cudaGetLastError());
   } else {
     // Fallback: use the sequential kernel for unsupported k_dim
     gated_delta_rule_recurrence(q, k, v, g, beta, state, output, bh, seq_len,
@@ -522,12 +571,14 @@ extern "C" void causal_conv1d_update(const void *x, const void *weight,
     causal_conv1d_update_kernel<__half><<<grid, block, 0, custream>>>(
         (const __half *)x, (const __half *)weight, (__half *)conv_state,
         (__half *)output, batch_size, conv_dim, kernel_size);
+    CUDA_CHECK(cudaGetLastError());
   } else {
     // bf16
     causal_conv1d_update_kernel<__nv_bfloat16><<<grid, block, 0, custream>>>(
         (const __nv_bfloat16 *)x, (const __nv_bfloat16 *)weight,
         (__nv_bfloat16 *)conv_state, (__nv_bfloat16 *)output, batch_size,
         conv_dim, kernel_size);
+    CUDA_CHECK(cudaGetLastError());
   }
 }
 
@@ -614,19 +665,23 @@ extern "C" void causal_conv1d_full(const void *x, const void *weight,
     causal_conv1d_full_kernel<__half><<<grid, block, 0, custream>>>(
         (const __half *)x, (const __half *)weight, (__half *)output, batch_size,
         conv_dim, seq_len, kernel_size);
+    CUDA_CHECK(cudaGetLastError());
     // Save conv state
     dim3 grid2((conv_dim + 255) / 256, batch_size);
     save_conv_state_kernel<__half><<<grid2, block, 0, custream>>>(
         (const __half *)x, (__half *)conv_state_out, batch_size, conv_dim,
         seq_len, kernel_size);
+    CUDA_CHECK(cudaGetLastError());
   } else {
     causal_conv1d_full_kernel<__nv_bfloat16><<<grid, block, 0, custream>>>(
         (const __nv_bfloat16 *)x, (const __nv_bfloat16 *)weight,
         (__nv_bfloat16 *)output, batch_size, conv_dim, seq_len, kernel_size);
+    CUDA_CHECK(cudaGetLastError());
     dim3 grid2((conv_dim + 255) / 256, batch_size);
     save_conv_state_kernel<__nv_bfloat16><<<grid2, block, 0, custream>>>(
         (const __nv_bfloat16 *)x, (__nv_bfloat16 *)conv_state_out, batch_size,
         conv_dim, seq_len, kernel_size);
+    CUDA_CHECK(cudaGetLastError());
   }
 }
 
@@ -687,10 +742,12 @@ extern "C" void fused_gdn_gating(const void *b, const void *a,
     fused_gdn_gating_kernel<__half><<<grid, block, 0, custream>>>(
         (const __half *)b, (const __half *)a, a_log, dt_bias,
         (__half *)beta_out, (__half *)g_out, total_elements, num_heads);
+    CUDA_CHECK(cudaGetLastError());
   } else {
     fused_gdn_gating_kernel<__nv_bfloat16><<<grid, block, 0, custream>>>(
         (const __nv_bfloat16 *)b, (const __nv_bfloat16 *)a, a_log, dt_bias,
         (__nv_bfloat16 *)beta_out, (__nv_bfloat16 *)g_out, total_elements,
         num_heads);
+    CUDA_CHECK(cudaGetLastError());
   }
 }

@@ -2,7 +2,11 @@
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    time::Instant,
 };
 
 use candle_core::{DType, Device, Module, Result, Tensor, D};
@@ -26,7 +30,7 @@ use crate::{
     pipeline::{
         extract_logits,
         text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
-        EitherCache, IsqModel, KvCache, NormalLoadingMetadata,
+        EitherCache, IsqModel, KvCache, NormalLoadingMetadata, ISQ_CPU_DEVICE_SENTINEL,
     },
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
@@ -212,6 +216,15 @@ impl FullAttention {
         q = q.apply(&self.q_norm)?;
         k = k.apply(&self.k_norm)?;
 
+        let cos_sin = if cos_sin.0.device().location() != q.device().location() {
+            (
+                cos_sin.0.to_device(q.device())?,
+                cos_sin.1.to_device(q.device())?,
+            )
+        } else {
+            (cos_sin.0.clone(), cos_sin.1.clone())
+        };
+
         // Apply partial MRoPE: split into rotated and pass-through portions
         if self.rot_dim < self.head_dim {
             let mut q_rot = q.narrow(D::Minus1, 0, self.rot_dim)?;
@@ -219,11 +232,11 @@ impl FullAttention {
             let mut k_rot = k.narrow(D::Minus1, 0, self.rot_dim)?;
             let k_pass = k.narrow(D::Minus1, self.rot_dim, self.head_dim - self.rot_dim)?;
 
-            self.rotary_emb.forward(cos_sin, &mut q_rot, &mut k_rot)?;
+            self.rotary_emb.forward(&cos_sin, &mut q_rot, &mut k_rot)?;
             q = Tensor::cat(&[q_rot, q_pass], D::Minus1)?;
             k = Tensor::cat(&[k_rot, k_pass], D::Minus1)?;
         } else {
-            self.rotary_emb.forward(cos_sin, &mut q, &mut k)?;
+            self.rotary_emb.forward(&cos_sin, &mut q, &mut k)?;
         }
 
         // Standard attention
@@ -291,6 +304,16 @@ impl FullAttention {
 }
 
 // ====================== MoE ======================
+
+fn qwen35_profile_enabled() -> bool {
+    crate::topology::qwen35_profile_enabled()
+}
+
+fn qwen35_cpu_moe_enabled() -> bool {
+    crate::topology::qwen35_cpu_moe_enabled()
+}
+
+static LOG_QWEN35_CPU_MOE: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone)]
 struct Mlp {
@@ -400,10 +423,22 @@ impl SparseMoeBlock {
             moe_intermediate_size: cfg.moe_intermediate_size,
         };
 
+        let experts_device = if qwen35_cpu_moe_enabled() {
+            if !layer_device.is_cpu() && !LOG_QWEN35_CPU_MOE.swap(true, Ordering::Relaxed) {
+                tracing::info!(
+                    "Using Qwen3.5 CPU-MoE mode: routed experts stay on CPU while hot layer weights stay on {:?}",
+                    layer_device
+                );
+            }
+            Device::Cpu
+        } else {
+            layer_device.clone()
+        };
+
         let experts = MoEExperts::new(
             &moe_cfg,
             vb.clone(),
-            layer_device.clone(),
+            experts_device,
             comm,
             loading_isq,
             &cfg.quantization_config,
@@ -438,9 +473,12 @@ impl SparseMoeBlock {
     }
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let profile = qwen35_profile_enabled();
+        let t_total = profile.then(Instant::now);
         let (b_size, seq_len, hidden_dim) = xs.dims3()?;
         let xs_flat = xs.reshape(((), hidden_dim))?;
 
+        let t_router = profile.then(Instant::now);
         let router_logits = self.gate.forward(&xs_flat)?;
         let routing_weights =
             candle_nn::ops::softmax_last_dim(&router_logits.to_dtype(DType::F32)?)?;
@@ -455,10 +493,14 @@ impl SparseMoeBlock {
         if self.norm_topk_prob {
             topk_weights = topk_weights.broadcast_div(&topk_weights.sum_keepdim(D::Minus1)?)?;
         }
+        let router_ms = t_router.map(|t| t.elapsed().as_secs_f64() * 1000.0);
 
+        let t_experts = profile.then(Instant::now);
         let mut y = self.experts.forward(xs, topk_weights, &topk_ids)?;
         y = y.reshape((b_size, seq_len, hidden_dim))?;
+        let experts_ms = t_experts.map(|t| t.elapsed().as_secs_f64() * 1000.0);
 
+        let t_shared = profile.then(Instant::now);
         let shared_out = self.shared_expert.forward(xs)?;
         let shared_gate = candle_nn::ops::sigmoid(
             &self
@@ -467,13 +509,35 @@ impl SparseMoeBlock {
         )?;
         let shared_gate = shared_gate.reshape((b_size, seq_len, 1))?;
         let shared_out = shared_out.broadcast_mul(&shared_gate)?;
+        let shared_ms = t_shared.map(|t| t.elapsed().as_secs_f64() * 1000.0);
+
+        if profile {
+            tracing::info!(
+                target: "mistralrs_profile",
+                "qwen35_moe seq={seq_len} router_topk_ms={:.3} experts_ms={:.3} shared_ms={:.3} total_ms={:.3}",
+                router_ms.unwrap(),
+                experts_ms.unwrap(),
+                shared_ms.unwrap(),
+                t_total.unwrap().elapsed().as_secs_f64() * 1000.0,
+            );
+        }
 
         y + shared_out
     }
 
-    fn get_isq_layers(&mut self) -> Vec<&mut Arc<dyn QuantMethod>> {
-        let mut layers = self.experts.get_isq_layers();
-        layers.extend(self.shared_expert.get_isq_layers());
+    fn get_isq_layers(&mut self) -> Vec<(&mut Arc<dyn QuantMethod>, bool)> {
+        let mut layers = self
+            .experts
+            .get_isq_layers()
+            .into_iter()
+            .map(|layer| (layer, true))
+            .collect::<Vec<_>>();
+        layers.extend(
+            self.shared_expert
+                .get_isq_layers()
+                .into_iter()
+                .map(|layer| (layer, false)),
+        );
         layers
     }
 }
@@ -849,7 +913,11 @@ impl Qwen3_5MoeTextModel {
         };
 
         for (i, layer) in self.layers.iter().enumerate() {
+            let profile = qwen35_profile_enabled();
+            let t_layer = profile.then(Instant::now);
+            let t_map = profile.then(Instant::now);
             xs = self.mapper.map(xs, i)?;
+            let map_ms = t_map.map(|t| t.elapsed().as_secs_f64() * 1000.0);
 
             match &self.layer_types[i] {
                 LayerType::FullAttention => {
@@ -919,6 +987,16 @@ impl Qwen3_5MoeTextModel {
                     }
                 }
             }
+            if profile {
+                tracing::info!(
+                    target: "mistralrs_profile",
+                    "qwen35_layer layer={i} kind={:?} device={:?} map_ms={:.3} total_ms={:.3}",
+                    self.layer_types[i],
+                    xs.device(),
+                    map_ms.unwrap(),
+                    t_layer.unwrap().elapsed().as_secs_f64() * 1000.0,
+                );
+            }
 
             // Integrate DeepStack visual features when provided
             if let (Some((idx, idx_expanded)), Some(deepstack)) =
@@ -987,8 +1065,13 @@ impl IsqModel for Qwen3_5MoeTextModel {
                     tensors.push((&mut gdn.out_proj, Some(i)));
                 }
             }
-            for l in layer.moe.get_isq_layers() {
-                tensors.push((l, Some(i)));
+            for (l, is_routed_expert) in layer.moe.get_isq_layers() {
+                let layer_num = if is_routed_expert && qwen35_cpu_moe_enabled() {
+                    ISQ_CPU_DEVICE_SENTINEL
+                } else {
+                    i
+                };
+                tensors.push((l, Some(layer_num)));
             }
         }
         (tensors, &*self.mapper)

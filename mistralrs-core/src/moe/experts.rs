@@ -821,7 +821,8 @@ impl MoEExperts {
 
         let xs_flat = xs.reshape((num_tokens, hidden_dim))?;
 
-        let ys = if xs.device().is_cuda() {
+        let (_, weights_device) = weights.fused_gate_proj.dtype_and_device();
+        let ys = if weights_device.is_cuda() {
             // CUDA path: use indexed_moe_forward compatible shapes
             let xs = xs_flat.reshape((num_tokens, 1, hidden_dim))?;
             let gate = weights
@@ -833,7 +834,7 @@ impl MoEExperts {
             weights
                 .fused_down_proj
                 .gather_forward_autocast(&(up * gate.apply(&self.act)?)?, topk_ids)?
-        } else {
+        } else if weights_device.is_metal() {
             // Metal path: use broadcast gather shapes
             let xs = xs.reshape((b_size, seq_len, 1, 1, hidden_dim))?;
             let indices = topk_ids.reshape((b_size, seq_len, self.num_experts_per_tok))?;
@@ -848,6 +849,39 @@ impl MoEExperts {
                 .gather_forward_autocast(&(up * gate.apply(&self.act)?)?, &indices)?;
             xs.squeeze(D::Minus2)?
                 .reshape((num_tokens, self.num_experts_per_tok, hidden_dim))?
+        } else {
+            let fused_cpu_act: Option<fn(f32) -> f32> = match self.act {
+                Activation::Silu | Activation::Swish => Some(|x| x / (1.0 + (-x).exp())),
+                Activation::Relu => Some(|x| x.max(0.0)),
+                Activation::Sigmoid => Some(|x| 1.0 / (1.0 + (-x).exp())),
+                _ => None,
+            };
+            if let Some(act) = fused_cpu_act {
+                if let Some(ys) = mistralrs_quant::gguf_cpu_fused_moe_q4k_forward(
+                    &*weights.fused_gate_proj,
+                    &*weights.fused_up_proj,
+                    &*weights.fused_down_proj,
+                    xs,
+                    topk_weights,
+                    topk_ids,
+                    act,
+                )? {
+                    return ys.to_dtype(original_dtype);
+                }
+            }
+
+            // CPU path: use QuantMethod::gather_forward so GGUF can dequantize
+            // only the selected experts rather than the full fused tensor.
+            let xs = xs_flat.reshape((num_tokens, 1, hidden_dim))?;
+            let gate = weights
+                .fused_gate_proj
+                .gather_forward_autocast(&xs, topk_ids)?;
+            let up = weights
+                .fused_up_proj
+                .gather_forward_autocast(&xs, topk_ids)?;
+            weights
+                .fused_down_proj
+                .gather_forward_autocast(&(up * gate.apply(&self.act)?)?, topk_ids)?
         };
 
         ys.to_dtype(DType::F32)?

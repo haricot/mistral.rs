@@ -140,6 +140,11 @@ pub struct DeviceOptions {
     #[arg(long, default_value_t = AutoDeviceMapParams::DEFAULT_MAX_BATCH_SIZE)]
     #[serde(default = "default_max_batch_size")]
     pub max_batch_size: usize,
+
+    /// Prefer conservative automatic mapping for active GPU layers on tight VRAM.
+    #[arg(long)]
+    #[serde(default)]
+    pub active_layers_on_vram: bool,
 }
 
 /// Multimodal model specific options

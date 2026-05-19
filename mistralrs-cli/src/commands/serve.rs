@@ -40,7 +40,7 @@ pub async fn run_server(
     ) = extract_paged_attn_settings(&model_type);
 
     // Extract device settings
-    let (cpu, device_layers) = extract_device_settings(&model_type);
+    let (cpu, device_layers, active_layers_on_vram) = extract_device_settings(&model_type);
 
     // Extract quantization settings
     let isq = extract_isq_setting(&model_type);
@@ -71,6 +71,7 @@ pub async fn run_server(
                 .map(|p| p.to_string_lossy().to_string()),
         )
         .with_num_device_layers_optional(device_layers)
+        .with_dummy_run(!active_layers_on_vram)
         .with_in_situ_quant_optional(isq)
         .with_paged_attn_gpu_mem_optional(paged_attn_gpu_mem)
         .with_paged_attn_gpu_mem_usage_optional(paged_attn_gpu_mem_usage)
@@ -531,7 +532,7 @@ pub(crate) fn extract_paged_attn_settings(
     cache.paged_attn.clone().into_builder_flags()
 }
 
-pub(crate) fn extract_device_settings(model_type: &ModelType) -> (bool, Option<Vec<String>>) {
+pub(crate) fn extract_device_settings(model_type: &ModelType) -> (bool, Option<Vec<String>>, bool) {
     let device = match model_type {
         ModelType::Auto { device, .. } => device,
         ModelType::Text { device, .. } => device,
@@ -541,7 +542,11 @@ pub(crate) fn extract_device_settings(model_type: &ModelType) -> (bool, Option<V
         ModelType::Embedding { device, .. } => device,
     };
 
-    (device.cpu, device.device_layers.clone())
+    (
+        device.cpu,
+        device.device_layers.clone(),
+        device.active_layers_on_vram,
+    )
 }
 
 pub(crate) fn extract_isq_setting(model_type: &ModelType) -> Option<String> {

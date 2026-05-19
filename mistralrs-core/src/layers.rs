@@ -3543,7 +3543,7 @@ impl Module for VocabEmbedding {
 
 #[cfg(test)]
 mod tests {
-    use super::{QuantizedVocabStore, TensorVocabStore, VocabEmbedding};
+    use super::{QuantizedVocabStore, TensorVocabStore, VocabEmbedding, VocabStore};
     use candle_core::{quantized::GgmlDType, Device, Result, Tensor};
     use candle_nn::{Embedding, Module};
 

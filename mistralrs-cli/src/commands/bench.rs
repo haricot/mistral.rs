@@ -67,7 +67,7 @@ pub async fn run_bench(
         paged_cache_type,
     ) = extract_paged_attn_settings(&model_type);
 
-    let (cpu, device_layers) = extract_device_settings(&model_type);
+    let (cpu, device_layers, active_layers_on_vram) = extract_device_settings(&model_type);
     let isq = extract_isq_setting(&model_type);
 
     info!("Loading model for benchmarking...");
@@ -84,6 +84,7 @@ pub async fn run_bench(
         .with_cpu(cpu)
         .with_seed_optional(global.seed)
         .with_num_device_layers_optional(device_layers)
+        .with_dummy_run(!active_layers_on_vram)
         .with_in_situ_quant_optional(isq)
         .with_paged_attn_gpu_mem_optional(paged_attn_gpu_mem)
         .with_paged_attn_gpu_mem_usage_optional(paged_attn_gpu_mem_usage)

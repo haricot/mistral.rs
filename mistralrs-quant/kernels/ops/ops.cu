@@ -893,6 +893,9 @@ __global__ void fused_glu_kernel_vec4(const T4 *__restrict__ a,
 
 extern "C" void fused_glu_f16(const __half *a, const __half *b, __half *output,
                               uint32_t N, int activation, cudaStream_t stream) {
+  if (N == 0) {
+    return;
+  }
   if (N % 4 == 0) {
     const int N4 = N / 4;
     const int nthreads = 256;
@@ -912,6 +915,9 @@ extern "C" void fused_glu_f16(const __half *a, const __half *b, __half *output,
 extern "C" void fused_glu_bf16(const __nv_bfloat16 *a, const __nv_bfloat16 *b,
                                __nv_bfloat16 *output, uint32_t N,
                                int activation, cudaStream_t stream) {
+  if (N == 0) {
+    return;
+  }
   if (N % 4 == 0) {
     const int N4 = N / 4;
     const int nthreads = 256;
@@ -931,6 +937,9 @@ extern "C" void fused_glu_bf16(const __nv_bfloat16 *a, const __nv_bfloat16 *b,
 
 extern "C" void fused_glu_f32(const float *a, const float *b, float *output,
                               uint32_t N, int activation, cudaStream_t stream) {
+  if (N == 0) {
+    return;
+  }
   if (N % 4 == 0) {
     const int N4 = N / 4;
     const int nthreads = 256;

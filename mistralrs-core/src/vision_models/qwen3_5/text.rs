@@ -211,6 +211,15 @@ impl FullAttention {
         q = q.apply(&self.q_norm)?;
         k = k.apply(&self.k_norm)?;
 
+        let cos_sin = if cos_sin.0.device().location() != q.device().location() {
+            (
+                cos_sin.0.to_device(q.device())?,
+                cos_sin.1.to_device(q.device())?,
+            )
+        } else {
+            (cos_sin.0.clone(), cos_sin.1.clone())
+        };
+
         // Apply partial MRoPE: split into rotated and pass-through portions
         if self.rot_dim < self.head_dim {
             let mut q_rot = q.narrow(D::Minus1, 0, self.rot_dim)?;
@@ -218,11 +227,11 @@ impl FullAttention {
             let mut k_rot = k.narrow(D::Minus1, 0, self.rot_dim)?;
             let k_pass = k.narrow(D::Minus1, self.rot_dim, self.head_dim - self.rot_dim)?;
 
-            self.rotary_emb.forward(cos_sin, &mut q_rot, &mut k_rot)?;
+            self.rotary_emb.forward(&cos_sin, &mut q_rot, &mut k_rot)?;
             q = Tensor::cat(&[q_rot, q_pass], D::Minus1)?;
             k = Tensor::cat(&[k_rot, k_pass], D::Minus1)?;
         } else {
-            self.rotary_emb.forward(cos_sin, &mut q, &mut k)?;
+            self.rotary_emb.forward(&cos_sin, &mut q, &mut k)?;
         }
 
         // Standard attention

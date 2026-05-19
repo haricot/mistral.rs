@@ -17,7 +17,7 @@ pub async fn run_tune(
     emit_config: Option<PathBuf>,
 ) -> Result<()> {
     let model_selected = convert_to_model_selected(&model_type)?;
-    let (cpu, _device_layers) = extract_device_settings(&model_type);
+    let (cpu, _device_layers, _active_layers_on_vram) = extract_device_settings(&model_type);
     let requested_isq = extract_isq_setting(&model_type)
         .as_deref()
         .map(|s| {

@@ -7,9 +7,30 @@
 use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
 use candle_nn::Linear;
 use mistralrs_quant::{MatMul, QuantMethod, QuantizedConfig, RowParallelLayer, ShardedVarBuilder};
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use crate::device_map::DeviceMapper;
+
+fn gdn_profile_enabled() -> bool {
+    matches!(
+        std::env::var("MISTRALRS_GDN_PROFILE"),
+        Ok(v) if !v.is_empty() && v != "0"
+    ) || crate::topology::qwen35_profile_enabled()
+}
+
+fn elapsed_ms(start: Instant) -> f64 {
+    start.elapsed().as_secs_f64() * 1_000.0
+}
+
+fn profile_tick(enabled: bool, start: &mut Instant) -> f64 {
+    if enabled {
+        let elapsed = elapsed_ms(*start);
+        *start = Instant::now();
+        elapsed
+    } else {
+        0.0
+    }
+}
 
 // ====================== GDN Config Trait ======================
 
@@ -369,6 +390,9 @@ impl GatedDeltaNet {
         let (batch_size, seq_len, _hidden) = x.dims3()?;
         let dtype = x.dtype();
         let v_per_group = self.num_v_heads / self.num_k_heads;
+        let profile = gdn_profile_enabled();
+        let total_start = Instant::now();
+        let mut section_start = total_start;
 
         // 1. Project input
         let mut x_q = x.clone();
@@ -381,6 +405,7 @@ impl GatedDeltaNet {
             mixed_qkvz = mixed_qkvz.to_dtype(dtype)?;
             mixed_ba = mixed_ba.to_dtype(dtype)?;
         }
+        let proj_ms = profile_tick(profile, &mut section_start);
 
         // 2. Grouped head layout
         let group_size_qkvz = 2 * self.head_k_dim + 2 * v_per_group * self.head_v_dim;
@@ -418,6 +443,7 @@ impl GatedDeltaNet {
 
         // 3. Concatenate q, k, v for conv1d
         let mixed_qkv = Tensor::cat(&[&q, &k, &v_flat], D::Minus1)?;
+        let layout_ms = profile_tick(profile, &mut section_start);
 
         // 4. Apply causal conv1d (includes silu activation)
         let mixed_qkv = if cache.seqlen_offset > 0 && seq_len == 1 {
@@ -425,6 +451,7 @@ impl GatedDeltaNet {
         } else {
             self.causal_conv1d_full(&mixed_qkv, cache)?
         };
+        let conv_ms = profile_tick(profile, &mut section_start);
 
         // 5. Split back after conv and reshape to per-head
         let q = mixed_qkv.narrow(D::Minus1, 0, self.key_dim)?;
@@ -480,6 +507,7 @@ impl GatedDeltaNet {
                 self.compute_beta_g_cpu(&b, &a, dtype)?
             }
         };
+        let gating_ms = profile_tick(profile, &mut section_start);
 
         // 7. If num_v_heads > num_k_heads, repeat_interleave q and k
         let (q, k) = if v_per_group > 1 {
@@ -499,6 +527,7 @@ impl GatedDeltaNet {
         // 8. L2-normalize q and k
         let q = l2_norm(&q, 1e-6)?;
         let k = l2_norm(&k, 1e-6)?;
+        let norm_ms = profile_tick(profile, &mut section_start);
 
         // 9. Apply recurrence
         let mut recurrent_state = cache.recurrent_state.to_device(q.device())?;
@@ -547,6 +576,7 @@ impl GatedDeltaNet {
         cache.recurrent_state = recurrent_state;
 
         cache.seqlen_offset += seq_len;
+        let recurrence_ms = profile_tick(profile, &mut section_start);
 
         // 10. Apply RMSNormGated
         let z_shape = z.shape().clone();
@@ -555,6 +585,7 @@ impl GatedDeltaNet {
         let y = self.norm.forward(&y, &z)?;
         let y = y.reshape(z_shape)?;
         let y = y.reshape((batch_size, seq_len, self.value_dim))?;
+        let rms_ms = profile_tick(profile, &mut section_start);
 
         // 11. Output projection
         let original_dtype = x.dtype();
@@ -565,6 +596,15 @@ impl GatedDeltaNet {
         let mut res = MatMul.qmethod_matmul(&y_proj, &*self.out_proj)?;
         if self.out_proj.quantized_act_type().is_some() {
             res = res.to_dtype(original_dtype)?;
+        }
+        let out_proj_ms = profile_tick(profile, &mut section_start);
+        if profile {
+            tracing::info!(
+                target: "mistralrs_profile",
+                "gdn seq={seq_len} device={:?} proj_ms={proj_ms:.3} layout_ms={layout_ms:.3} conv_ms={conv_ms:.3} gating_ms={gating_ms:.3} norm_ms={norm_ms:.3} recurrence_ms={recurrence_ms:.3} rms_ms={rms_ms:.3} out_proj_ms={out_proj_ms:.3} total_ms={:.3}",
+                x.device(),
+                elapsed_ms(total_start)
+            );
         }
         Ok(res)
     }

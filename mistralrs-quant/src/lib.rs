@@ -2,7 +2,10 @@ use std::{
     borrow::Cow,
     fmt::Debug,
     num::NonZeroUsize,
-    sync::{atomic::AtomicUsize, Arc, Condvar, Mutex, MutexGuard},
+    sync::{
+        atomic::{AtomicU8, AtomicUsize, Ordering},
+        Arc, Condvar, Mutex, MutexGuard,
+    },
 };
 
 use blockwise_fp8::blockwise_fp8_linear_b;
@@ -91,6 +94,107 @@ pub use vector_fp8::{fp8_vector_dequantize, fp8_vector_quantize};
 
 use candle_nn::{Conv1d, Conv2d, Linear, Module};
 use serde::{Deserialize, Deserializer, Serialize};
+
+const RUNTIME_UNSET_BOOL: u8 = 0;
+const RUNTIME_FALSE_BOOL: u8 = 1;
+const RUNTIME_TRUE_BOOL: u8 = 2;
+const RUNTIME_UNSET_USIZE: usize = usize::MAX;
+
+static GGUF_CPU_MOE_EXPERT_CACHE: AtomicUsize = AtomicUsize::new(RUNTIME_UNSET_USIZE);
+static GGUF_CPU_MOE_Q4_1_EXPERT_CACHE: AtomicUsize = AtomicUsize::new(RUNTIME_UNSET_USIZE);
+static GGUF_CPU_MOE_Q4K_EXPERT_CACHE: AtomicUsize = AtomicUsize::new(RUNTIME_UNSET_USIZE);
+static GGUF_CPU_MOE_PARALLEL_TOPK: AtomicU8 = AtomicU8::new(RUNTIME_UNSET_BOOL);
+static GGUF_CPU_Q4K_MATMUL: AtomicU8 = AtomicU8::new(RUNTIME_UNSET_BOOL);
+static GGUF_CPU_Q4K_MATMUL_CACHE: AtomicUsize = AtomicUsize::new(RUNTIME_UNSET_USIZE);
+static GGUF_CPU_Q4K_MATMUL_MAX_ROWS: AtomicUsize = AtomicUsize::new(RUNTIME_UNSET_USIZE);
+
+#[derive(Clone, Debug, Default)]
+pub struct GgufCpuRuntimeOptions {
+    pub cpu_moe_expert_cache: Option<usize>,
+    pub cpu_moe_q4_1_expert_cache: Option<usize>,
+    pub cpu_moe_q4k_expert_cache: Option<usize>,
+    pub cpu_moe_parallel_topk: Option<bool>,
+    pub cpu_q4k_matmul: Option<bool>,
+    pub cpu_q4k_matmul_cache: Option<usize>,
+    pub cpu_q4k_matmul_max_rows: Option<usize>,
+}
+
+pub fn set_gguf_cpu_runtime_options(options: GgufCpuRuntimeOptions) {
+    store_optional_usize(&GGUF_CPU_MOE_EXPERT_CACHE, options.cpu_moe_expert_cache);
+    store_optional_usize(
+        &GGUF_CPU_MOE_Q4_1_EXPERT_CACHE,
+        options.cpu_moe_q4_1_expert_cache,
+    );
+    store_optional_usize(
+        &GGUF_CPU_MOE_Q4K_EXPERT_CACHE,
+        options.cpu_moe_q4k_expert_cache,
+    );
+    store_optional_bool(&GGUF_CPU_MOE_PARALLEL_TOPK, options.cpu_moe_parallel_topk);
+    store_optional_bool(&GGUF_CPU_Q4K_MATMUL, options.cpu_q4k_matmul);
+    store_optional_usize(&GGUF_CPU_Q4K_MATMUL_CACHE, options.cpu_q4k_matmul_cache);
+    store_optional_usize(
+        &GGUF_CPU_Q4K_MATMUL_MAX_ROWS,
+        options.cpu_q4k_matmul_max_rows,
+    );
+}
+
+fn store_optional_usize(atom: &AtomicUsize, value: Option<usize>) {
+    atom.store(value.unwrap_or(RUNTIME_UNSET_USIZE), Ordering::Relaxed);
+}
+
+fn load_optional_usize(atom: &AtomicUsize) -> Option<usize> {
+    match atom.load(Ordering::Relaxed) {
+        RUNTIME_UNSET_USIZE => None,
+        value => Some(value),
+    }
+}
+
+fn store_optional_bool(atom: &AtomicU8, value: Option<bool>) {
+    atom.store(
+        match value {
+            None => RUNTIME_UNSET_BOOL,
+            Some(false) => RUNTIME_FALSE_BOOL,
+            Some(true) => RUNTIME_TRUE_BOOL,
+        },
+        Ordering::Relaxed,
+    );
+}
+
+fn load_optional_bool(atom: &AtomicU8) -> Option<bool> {
+    match atom.load(Ordering::Relaxed) {
+        RUNTIME_FALSE_BOOL => Some(false),
+        RUNTIME_TRUE_BOOL => Some(true),
+        _ => None,
+    }
+}
+
+pub(crate) fn gguf_cpu_moe_expert_cache_override() -> Option<usize> {
+    load_optional_usize(&GGUF_CPU_MOE_EXPERT_CACHE)
+}
+
+pub(crate) fn gguf_cpu_moe_q4_1_expert_cache_override() -> Option<usize> {
+    load_optional_usize(&GGUF_CPU_MOE_Q4_1_EXPERT_CACHE)
+}
+
+pub(crate) fn gguf_cpu_moe_q4k_expert_cache_override() -> Option<usize> {
+    load_optional_usize(&GGUF_CPU_MOE_Q4K_EXPERT_CACHE)
+}
+
+pub(crate) fn gguf_cpu_moe_parallel_topk_override() -> Option<bool> {
+    load_optional_bool(&GGUF_CPU_MOE_PARALLEL_TOPK)
+}
+
+pub(crate) fn gguf_cpu_q4k_matmul_override() -> Option<bool> {
+    load_optional_bool(&GGUF_CPU_Q4K_MATMUL)
+}
+
+pub(crate) fn gguf_cpu_q4k_matmul_cache_override() -> Option<usize> {
+    load_optional_usize(&GGUF_CPU_Q4K_MATMUL_CACHE)
+}
+
+pub(crate) fn gguf_cpu_q4k_matmul_max_rows_override() -> Option<usize> {
+    load_optional_usize(&GGUF_CPU_Q4K_MATMUL_MAX_ROWS)
+}
 
 /// Limits outstanding async ISQ jobs to prevent unbounded memory growth.
 ///
@@ -1021,6 +1125,12 @@ pub trait QuantMethod: Send + Sync + Debug + QuantizedSerde {
     /// Weight dtype and device
     fn dtype_and_device(&self) -> (DType, Device);
 
+    /// If this quantization method is backed by a GGUF QMatMul, expose it for
+    /// fused kernels that can consume the quantized blocks directly.
+    fn gguf_qmatmul_and_bias(&self) -> Option<(&QMatMul, Option<&Tensor>)> {
+        None
+    }
+
     /// Add a delta weight from LoRA to the weights. This should be prescaled with alpha.
     fn add_delta_w(&self, delta: &Tensor) -> Result<Arc<dyn QuantMethod>>;
 
@@ -1051,6 +1161,31 @@ pub trait QuantMethod: Send + Sync + Debug + QuantizedSerde {
     fn is_distributed(&self) -> Option<DistributedKind> {
         None
     }
+}
+
+pub fn gguf_cpu_fused_moe_q4k_forward<F>(
+    gate: &dyn QuantMethod,
+    up: &dyn QuantMethod,
+    down: &dyn QuantMethod,
+    xs: &Tensor,
+    topk_weights: &Tensor,
+    topk_ids: &Tensor,
+    act: F,
+) -> Result<Option<Tensor>>
+where
+    F: Fn(f32) -> f32 + Copy + Send + Sync,
+{
+    let Some((gate, None)) = gate.gguf_qmatmul_and_bias() else {
+        return Ok(None);
+    };
+    let Some((up, None)) = up.gguf_qmatmul_and_bias() else {
+        return Ok(None);
+    };
+    let Some((down, None)) = down.gguf_qmatmul_and_bias() else {
+        return Ok(None);
+    };
+
+    gguf::cpu_fused_moe_q4k_forward(gate, up, down, xs, topk_weights, topk_ids, act)
 }
 
 impl Module for dyn QuantMethod {
