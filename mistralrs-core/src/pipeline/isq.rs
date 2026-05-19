@@ -837,7 +837,6 @@ pub trait IsqModel {
                 flush_uqff_shard(parent, &file_stem, shard_index, &mut current_chunk)?;
             }
 
-            // 3. Serialize Residuals, Configs, Tokenizer, etc.
             let residual = match organization {
                 IsqOrganization::Default => self.residual_tensors(),
                 IsqOrganization::MoeExpertsOnly => self
@@ -846,53 +845,99 @@ pub trait IsqModel {
             };
 
             let residual_out = parent.join(UQFF_RESIDUAL_SAFETENSORS);
+            let config_out = parent.join("config.json");
+            let modules_out = parent.join("modules.json");
+            let tokenizer_out = parent.join("tokenizer.json");
+            let tokenizer_cfg_out = parent.join("tokenizer_config.json");
+            let chat_template_jinja_out = parent.join("chat_template.jinja");
+            let gen_cfg_out = parent.join("generation_config.json");
+            let processor_out = parent.join("processor_config.json");
+            let preprocessor_out = parent.join("preprocessor_config.json");
+
             info!(
                 "Serializing {} residual tensors to `{}`.",
                 residual.len(),
                 residual_out.display()
             );
+
             safetensors::serialize_to_file(residual, None, &residual_out)?;
 
-            let config_out = parent.join(full_ser.config_filename.clone());
-            info!("Serializing configuration to `{}`.", config_out.display());
-            std::fs::write(config_out, &full_ser.config)?;
+            let UqffFullSer {
+                tokenizer,
+                template_filename,
+                modules,
+                module_paths,
+                generation_config,
+                config,
+                config_filename: _,
+                processor_filename,
+                preprocessor_filename,
+            } = full_ser;
 
-            let tokenizer_out = parent.join("tokenizer.json");
+            info!("Serializing configuration to `{}`.", config_out.display());
+
+            std::fs::write(config_out, config)?;
+
             info!("Serializing tokenizer to `{}`.", tokenizer_out.display());
-            serde_json::to_writer_pretty(File::create(&tokenizer_out)?, full_ser.tokenizer)
+
+            serde_json::to_writer_pretty(File::create(&tokenizer_out)?, tokenizer)
                 .map_err(candle_core::Error::msg)?;
 
-            if let Some(tf) = full_ser.template_filename {
-                let template = std::fs::read(&tf).map_err(candle_core::Error::msg)?;
-                let dest = if tf.extension().map(|e| e.to_str()) == Some(Some("jinja")) {
-                    parent.join("chat_template.jinja")
+            if let Some(template_filename) = template_filename {
+                let template =
+                    std::fs::read(template_filename).map_err(candle_core::Error::msg)?;
+
+                if template_filename.extension().map(|e| e.to_str()) == Some(Some("jinja")) {
+                    info!(
+                        "Serializing chat template to `{}`.",
+                        chat_template_jinja_out.display()
+                    );
+                    std::fs::write(&chat_template_jinja_out, template)
+                        .map_err(candle_core::Error::msg)?;
+
+                    // When the chat template is a .jinja file, also save the
+                    // tokenizer_config.json that lives alongside it. This file
+                    // contains bos_token/eos_token/unk_token which are needed
+                    // to render the template correctly. Without it, special
+                    // tokens render as "none" in minijinja.
+                    let sibling_cfg = template_filename
+                        .parent()
+                        .map(|dir| dir.join("tokenizer_config.json"));
+                    if let Some(cfg_path) = sibling_cfg.filter(|p| p.exists()) {
+                        info!(
+                            "Serializing tokenizer config to `{}`.",
+                            tokenizer_cfg_out.display()
+                        );
+                        std::fs::copy(&cfg_path, &tokenizer_cfg_out)
+                            .map_err(candle_core::Error::msg)?;
+                    }
                 } else {
-                    parent.join("tokenizer_config.json")
-                };
-                info!(
-                    "Serializing chat template / tokenizer config to `{}`.",
-                    dest.display()
-                );
-                std::fs::write(dest, template).map_err(candle_core::Error::msg)?;
+                    info!(
+                        "Serializing tokenizer config to `{}`.",
+                        tokenizer_cfg_out.display()
+                    );
+                    std::fs::write(&tokenizer_cfg_out, template)
+                        .map_err(candle_core::Error::msg)?;
+                }
             }
 
-            if let Some(gc) = full_ser.generation_config {
+            if let Some(gc) = generation_config {
                 info!("Copying generation config to `generation_config.json`.");
-                std::fs::copy(gc, parent.join("generation_config.json"))?;
+                std::fs::copy(gc, gen_cfg_out)?;
             }
-            if let Some(pf) = full_ser.processor_filename {
+            if let Some(pf) = processor_filename {
                 info!("Copying processor config to `processor_config.json`.");
-                std::fs::copy(pf, parent.join("processor_config.json"))?;
+                std::fs::copy(pf, processor_out)?;
             }
-            if let Some(ppf) = full_ser.preprocessor_filename {
+            if let Some(ppf) = preprocessor_filename {
                 info!("Copying preprocessor config to `preprocessor_config.json`.");
-                std::fs::copy(ppf, parent.join("preprocessor_config.json"))?;
+                std::fs::copy(ppf, preprocessor_out)?;
             }
 
-            if let Some(mod_data) = full_ser.modules {
+            if let Some(mod_data) = modules {
                 info!("Serializing modules manifest to `modules.json`.");
-                std::fs::write(parent.join("modules.json"), mod_data)?;
-                if let Some(paths) = full_ser.module_paths {
+                std::fs::write(modules_out, mod_data)?;
+                if let Some(paths) = module_paths {
                     for module in paths {
                         if let Some(path) = match module {
                             EmbeddingModulePaths::Transformer { path }
@@ -1198,9 +1243,15 @@ pub trait IsqModel {
         {
             let (check_tensors, _) = self.get_layers();
             for (i, (tensor, layer_num)) in check_tensors.iter().enumerate() {
-                if tensor.name() == "dummy" {
+                if let Some(info) = tensor.dummy_info() {
+                    let artifact_note = if artifact_isqs.contains_key(&i) {
+                        "the matching UQFF artifact did not deserialize into a real layer"
+                    } else {
+                        "the UQFF artifact set did not contain an entry for this layer index"
+                    };
                     candle_core::bail!(
-                        "DummyLayer not replaced at index {i}, layer {layer_num:?} after load_from_artifacts"
+                        "UQFF placeholder was not replaced at artifact index {i}, model layer {layer_num:?}: {artifact_note}. {}",
+                        info.message("UQFF artifact loading")
                     );
                 }
             }

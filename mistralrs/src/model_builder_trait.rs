@@ -3,7 +3,7 @@
 use candle_core::Device;
 use mistralrs_core::{
     AddModelConfig, DefaultSchedulerMethod, EngineConfig, IsqType, Pipeline, SchedulerConfig,
-    SearchCallback, SearchEmbeddingModel, ToolCallback, ToolCallbackWithTool,
+    SearchCallback, SearchEmbeddingModel, ToolCallbackWithTool,
 };
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use tokio::sync::Mutex;
@@ -188,17 +188,9 @@ impl MultiModelBuilder {
             runner_builder = runner_builder.with_search_callback(cb);
         }
 
-        for (name, cb) in &add_model_config.engine_config.tool_callbacks {
-            runner_builder = runner_builder.with_tool_callback(name.clone(), cb.clone());
-        }
-
-        for (name, callback_with_tool) in &add_model_config.engine_config.tool_callbacks_with_tools
-        {
-            runner_builder = runner_builder.with_tool_callback_and_tool(
-                name.clone(),
-                callback_with_tool.callback.clone(),
-                callback_with_tool.tool.clone(),
-            );
+        for (name, callback_with_tool) in &add_model_config.engine_config.tool_callbacks {
+            runner_builder = runner_builder
+                .with_tool_callback_with_tool(name.clone(), callback_with_tool.clone());
         }
 
         if let Some(mcp_config) = add_model_config.mcp_client_config.clone() {
@@ -207,6 +199,10 @@ impl MultiModelBuilder {
 
         if let Some(loader_config) = add_model_config.loader_config.clone() {
             runner_builder = runner_builder.with_loader_config(loader_config);
+        }
+
+        if let Some(code_exec_config) = add_model_config.code_exec_config.clone() {
+            runner_builder = runner_builder.with_code_execution(code_exec_config);
         }
 
         runner_builder = runner_builder
@@ -321,8 +317,7 @@ pub(crate) fn build_engine_config(
     throughput_logging_enabled: bool,
     search_embedding_model: Option<SearchEmbeddingModel>,
     search_callback: Option<Arc<SearchCallback>>,
-    tool_callbacks: &HashMap<String, Arc<ToolCallback>>,
-    tool_callbacks_with_tools: &HashMap<String, ToolCallbackWithTool>,
+    tool_callbacks: &HashMap<String, ToolCallbackWithTool>,
     no_kv_cache: bool,
     prefix_cache_n: Option<usize>,
 ) -> EngineConfig {
@@ -331,7 +326,6 @@ pub(crate) fn build_engine_config(
         search_embedding_model,
         search_callback,
         tool_callbacks: tool_callbacks.clone(),
-        tool_callbacks_with_tools: tool_callbacks_with_tools.clone(),
         no_kv_cache,
         no_prefix_cache: prefix_cache_n.is_none(),
         prefix_cache_n: prefix_cache_n.unwrap_or(16),
@@ -360,7 +354,6 @@ pub(crate) async fn build_pipeline_from_text_loader(
         builder.search_embedding_model,
         builder.search_callback.clone(),
         &builder.tool_callbacks,
-        &builder.tool_callbacks_with_tools,
         builder.no_kv_cache,
         builder.prefix_cache_n,
     );
@@ -395,6 +388,7 @@ pub(crate) async fn build_pipeline_from_text_loader(
         engine_config,
         mcp_client_config,
         loader_config: None,
+        code_exec_config: builder.code_exec_config.clone(),
     };
 
     Ok((pipeline, scheduler_config, add_model_config))
@@ -411,7 +405,6 @@ pub(crate) async fn build_pipeline_from_gguf_loader(
         builder.search_embedding_model,
         builder.search_callback.clone(),
         &builder.tool_callbacks,
-        &builder.tool_callbacks_with_tools,
         builder.no_kv_cache,
         builder.prefix_cache_n,
     );
@@ -441,6 +434,7 @@ pub(crate) async fn build_pipeline_from_gguf_loader(
         engine_config,
         mcp_client_config: None,
         loader_config: None,
+        code_exec_config: builder.code_exec_config.clone(),
     };
 
     Ok((pipeline, scheduler_config, add_model_config))
@@ -464,16 +458,9 @@ pub async fn build_model_from_pipeline(
         runner_builder = runner_builder.with_search_callback(cb);
     }
 
-    for (name, cb) in &add_model_config.engine_config.tool_callbacks {
-        runner_builder = runner_builder.with_tool_callback(name.clone(), cb.clone());
-    }
-
-    for (name, callback_with_tool) in &add_model_config.engine_config.tool_callbacks_with_tools {
-        runner_builder = runner_builder.with_tool_callback_and_tool(
-            name.clone(),
-            callback_with_tool.callback.clone(),
-            callback_with_tool.tool.clone(),
-        );
+    for (name, callback_with_tool) in &add_model_config.engine_config.tool_callbacks {
+        runner_builder =
+            runner_builder.with_tool_callback_with_tool(name.clone(), callback_with_tool.clone());
     }
 
     if let Some(mcp_config) = add_model_config.mcp_client_config.clone() {
@@ -482,6 +469,10 @@ pub async fn build_model_from_pipeline(
 
     if let Some(loader_config) = add_model_config.loader_config.clone() {
         runner_builder = runner_builder.with_loader_config(loader_config);
+    }
+
+    if let Some(code_exec_config) = add_model_config.code_exec_config.clone() {
+        runner_builder = runner_builder.with_code_execution(code_exec_config);
     }
 
     runner_builder = runner_builder
@@ -552,7 +543,6 @@ pub async fn build_text_pipeline(
         builder.search_embedding_model,
         builder.search_callback.clone(),
         &builder.tool_callbacks,
-        &builder.tool_callbacks_with_tools,
         builder.no_kv_cache,
         builder.prefix_cache_n,
     );
@@ -600,6 +590,7 @@ pub async fn build_text_pipeline(
         engine_config,
         mcp_client_config: builder.mcp_client_config.clone(),
         loader_config: Some(loader_config),
+        code_exec_config: builder.code_exec_config.clone(),
     };
 
     Ok((pipeline, scheduler_config, add_model_config))
@@ -668,7 +659,6 @@ pub async fn build_multimodal_pipeline(
         builder.search_embedding_model,
         builder.search_callback.clone(),
         &builder.tool_callbacks,
-        &builder.tool_callbacks_with_tools,
         false,
         builder.prefix_cache_n,
     );
@@ -723,6 +713,7 @@ pub async fn build_multimodal_pipeline(
         engine_config,
         mcp_client_config: None,
         loader_config: Some(loader_config),
+        code_exec_config: None,
     };
 
     Ok((pipeline, scheduler_config, add_model_config))
@@ -779,7 +770,6 @@ pub async fn build_gguf_pipeline(
         builder.search_embedding_model,
         builder.search_callback.clone(),
         &builder.tool_callbacks,
-        &builder.tool_callbacks_with_tools,
         builder.no_kv_cache,
         builder.prefix_cache_n,
     );
@@ -816,6 +806,7 @@ pub async fn build_gguf_pipeline(
         engine_config,
         mcp_client_config: None,
         loader_config: Some(loader_config),
+        code_exec_config: None,
     };
 
     Ok((pipeline, scheduler_config, add_model_config))
@@ -873,6 +864,7 @@ pub async fn build_diffusion_pipeline(
         engine_config,
         mcp_client_config: None,
         loader_config: Some(loader_config),
+        code_exec_config: None,
     };
 
     Ok((pipeline, scheduler_config, add_model_config))
@@ -934,6 +926,7 @@ pub async fn build_speech_pipeline(
         engine_config,
         mcp_client_config: None,
         loader_config: Some(loader_config),
+        code_exec_config: None,
     };
 
     Ok((pipeline, scheduler_config, add_model_config))
@@ -1022,6 +1015,7 @@ pub async fn build_embedding_pipeline(
         engine_config,
         mcp_client_config: None,
         loader_config: Some(loader_config),
+        code_exec_config: None,
     };
 
     Ok((pipeline, scheduler_config, add_model_config))
@@ -1116,7 +1110,6 @@ pub async fn build_auto_pipeline(
         builder.search_embedding_model,
         builder.search_callback.clone(),
         &builder.tool_callbacks,
-        &builder.tool_callbacks_with_tools,
         builder.no_kv_cache,
         builder.prefix_cache_n,
     );
@@ -1168,6 +1161,7 @@ pub async fn build_auto_pipeline(
         engine_config,
         mcp_client_config: builder.mcp_client_config.clone(),
         loader_config: Some(loader_config),
+        code_exec_config: builder.code_exec_config.clone(),
     };
 
     Ok((pipeline, scheduler_config, add_model_config))

@@ -101,6 +101,7 @@ use std::fmt::Debug;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
 use tokenizers::Tokenizer;
 
 use anyhow::Result;
@@ -579,7 +580,7 @@ pub trait Pipeline:
                 let logits = logits
                     .into_iter()
                     .map(|l| {
-                        let l = l.expect("Did not get any inputs. This is shocking.");
+                        let l = l.expect("missing forward result");
                         if logits_on_cpu {
                             l.to_device(&Device::Cpu)
                         } else {
@@ -800,7 +801,7 @@ pub trait Pipeline:
                 let logits = logits
                     .into_iter()
                     .map(|l| {
-                        let l = l.expect("Did not get any inputs. This is shocking.");
+                        let l = l.expect("missing forward result");
                         if logits_on_cpu {
                             l.to_device(&Device::Cpu)
                         } else {
@@ -808,7 +809,6 @@ pub trait Pipeline:
                         }
                     })
                     .collect::<candle_core::Result<Vec<_>>>()?;
-
                 match &logits[0] {
                     ForwardInputsResult::RawLogits { .. }
                     | ForwardInputsResult::Embeddings { .. } => unreachable!(),

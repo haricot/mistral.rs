@@ -395,16 +395,8 @@ impl GatedDeltaNet {
         let mut section_start = total_start;
 
         // 1. Project input
-        let mut x_q = x.clone();
-        if let Some(t) = self.in_proj_qkvz.quantized_act_type() {
-            x_q = x_q.to_dtype(t)?;
-        }
-        let mut mixed_qkvz = MatMul.qmethod_matmul(&x_q, &*self.in_proj_qkvz)?;
-        let mut mixed_ba = MatMul.qmethod_matmul(&x_q, &*self.in_proj_ba)?;
-        if self.in_proj_qkvz.quantized_act_type().is_some() {
-            mixed_qkvz = mixed_qkvz.to_dtype(dtype)?;
-            mixed_ba = mixed_ba.to_dtype(dtype)?;
-        }
+        let mixed_qkvz = self.in_proj_qkvz.forward(x)?;
+        let mixed_ba = self.in_proj_ba.forward(x)?;
         let proj_ms = profile_tick(profile, &mut section_start);
 
         // 2. Grouped head layout
@@ -588,15 +580,8 @@ impl GatedDeltaNet {
         let rms_ms = profile_tick(profile, &mut section_start);
 
         // 11. Output projection
-        let original_dtype = x.dtype();
-        let mut y_proj = y;
-        if let Some(t) = self.out_proj.quantized_act_type() {
-            y_proj = y_proj.to_dtype(t)?;
-        }
-        let mut res = MatMul.qmethod_matmul(&y_proj, &*self.out_proj)?;
-        if self.out_proj.quantized_act_type().is_some() {
-            res = res.to_dtype(original_dtype)?;
-        }
+        let y_proj = y;
+        let res = self.out_proj.forward(&y_proj)?;
         let out_proj_ms = profile_tick(profile, &mut section_start);
         if profile {
             tracing::info!(
@@ -632,6 +617,7 @@ impl GatedDeltaNet {
     }
 
     #[cfg(feature = "cuda")]
+    #[allow(clippy::too_many_arguments)]
     fn recurrence_cuda(
         &self,
         q: &Tensor,

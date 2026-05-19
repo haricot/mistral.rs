@@ -78,13 +78,10 @@ afq_qmv_kernel(const T *__restrict__ x, const uint32_t *__restrict__ w_q,
     } else if constexpr (std::is_same_v<T, __half>) {
       scale = __half2float(scales_row[group_idx]);
       bias = __half2float(biases_row[group_idx]);
-    }
-#if __CUDA_ARCH__ >= 800
-    else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+    } else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
       scale = __bfloat162float(scales_row[group_idx]);
       bias = __bfloat162float(biases_row[group_idx]);
     }
-#endif
 
     // Dequantize: w = q * scale + bias
     float w = (float)q * scale + bias;

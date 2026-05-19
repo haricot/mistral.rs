@@ -15,12 +15,14 @@ pub use inputs_processor::Idefics3Processor;
 use mistralrs_quant::{NonZeroOp, ShardedVarBuilder};
 use vision::{Idefics3Connector, Idefics3VisionTransformer};
 
+use crate::attention::AttentionMask;
 use crate::{
     amoe::{AnyMoeBaseModelMixin, MlpLayer},
     device_map::DeviceMapper,
     models::llama::Llama,
     paged_attention::{
-        encoder_cache::EncoderCacheManager, AttentionImplementation, ModelConfigMetadata,
+        encoder_cache::{CacheModality, EncoderCacheManager},
+        AttentionImplementation, ModelConfigMetadata,
     },
     pipeline::{
         text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
@@ -203,7 +205,7 @@ impl Idefics3Model {
                         .lock()
                         .expect("encoder cache lock poisoned");
                     for (i, &hash) in image_hashes.iter().enumerate() {
-                        if let Some(cached) = guard.get(hash) {
+                        if let Some(cached) = guard.get(CacheModality::Image, hash) {
                             per_image[i] = Some(cached[0].clone());
                         } else {
                             miss_indices.push(i);
@@ -214,7 +216,9 @@ impl Idefics3Model {
                     for &i in &miss_indices {
                         let pv = pixel_values.get(i)?.unsqueeze(0)?;
                         let mask = patch_attention_mask.get(i)?.unsqueeze(0)?;
-                        let hidden = self.vision.forward(&pv, Some(&mask))?;
+                        let hidden = self
+                            .vision
+                            .forward(&pv, &AttentionMask::Custom(mask.clone()))?;
                         let hidden = self.connector.forward(&hidden)?;
                         let result = hidden.squeeze(0)?;
                         {
@@ -222,7 +226,11 @@ impl Idefics3Model {
                                 .encoder_cache
                                 .lock()
                                 .expect("encoder cache lock poisoned");
-                            guard.insert(image_hashes[i], vec![result.clone()]);
+                            guard.insert(
+                                CacheModality::Image,
+                                image_hashes[i],
+                                vec![result.clone()],
+                            );
                         }
                         per_image[i] = Some(result);
                     }
@@ -231,9 +239,10 @@ impl Idefics3Model {
                 Tensor::stack(&slices, 0)?
             } else {
                 // No caching: original path
-                let image_hidden_states = self
-                    .vision
-                    .forward(&pixel_values, Some(&patch_attention_mask))?;
+                let image_hidden_states = self.vision.forward(
+                    &pixel_values,
+                    &AttentionMask::Custom(patch_attention_mask.clone()),
+                )?;
                 self.connector.forward(&image_hidden_states)?
             };
 

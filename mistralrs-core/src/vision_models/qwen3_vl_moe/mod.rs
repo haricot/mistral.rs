@@ -1,5 +1,7 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
+use crate::attention::AttentionMask;
+use crate::layers_masker::CausalMaskConfig;
 use std::{
     any::Any,
     sync::{Arc, Mutex},
@@ -15,7 +17,8 @@ use crate::{
     layers::CausalMasker,
     layers_masker::PastKvLenCache,
     paged_attention::{
-        encoder_cache::EncoderCacheManager, AttentionImplementation, ModelConfigMetadata,
+        encoder_cache::{CacheModality, EncoderCacheManager},
+        AttentionImplementation, ModelConfigMetadata,
     },
     pipeline::{
         text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
@@ -104,18 +107,24 @@ impl Qwen3VLMoEModel {
         metadata: Option<(Vec<(Tensor, Tensor)>, &PagedAttentionInputMetadata)>,
         flash_params: &FlashParams,
     ) -> Result<Tensor> {
-        let mut attention_mask = CausalMasker.make_sliding_window_causal_mask_matrix(
+        let mut attention_mask = CausalMasker.make_causal_mask(
             input_ids,
             &seqlen_offsets as &dyn PastKvLenCache,
-            self.text.cfg.sliding_window,
             self.text.dtype,
-            self.text.cfg.num_attn_heads,
+            &CausalMaskConfig {
+                sliding_window: self.text.cfg.sliding_window,
+                ..Default::default()
+            },
         )?;
         let is_first_chunk = metadata
             .as_ref()
             .map(|(_, meta)| meta.is_first_prompt_chunk)
             .unwrap_or(true);
-        attention_mask = attention_mask.filter(|_| is_first_chunk);
+        attention_mask = if is_first_chunk {
+            attention_mask
+        } else {
+            AttentionMask::None
+        };
 
         let mut input_embeds = self.text.embed_tokens(input_ids)?;
         let (batch_size, seq_len, hidden_dim) = input_embeds.dims3()?;
@@ -161,7 +170,7 @@ impl Qwen3VLMoEModel {
                         .lock()
                         .expect("encoder cache lock poisoned");
                     for (i, &hash) in image_hashes.iter().enumerate() {
-                        if let Some(cached) = guard.get(hash) {
+                        if let Some(cached) = guard.get(CacheModality::Image, hash) {
                             per_image[i] = Some(cached);
                         } else {
                             miss_indices.push(i);
@@ -226,7 +235,11 @@ impl Qwen3VLMoEModel {
                                 cache_entry.push(single_ds.clone());
                             }
                             enc_offset += n_out;
-                            guard.insert(image_hashes[orig_idx], cache_entry.clone());
+                            guard.insert(
+                                CacheModality::Image,
+                                image_hashes[orig_idx],
+                                cache_entry.clone(),
+                            );
                             per_image[orig_idx] = Some(cache_entry);
                         }
                     }
@@ -417,14 +430,14 @@ impl Qwen3VLMoEModel {
             input_ids_full,
             rope_img_grid_thw.as_ref(),
             rope_vid_grid_thw.as_ref(),
-            Some(&ropeidx_attn_mask),
+            &AttentionMask::Custom(ropeidx_attn_mask.clone()),
             self.spatial_merge_size,
             self.image_token_id,
             self.video_token_id,
             self.vision_start_token_id,
             self.vision_end_token_id,
         )?;
-        let position_ids = if attention_mask.is_some() {
+        let position_ids = if !matches!(attention_mask, AttentionMask::None) {
             let full_len = position_ids.dim(2)?;
             let trimmed_len = input_ids.dim(1)?;
             position_ids.narrow(2, full_len - trimmed_len, trimmed_len)?
@@ -441,7 +454,7 @@ impl Qwen3VLMoEModel {
 
         let out = self.text.forward_embeds(
             input_embeds,
-            attention_mask.as_ref(),
+            &attention_mask,
             &position_ids,
             context_lens,
             metadata,

@@ -299,6 +299,7 @@ fn generate_tool_impl(args: ToolArgs, input_fn: ItemFn) -> syn::Result<TokenStre
                         description: Some(#description.to_string()),
                         name: #tool_name.to_string(),
                         parameters: Some(parameters),
+                        strict: None,
                     },
                 }
             }
@@ -361,13 +362,14 @@ fn generate_tool_impl(args: ToolArgs, input_fn: ItemFn) -> syn::Result<TokenStre
                         description: Some(#description.to_string()),
                         name: #tool_name.to_string(),
                         parameters: Some(parameters),
+                        strict: None,
                     },
                 }
             }
 
             /// Returns a sync callback that wraps this function for tool execution
             #fn_vis fn #callback_fn_name() -> std::sync::Arc<mistralrs::ToolCallback> {
-                std::sync::Arc::new(|called: &mistralrs::CalledFunction| {
+                std::sync::Arc::new(|called: &mistralrs::CalledFunction, _ctx: &mistralrs::ToolCallContext| {
                     let args: #args_struct_name = serde_json::from_str(&called.arguments)
                         .map_err(|e| anyhow::anyhow!("Failed to parse tool arguments: {}", e))?;
 

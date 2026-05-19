@@ -1,6 +1,6 @@
 use candle_core::Device;
 use mistralrs_core::*;
-use mistralrs_core::{SearchCallback, Tool, ToolCallback};
+use mistralrs_core::{SearchCallback, Tool, ToolCallback, ToolCallbackKind};
 
 use crate::{IsqBits, IsqSetting};
 use std::collections::HashMap;
@@ -31,9 +31,9 @@ pub struct TextModelBuilder {
     pub(crate) hf_cache_path: Option<PathBuf>,
     pub(crate) search_embedding_model: Option<SearchEmbeddingModel>,
     pub(crate) search_callback: Option<Arc<SearchCallback>>,
-    pub(crate) tool_callbacks: HashMap<String, Arc<ToolCallback>>,
-    pub(crate) tool_callbacks_with_tools: HashMap<String, ToolCallbackWithTool>,
+    pub(crate) tool_callbacks: HashMap<String, ToolCallbackWithTool>,
     pub(crate) mcp_client_config: Option<McpClientConfig>,
+    pub(crate) code_exec_config: Option<mistralrs_core::CodeExecutionConfig>,
     pub(crate) device: Option<Device>,
     pub(crate) matformer_config_path: Option<PathBuf>,
     pub(crate) matformer_slice_name: Option<String>,
@@ -147,8 +147,8 @@ impl TextModelBuilder {
             search_embedding_model: None,
             search_callback: None,
             tool_callbacks: HashMap::new(),
-            tool_callbacks_with_tools: HashMap::new(),
             mcp_client_config: None,
+            code_exec_config: None,
             device: None,
             matformer_config_path: None,
             matformer_slice_name: None,
@@ -162,6 +162,12 @@ impl TextModelBuilder {
     /// register their tools for use in automatic tool calling.
     pub fn with_mcp_client(mut self, config: McpClientConfig) -> Self {
         self.mcp_client_config = Some(config);
+        self
+    }
+
+    /// Enable Python code execution.
+    pub fn with_code_execution(mut self, config: mistralrs_core::CodeExecutionConfig) -> Self {
+        self.code_exec_config = Some(config);
         self
     }
 

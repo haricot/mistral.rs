@@ -51,7 +51,7 @@ impl Gemma4MultimodalEmbedder {
             normed = normed.to_dtype(norm_dtype)?;
         }
         let normed = self.embedding_pre_projection_norm.forward(&normed)?;
-        self.embedding_projection.forward_autocast(&normed)
+        self.embedding_projection.forward(&normed)
     }
 
     pub fn get_isq_layers(&mut self) -> Vec<(&mut Arc<dyn QuantMethod>, Option<usize>)> {
