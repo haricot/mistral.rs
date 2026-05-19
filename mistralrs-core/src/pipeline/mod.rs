@@ -36,7 +36,8 @@ pub use gguf::{GGUFLoader, GGUFLoaderBuilder, GGUFSpecificConfig};
 use image::DynamicImage;
 pub use inputs_processor::InputProcessorOutput;
 pub use isq::{
-    expand_isq_value, parse_isq_value, IsqModel, IsqOrganization, UQFF_MULTI_FILE_DELIMITER,
+    expand_isq_value, parse_isq_value, parse_uqff_shard, resolve_uqff_shorthand, IsqModel,
+    IsqOrganization, UQFF_MULTI_FILE_DELIMITER,
 };
 pub(crate) use isq::{IsqModelLoader, ISQ_CPU_DEVICE_SENTINEL};
 use llguidance::toktrie::TokEnv;
