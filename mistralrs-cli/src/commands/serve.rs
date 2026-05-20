@@ -1,7 +1,7 @@
 //! Server command implementation
 
 use anyhow::{Context, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tracing::info;
 
 use mistralrs_core::{
@@ -24,12 +24,21 @@ use crate::ui::build_ui_router;
 #[allow(clippy::too_many_arguments)]
 pub async fn run_server(
     mut model_type: ModelType,
-    server: ServerOptions,
+    mut server: ServerOptions,
+    config_srv: Option<PathBuf>,
     mut runtime: RuntimeOptions,
     agent_options: AgentCliOptions,
     sandbox: SandboxOptions,
     global: GlobalOptions,
 ) -> Result<()> {
+    if let Some(config_srv) = config_srv {
+        let content = std::fs::read_to_string(&config_srv)?;
+        let config: crate::args::ServerConfig = toml::from_str(&content)?;
+        if let Some(server_config) = config.server {
+            server = server_config;
+        }
+    }
+
     initialize_logging();
 
     agent_options.apply_to(&mut runtime);
@@ -118,16 +127,21 @@ pub async fn run_server(
     let mistralrs_for_ui = mistralrs.clone();
 
     // Build and run the server
-    let mut app = MistralRsServerRouterBuilder::new()
+    let mut builder = MistralRsServerRouterBuilder::new()
         .with_mistralrs(mistralrs)
         .with_max_tool_rounds_optional(server.max_tool_rounds)
         .with_tool_dispatch_url_optional(server.tool_dispatch_url.clone())
         .with_allowed_origins_optional(server.cors_origins)
-        .with_allow_any_origin(server.cors_origins_any)
+        .with_max_body_limit_optional(server.max_body_limit)
+        .with_include_swagger_routes(server.include_swagger_routes)
         .with_agent_permission(runtime.code_exec_permission.into())
-        .with_approval_broker(approval_broker.clone())
-        .build()
-        .await?;
+        .with_approval_broker(approval_broker.clone());
+
+    if let Some(base_path) = server.base_path {
+        builder = builder.with_base_path(&base_path);
+    }
+
+    let mut app = builder.build().await?;
 
     if !server.no_ui {
         let enable_code_execution = {

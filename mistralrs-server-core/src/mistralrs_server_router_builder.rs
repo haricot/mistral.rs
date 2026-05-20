@@ -84,8 +84,6 @@ pub struct MistralRsServerRouterBuilder {
     base_path: Option<String>,
     /// Optional CORS allowed origins
     allowed_origins: Option<Vec<String>>,
-    /// Allow any CORS origin
-    allow_any_origin: bool,
     /// Optional axum default request body limit
     max_body_limit: Option<usize>,
     /// Server-level agentic defaults
@@ -102,7 +100,6 @@ impl Default for MistralRsServerRouterBuilder {
             #[cfg(feature = "swagger-ui")]
             base_path: None,
             allowed_origins: None,
-            allow_any_origin: false,
             max_body_limit: None,
             agentic_defaults: AgenticDefaults::default(),
         }
@@ -170,15 +167,17 @@ impl MistralRsServerRouterBuilder {
         self
     }
 
-    /// Sets whether to allow any CORS origin.
-    pub fn with_allow_any_origin(mut self, allow_any_origin: bool) -> Self {
-        self.allow_any_origin = allow_any_origin;
-        self
-    }
-
     /// Sets the axum default request body limit.
     pub fn with_max_body_limit(mut self, max_body_limit: usize) -> Self {
         self.max_body_limit = Some(max_body_limit);
+        self
+    }
+
+    /// Sets the axum default request body limit if provided.
+    pub fn with_max_body_limit_optional(mut self, max_body_limit: Option<usize>) -> Self {
+        if let Some(limit) = max_body_limit {
+            self.max_body_limit = Some(limit);
+        }
         self
     }
 
@@ -248,7 +247,6 @@ impl MistralRsServerRouterBuilder {
         let mut router = init_router(
             mistralrs,
             self.allowed_origins,
-            self.allow_any_origin,
             self.max_body_limit,
             self.agentic_defaults,
         )?;
@@ -274,37 +272,28 @@ impl MistralRsServerRouterBuilder {
 fn init_router(
     state: SharedMistralRsState,
     allowed_origins: Option<Vec<String>>,
-    allow_any_origin: bool,
     max_body_limit: Option<usize>,
     agentic_defaults: AgenticDefaults,
 ) -> Result<Router> {
-    let cors_layer = if allow_any_origin {
-        Some(
-            CorsLayer::new()
-                .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
-                .allow_headers([http::header::CONTENT_TYPE, http::header::AUTHORIZATION])
-                .allow_origin(AllowOrigin::any()),
-        )
-    } else if let Some(origins) = allowed_origins {
+    let allow_origin = if let Some(origins) = allowed_origins {
         let parsed_origins: Result<Vec<_>, _> = origins.into_iter().map(|o| o.parse()).collect();
 
-        let allow_origin = match parsed_origins {
+        match parsed_origins {
             Ok(origins) => AllowOrigin::list(origins),
             Err(_) => anyhow::bail!("Invalid origin format"),
-        };
-        Some(
-            CorsLayer::new()
-                .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
-                .allow_headers([http::header::CONTENT_TYPE, http::header::AUTHORIZATION])
-                .allow_origin(allow_origin),
-        )
+        }
     } else {
-        None
+        AllowOrigin::any()
     };
+
+    let cors_layer = CorsLayer::new()
+        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
+        .allow_headers([http::header::CONTENT_TYPE, http::header::AUTHORIZATION])
+        .allow_origin(allow_origin);
 
     let router_max_body_limit = max_body_limit.unwrap_or(DEFAULT_MAX_BODY_LIMIT);
 
-    let mut router = Router::new()
+    let router = Router::new()
         .route("/v1/chat/completions", post(chatcompletions))
         .route("/v1/completions", post(completions))
         .route("/v1/embeddings", post(embeddings))
@@ -336,13 +325,8 @@ fn init_router(
         .route(
             "/v1/sessions/{session_id}",
             get(get_session).put(put_session).delete(delete_session),
-        );
-
-    if let Some(cors_layer) = cors_layer {
-        router = router.layer(cors_layer);
-    }
-
-    let router = router
+        )
+        .layer(cors_layer)
         .layer(DefaultBodyLimit::max(router_max_body_limit))
         .layer(Extension(agentic_defaults.approval_broker.clone()))
         .layer(Extension(agentic_defaults))

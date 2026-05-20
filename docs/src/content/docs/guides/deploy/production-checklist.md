@@ -31,9 +31,9 @@ mistral.rs has no built-in authentication. Run behind a reverse proxy (nginx, Ca
 
 ## Body limit and CORS
 
-The default body limit is 50 MB and the default CORS is **same-origin only** (no cross-origin access).
+The default body limit is 50 MB and the default CORS allows any origin.
 
-Use `--cors-origins <list>` (comma-separated) to allow specific origins, or `--cors-origins-any` to allow all origins (permissive behavior). For programmatic control or to change the body limit, use `MistralRsServerRouterBuilder` in `mistralrs-server-core`.
+For production, you should restrict CORS using `--cors-origins <list>` (comma-separated) or via a server configuration file with `--config-srv`. For programmatic control or to change the body limit, use `MistralRsServerRouterBuilder` in `mistralrs-server-core`.
 
 ## Health and readiness
 

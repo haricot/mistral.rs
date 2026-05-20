@@ -5,7 +5,7 @@ sidebar:
   order: 1
 ---
 
-`mistralrs serve` defaults: bind on `0.0.0.0:1234`, CORS secure (same-origin only), no authentication, 50 MB request body limit.
+`mistralrs serve` defaults: bind on `0.0.0.0:1234`, CORS permissive (any origin), no authentication, 50 MB request body limit.
 
 ## Host and port
 
@@ -17,17 +17,17 @@ mistralrs serve --host 127.0.0.1 --port 8080 -m <model>
 
 ## CORS and body limit
 
-By default, the server blocks cross-origin requests (same-origin only). Use the `--cors-origins` flag to allow specific origins, or `--cors-origins-any` to allow any origin:
+By default, the server allows cross-origin requests from any origin. You can restrict this using the `--cors-origins` flag:
 
 ```bash
-# Specific origins
 mistralrs serve --cors-origins http://localhost:3000,https://app.example.com -m <model>
-
-# Any origin (permissive)
-mistralrs serve --cors-origins-any -m <model>
 ```
 
-The request body limit is not exposed as a CLI flag. It can be configured programmatically through `MistralRsServerRouterBuilder` in `mistralrs-server-core`.
+For advanced server configuration (CORS, Swagger, body limits), you can use a TOML file with `--config-srv`:
+
+```bash
+mistralrs serve --config-srv server-config.toml -m <model>
+```
 
 The default body limit is 50 MB. Allowed methods are `GET`, `POST`, `PUT`, `DELETE`; allowed headers include `Content-Type` and `Authorization`.
 

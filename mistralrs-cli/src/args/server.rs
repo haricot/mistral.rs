@@ -33,15 +33,30 @@ pub struct ServerOptions {
     #[serde(default)]
     pub tool_dispatch_url: Option<String>,
 
-    /// CORS allowed origins. Same-origin only by default.
-    #[arg(long, value_delimiter = ',', conflicts_with = "cors_origins_any")]
+    /// CORS allowed origins. Permissive by default.
+    #[arg(long, value_delimiter = ',')]
     #[serde(default)]
     pub cors_origins: Option<Vec<String>>,
 
-    /// Allow any CORS origin. Same-origin only by default.
+    /// Base path prefix for Swagger UI routes.
     #[arg(long)]
     #[serde(default)]
-    pub cors_origins_any: bool,
+    pub base_path: Option<String>,
+
+    /// Whether to include Swagger/OpenAPI documentation routes.
+    #[arg(long, default_value_t = true)]
+    #[serde(default = "default_true")]
+    pub include_swagger_routes: bool,
+
+    /// Maximum request body limit in bytes.
+    #[arg(long)]
+    #[serde(default)]
+    pub max_body_limit: Option<usize>,
+}
+
+#[derive(Deserialize, Default)]
+pub struct ServerConfig {
+    pub server: Option<ServerOptions>,
 }
 
 impl Default for ServerOptions {
@@ -53,7 +68,9 @@ impl Default for ServerOptions {
             max_tool_rounds: None,
             tool_dispatch_url: None,
             cors_origins: None,
-            cors_origins_any: false,
+            base_path: None,
+            include_swagger_routes: true,
+            max_body_limit: None,
         }
     }
 }
@@ -64,4 +81,8 @@ fn default_port() -> u16 {
 
 fn default_host() -> String {
     "0.0.0.0".to_string()
+}
+
+fn default_true() -> bool {
+    true
 }

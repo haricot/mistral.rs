@@ -13,14 +13,16 @@ For the full TOML schema, see the [CLI TOML config reference](/mistral.rs/refere
 |---|---|---|---|
 | `--host` | `server.host` | `0.0.0.0` | Bind interface. |
 | `-p`, `--port` | `server.port` | `1234` | TCP port. |
-| `--cors-origins` | `server.cors_origins` | same-origin | Allowed origins for CORS (comma-separated). |
-| `--cors-origins-any` | `server.cors_origins_any` | false | Allow any CORS origin (permissive). |
+| `--cors-origins` | `server.cors_origins` | any | Allowed origins for CORS (comma-separated). |
+| `--config-srv` | not set | not set | Path to server configuration file (.toml). |
 
 ## Web UI
 
 | CLI flag | TOML key | Default | Meaning |
 |---|---|---|---|
 | `--no-ui` | `server.no_ui` | false | Disable the built-in web UI (mounted at `/ui` by default). |
+| `--base-path` | `server.base_path` | not set | Base path prefix for Swagger UI. |
+| `--include-swagger-routes` | `server.include_swagger_routes` | true | Whether to include OpenAPI/Swagger routes. |
 
 ## MCP
 
@@ -55,9 +57,9 @@ For the full TOML schema, see the [CLI TOML config reference](/mistral.rs/refere
 | `--pa-block-size` | `paged_attn.block_size` | not set | Tokens per block. |
 | `--pa-cache-type` | `paged_attn.cache_type` | `auto` | KV cache quantization type. |
 
-## Not exposed via CLI
+## Configuration file only
 
-The request body limit (default 50 MB) is configurable only programmatically through `MistralRsServerRouterBuilder` in `mistralrs-server-core`.
+The request body limit (default 50 MB) is configurable via `--config-srv` (`server.max_body_limit`) or programmatically through `MistralRsServerRouterBuilder` in `mistralrs-server-core`.
 
 ## Environment variables
 
