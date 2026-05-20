@@ -159,6 +159,14 @@ impl MistralRsServerRouterBuilder {
         self
     }
 
+    /// Sets the CORS allowed origins if provided.
+    pub fn with_allowed_origins_optional(mut self, origins: Option<Vec<String>>) -> Self {
+        if let Some(origins) = origins {
+            self.allowed_origins = Some(origins);
+        }
+        self
+    }
+
     /// Sets the axum default request body limit.
     pub fn with_max_body_limit(mut self, max_body_limit: usize) -> Self {
         self.max_body_limit = Some(max_body_limit);
@@ -259,25 +267,26 @@ fn init_router(
     max_body_limit: Option<usize>,
     agentic_defaults: AgenticDefaults,
 ) -> Result<Router> {
-    let allow_origin = if let Some(origins) = allowed_origins {
+    let cors_layer = if let Some(origins) = allowed_origins {
         let parsed_origins: Result<Vec<_>, _> = origins.into_iter().map(|o| o.parse()).collect();
 
-        match parsed_origins {
+        let allow_origin = match parsed_origins {
             Ok(origins) => AllowOrigin::list(origins),
             Err(_) => anyhow::bail!("Invalid origin format"),
-        }
+        };
+        Some(
+            CorsLayer::new()
+                .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
+                .allow_headers([http::header::CONTENT_TYPE, http::header::AUTHORIZATION])
+                .allow_origin(allow_origin),
+        )
     } else {
-        AllowOrigin::any()
+        None
     };
 
     let router_max_body_limit = max_body_limit.unwrap_or(DEFAULT_MAX_BODY_LIMIT);
 
-    let cors_layer = CorsLayer::new()
-        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
-        .allow_headers([http::header::CONTENT_TYPE, http::header::AUTHORIZATION])
-        .allow_origin(allow_origin);
-
-    let router = Router::new()
+    let mut router = Router::new()
         .route("/v1/chat/completions", post(chatcompletions))
         .route("/v1/completions", post(completions))
         .route("/v1/embeddings", post(embeddings))
@@ -309,8 +318,13 @@ fn init_router(
         .route(
             "/v1/sessions/{session_id}",
             get(get_session).put(put_session).delete(delete_session),
-        )
-        .layer(cors_layer)
+        );
+
+    if let Some(cors_layer) = cors_layer {
+        router = router.layer(cors_layer);
+    }
+
+    let router = router
         .layer(DefaultBodyLimit::max(router_max_body_limit))
         .layer(Extension(agentic_defaults.approval_broker.clone()))
         .layer(Extension(agentic_defaults))
