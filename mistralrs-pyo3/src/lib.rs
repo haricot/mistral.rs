@@ -2,7 +2,12 @@
 
 use anyhow::Context;
 use anymoe::{AnyMoeConfig, AnyMoeExpertType};
-use code_execution::{CodeExecutionConfig, SandboxPolicy};
+use code_execution::{
+    build_agent_approval_callback, AgentPermissionPy, AgentToolApprovalDecisionKindPy,
+    AgentToolApprovalDecisionPy, AgentToolApprovalPy, AgentToolKindPy, AgentToolMetadataPy,
+    AgentToolSourcePy, CodeExecutionConfig, CodeExecutionPermissionPy, NetworkModePy,
+    SandboxPolicy,
+};
 use either::Either;
 use indexmap::IndexMap;
 use itertools::Itertools;
@@ -27,10 +32,11 @@ use util::{
 
 use candle_core::{Device, Result};
 use mistralrs_core::{
-    initialize_logging, paged_attn_supported, parse_isq_value, AnyMoeLoader, AutoDeviceMapParams,
-    ChatCompletionResponse, CompletionResponse, Constraint, DefaultSchedulerMethod,
-    DetokenizationRequest, DeviceLayerMapMetadata, DeviceMapMetadata, DeviceMapSetting,
-    DiffusionGenerationParams, DiffusionLoaderBuilder, DisabledModalities, DrySamplingParams,
+    initialize_logging, paged_attn_supported, parse_isq_value, AgentToolApprovalHandler,
+    AnyMoeLoader, AutoDeviceMapParams, ChatCompletionResponse, CompletionResponse, Constraint,
+    DefaultSchedulerMethod, DetokenizationRequest, DeviceLayerMapMetadata, DeviceMapMetadata,
+    DeviceMapSetting, DiffusionGenerationParams, DiffusionLoaderBuilder, DisabledModalities,
+    DrySamplingParams,
     EmbeddingLoaderBuilder, EmbeddingSpecificConfig, GGMLLoaderBuilder, GGMLSpecificConfig,
     GGUFLoaderBuilder, GGUFSpecificConfig, ImageGenerationResponse, ImageGenerationResponseFormat,
     LlguidanceGrammar, Loader, MemoryGpuConfig, MistralRs, MistralRsBuilder,
@@ -1273,6 +1279,13 @@ impl Runner {
                 None
             };
 
+            let agent_approval_callback = build_agent_approval_callback(
+                request
+                    .agent_approval_callback
+                    .as_ref()
+                    .map(|callback| callback.clone_ref(py)),
+            );
+
             let model_request = _Request::Normal(Box::new(NormalRequest {
                 id: next_request_id(),
                 messages,
@@ -1302,6 +1315,12 @@ impl Runner {
                 return_raw_logits: false,
                 web_search_options: request.web_search_options.clone(),
                 enable_code_execution: request.enable_code_execution,
+                code_execution_permission: request.code_execution_permission,
+                code_execution_approval_notifier: None,
+                agent_permission: request.agent_permission,
+                agent_approval_handler: agent_approval_callback
+                    .map(AgentToolApprovalHandler::from_sync),
+                agent_approval_notifier: None,
                 max_tool_rounds: request.max_tool_rounds,
                 tool_dispatch_url: request.tool_dispatch_url.clone(),
                 model_id: model_id.clone(),
@@ -1389,6 +1408,11 @@ impl Runner {
                         return_raw_logits: false,
                         web_search_options: None,
                         enable_code_execution: false,
+                        code_execution_permission: None,
+                        code_execution_approval_notifier: None,
+                        agent_permission: None,
+                        agent_approval_handler: None,
+                        agent_approval_notifier: None,
                         max_tool_rounds: None,
                         tool_dispatch_url: None,
                         model_id: model_id.clone(),
@@ -1509,6 +1533,11 @@ impl Runner {
                 return_raw_logits: false,
                 web_search_options: None,
                 enable_code_execution: false,
+                code_execution_permission: None,
+                code_execution_approval_notifier: None,
+                agent_permission: None,
+                agent_approval_handler: None,
+                agent_approval_notifier: None,
                 max_tool_rounds: None,
                 tool_dispatch_url: None,
                 model_id: model_id.clone(),
@@ -1572,6 +1601,11 @@ impl Runner {
             return_raw_logits: false,
             web_search_options: None,
             enable_code_execution: false,
+            code_execution_permission: None,
+            code_execution_approval_notifier: None,
+            agent_permission: None,
+            agent_approval_handler: None,
+            agent_approval_notifier: None,
             max_tool_rounds: None,
             tool_dispatch_url: None,
             model_id: model_id.clone(),
@@ -1627,6 +1661,11 @@ impl Runner {
             return_raw_logits: false,
             web_search_options: None,
             enable_code_execution: false,
+            code_execution_permission: None,
+            code_execution_approval_notifier: None,
+            agent_permission: None,
+            agent_approval_handler: None,
+            agent_approval_notifier: None,
             max_tool_rounds: None,
             tool_dispatch_url: None,
             model_id: model_id.clone(),
@@ -2130,6 +2169,13 @@ impl Runner {
                 None
             };
 
+            let agent_approval_callback = build_agent_approval_callback(
+                request
+                    .agent_approval_callback
+                    .as_ref()
+                    .map(|callback| callback.clone_ref(py)),
+            );
+
             let model_request = _Request::Normal(Box::new(NormalRequest {
                 id: next_request_id(),
                 messages,
@@ -2159,6 +2205,12 @@ impl Runner {
                 return_raw_logits: false,
                 web_search_options: request.web_search_options.clone(),
                 enable_code_execution: request.enable_code_execution,
+                code_execution_permission: request.code_execution_permission,
+                code_execution_approval_notifier: None,
+                agent_permission: request.agent_permission,
+                agent_approval_handler: agent_approval_callback
+                    .map(AgentToolApprovalHandler::from_sync),
+                agent_approval_notifier: None,
                 max_tool_rounds: request.max_tool_rounds,
                 tool_dispatch_url: request.tool_dispatch_url.clone(),
                 model_id: Some(model_id.clone()),
@@ -2270,6 +2322,11 @@ impl Runner {
                 return_raw_logits: false,
                 web_search_options: None,
                 enable_code_execution: false,
+                code_execution_permission: None,
+                code_execution_approval_notifier: None,
+                agent_permission: None,
+                agent_approval_handler: None,
+                agent_approval_notifier: None,
                 max_tool_rounds: None,
                 tool_dispatch_url: None,
                 model_id: Some(model_id.clone()),
@@ -2523,6 +2580,15 @@ fn mistralrs(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<AnyMoeExpertType>()?;
     m.add_class::<CodeExecutionConfig>()?;
     m.add_class::<SandboxPolicy>()?;
+    m.add_class::<NetworkModePy>()?;
+    m.add_class::<CodeExecutionPermissionPy>()?;
+    m.add_class::<AgentPermissionPy>()?;
+    m.add_class::<AgentToolSourcePy>()?;
+    m.add_class::<AgentToolKindPy>()?;
+    m.add_class::<AgentToolMetadataPy>()?;
+    m.add_class::<AgentToolApprovalPy>()?;
+    m.add_class::<AgentToolApprovalDecisionKindPy>()?;
+    m.add_class::<AgentToolApprovalDecisionPy>()?;
     m.add_class::<files::RequestedFile>()?;
     m.add_class::<mistralrs_core::File>()?;
     m.add_class::<mistralrs_core::FileSource>()?;

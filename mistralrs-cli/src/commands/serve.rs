@@ -9,14 +9,14 @@ use mistralrs_core::{
     SpeechLoaderType,
 };
 use mistralrs_server_core::{
-    mistralrs_for_server_builder::MistralRsForServerBuilder,
+    approvals::ApprovalBroker, mistralrs_for_server_builder::MistralRsForServerBuilder,
     mistralrs_server_router_builder::MistralRsServerRouterBuilder,
 };
 
 use crate::args::{
-    AdapterOptions, AgentCliOptions, DeviceOptions, FormatOptions, GlobalOptions,
-    MatformerSelection, ModelFormat, ModelSourceOptions, ModelType, QuantizationOptions,
-    RuntimeOptions, SandboxMode, SandboxOptions, ServerOptions,
+    AdapterOptions, AgentCliOptions, CodeExecPermissionArg, DeviceOptions, FormatOptions,
+    GlobalOptions, MatformerSelection, ModelFormat, ModelSourceOptions, ModelType,
+    QuantizationOptions, RuntimeOptions, SandboxMode, SandboxOptions, ServerOptions,
 };
 use crate::ui::build_ui_router;
 
@@ -105,10 +105,12 @@ pub async fn run_server(
 
     let sandbox_policy = extract_sandbox_settings(sandbox);
 
+    let approval_broker = ApprovalBroker::default();
+
     #[cfg(feature = "code-execution")]
     {
-        builder = builder
-            .with_code_exec_config_optional(build_code_exec_config(&runtime, sandbox_policy));
+        let config = build_code_exec_config(&runtime, sandbox_policy);
+        builder = builder.with_code_exec_config_optional(config);
     }
     #[cfg(not(feature = "code-execution"))]
     let _ = sandbox_policy;
@@ -121,6 +123,8 @@ pub async fn run_server(
         .with_mistralrs(mistralrs)
         .with_max_tool_rounds_optional(server.max_tool_rounds)
         .with_tool_dispatch_url_optional(server.tool_dispatch_url.clone())
+        .with_agent_permission(runtime.code_exec_permission.into())
+        .with_approval_broker(approval_broker.clone())
         .build()
         .await?;
 
@@ -817,26 +821,33 @@ pub(crate) fn log_agent_runtime(runtime: &RuntimeOptions, max_tool_rounds: Optio
         return;
     }
 
-    if runtime.agent {
-        tracing::info!("agent mode: --agent enabling search + code-execution defaults");
-    }
-    log_search(runtime);
-    log_code_execution(runtime);
     let rounds = max_tool_rounds.unwrap_or(mistralrs_core::DEFAULT_MAX_TOOL_ROUNDS);
-    tracing::info!("agentic loop: max tool rounds = {rounds}");
+    let mode = if runtime.agent { "agent" } else { "tools" };
+    tracing::info!(
+        "{mode}: search {}, code execution {}, approvals {}, max tool rounds {rounds}",
+        search_summary(runtime),
+        code_execution_summary(runtime),
+        agent_permission_summary(runtime.code_exec_permission)
+    );
+    log_agent_runtime_details(runtime);
 }
 
-fn log_search(runtime: &RuntimeOptions) {
+fn search_summary(runtime: &RuntimeOptions) -> String {
     if !runtime.enable_search {
-        tracing::info!("search: off");
-        return;
+        return "off".to_string();
     }
-    match runtime.search_embedding_model {
-        Some(model) => tracing::info!(
-            "search: on (reranker = {})",
-            mistralrs_core::SearchEmbeddingModel::from(model)
-        ),
-        None => tracing::info!("search: on (no reranker configured)"),
+    let model = runtime
+        .search_embedding_model
+        .map(mistralrs_core::SearchEmbeddingModel::from)
+        .unwrap_or_default();
+    format!("on (reranker {model})")
+}
+
+fn agent_permission_summary(permission: CodeExecPermissionArg) -> &'static str {
+    match permission {
+        CodeExecPermissionArg::Auto => "auto",
+        CodeExecPermissionArg::Ask => "ask",
+        CodeExecPermissionArg::Deny => "deny",
     }
 }
 
@@ -850,9 +861,17 @@ fn is_code_execution_enabled(_runtime: &RuntimeOptions) -> bool {
 }
 
 #[cfg(feature = "code-execution")]
-fn log_code_execution(runtime: &RuntimeOptions) {
+fn code_execution_summary(runtime: &RuntimeOptions) -> &'static str {
     if !runtime.enable_code_execution {
-        tracing::info!("code-exec: off");
+        "off"
+    } else {
+        "on"
+    }
+}
+
+#[cfg(feature = "code-execution")]
+fn log_agent_runtime_details(runtime: &RuntimeOptions) {
+    if !runtime.enable_code_execution {
         return;
     }
     let python = runtime
@@ -868,10 +887,22 @@ fn log_code_execution(runtime: &RuntimeOptions) {
         .as_ref()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "per-session temp dir".to_string());
-    tracing::info!("code-exec: on (python={python}, timeout={timeout}, workdir={workdir})");
+    tracing::info!(
+        "code-exec: python={python}, timeout={timeout}, workdir={workdir}, permission={}",
+        agent_permission_summary(runtime.code_exec_permission)
+    );
 }
 #[cfg(not(feature = "code-execution"))]
-fn log_code_execution(runtime: &RuntimeOptions) {
+fn code_execution_summary(runtime: &RuntimeOptions) -> &'static str {
+    if runtime.agent {
+        "not compiled in"
+    } else {
+        "off"
+    }
+}
+
+#[cfg(not(feature = "code-execution"))]
+fn log_agent_runtime_details(runtime: &RuntimeOptions) {
     if runtime.agent {
         tracing::warn!(
             "code-exec: not compiled in (build with `--features code-execution`); --agent enabled search only"

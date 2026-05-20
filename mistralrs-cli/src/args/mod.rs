@@ -427,6 +427,11 @@ pub struct GlobalOptions {
     #[arg(long, default_value = "cache", global = true, value_parser = parse_token_source)]
     #[serde(default = "default_token_source")]
     pub token_source: TokenSource,
+
+    /// Increase logging verbosity. Use -v for debug and -vv for trace-level internals.
+    #[arg(short = 'v', long, global = true, action = clap::ArgAction::Count)]
+    #[serde(default)]
+    pub verbose: u8,
 }
 
 /// Runtime options for inference
@@ -503,6 +508,10 @@ pub struct RuntimeOptions {
     #[arg(skip)]
     #[serde(default)]
     pub code_exec_workdir: Option<PathBuf>,
+
+    #[arg(skip)]
+    #[serde(default, rename = "agent_permission", alias = "code_exec_permission")]
+    pub code_exec_permission: CodeExecPermissionArg,
 }
 
 #[derive(clap::Args, Clone, Default)]
@@ -542,6 +551,10 @@ pub struct AgentCliOptions {
     #[cfg(feature = "code-execution")]
     #[arg(long)]
     pub code_exec_workdir: Option<PathBuf>,
+
+    /// Agent action permission mode.
+    #[arg(long = "agent-permission", alias = "code-exec-permission", value_enum, default_value_t = CodeExecPermissionArg::Auto)]
+    pub code_exec_permission: CodeExecPermissionArg,
 }
 
 impl AgentCliOptions {
@@ -556,6 +569,7 @@ impl AgentCliOptions {
             runtime.code_exec_timeout = self.code_exec_timeout;
             runtime.code_exec_workdir = self.code_exec_workdir;
         }
+        runtime.code_exec_permission = self.code_exec_permission;
     }
 }
 
@@ -588,6 +602,15 @@ impl BenchRuntimeOptions {
 #[serde(rename_all = "kebab-case")]
 pub enum SearchEmbeddingModelArg {
     EmbeddingGemma,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CodeExecPermissionArg {
+    #[default]
+    Auto,
+    Ask,
+    Deny,
 }
 
 /// Tuning profile options
@@ -635,12 +658,33 @@ impl From<SearchEmbeddingModelArg> for mistralrs_core::SearchEmbeddingModel {
     }
 }
 
+impl From<CodeExecPermissionArg> for mistralrs_core::CodeExecutionPermission {
+    fn from(value: CodeExecPermissionArg) -> Self {
+        match value {
+            CodeExecPermissionArg::Auto => mistralrs_core::CodeExecutionPermission::Auto,
+            CodeExecPermissionArg::Ask => mistralrs_core::CodeExecutionPermission::Ask,
+            CodeExecPermissionArg::Deny => mistralrs_core::CodeExecutionPermission::Deny,
+        }
+    }
+}
+
+impl From<CodeExecPermissionArg> for mistralrs_core::AgentPermission {
+    fn from(value: CodeExecPermissionArg) -> Self {
+        match value {
+            CodeExecPermissionArg::Auto => mistralrs_core::AgentPermission::Auto,
+            CodeExecPermissionArg::Ask => mistralrs_core::AgentPermission::Ask,
+            CodeExecPermissionArg::Deny => mistralrs_core::AgentPermission::Deny,
+        }
+    }
+}
+
 impl Default for GlobalOptions {
     fn default() -> Self {
         Self {
             seed: None,
             log: None,
             token_source: TokenSource::CacheToken,
+            verbose: 0,
         }
     }
 }
@@ -667,6 +711,7 @@ impl Default for RuntimeOptions {
             code_exec_timeout: None,
             #[cfg(feature = "code-execution")]
             code_exec_workdir: None,
+            code_exec_permission: CodeExecPermissionArg::Auto,
         }
     }
 }

@@ -196,6 +196,7 @@ impl GlobalOptionsToml {
             seed: self.seed,
             log: self.log.clone(),
             token_source,
+            verbose: 0,
         })
     }
 }

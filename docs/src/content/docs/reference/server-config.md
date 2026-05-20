@@ -40,6 +40,7 @@ For the full TOML schema, see the [CLI TOML config reference](/mistral.rs/refere
 | `--code-exec-python` | `runtime.code_exec_python` | `python` on Windows, `python3` elsewhere | Python interpreter for code execution. |
 | `--code-exec-workdir` | `runtime.code_exec_workdir` | per-session temp dir | Code execution working directory. |
 | `--code-exec-timeout` | `runtime.code_exec_timeout` | 30 | Code execution timeout (seconds). |
+| `--agent-permission` | `runtime.agent_permission` | `auto` | `auto`, `ask`, or `deny`. Controls whether agent actions run automatically, require approval, or are denied. See [agent permissions](/mistral.rs/guides/agents/agentic-runtime/#agent-permissions). `--code-exec-permission` and `runtime.code_exec_permission` are accepted as aliases. |
 
 ## Paged attention
 
@@ -60,7 +61,7 @@ CORS allowed origins and the request body limit (default 50 MB) are configurable
 
 | Variable | Meaning |
 |---|---|
-| `RUST_LOG` | `tracing` log filter. |
+| `RUST_LOG` | Override the `tracing` log filter. CLI users can usually use `-v` or `-vv` instead. |
 | `HF_HOME` | Hugging Face cache root. |
 | `HF_TOKEN` | Override cached auth token. |
 | `HF_HUB_OFFLINE` | `HF_HUB_OFFLINE=1` runs fully offline; only the local Hugging Face cache is consulted and no network calls are made. |
