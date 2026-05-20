@@ -17,10 +17,14 @@ mistralrs serve --host 127.0.0.1 --port 8080 -m <model>
 
 ## CORS and body limit
 
-By default, the server blocks cross-origin requests (same-origin only). Use the `--cors-origins` flag to allow specific origins:
+By default, the server blocks cross-origin requests (same-origin only). Use the `--cors-origins` flag to allow specific origins, or `--cors-origins-any` to allow any origin:
 
 ```bash
+# Specific origins
 mistralrs serve --cors-origins http://localhost:3000,https://app.example.com -m <model>
+
+# Any origin (permissive)
+mistralrs serve --cors-origins-any -m <model>
 ```
 
 The request body limit is not exposed as a CLI flag. It can be configured programmatically through `MistralRsServerRouterBuilder` in `mistralrs-server-core`.

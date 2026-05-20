@@ -123,6 +123,7 @@ pub async fn run_server(
         .with_max_tool_rounds_optional(server.max_tool_rounds)
         .with_tool_dispatch_url_optional(server.tool_dispatch_url.clone())
         .with_allowed_origins_optional(server.cors_origins)
+        .with_allow_any_origin(server.cors_origins_any)
         .with_agent_permission(runtime.code_exec_permission.into())
         .with_approval_broker(approval_broker.clone())
         .build()

@@ -84,6 +84,8 @@ pub struct MistralRsServerRouterBuilder {
     base_path: Option<String>,
     /// Optional CORS allowed origins
     allowed_origins: Option<Vec<String>>,
+    /// Allow any CORS origin
+    allow_any_origin: bool,
     /// Optional axum default request body limit
     max_body_limit: Option<usize>,
     /// Server-level agentic defaults
@@ -100,6 +102,7 @@ impl Default for MistralRsServerRouterBuilder {
             #[cfg(feature = "swagger-ui")]
             base_path: None,
             allowed_origins: None,
+            allow_any_origin: false,
             max_body_limit: None,
             agentic_defaults: AgenticDefaults::default(),
         }
@@ -164,6 +167,12 @@ impl MistralRsServerRouterBuilder {
         if let Some(origins) = origins {
             self.allowed_origins = Some(origins);
         }
+        self
+    }
+
+    /// Sets whether to allow any CORS origin.
+    pub fn with_allow_any_origin(mut self, allow_any_origin: bool) -> Self {
+        self.allow_any_origin = allow_any_origin;
         self
     }
 
@@ -239,6 +248,7 @@ impl MistralRsServerRouterBuilder {
         let mut router = init_router(
             mistralrs,
             self.allowed_origins,
+            self.allow_any_origin,
             self.max_body_limit,
             self.agentic_defaults,
         )?;
@@ -264,10 +274,18 @@ impl MistralRsServerRouterBuilder {
 fn init_router(
     state: SharedMistralRsState,
     allowed_origins: Option<Vec<String>>,
+    allow_any_origin: bool,
     max_body_limit: Option<usize>,
     agentic_defaults: AgenticDefaults,
 ) -> Result<Router> {
-    let cors_layer = if let Some(origins) = allowed_origins {
+    let cors_layer = if allow_any_origin {
+        Some(
+            CorsLayer::new()
+                .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
+                .allow_headers([http::header::CONTENT_TYPE, http::header::AUTHORIZATION])
+                .allow_origin(AllowOrigin::any()),
+        )
+    } else if let Some(origins) = allowed_origins {
         let parsed_origins: Result<Vec<_>, _> = origins.into_iter().map(|o| o.parse()).collect();
 
         let allow_origin = match parsed_origins {

@@ -14,6 +14,7 @@ For the full TOML schema, see the [CLI TOML config reference](/mistral.rs/refere
 | `--host` | `server.host` | `0.0.0.0` | Bind interface. |
 | `-p`, `--port` | `server.port` | `1234` | TCP port. |
 | `--cors-origins` | `server.cors_origins` | same-origin | Allowed origins for CORS (comma-separated). |
+| `--cors-origins-any` | `server.cors_origins_any` | false | Allow any CORS origin (permissive). |
 
 ## Web UI
 

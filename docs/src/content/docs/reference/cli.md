@@ -153,6 +153,7 @@ OS-level isolation applied to the code-execution subprocess. See [sandbox refere
 | `-p`, `--port <port>` | 1234 | TCP port. |
 | `--no-ui` | off | Disable the built-in web UI (mounted at `/ui` by default). |
 | `--cors-origins <list>` | same-origin | Allowed origins for CORS (comma-separated). |
+| `--cors-origins-any` | off | Allow any CORS origin (permissive). |
 | `--mcp-port <port>` | not set | Enable MCP server on a separate port. |
 | `--max-tool-rounds <n>` | not set | Cap on agentic tool loop rounds. |
 | `--tool-dispatch-url <url>` | not set | External URL for tool execution. |

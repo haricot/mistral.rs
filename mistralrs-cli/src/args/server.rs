@@ -34,9 +34,14 @@ pub struct ServerOptions {
     pub tool_dispatch_url: Option<String>,
 
     /// CORS allowed origins. Same-origin only by default.
-    #[arg(long, value_delimiter = ',')]
+    #[arg(long, value_delimiter = ',', conflicts_with = "cors_origins_any")]
     #[serde(default)]
     pub cors_origins: Option<Vec<String>>,
+
+    /// Allow any CORS origin. Same-origin only by default.
+    #[arg(long)]
+    #[serde(default)]
+    pub cors_origins_any: bool,
 }
 
 impl Default for ServerOptions {
@@ -48,6 +53,7 @@ impl Default for ServerOptions {
             max_tool_rounds: None,
             tool_dispatch_url: None,
             cors_origins: None,
+            cors_origins_any: false,
         }
     }
 }
