@@ -33,36 +33,36 @@ pub async fn run_server(
 ) -> Result<()> {
     if let Some(srv_config) = srv_config {
         let content = std::fs::read_to_string(&srv_config)?;
-        let config: crate::args::ServerConfig = toml::from_str(&content)?;
+        let config: crate::args::server::ServerConfig = toml::from_str(&content)?;
         if let Some(server_config) = config.server {
             // Only update fields that were provided in the TOML file.
             // This ensures CLI flags take precedence where they exist.
-            if server_config.port != 1234 {
-                server.port = server_config.port;
+            if let Some(port) = server_config.port {
+                server.port = port;
             }
-            if server_config.host != "0.0.0.0" {
-                server.host = server_config.host;
+            if let Some(host) = server_config.host {
+                server.host = host;
             }
-            if server_config.no_ui {
-                server.no_ui = server_config.no_ui;
+            if let Some(no_ui) = server_config.no_ui {
+                server.no_ui = no_ui;
             }
-            if server_config.max_tool_rounds.is_some() {
-                server.max_tool_rounds = server_config.max_tool_rounds;
+            if let Some(max_tool_rounds) = server_config.max_tool_rounds {
+                server.max_tool_rounds = Some(max_tool_rounds);
             }
-            if server_config.tool_dispatch_url.is_some() {
-                server.tool_dispatch_url = server_config.tool_dispatch_url;
+            if let Some(tool_dispatch_url) = server_config.tool_dispatch_url {
+                server.tool_dispatch_url = Some(tool_dispatch_url);
             }
-            if server_config.cors_origins.is_some() {
-                server.cors_origins = server_config.cors_origins;
+            if let Some(cors_origins) = server_config.cors_origins {
+                server.cors_origins = Some(cors_origins);
             }
-            if server_config.base_path.is_some() {
-                server.base_path = server_config.base_path;
+            if let Some(base_path) = server_config.base_path {
+                server.base_path = Some(base_path);
             }
-            if !server_config.include_swagger_routes {
-                server.include_swagger_routes = server_config.include_swagger_routes;
+            if let Some(include_swagger_routes) = server_config.include_swagger_routes {
+                server.include_swagger_routes = include_swagger_routes;
             }
-            if server_config.max_body_limit.is_some() {
-                server.max_body_limit = server_config.max_body_limit;
+            if let Some(max_body_limit) = server_config.max_body_limit {
+                server.max_body_limit = Some(max_body_limit);
             }
         }
     }

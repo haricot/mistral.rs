@@ -7,7 +7,7 @@ mod model;
 mod paged_attn;
 mod quantize;
 mod sandbox;
-mod server;
+pub mod server;
 
 pub use model::*;
 pub use paged_attn::*;

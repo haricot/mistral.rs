@@ -55,8 +55,21 @@ pub struct ServerOptions {
 }
 
 #[derive(Deserialize, Default)]
+pub struct ServerOptionsToml {
+    pub port: Option<u16>,
+    pub host: Option<String>,
+    pub no_ui: Option<bool>,
+    pub max_tool_rounds: Option<usize>,
+    pub tool_dispatch_url: Option<String>,
+    pub cors_origins: Option<Vec<String>>,
+    pub base_path: Option<String>,
+    pub include_swagger_routes: Option<bool>,
+    pub max_body_limit: Option<usize>,
+}
+
+#[derive(Deserialize, Default)]
 pub struct ServerConfig {
-    pub server: Option<ServerOptions>,
+    pub server: Option<ServerOptionsToml>,
 }
 
 impl Default for ServerOptions {
