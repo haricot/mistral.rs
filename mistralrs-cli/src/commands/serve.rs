@@ -25,17 +25,45 @@ use crate::ui::build_ui_router;
 pub async fn run_server(
     mut model_type: ModelType,
     mut server: ServerOptions,
-    config_srv: Option<PathBuf>,
+    srv_config: Option<PathBuf>,
     mut runtime: RuntimeOptions,
     agent_options: AgentCliOptions,
     sandbox: SandboxOptions,
     global: GlobalOptions,
 ) -> Result<()> {
-    if let Some(config_srv) = config_srv {
-        let content = std::fs::read_to_string(&config_srv)?;
+    if let Some(srv_config) = srv_config {
+        let content = std::fs::read_to_string(&srv_config)?;
         let config: crate::args::ServerConfig = toml::from_str(&content)?;
         if let Some(server_config) = config.server {
-            server = server_config;
+            // Only update fields that were provided in the TOML file.
+            // This ensures CLI flags take precedence where they exist.
+            if server_config.port != 1234 {
+                server.port = server_config.port;
+            }
+            if server_config.host != "0.0.0.0" {
+                server.host = server_config.host;
+            }
+            if server_config.no_ui {
+                server.no_ui = server_config.no_ui;
+            }
+            if server_config.max_tool_rounds.is_some() {
+                server.max_tool_rounds = server_config.max_tool_rounds;
+            }
+            if server_config.tool_dispatch_url.is_some() {
+                server.tool_dispatch_url = server_config.tool_dispatch_url;
+            }
+            if server_config.cors_origins.is_some() {
+                server.cors_origins = server_config.cors_origins;
+            }
+            if server_config.base_path.is_some() {
+                server.base_path = server_config.base_path;
+            }
+            if !server_config.include_swagger_routes {
+                server.include_swagger_routes = server_config.include_swagger_routes;
+            }
+            if server_config.max_body_limit.is_some() {
+                server.max_body_limit = server_config.max_body_limit;
+            }
         }
     }
 

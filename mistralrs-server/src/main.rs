@@ -158,9 +158,6 @@ struct Args {
     #[arg(long)]
     mcp_config: Option<String>,
 
-    /// CORS allowed origins. Permissive by default.
-    #[arg(long, value_delimiter = ',')]
-    cors_origins: Option<Vec<String>>,
 }
 
 fn parse_token_source(s: &str) -> Result<TokenSource, String> {
@@ -460,7 +457,6 @@ async fn main() -> Result<()> {
 
         let app = MistralRsServerRouterBuilder::new()
             .with_mistralrs(mistralrs)
-            .with_allowed_origins_optional(args.cors_origins)
             .build()
             .await?;
 

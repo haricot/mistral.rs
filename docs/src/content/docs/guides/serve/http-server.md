@@ -17,16 +17,10 @@ mistralrs serve --host 127.0.0.1 --port 8080 -m <model>
 
 ## CORS and body limit
 
-By default, the server allows cross-origin requests from any origin. You can restrict this using the `--cors-origins` flag:
+By default, the server allows cross-origin requests from any origin. For advanced server configuration (CORS, Swagger, body limits), you can use a TOML file with `--srv-config`:
 
 ```bash
-mistralrs serve --cors-origins http://localhost:3000,https://app.example.com -m <model>
-```
-
-For advanced server configuration (CORS, Swagger, body limits), you can use a TOML file with `--config-srv`:
-
-```bash
-mistralrs serve --config-srv server-config.toml -m <model>
+mistralrs serve --srv-config server-config.toml -m <model>
 ```
 
 The default body limit is 50 MB. Allowed methods are `GET`, `POST`, `PUT`, `DELETE`; allowed headers include `Content-Type` and `Authorization`.

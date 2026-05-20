@@ -51,7 +51,7 @@ Check the `Server listening on http://...` line in the server output to confirm 
 
 ### CORS errors in a browser
 
-By default, the server allows any origin. If you have restricted it using `--cors-origins`, ensure the origin from which you are making the request is in the list.
+By default, the server allows any origin. If you have restricted it using `--srv-config`, ensure the origin from which you are making the request is in the list.
 
 ### `413 Payload Too Large`
 

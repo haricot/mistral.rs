@@ -50,7 +50,7 @@ pub enum Command {
 
         /// Path to a server configuration file (.toml). Overrides CLI server options.
         #[arg(long)]
-        config_srv: Option<PathBuf>,
+        srv_config: Option<PathBuf>,
 
         #[command(flatten)]
         runtime: RuntimeOptions,

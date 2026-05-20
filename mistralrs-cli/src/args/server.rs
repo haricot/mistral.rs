@@ -34,22 +34,22 @@ pub struct ServerOptions {
     pub tool_dispatch_url: Option<String>,
 
     /// CORS allowed origins. Permissive by default.
-    #[arg(long, value_delimiter = ',')]
+    #[arg(skip)]
     #[serde(default)]
     pub cors_origins: Option<Vec<String>>,
 
     /// Base path prefix for Swagger UI routes.
-    #[arg(long)]
+    #[arg(skip)]
     #[serde(default)]
     pub base_path: Option<String>,
 
     /// Whether to include Swagger/OpenAPI documentation routes.
-    #[arg(long, default_value_t = true)]
+    #[arg(skip)]
     #[serde(default = "default_true")]
     pub include_swagger_routes: bool,
 
     /// Maximum request body limit in bytes.
-    #[arg(long)]
+    #[arg(skip)]
     #[serde(default)]
     pub max_body_limit: Option<usize>,
 }
