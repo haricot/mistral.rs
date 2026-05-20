@@ -157,7 +157,6 @@ struct Args {
     /// MCP client configuration file path
     #[arg(long)]
     mcp_config: Option<String>,
-
 }
 
 fn parse_token_source(s: &str) -> Result<TokenSource, String> {
