@@ -13,6 +13,7 @@ For the full TOML schema, see the [CLI TOML config reference](/mistral.rs/refere
 |---|---|---|---|
 | `--host` | `server.host` | `0.0.0.0` | Bind interface. |
 | `-p`, `--port` | `server.port` | `1234` | TCP port. |
+| `--cors-origins` | `server.cors_origins` | same-origin | Allowed origins for CORS (comma-separated). |
 
 ## Web UI
 
@@ -55,7 +56,7 @@ For the full TOML schema, see the [CLI TOML config reference](/mistral.rs/refere
 
 ## Not exposed via CLI
 
-CORS allowed origins and the request body limit (default 50 MB) are configurable only programmatically through `MistralRsServerRouterBuilder` in `mistralrs-server-core`.
+The request body limit (default 50 MB) is configurable only programmatically through `MistralRsServerRouterBuilder` in `mistralrs-server-core`.
 
 ## Environment variables
 

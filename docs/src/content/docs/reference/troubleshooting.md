@@ -51,7 +51,11 @@ Check the `Server listening on http://...` line in the server output to confirm 
 
 ### CORS errors in a browser
 
-The default allows any origin. Custom CORS configuration is only available programmatically through `MistralRsServerRouterBuilder`.
+By default, the server is secure and only allows same-origin requests. Use the `--cors-origins` flag to allow specific origins:
+
+```bash
+mistralrs serve --cors-origins http://localhost:3000 -m <model>
+```
 
 ### `413 Payload Too Large`
 

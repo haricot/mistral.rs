@@ -152,11 +152,12 @@ OS-level isolation applied to the code-execution subprocess. See [sandbox refere
 | `--host <ip>` | `0.0.0.0` | Bind address. |
 | `-p`, `--port <port>` | 1234 | TCP port. |
 | `--no-ui` | off | Disable the built-in web UI (mounted at `/ui` by default). |
+| `--cors-origins <list>` | same-origin | Allowed origins for CORS (comma-separated). |
 | `--mcp-port <port>` | not set | Enable MCP server on a separate port. |
 | `--max-tool-rounds <n>` | not set | Cap on agentic tool loop rounds. |
 | `--tool-dispatch-url <url>` | not set | External URL for tool execution. |
 
-CORS allowed origins and the request body limit (default 50 MB) are not exposed as CLI flags. They can be configured programmatically through `MistralRsServerRouterBuilder` in `mistralrs-server-core`.
+The request body limit (default 50 MB) is not exposed as a CLI flag. It can be configured programmatically through `MistralRsServerRouterBuilder` in `mistralrs-server-core`.
 
 ## `mistralrs run` flags
 
