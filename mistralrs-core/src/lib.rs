@@ -304,7 +304,7 @@ pub use speech_models::{utils as speech_utils, SpeechGenerationConfig, SpeechLoa
 use tokio::runtime::Runtime;
 use toml_selector::{TomlLoaderArgs, TomlSelector};
 pub use tools::{ToolCallResponse, ToolCallType, ToolCallbacks, ToolChoice};
-pub use topology::{LayerTopology, Topology};
+pub use topology::{LayerTopology, SubmodelTopology, SubmodelsTopology, Topology};
 pub use utils::debug::initialize_logging;
 pub use utils::memory_usage::MemoryUsage;
 pub use utils::normal::{ModelDType, TryIntoDType};

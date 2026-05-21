@@ -602,6 +602,7 @@ macro_rules! normal_model_loader {
         $attention_mechanism:expr,
         $is_moqe:expr,
         $multi_progress:expr,
+        $topology:expr,
         $matformer_config:expr,
     ) => {{
         let regexes = if $loading_isq && $loading_uqff {
@@ -637,6 +638,7 @@ macro_rules! normal_model_loader {
                 loading_isq: $loading_isq,
                 real_device: $real_device,
                 multi_progress: $multi_progress,
+                topology: $topology,
                 matformer_slicing_config: $matformer_config,
             },
             $attention_mechanism,
@@ -656,6 +658,7 @@ macro_rules! normal_model_loader_sharded {
         $real_device:expr,
         $attention_mechanism:expr,
         $multi_progress:expr,
+        $topology:expr,
         $matformer_config:expr,
     ) => {{
         $loader.load(
@@ -666,6 +669,7 @@ macro_rules! normal_model_loader_sharded {
                 loading_isq: $loading_isq,
                 real_device: $real_device,
                 multi_progress: $multi_progress,
+                topology: $topology,
                 matformer_slicing_config: $matformer_config,
             },
             $attention_mechanism,
@@ -691,6 +695,7 @@ macro_rules! multimodal_normal_model_loader {
         $attention_mechanism:expr,
         $is_moqe:expr,
         $multi_progress:expr,
+        $topology:expr,
         $matformer_config:expr,
     ) => {{
         let regexes = if $loading_isq && $loading_uqff {
@@ -726,6 +731,7 @@ macro_rules! multimodal_normal_model_loader {
                 loading_isq: $loading_isq,
                 real_device: $real_device,
                 multi_progress: $multi_progress,
+                topology: $topology,
                 matformer_slicing_config: $matformer_config,
             },
             $attention_mechanism,
@@ -745,6 +751,7 @@ macro_rules! multimodal_normal_model_loader_sharded {
         $real_device:expr,
         $attention_mechanism:expr,
         $multi_progress:expr,
+        $topology:expr,
         $matformer_config:expr,
     ) => {{
         $loader.load(
@@ -755,6 +762,7 @@ macro_rules! multimodal_normal_model_loader_sharded {
                 loading_isq: $loading_isq,
                 real_device: $real_device,
                 multi_progress: $multi_progress,
+                topology: $topology,
                 matformer_slicing_config: $matformer_config,
             },
             $attention_mechanism,
@@ -809,6 +817,7 @@ macro_rules! embedding_normal_model_loader {
                 loading_isq: $loading_isq,
                 real_device: $real_device,
                 multi_progress: $multi_progress,
+                topology: None,
                 matformer_slicing_config: None,
             },
             $attention_mechanism,
@@ -837,6 +846,7 @@ macro_rules! embedding_normal_model_loader_sharded {
                 loading_isq: $loading_isq,
                 real_device: $real_device,
                 multi_progress: $multi_progress,
+                topology: None,
                 matformer_slicing_config: None,
             },
             $attention_mechanism,
@@ -910,6 +920,7 @@ macro_rules! xlora_model_loader {
                 loading_isq: $loading_isq,
                 real_device: $real_device,
                 multi_progress: $multi_progress,
+                topology: None,
                 matformer_slicing_config: $matformer_config,
             },
             &None,
@@ -998,6 +1009,7 @@ macro_rules! lora_model_loader {
                 loading_isq: $loading_isq,
                 real_device: $real_device,
                 multi_progress: $multi_progress,
+                topology: None,
                 matformer_slicing_config: $matformer_config,
             },
             $attention_mechanism,

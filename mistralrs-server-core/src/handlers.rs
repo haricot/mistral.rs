@@ -360,6 +360,7 @@ pub async fn tune_model(
         max_batch_size,
         max_num_images: request.max_num_images,
         max_image_length: request.max_image_length,
+        text_only: false,
         hf_cache_path: None,
         matformer_config_path: None,
         matformer_slice_name: None,

@@ -55,6 +55,22 @@ impl LoaderBuilder {
     }
 }
 
+fn topology_with_text_only(
+    topology: Option<String>,
+    text_only: bool,
+) -> anyhow::Result<Option<Topology>> {
+    let topology = Topology::from_option_path(topology)?;
+    if text_only {
+        Ok(Some(
+            topology
+                .unwrap_or_else(Topology::empty)
+                .with_vision_disabled(),
+        ))
+    } else {
+        Ok(topology)
+    }
+}
+
 pub fn get_tgt_non_granular_index(model: &ModelSelected) -> Option<usize> {
     match model {
         ModelSelected::Plain { .. }
@@ -171,9 +187,15 @@ pub fn get_auto_device_map_params(model: &ModelSelected) -> anyhow::Result<AutoD
             max_batch_size,
             max_image_length,
             max_num_images,
+            text_only,
             ..
         } => {
-            if max_num_images.is_some() || max_image_length.is_some() {
+            if *text_only {
+                Ok(AutoDeviceMapParams::Text {
+                    max_seq_len: *max_seq_len,
+                    max_batch_size: *max_batch_size,
+                })
+            } else if max_num_images.is_some() || max_image_length.is_some() {
                 let max_image_length =
                     max_image_length.unwrap_or(AutoDeviceMapParams::DEFAULT_MAX_IMAGE_LENGTH);
                 Ok(AutoDeviceMapParams::Multimodal {
@@ -287,13 +309,17 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
             max_batch_size: _,
             max_num_images: _,
             max_image_length: _,
+            text_only,
             hf_cache_path,
             matformer_config_path,
             matformer_slice_name,
         } => {
+            let normal_topology = topology_with_text_only(topology.clone(), text_only)?;
+            let multimodal_topology = topology_with_text_only(topology.clone(), text_only)?;
+            let embedding_topology = Topology::from_option_path(topology)?;
             let builder = AutoLoaderBuilder::new(
                 NormalSpecificConfig {
-                    topology: Topology::from_option_path(topology.clone())?,
+                    topology: normal_topology,
                     organization: organization.unwrap_or_default(),
                     write_uqff: write_uqff.clone(),
                     from_uqff: from_uqff.clone().map(|x| {
@@ -309,7 +335,7 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
                     matformer_slice_name: matformer_slice_name.clone(),
                 },
                 MultimodalSpecificConfig {
-                    topology: Topology::from_option_path(topology.clone())?,
+                    topology: multimodal_topology,
                     write_uqff: write_uqff.clone(),
                     from_uqff: from_uqff.clone().map(|x| {
                         x.split(UQFF_MULTI_FILE_DELIMITER)
@@ -326,7 +352,7 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
                     organization: organization.unwrap_or_default(),
                 },
                 EmbeddingSpecificConfig {
-                    topology: Topology::from_option_path(topology)?,
+                    topology: embedding_topology,
                     write_uqff,
                     from_uqff: from_uqff.map(|x| {
                         x.split(UQFF_MULTI_FILE_DELIMITER)

@@ -27,6 +27,21 @@ A YAML file keyed by `start-end` layer-range selectors:
 
 Layers outside any range use defaults. `device` is a CUDA (`cuda[N]`), Metal (`metal[N]`), or CPU (`cpu`) specifier. `isq` accepts any ISQ type name recognized by `--isq`.
 
+## Submodels
+
+Supported multimodal models can use a `submodels` block to select which modality-specific paths are loaded. For example, Qwen3.5 MoE can skip the vision tower for text-only runs:
+
+```yaml
+submodels:
+  vision:
+    load: false
+
+0-40:
+  device: cuda[0]
+```
+
+`enabled: false` is accepted as an alias for `load: false`. Image or video inputs fail with a clear error while the vision submodel is disabled.
+
 Pass with `--topology`:
 
 ```bash

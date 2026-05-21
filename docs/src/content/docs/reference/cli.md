@@ -47,6 +47,7 @@ Apply to subcommands that load or inspect a model (`serve`, `run`, `bench`, `tun
 | `--hf-cache <path>` | not set | Custom Hugging Face cache directory. |
 | `--max-seq-len <n>` | 4096 | Max sequence length used for automatic device mapping. |
 | `--max-batch-size <n>` | 1 | Max batch size used for automatic device mapping. |
+| `--text-only` | off | For supported auto-detected multimodal models, load only the text path. |
 
 ## Shared generation runtime flags
 

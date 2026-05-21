@@ -334,7 +334,7 @@ pub use mistralrs_core::SpeculativeConfig;
 pub use mistralrs_core::{AutoDeviceMapParams, DeviceMapSetting};
 
 // ========== Topology ==========
-pub use mistralrs_core::{LayerTopology, Topology};
+pub use mistralrs_core::{LayerTopology, SubmodelTopology, SubmodelsTopology, Topology};
 
 // ========== Loader Types ==========
 pub use mistralrs_core::{MultimodalLoaderType, NormalLoaderType};

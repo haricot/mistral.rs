@@ -18,11 +18,39 @@ pub struct DeserLayerTopology {
 }
 
 #[derive(Deserialize)]
-pub struct DeserTopology(IndexMap<String, DeserLayerTopology>);
+pub struct DeserTopology {
+    #[serde(default)]
+    submodels: Option<DeserSubmodelsTopology>,
+    #[serde(flatten)]
+    layers: IndexMap<String, DeserLayerTopology>,
+}
+
+#[derive(Deserialize)]
+pub struct DeserSubmodelsTopology {
+    vision: Option<DeserSubmodelTopology>,
+}
+
+#[derive(Deserialize)]
+pub struct DeserSubmodelTopology {
+    load: Option<bool>,
+    enabled: Option<bool>,
+    device: Option<String>,
+}
 
 #[derive(Clone, Debug)]
 pub struct LayerTopology {
     pub isq: Option<IsqType>,
+    pub device: Option<Device>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SubmodelsTopology {
+    pub vision: Option<SubmodelTopology>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SubmodelTopology {
+    pub load: bool,
     pub device: Option<Device>,
 }
 
@@ -61,6 +89,7 @@ impl PartialOrd for CustomRange {
 pub struct Topology {
     pub layers: Vec<Option<LayerTopology>>,
     pub patterns: Vec<(Regex, LayerTopology)>,
+    pub submodels: SubmodelsTopology,
 }
 
 impl Topology {
@@ -69,6 +98,7 @@ impl Topology {
         Topology {
             layers: Vec::new(),
             patterns: Vec::new(),
+            submodels: SubmodelsTopology::default(),
         }
     }
 
@@ -76,7 +106,16 @@ impl Topology {
         Topology {
             layers: vec![None; cap],
             patterns: Vec::new(),
+            submodels: SubmodelsTopology::default(),
         }
+    }
+
+    pub fn with_vision_disabled(mut self) -> Self {
+        self.submodels.vision = Some(SubmodelTopology {
+            load: false,
+            device: None,
+        });
+        self
     }
 
     pub fn is_dummy_device_map(&self) -> bool {
@@ -107,8 +146,10 @@ impl Topology {
 
         let mut range_layers = Vec::new();
         let mut pattern_layers = Vec::new();
+        let submodels = parse_submodels_topology(deser.submodels, &device_regex)?;
+
         for (index, (selector, DeserLayerTopology { isq, device })) in
-            deser.0.into_iter().enumerate()
+            deser.layers.into_iter().enumerate()
         {
             let parsed_isq = if let Some(isq) = isq {
                 Some(parse_isq_value(&isq, None).map_err(anyhow::Error::msg)?)
@@ -116,28 +157,7 @@ impl Topology {
                 None
             };
 
-            let parsed_device = if let Some(device) = device {
-                let Some(captures) = device_regex.captures(&device) else {
-                    anyhow::bail!(
-                        "Device specifier must match regex {DEVICE_PATTERN}. Examples: `cpu`, `cuda[ORD]`, `metal[ORD]`"
-                    );
-                };
-                let device = if let Some(val) = captures.get(2).or(captures.get(3)) {
-                    let ord = val.as_str().parse::<usize>()?;
-                    let device = device.split('[').collect::<Vec<_>>()[0];
-                    match device {
-                        "cuda" => Device::new_cuda(ord)?,
-                        "metal" => Device::new_metal(ord)?,
-                        _ => unreachable!(),
-                    }
-                } else {
-                    Device::Cpu
-                };
-
-                Some(device)
-            } else {
-                None
-            };
+            let parsed_device = parse_optional_device(device, &device_regex)?;
 
             if selector.starts_with('/') && selector.ends_with('/') && selector.len() >= 2 {
                 let pattern = &selector[1..selector.len() - 1];
@@ -193,6 +213,7 @@ impl Topology {
             }
         }
         this.patterns = pattern_layers;
+        this.submodels = submodels;
         Ok(this)
     }
 
@@ -244,6 +265,70 @@ impl Topology {
                 .is_some_and(|layer| layer.isq.is_some() || layer.device.is_some())
         })
     }
+}
+
+fn parse_submodels_topology(
+    submodels: Option<DeserSubmodelsTopology>,
+    device_regex: &Regex,
+) -> anyhow::Result<SubmodelsTopology> {
+    let Some(submodels) = submodels else {
+        return Ok(SubmodelsTopology::default());
+    };
+
+    Ok(SubmodelsTopology {
+        vision: submodels
+            .vision
+            .map(|vision| parse_submodel_topology("vision", vision, device_regex))
+            .transpose()?,
+    })
+}
+
+fn parse_submodel_topology(
+    name: &str,
+    submodel: DeserSubmodelTopology,
+    device_regex: &Regex,
+) -> anyhow::Result<SubmodelTopology> {
+    let load = match (submodel.load, submodel.enabled) {
+        (Some(load), Some(enabled)) if load != enabled => {
+            anyhow::bail!("Topology submodel `{name}` has conflicting `load` and `enabled` values.")
+        }
+        (Some(load), _) => load,
+        (_, Some(enabled)) => enabled,
+        (None, None) => true,
+    };
+
+    Ok(SubmodelTopology {
+        load,
+        device: parse_optional_device(submodel.device, device_regex)?,
+    })
+}
+
+fn parse_optional_device(
+    device: Option<String>,
+    device_regex: &Regex,
+) -> anyhow::Result<Option<Device>> {
+    let Some(device) = device else {
+        return Ok(None);
+    };
+
+    let Some(captures) = device_regex.captures(&device) else {
+        anyhow::bail!(
+            "Device specifier must match regex {DEVICE_PATTERN}. Examples: `cpu`, `cuda[ORD]`, `metal[ORD]`"
+        );
+    };
+    let device = if let Some(val) = captures.get(2).or(captures.get(3)) {
+        let ord = val.as_str().parse::<usize>()?;
+        let device = device.split('[').collect::<Vec<_>>()[0];
+        match device {
+            "cuda" => Device::new_cuda(ord)?,
+            "metal" => Device::new_metal(ord)?,
+            _ => unreachable!(),
+        }
+    } else {
+        Device::Cpu
+    };
+
+    Ok(Some(device))
 }
 
 #[cfg(test)]
@@ -301,5 +386,57 @@ mod tests {
         let yaml = "0-2:\n  isq: Q4K\n";
         let topology = Topology::from_str(yaml).expect("topology parses");
         assert!(topology.match_for_name("transformer.wte.weight").is_none());
+    }
+
+    #[test]
+    fn parses_submodel_topology() {
+        let yaml = r#"
+submodels:
+  vision:
+    load: false
+    device: cpu
+
+0-2:
+  device: cpu
+"#;
+        let topology = Topology::from_str(yaml).expect("topology parses");
+        let vision = topology
+            .submodels
+            .vision
+            .as_ref()
+            .expect("vision submodel topology");
+
+        assert!(!vision.load);
+        assert!(vision.device.as_ref().is_some_and(Device::is_cpu));
+        assert!(topology.layer_for(0).is_some());
+    }
+
+    #[test]
+    fn parses_submodel_enabled_alias() {
+        let yaml = r#"
+submodels:
+  vision:
+    enabled: false
+"#;
+        let topology = Topology::from_str(yaml).expect("topology parses");
+        assert!(
+            !topology
+                .submodels
+                .vision
+                .as_ref()
+                .expect("vision submodel topology")
+                .load
+        );
+    }
+
+    #[test]
+    fn rejects_conflicting_submodel_flags() {
+        let yaml = r#"
+submodels:
+  vision:
+    load: false
+    enabled: true
+"#;
+        assert!(Topology::from_str(yaml).is_err());
     }
 }

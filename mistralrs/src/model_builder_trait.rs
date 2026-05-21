@@ -1135,6 +1135,7 @@ pub async fn build_auto_pipeline(
             max_batch_size: AutoDeviceMapParams::DEFAULT_MAX_BATCH_SIZE,
             max_num_images: None,
             max_image_length: None,
+            text_only: false,
             hf_cache_path: builder.hf_cache_path.clone(),
             matformer_config_path: builder.matformer_config_path.clone(),
             matformer_slice_name: builder.matformer_slice_name.clone(),

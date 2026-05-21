@@ -85,6 +85,8 @@ pub struct NormalLoadingMetadata {
     pub real_device: Device,
     // MultiProgress support for parallelized loading
     pub multi_progress: Arc<MultiProgress>,
+    // Optional model topology for submodel placement/loading overrides.
+    pub topology: Option<Arc<crate::Topology>>,
     // Optional Matryoshka Transformer slicing configuration
     pub matformer_slicing_config: Option<MatformerSliceConfig>,
 }

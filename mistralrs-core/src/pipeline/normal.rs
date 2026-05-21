@@ -670,6 +670,7 @@ impl Loader for NormalLoader {
                     device.clone(),
                     attention_mechanism,
                     multi_progress.clone(),
+                    self.config.topology.clone().map(Arc::new),
                     matformer_slicing_config.clone(),
                 ),
                 ModelKind::Adapter {
@@ -726,6 +727,7 @@ impl Loader for NormalLoader {
                     attention_mechanism,
                     matches!(self.config.organization, IsqOrganization::MoeExpertsOnly),
                     multi_progress.clone(),
+                    self.config.topology.clone().map(Arc::new),
                     matformer_slicing_config.clone(),
                 ),
                 ModelKind::Adapter {

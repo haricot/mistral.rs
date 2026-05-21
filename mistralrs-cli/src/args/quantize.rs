@@ -167,6 +167,10 @@ pub struct QuantizeOutputOptions {
 /// Multimodal model options for quantization
 #[derive(Args, Clone, Default)]
 pub struct QuantizeMultimodalOptions {
+    /// Load only the text path for supported multimodal models.
+    #[arg(long)]
+    pub text_only: bool,
+
     /// Maximum edge length for image resizing (aspect ratio preserved)
     #[arg(long)]
     pub max_edge: Option<u32>,
@@ -253,6 +257,10 @@ pub struct QuantizeDefaultOptions {
     #[arg(long)]
     pub uqff_repo_id: Option<String>,
 
+    /// Load only the text path for supported multimodal models.
+    #[arg(long)]
+    pub text_only: bool,
+
     /// Maximum edge length for image resizing (aspect ratio preserved)
     #[arg(long)]
     pub max_edge: Option<u32>,
@@ -307,6 +315,7 @@ impl QuantizeDefaultOptions {
                 uqff_repo_id: self.uqff_repo_id,
             },
             multimodal: QuantizeMultimodalOptions {
+                text_only: self.text_only,
                 max_edge: self.max_edge,
                 max_num_images: self.max_num_images,
                 max_image_length: self.max_image_length,
