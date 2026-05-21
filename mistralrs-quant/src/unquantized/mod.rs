@@ -692,8 +692,8 @@ mod tests {
     use candle_nn::Linear;
 
     use super::*;
-    use crate::GEMV_CONTROLLER;
     use crate::cublaslt::CUBLASLT_CONTROLLER;
+    use crate::GEMV_CONTROLLER;
 
     static CUDA_FALLBACK_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 

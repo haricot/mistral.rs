@@ -14,6 +14,14 @@ Most cases do not need topology. Defaults work for typical hardware; `mistralrs 
 A YAML file keyed by `start-end` layer-range selectors:
 
 ```yaml
+runtime:
+  cpu_moe: true
+  profile: true
+  gguf_cpu_moe_expert_cache: 0
+  gguf_cpu_moe_q4_1_expert_cache: 128
+  gguf_cpu_moe_q4k_expert_cache: 256
+  gguf_cpu_moe_parallel_topk: true
+
 0-16:
   device: cuda[0]
   isq: q4k
@@ -26,6 +34,7 @@ A YAML file keyed by `start-end` layer-range selectors:
 ```
 
 Layers outside any range use defaults. `device` is a CUDA (`cuda[N]`), Metal (`metal[N]`), or CPU (`cpu`) specifier. `isq` accepts any ISQ type name recognized by `--isq`.
+The optional `runtime` block enables model runtime knobs such as CPU MoE, profiling, and GGUF CPU MoE expert caches. Keep the generic `gguf_cpu_moe_expert_cache` low because it caches dequantized fallback experts; prefer dtype-specific caches such as `gguf_cpu_moe_q4_1_expert_cache` and `gguf_cpu_moe_q4k_expert_cache`.
 
 Pass with `--topology`:
 

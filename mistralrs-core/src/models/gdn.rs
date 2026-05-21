@@ -6,7 +6,7 @@
 
 use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
 use candle_nn::Linear;
-use mistralrs_quant::{MatMul, QuantMethod, QuantizedConfig, RowParallelLayer, ShardedVarBuilder};
+use mistralrs_quant::{QuantMethod, QuantizedConfig, RowParallelLayer, ShardedVarBuilder};
 use std::{sync::Arc, time::Instant};
 
 use crate::device_map::DeviceMapper;
@@ -15,7 +15,7 @@ fn gdn_profile_enabled() -> bool {
     matches!(
         std::env::var("MISTRALRS_GDN_PROFILE"),
         Ok(v) if !v.is_empty() && v != "0"
-    ) || crate::topology::qwen35_profile_enabled()
+    ) || crate::topology::profile_enabled()
 }
 
 fn elapsed_ms(start: Instant) -> f64 {
@@ -849,6 +849,7 @@ impl GatedDeltaNet {
         let (batch_size, seq_len, conv_dim) = x.dims3()?;
         let x_t = x.transpose(1, 2)?.contiguous()?;
         let conv_weight = self.conv1d_weight.to_device(x.device())?;
+        #[cfg(any(feature = "cuda", feature = "metal"))]
         let conv_state = cache.conv_state.to_device(x.device())?;
 
         #[cfg(feature = "cuda")]

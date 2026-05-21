@@ -175,6 +175,10 @@ impl QuantMethod for MXFP4Layer {
         (DType::BF16, self.scales.device().clone())
     }
 
+    fn unquant_weight_bias(&self) -> Option<(Tensor, Option<Tensor>)> {
+        Some((self.dequantize_w().ok()?, self.bias.clone()))
+    }
+
     fn apply_isq(
         self: Arc<Self>,
         _dtype: Option<IsqType>,

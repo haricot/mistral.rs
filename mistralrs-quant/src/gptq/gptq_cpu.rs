@@ -1,4 +1,5 @@
 use crate::{
+    gptq::cpu_dequant::{self, GptqCpuParams},
     has_missing_required_tensors, make_dummy_or_error, IsqType, QuantMethod, QuantMethodConfig,
     QuantizeOntoGuard, QuantizedConfig, QuantizedSerde, ShardedVarBuilder,
 };
@@ -6,7 +7,16 @@ use candle_core::{DType, Device, Result, Tensor};
 use std::sync::{atomic::AtomicUsize, Arc};
 
 #[derive(Debug)]
-pub struct GptqLayer;
+pub struct GptqLayer {
+    q_weight: Tensor,
+    qzeros: Option<Tensor>,
+    scales: Tensor,
+    bias: Option<Tensor>,
+    g_idx: Option<Tensor>,
+    bits: i32,
+    is_marlin: bool,
+    is_awq: bool,
+}
 
 impl QuantMethod for GptqLayer {
     fn new(method: QuantMethodConfig) -> Result<Self>
@@ -14,9 +24,26 @@ impl QuantMethod for GptqLayer {
         Self: Sized,
     {
         match method {
-            QuantMethodConfig::GptqAwq { .. } => {
-                candle_core::bail!("GPTQ is only supported on CUDA.")
-            }
+            QuantMethodConfig::GptqAwq {
+                bits,
+                q_weight,
+                qzeros,
+                scales,
+                g_idx,
+                bias,
+                is_marlin,
+                is_awq,
+                ..
+            } => Ok(Self {
+                q_weight,
+                qzeros,
+                scales,
+                g_idx,
+                bits,
+                bias,
+                is_marlin,
+                is_awq,
+            }),
             QuantMethodConfig::Gguf { .. }
             | QuantMethodConfig::Unquantized(_)
             | QuantMethodConfig::Hqq { .. }
@@ -33,23 +60,27 @@ impl QuantMethod for GptqLayer {
     }
 
     fn dequantize_w(&self) -> Result<Tensor> {
-        todo!()
+        cpu_dequant::dequantize_w(&self.cpu_params())
     }
 
-    fn forward_raw(&self, _a: &Tensor) -> Result<Tensor> {
-        todo!()
+    fn forward_raw(&self, a: &Tensor) -> Result<Tensor> {
+        cpu_dequant::forward(&self.cpu_params(), a)
     }
 
     fn quantized_act_type(&self) -> Option<DType> {
-        todo!()
+        Some(DType::F16)
+    }
+
+    fn gather_forward_raw(&self, a: &Tensor, indices: &Tensor) -> Result<Tensor> {
+        cpu_dequant::gather_forward(&self.cpu_params(), a, indices)
     }
 
     fn add_delta_w(&self, _delta: &Tensor) -> Result<Arc<dyn QuantMethod>> {
-        todo!()
+        candle_core::bail!("GPTQ quantization does not support adding weight delta.")
     }
 
     fn dtype_and_device(&self) -> (DType, candle_core::Device) {
-        todo!()
+        (self.scales.dtype(), self.scales.device().clone())
     }
 
     fn apply_isq(
@@ -60,13 +91,29 @@ impl QuantMethod for GptqLayer {
         _imatrix_weight: Option<Vec<f32>>,
         _guard: QuantizeOntoGuard,
     ) -> Result<Arc<dyn QuantMethod>> {
-        todo!()
+        candle_core::bail!("GPTQ quantization does not support ISQ.")
     }
 }
 
 impl QuantizedSerde for GptqLayer {
     fn name(&self) -> &'static str {
         "gptq"
+    }
+}
+
+impl GptqLayer {
+    fn cpu_params(&self) -> GptqCpuParams<'_> {
+        GptqCpuParams {
+            q_weight: &self.q_weight,
+            qzeros: self.qzeros.as_ref(),
+            scales: &self.scales,
+            g_idx: self.g_idx.as_ref(),
+            bias: self.bias.as_ref(),
+            bits: self.bits,
+            is_marlin: self.is_marlin,
+            is_awq: self.is_awq,
+            name: self.name(),
+        }
     }
 }
 

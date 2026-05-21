@@ -10,7 +10,7 @@ mod ffi;
 
 use std::{
     borrow::Cow,
-    io::{Cursor, Read},
+    io::Cursor,
     sync::{atomic::AtomicUsize, Arc},
 };
 
@@ -162,7 +162,11 @@ impl QuantMethod for GgufMatMul {
         // - x: (n_tokens, 1, hidden_dim) or (n_tokens, n_experts_per_tok, hidden_dim)
         // - indices: (n_tokens, n_experts_per_tok)
         // - weights (self): (n_experts, out_features, in_features)
-        let res = if x.device().is_cuda() {
+        let weights_device = match &self.w {
+            QMatMul::QTensor(q) => q.device(),
+            QMatMul::Tensor(t) | QMatMul::TensorF16(t) => t.device().clone(),
+        };
+        let res = if weights_device.is_cuda() && x.device().is_cuda() {
             #[cfg(feature = "cuda")]
             {
                 cuda::qmatmul_indexed_moe_forward(&self.w, x, indices)?
@@ -171,15 +175,17 @@ impl QuantMethod for GgufMatMul {
             {
                 candle_core::bail!("GGUF indexed MoE CUDA path requires the `cuda` feature")
             }
+        } else if weights_device.is_cpu() && !x.device().is_cpu() {
+            let x_cpu = x.to_device(&Device::Cpu)?;
+            let indices_cpu = indices.to_device(&Device::Cpu)?;
+            return self
+                .add_bias(cpu::cpu_indexed_moe_forward(&self.w, &x_cpu, &indices_cpu)?)?
+                .to_device(x.device());
         } else {
             cpu::cpu_indexed_moe_forward(&self.w, x, indices)?
         };
 
-        if let Some(ref b) = self.b {
-            res.broadcast_add(b)
-        } else {
-            Ok(res)
-        }
+        self.add_bias(res)
     }
 
     #[cfg(feature = "cuda")]
@@ -449,10 +455,18 @@ impl QuantizedSerde for GgufMatMul {
             dims.push(buffer.read_u32::<LittleEndian>()? as usize)
         }
 
-        let mut tensor_data = vec![0; data_len];
-        buffer.read_exact(&mut tensor_data)?;
-
         let _acquired_load_guard = guard.acquire(device);
+        let tensor_start = buffer.position() as usize;
+        let tensor_end = tensor_start + data_len;
+        if tensor_end > buffer.get_ref().as_ref().len() {
+            candle_core::bail!("UQFF GGUF tensor data exceeds artifact length");
+        }
+        let w = {
+            let backing = buffer.get_ref().as_ref();
+            qtensor_from_ggml(dtype, &backing[tensor_start..tensor_end], dims, device)?
+        };
+        buffer.set_position(tensor_end as u64);
+
         // If we have bias
         let b = if has_bias {
             Some(deserialize_tensor(&mut buffer, device)?)
@@ -460,7 +474,6 @@ impl QuantizedSerde for GgufMatMul {
             None
         };
 
-        let w = qtensor_from_ggml(dtype, &tensor_data, dims, device)?;
         Ok(Arc::new(Self {
             w: QMatMul::QTensor(w.into()),
             b,
@@ -519,10 +532,18 @@ impl QuantizedSerde for GgufMatMul {
             dims.push(buffer.read_u32::<LittleEndian>()? as usize)
         }
 
-        let mut tensor_data = vec![0; data_len];
-        buffer.read_exact(&mut tensor_data)?;
-
         let _acquired_load_guard = guard.acquire(device);
+        let tensor_start = buffer.position() as usize;
+        let tensor_end = tensor_start + data_len;
+        if tensor_end > buffer.get_ref().as_ref().len() {
+            candle_core::bail!("UQFF GGUF tensor data exceeds artifact length");
+        }
+        let w = {
+            let backing = buffer.get_ref().as_ref();
+            qtensor_from_ggml(dtype, &backing[tensor_start..tensor_end], dims, device)?
+        };
+        buffer.set_position(tensor_end as u64);
+
         // If we have bias
         let b = if has_bias {
             Some(deserialize_tensor(&mut buffer, device)?)
@@ -530,7 +551,6 @@ impl QuantizedSerde for GgufMatMul {
             None
         };
 
-        let w = qtensor_from_ggml(dtype, &tensor_data, dims, device)?;
         Ok((
             Arc::new(Self {
                 w: QMatMul::QTensor(w.into()),

@@ -6702,8 +6702,8 @@ impl Qwen3_5MoeLoader {
     }
 }
 
-fn qwen35_cpu_moe_enabled() -> bool {
-    crate::topology::qwen35_cpu_moe_enabled()
+fn cpu_moe_enabled() -> bool {
+    crate::topology::cpu_moe_enabled()
 }
 
 pub struct Qwen3_5MoePrefixer;
@@ -7014,7 +7014,7 @@ impl DeviceMappedModelLoader for Qwen3_5MoeLoader {
         let cfg: Qwen3_5MoeConfig = serde_json::from_str(config)?;
         let text_cfg = &cfg.text_config;
         let layer_types = text_cfg.layer_types();
-        let cpu_moe = qwen35_cpu_moe_enabled();
+        let cpu_moe = cpu_moe_enabled();
 
         let mut layer_sizes = Vec::with_capacity(text_cfg.num_hidden_layers);
 

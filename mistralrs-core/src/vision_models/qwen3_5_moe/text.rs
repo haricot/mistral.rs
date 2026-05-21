@@ -288,15 +288,15 @@ impl FullAttention {
 
 // ====================== MoE ======================
 
-fn qwen35_profile_enabled() -> bool {
-    crate::topology::qwen35_profile_enabled()
+fn profile_enabled() -> bool {
+    crate::topology::profile_enabled()
 }
 
-fn qwen35_cpu_moe_enabled() -> bool {
-    crate::topology::qwen35_cpu_moe_enabled()
+fn cpu_moe_enabled() -> bool {
+    crate::topology::cpu_moe_enabled()
 }
 
-static LOG_QWEN35_CPU_MOE: AtomicBool = AtomicBool::new(false);
+static LOG_CPU_MOE: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone)]
 struct Mlp {
@@ -398,10 +398,10 @@ impl SparseMoeBlock {
             moe_intermediate_size: cfg.moe_intermediate_size,
         };
 
-        let experts_device = if qwen35_cpu_moe_enabled() {
-            if !layer_device.is_cpu() && !LOG_QWEN35_CPU_MOE.swap(true, Ordering::Relaxed) {
+        let experts_device = if cpu_moe_enabled() {
+            if !layer_device.is_cpu() && !LOG_CPU_MOE.swap(true, Ordering::Relaxed) {
                 tracing::info!(
-                    "Using Qwen3.5 CPU-MoE mode: routed experts stay on CPU while hot layer weights stay on {:?}",
+                    "Using CPU-MoE mode: routed experts stay on CPU while hot layer weights stay on {:?}",
                     layer_device
                 );
             }
@@ -448,7 +448,7 @@ impl SparseMoeBlock {
     }
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let profile = qwen35_profile_enabled();
+        let profile = profile_enabled();
         let t_total = profile.then(Instant::now);
         let (b_size, seq_len, hidden_dim) = xs.dims3()?;
         let xs_flat = xs.reshape(((), hidden_dim))?;
@@ -888,7 +888,7 @@ impl Qwen3_5MoeTextModel {
         };
 
         for (i, layer) in self.layers.iter().enumerate() {
-            let profile = qwen35_profile_enabled();
+            let profile = profile_enabled();
             let t_layer = profile.then(Instant::now);
             let t_map = profile.then(Instant::now);
             xs = self.mapper.map(xs, i)?;
@@ -1038,7 +1038,7 @@ impl IsqModel for Qwen3_5MoeTextModel {
                 }
             }
             for (l, is_routed_expert) in layer.moe.get_isq_layers() {
-                let layer_num = if is_routed_expert && qwen35_cpu_moe_enabled() {
+                let layer_num = if is_routed_expert && cpu_moe_enabled() {
                     ISQ_CPU_DEVICE_SENTINEL
                 } else {
                     i

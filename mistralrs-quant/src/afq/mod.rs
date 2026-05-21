@@ -153,6 +153,16 @@ impl QuantMethod for AfqLayer {
     }
 
     fn gather_forward_raw(&self, x: &Tensor, indices: &Tensor) -> Result<Tensor> {
+        if x.device().is_cpu() {
+            return crate::gather_forward_dequantized(
+                self.name(),
+                self.dequantize_w()?,
+                self.bias.clone(),
+                x,
+                indices,
+            );
+        }
+
         ops::afq_mm_op(
             x,
             &self.w_q,

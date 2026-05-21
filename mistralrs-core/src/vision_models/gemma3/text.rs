@@ -11,8 +11,8 @@ use crate::{
     device_map::{DeviceMappedMask, DeviceMapper},
     get_delta_from_lora_ab,
     layers::{
-        vocab_embedding, CausalMaskConfig, CausalMasker, Gemma3RotaryEmbedding, GemmaRmsNorm, MatMul,
-        Mlp, RotaryEmbedding, Sdpa, VocabEmbedding,
+        vocab_embedding, CausalMaskConfig, CausalMasker, Gemma3RotaryEmbedding, GemmaRmsNorm,
+        MatMul, Mlp, RotaryEmbedding, Sdpa, VocabEmbedding,
     },
     layers_masker::PastKvLenCache,
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},

@@ -276,16 +276,17 @@ pub use pipeline::{
     chat_template::ChatTemplate, expand_isq_value, parse_isq_value, parse_uqff_shard,
     resolve_uqff_shorthand, AdapterPaths, AnyMoeLoader, AnyMoePipeline, AutoDeviceMapParams,
     AutoLoader, AutoLoaderBuilder, DiffusionGenerationParams, DiffusionLoader,
-    DiffusionLoaderBuilder, DiffusionLoaderType, DisabledModalities, EmbeddingLoader, EmbeddingLoaderBuilder,
-    EmbeddingLoaderType, EmbeddingModelPaths, EmbeddingSpecificConfig, GGMLLoader,
-    GGMLLoaderBuilder, GGMLSpecificConfig, GGUFLoader, GGUFLoaderBuilder, GGUFSpecificConfig,
-    GemmaLoader, Idefics2Loader, IsqOrganization, LLaVALoader, LLaVANextLoader, LlamaLoader,
-    Loader, LocalModelPaths, LoraAdapterPaths, MistralLoader, MixtralLoader, Modalities, ModelKind,
-    ModelPaths, MultimodalLoader, MultimodalLoaderBuilder, MultimodalLoaderType,
-    MultimodalPromptPrefixer, MultimodalSpecificConfig, NormalLoader, NormalLoaderBuilder,
-    NormalLoaderType, NormalSpecificConfig, Phi2Loader, Phi3Loader, Phi3VLoader, Qwen2Loader,
-    SpeculativeConfig, SpeculativeLoader, SpeculativePipeline, SpeechLoader, SpeechPipeline,
-    Starcoder2Loader, SupportedModality, TokenSource, UQFF_MULTI_FILE_DELIMITER,
+    DiffusionLoaderBuilder, DiffusionLoaderType, DisabledModalities, EmbeddingLoader,
+    EmbeddingLoaderBuilder, EmbeddingLoaderType, EmbeddingModelPaths, EmbeddingSpecificConfig,
+    GGMLLoader, GGMLLoaderBuilder, GGMLSpecificConfig, GGUFLoader, GGUFLoaderBuilder,
+    GGUFSpecificConfig, GemmaLoader, Idefics2Loader, IsqOrganization, LLaVALoader, LLaVANextLoader,
+    LlamaLoader, Loader, LocalModelPaths, LoraAdapterPaths, MistralLoader, MixtralLoader,
+    Modalities, ModelKind, ModelPaths, MultimodalLoader, MultimodalLoaderBuilder,
+    MultimodalLoaderType, MultimodalPromptPrefixer, MultimodalSpecificConfig, NormalLoader,
+    NormalLoaderBuilder, NormalLoaderType, NormalSpecificConfig, Phi2Loader, Phi3Loader,
+    Phi3VLoader, Qwen2Loader, SpeculativeConfig, SpeculativeLoader, SpeculativePipeline,
+    SpeechLoader, SpeechPipeline, Starcoder2Loader, SupportedModality, TokenSource,
+    UQFF_MULTI_FILE_DELIMITER,
 };
 pub use request::{
     ApproximateUserLocation, Constraint, DetokenizationRequest, ImageGenerationResponseFormat,
@@ -722,7 +723,6 @@ impl MistralRsBuilder {
         self.code_exec_config = Some(config);
         self
     }
-
 
     pub async fn build(self) -> Arc<MistralRs> {
         MistralRs::new(self).await

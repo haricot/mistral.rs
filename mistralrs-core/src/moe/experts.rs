@@ -9,9 +9,9 @@
 use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
 use candle_nn::Linear;
 use mistralrs_quant::{
-    apply_immediate_isq, should_apply_immediate_isq, DummyLayer, FusedExperts, PackedExperts,
-    QuantMethod, QuantMethodConfig, QuantizedConfig, ShardedVarBuilder, SumAllReduce,
-    UnquantLinear,
+    apply_immediate_isq, gptq_moe_linear, should_apply_immediate_isq, DummyLayer, FusedExperts,
+    PackedExperts, QuantMethod, QuantMethodConfig, QuantizedConfig, ShardedVarBuilder,
+    SumAllReduce, UnquantLinear,
 };
 use std::sync::Arc;
 
@@ -45,8 +45,11 @@ impl MoEExpertsBackend {
         quantization_config: &Option<QuantizedConfig>,
     ) -> Self {
         let has_immediate_isq = mistralrs_quant::get_immediate_isq().is_some();
+        let cpu_indexed_gptq_awq =
+            device.is_cpu() && matches!(quantization_config, Some(QuantizedConfig::GptqAwq { .. }));
         let use_fast = loading_isq
             || device.is_metal()
+            || cpu_indexed_gptq_awq
             || (device.is_cuda()
                 && (loading_isq || quantization_config.is_some() || has_immediate_isq));
 
@@ -229,7 +232,11 @@ impl MoEExperts {
                         cfg, experts_vb,
                     )?)
                 } else {
-                    MoEExpertsBackendImpl::Fast(Self::load_fast_direct_standard(cfg, experts_vb)?)
+                    MoEExpertsBackendImpl::Fast(Self::load_fast_direct_standard(
+                        cfg,
+                        experts_vb,
+                        quantization_config,
+                    )?)
                 }
             }
             MoEExpertsBackend::Slow => {
@@ -454,8 +461,41 @@ impl MoEExperts {
     fn load_fast_direct_standard(
         cfg: &MoEExpertsConfig,
         experts_vb: ShardedVarBuilder,
+        quantization_config: &Option<QuantizedConfig>,
     ) -> Result<FastExpertsWeights> {
         let num_experts = cfg.num_experts;
+
+        if let Some(quantization_config @ QuantizedConfig::GptqAwq { .. }) = quantization_config {
+            return Ok(FastExpertsWeights {
+                fused_gate_proj: gptq_moe_linear(
+                    num_experts,
+                    cfg.hidden_size,
+                    cfg.moe_intermediate_size,
+                    quantization_config,
+                    false,
+                    experts_vb.clone(),
+                    "gate_proj",
+                )?,
+                fused_up_proj: gptq_moe_linear(
+                    num_experts,
+                    cfg.hidden_size,
+                    cfg.moe_intermediate_size,
+                    quantization_config,
+                    false,
+                    experts_vb.clone(),
+                    "up_proj",
+                )?,
+                fused_down_proj: gptq_moe_linear(
+                    num_experts,
+                    cfg.moe_intermediate_size,
+                    cfg.hidden_size,
+                    quantization_config,
+                    false,
+                    experts_vb,
+                    "down_proj",
+                )?,
+            });
+        }
 
         // UQFF loading: experts have no real tensors yet, create dummy layers
         // that will be replaced during deserialization.
@@ -902,12 +942,8 @@ impl MoEExperts {
             // CPU path: use QuantMethod::gather_forward so GGUF can dequantize
             // only the selected experts rather than the full fused tensor.
             let xs = xs_flat.reshape((num_tokens, 1, hidden_dim))?;
-            let gate = weights
-                .fused_gate_proj
-                .gather_forward(&xs, topk_ids)?;
-            let up = weights
-                .fused_up_proj
-                .gather_forward(&xs, topk_ids)?;
+            let gate = weights.fused_gate_proj.gather_forward(&xs, topk_ids)?;
+            let up = weights.fused_up_proj.gather_forward(&xs, topk_ids)?;
             weights
                 .fused_down_proj
                 .gather_forward(&(up * gate.apply(&self.act)?)?, topk_ids)?

@@ -72,7 +72,7 @@ pub use gguf::cuda::{
     quantize_input_q8_1, ACT_GELU_PYTORCH_TANH, ACT_SILU,
 };
 pub use gguf::GgufMatMul;
-pub use gptq::GptqLayer;
+pub use gptq::{gptq_moe_linear, GptqLayer};
 pub use hqq::{HqqAxis, HqqBits, HqqConfig, HqqLayer};
 pub use imatrix::{CollectedImatrixData, ImatrixLayerStats};
 pub use lora::{
@@ -1099,22 +1099,43 @@ pub trait QuantMethod: Send + Sync + Debug + QuantizedSerde {
     /// If `a` is (n_tokens, n_experts, cols), `self` weights are (n_experts, rows, cols),
     /// then the indices are (n_tokens, n_experts).
     fn gather_forward(&self, a: &Tensor, indices: &Tensor) -> Result<Tensor> {
-        if let Some(t) = self.quantized_act_type() {
-            let original_ty = a.dtype();
-            self.gather_forward_raw(&a.to_dtype(t)?, indices)?
-                .to_dtype(original_ty)
+        let original_ty = a.dtype();
+        let original_device = a.device().clone();
+        let (_, weight_device) = self.dtype_and_device();
+        let a = if let Some(t) = self.quantized_act_type() {
+            a.to_dtype(t)?
         } else {
-            self.gather_forward_raw(a, indices)
+            a.clone()
+        };
+        let a = if a.device().same_device(&weight_device) {
+            a
+        } else {
+            a.to_device(&weight_device)?
+        };
+        let indices = if indices.device().same_device(&weight_device) {
+            indices.clone()
+        } else {
+            indices.to_device(&weight_device)?
+        };
+        let result = self
+            .gather_forward_raw(&a, &indices)?
+            .to_dtype(original_ty)?;
+        if result.device().same_device(&original_device) {
+            Ok(result)
+        } else {
+            result.to_device(&original_device)
         }
     }
 
     /// Raw gather matmul without dtype casting. Implementors override this.
     /// Callers should use `gather_forward` instead.
-    fn gather_forward_raw(&self, _a: &Tensor, _indices: &Tensor) -> Result<Tensor> {
-        candle_core::bail!(
-            "{} does not support `gather_forward`. Please raise an issue.",
-            self.name()
-        )
+    fn gather_forward_raw(&self, a: &Tensor, indices: &Tensor) -> Result<Tensor> {
+        let (weight, bias) = if let Some(weight_bias) = self.unquant_weight_bias() {
+            weight_bias
+        } else {
+            (self.dequantize_w()?, None)
+        };
+        gather_forward_dequantized(self.name(), weight, bias, a, indices)
     }
 
     /// Get the underlying QTensor if this is a GGUF quantized layer.
@@ -1170,6 +1191,33 @@ pub trait QuantMethod: Send + Sync + Debug + QuantizedSerde {
     fn dummy_info(&self) -> Option<&DummyLayerInfo> {
         None
     }
+}
+
+pub(crate) fn gather_forward_dequantized(
+    name: &str,
+    weight: Tensor,
+    bias: Option<Tensor>,
+    a: &Tensor,
+    indices: &Tensor,
+) -> Result<Tensor> {
+    let weight = if weight.device().same_device(a.device()) {
+        weight
+    } else {
+        weight.to_device(a.device())?
+    };
+    let bias = bias
+        .map(|bias| {
+            if bias.device().same_device(a.device()) {
+                Ok(bias)
+            } else {
+                bias.to_device(a.device())
+            }
+        })
+        .transpose()?;
+    let unquant = UnquantLinear::new(QuantMethodConfig::Unquantized(Linear::new(weight, bias)))?;
+    unquant
+        .gather_forward_raw(a, indices)
+        .map_err(|err| err.with_path(name))
 }
 
 pub fn gguf_cpu_fused_moe_q4k_forward<F>(
