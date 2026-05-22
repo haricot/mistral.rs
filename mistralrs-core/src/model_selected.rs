@@ -118,6 +118,11 @@ pub enum ModelSelected {
         #[arg(long)]
         max_image_length: Option<usize>,
 
+        /// Load only the text path for supported multimodal models.
+        #[arg(long)]
+        #[serde(default)]
+        text_only: bool,
+
         /// Cache path for Hugging Face models downloaded locally.
         #[arg(long)]
         hf_cache_path: Option<PathBuf>,

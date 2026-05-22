@@ -133,6 +133,9 @@ pub trait MultimodalModelLoader: IsqModelLoader + Send + Sync + DeviceMappedMode
         // Default is false, specific model must override.
         false
     }
+    fn supports_text_only_loading(&self, _config: &str) -> bool {
+        false
+    }
     fn modalities(&self, config: &str) -> Result<Modalities>;
     fn prefixer(&self, config: &str) -> Arc<dyn MultimodalPromptPrefixer>;
     /// Return a default chat template (Jinja string) for models that don't ship a
@@ -7338,6 +7341,9 @@ impl MultimodalModelLoader for Gemma4Loader {
     fn supports_prefix_cacher(&self, _config: &str) -> bool {
         true
     }
+    fn supports_text_only_loading(&self, _config: &str) -> bool {
+        true
+    }
     fn prefixer(&self, _config: &str) -> Arc<dyn MultimodalPromptPrefixer> {
         Arc::new(Gemma4Prefixer)
     }
@@ -7410,22 +7416,29 @@ impl DeviceMappedModelLoader for Gemma4Loader {
         config: &str,
         params: &AutoDeviceMapParams,
     ) -> Result<usize> {
-        let AutoDeviceMapParams::Multimodal {
-            max_seq_len,
-            max_batch_size,
-            max_image_shape: _,
-            max_num_images,
-        } = params
-        else {
-            anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
+        let (max_seq_len, max_batch_size, max_num_images, include_multimodal) = match params {
+            AutoDeviceMapParams::Text {
+                max_seq_len,
+                max_batch_size,
+            } => (*max_seq_len, *max_batch_size, 0, false),
+            AutoDeviceMapParams::Multimodal {
+                max_seq_len,
+                max_batch_size,
+                max_image_shape: _,
+                max_num_images,
+            } => (*max_seq_len, *max_batch_size, *max_num_images, true),
         };
 
         let cfg: Gemma4Config = serde_json::from_str(config)?;
         let tc = &cfg.text_config;
 
         let vision_tokens_per_image = cfg.vision_soft_tokens_per_image.unwrap_or(280);
-        let audio_tokens = if cfg.audio_config.is_some() { 750 } else { 0 };
-        let total_seq_len = *max_seq_len + vision_tokens_per_image * max_num_images + audio_tokens;
+        let audio_tokens = if include_multimodal && cfg.audio_config.is_some() {
+            750
+        } else {
+            0
+        };
+        let total_seq_len = max_seq_len + vision_tokens_per_image * max_num_images + audio_tokens;
         let max_text_attn = max_batch_size * tc.num_attention_heads * total_seq_len * total_seq_len;
 
         Ok(max_text_attn)
@@ -7443,7 +7456,7 @@ impl DeviceMappedModelLoader for Gemma4Loader {
             max_num_images,
         } = params
         else {
-            anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
+            return Ok(0);
         };
 
         let cfg: Gemma4Config = serde_json::from_str(config)?;
@@ -7690,7 +7703,7 @@ impl DeviceMappedModelLoader for Gemma4Loader {
     }
 
     fn non_mapped_sub_models(&self) -> Option<Vec<NonMappedSubModel>> {
-        Some(vec![NonMappedSubModel::Vision, NonMappedSubModel::Audio])
+        None
     }
 
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {

@@ -943,6 +943,7 @@ fn loader_from_selected(
         } => MultimodalLoaderBuilder::new(
             MultimodalSpecificConfig {
                 topology: Topology::from_option_path(topology)?,
+                text_only: false,
                 write_uqff,
                 from_uqff: from_uqff.map(|x| {
                     x.split(UQFF_MULTI_FILE_DELIMITER)

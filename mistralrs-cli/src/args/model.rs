@@ -152,6 +152,11 @@ pub struct DeviceOptions {
 /// Multimodal model specific options
 #[derive(Args, Clone, Default, Deserialize)]
 pub struct MultimodalOptions {
+    /// Load only the text path for supported multimodal models.
+    #[arg(long)]
+    #[serde(default)]
+    pub text_only: bool,
+
     /// Maximum edge length for image resizing (aspect ratio preserved)
     #[arg(long)]
     pub max_edge: Option<u32>,

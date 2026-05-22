@@ -391,6 +391,7 @@ fn convert_to_model_selected(
                 max_batch_size: device.max_batch_size,
                 max_num_images: multimodal.max_num_images,
                 max_image_length: multimodal.max_image_length,
+                text_only: false,
                 hf_cache_path: device.hf_cache.clone(),
                 matformer_config_path: None,
                 matformer_slice_name: None,

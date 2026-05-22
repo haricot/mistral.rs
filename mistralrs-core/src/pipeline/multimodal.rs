@@ -123,6 +123,7 @@ pub struct MultimodalLoaderBuilder {
 /// Config specific to loading a multimodal model.
 pub struct MultimodalSpecificConfig {
     pub topology: Option<Topology>,
+    pub text_only: bool,
     pub write_uqff: Option<PathBuf>,
     pub from_uqff: Option<Vec<PathBuf>>,
     pub max_edge: Option<u32>,
@@ -325,6 +326,11 @@ impl Loader for MultimodalLoader {
         } else {
             None
         };
+        let load_text_only =
+            self.config.text_only && self.inner.supports_text_only_loading(&config);
+        if self.config.text_only && !load_text_only {
+            warn!("Text-only loading was requested, but this multimodal loader does not support skipping non-text submodels.");
+        }
 
         // If auto, convert to Map if not using nccl
         let mut max_kv_tokens: Option<usize> = None;
@@ -333,8 +339,10 @@ impl Loader for MultimodalLoader {
                 nm_device: available_devices[0].clone(),
             };
         } else if let DeviceMapSetting::Auto(mut params) = mapper.clone() {
-            // We can promote to multimodal params if we get text params
-            params = params.maybe_promote_to_multimodal();
+            if !load_text_only {
+                // We can promote to multimodal params if we get text params
+                params = params.maybe_promote_to_multimodal();
+            }
             max_kv_tokens = Some(params.max_seq_len() * params.max_batch_size());
 
             // Initial dtype
@@ -385,12 +393,16 @@ impl Loader for MultimodalLoader {
                         weight_pack_factor,
                         matformer_slicing_config.as_ref(),
                     )?;
-                    let non_mapped_size_in_bytes = self.inner.non_mapped_size_in_bytes(
-                        &config,
-                        dtype,
-                        weight_pack_factor,
-                        matformer_slicing_config.as_ref(),
-                    )?;
+                    let non_mapped_size_in_bytes = if load_text_only {
+                        0
+                    } else {
+                        self.inner.non_mapped_size_in_bytes(
+                            &config,
+                            dtype,
+                            weight_pack_factor,
+                            matformer_slicing_config.as_ref(),
+                        )?
+                    };
                     let layer_sizes_sum = layer_sizes_in_bytes.iter().sum::<usize>();
                     (
                         layer_sizes_in_bytes,
@@ -405,12 +417,16 @@ impl Loader for MultimodalLoader {
                         weight_pack_factor,
                         matformer_slicing_config.as_ref(),
                     )?;
-                    let non_mapped_size_in_bytes = self.inner.non_mapped_size_in_bytes(
-                        &config,
-                        dtype,
-                        weight_pack_factor,
-                        matformer_slicing_config.as_ref(),
-                    )?;
+                    let non_mapped_size_in_bytes = if load_text_only {
+                        0
+                    } else {
+                        self.inner.non_mapped_size_in_bytes(
+                            &config,
+                            dtype,
+                            weight_pack_factor,
+                            matformer_slicing_config.as_ref(),
+                        )?
+                    };
                     let layer_sizes_sum = layer_sizes_in_bytes.iter().sum::<usize>();
                     (
                         layer_sizes_in_bytes,
@@ -427,12 +443,16 @@ impl Loader for MultimodalLoader {
                         weight_pack_factor,
                         matformer_slicing_config.as_ref(),
                     )?;
-                    let non_mapped_size_in_bytes = self.inner.non_mapped_size_in_bytes(
-                        &config,
-                        dtype,
-                        weight_pack_factor,
-                        matformer_slicing_config.as_ref(),
-                    )?;
+                    let non_mapped_size_in_bytes = if load_text_only {
+                        0
+                    } else {
+                        self.inner.non_mapped_size_in_bytes(
+                            &config,
+                            dtype,
+                            weight_pack_factor,
+                            matformer_slicing_config.as_ref(),
+                        )?
+                    };
                     let layer_sizes_sum = layer_sizes_in_bytes.iter().sum::<usize>();
                     (
                         layer_sizes_in_bytes,
@@ -623,6 +643,7 @@ impl Loader for MultimodalLoader {
                     device.clone(),
                     attention_mechanism,
                     multi_progress.clone(),
+                    load_text_only,
                     matformer_slicing_config.clone(),
                 ),
                 _ => unreachable!(),
@@ -644,6 +665,7 @@ impl Loader for MultimodalLoader {
                     attention_mechanism,
                     matches!(self.config.organization, IsqOrganization::MoeExpertsOnly),
                     multi_progress,
+                    load_text_only,
                     matformer_slicing_config.clone(),
                 ),
                 _ => unreachable!(),

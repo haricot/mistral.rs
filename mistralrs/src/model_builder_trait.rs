@@ -618,6 +618,7 @@ pub async fn build_multimodal_pipeline(
 
     let config = MultimodalSpecificConfig {
         topology: builder.topology.clone(),
+        text_only: false,
         write_uqff: builder.write_uqff.clone(),
         from_uqff: builder.from_uqff.clone(),
         max_edge: builder.max_edge,
@@ -1064,6 +1065,7 @@ pub async fn build_auto_pipeline(
 
     let vision_config = MultimodalSpecificConfig {
         topology: builder.topology.clone(),
+        text_only: false,
         write_uqff: builder.write_uqff.clone(),
         from_uqff: builder.from_uqff.clone(),
         max_edge: builder.max_edge,
@@ -1165,6 +1167,7 @@ pub async fn build_auto_pipeline(
             max_batch_size: AutoDeviceMapParams::DEFAULT_MAX_BATCH_SIZE,
             max_num_images: None,
             max_image_length: None,
+            text_only: false,
             hf_cache_path: builder.hf_cache_path.clone(),
             matformer_config_path: builder.matformer_config_path.clone(),
             matformer_slice_name: builder.matformer_slice_name.clone(),
