@@ -1,7 +1,6 @@
 runtime:
-  qwen35_cpu_moe: true
-  #qwen35_profile: false
-  qwen35_profile: true
+  cpu_moe: true
+  cpu_profile: true
   gguf_cpu_moe_q4k_expert_cache: 2048
   gguf_cpu_moe_parallel_topk: true
 

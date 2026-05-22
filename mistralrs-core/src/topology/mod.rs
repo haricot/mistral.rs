@@ -32,9 +32,19 @@ pub struct DeserLayerTopology {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct TopologyRuntime {
-    #[serde(alias = "MISTRALRS_QWEN35_CPU_MOE", alias = "qwen35-cpu-moe")]
+    #[serde(
+        alias = "MISTRALRS_QWEN35_CPU_MOE",
+        alias = "MISTRALRS_CPU_MOE",
+        alias = "qwen35-cpu-moe",
+        alias = "cpu-moe"
+    )]
     pub qwen35_cpu_moe: Option<bool>,
-    #[serde(alias = "MISTRALRS_QWEN35_PROFILE", alias = "qwen35-profile")]
+    #[serde(
+        alias = "MISTRALRS_QWEN35_PROFILE",
+        alias = "MISTRALRS_CPU_PROFILE",
+        alias = "qwen35-profile",
+        alias = "cpu-profile"
+    )]
     pub qwen35_profile: Option<bool>,
     #[serde(
         alias = "MISTRALRS_GGUF_CPU_MOE_EXPERT_CACHE",
@@ -386,12 +396,14 @@ fn env_bool(name: &str) -> Option<bool> {
 
 pub(crate) fn qwen35_cpu_moe_enabled() -> bool {
     load_optional_bool(&QWEN35_CPU_MOE)
+        .or_else(|| env_bool("MISTRALRS_CPU_MOE"))
         .or_else(|| env_bool("MISTRALRS_QWEN35_CPU_MOE"))
         .unwrap_or(false)
 }
 
 pub(crate) fn qwen35_profile_enabled() -> bool {
     load_optional_bool(&QWEN35_PROFILE)
+        .or_else(|| env_bool("MISTRALRS_CPU_PROFILE"))
         .or_else(|| env_bool("MISTRALRS_QWEN35_PROFILE"))
         .unwrap_or(false)
 }
@@ -450,8 +462,8 @@ mod tests {
     fn runtime_and_nested_layers_parse() {
         let yaml = r#"
 runtime:
-  qwen35_cpu_moe: true
-  qwen35_profile: true
+  cpu_moe: true
+  cpu_profile: true
   gguf_cpu_moe_q4k_expert_cache: 2048
 layers:
   0-2:
