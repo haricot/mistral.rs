@@ -383,3 +383,30 @@ pub fn plain(w: &QTensor, xs: &Tensor) -> Result<Tensor> {
         out_tensor.to_dtype(input_ty)
     }
 }
+
+#[cfg(all(test, feature = "cuda"))]
+mod tests {
+    use super::*;
+    use candle_core::quantized::QTensor;
+    use candle_core::{DType, Device, Result, Tensor};
+
+    #[test]
+    fn test_fast_mmq_q4k_f16_then_fused_glu() -> Result<()> {
+        let device = Device::new_cuda(0)?;
+        let cpu = Device::Cpu;
+
+        let weight = Tensor::zeros((512, 512), DType::F32, &cpu)?;
+        let weight = QTensor::quantize_onto(&weight, GgmlDType::Q4K, &device)?;
+        let xs = Tensor::zeros((16, 512), DType::F16, &device)?;
+
+        let out = plain(&weight, &xs)?;
+        assert_eq!(out.dims(), &[16, 512]);
+
+        let a = Tensor::zeros((16, 512), DType::F16, &device)?;
+        let b = Tensor::zeros((16, 512), DType::F16, &device)?;
+        let glu = crate::fused_glu(&a, &b, crate::GluActivationType::Silu)?;
+        let _ = glu.to_device(&cpu)?;
+
+        Ok(())
+    }
+}
