@@ -22,7 +22,8 @@ pub struct GgufModelBuilder {
     pub(crate) device_mapping: Option<DeviceMapSetting>,
     pub(crate) search_embedding_model: Option<SearchEmbeddingModel>,
     pub(crate) search_callback: Option<Arc<SearchCallback>>,
-    pub(crate) tool_callbacks: HashMap<String, ToolCallbackWithTool>,
+    pub(crate) tool_callbacks: HashMap<String, Arc<ToolCallback>>,
+    pub(crate) tool_callbacks_with_tools: HashMap<String, ToolCallbackWithTool>,
     pub(crate) device: Option<Device>,
 
     // Model running
@@ -37,7 +38,6 @@ pub struct GgufModelBuilder {
     pub(crate) no_kv_cache: bool,
     pub(crate) with_logging: bool,
     pub(crate) prefix_cache_n: Option<usize>,
-    pub(crate) code_exec_config: Option<mistralrs_core::CodeExecutionConfig>,
 }
 
 impl GgufModelBuilder {
@@ -70,8 +70,8 @@ impl GgufModelBuilder {
             search_embedding_model: None,
             search_callback: None,
             tool_callbacks: HashMap::new(),
+            tool_callbacks_with_tools: HashMap::new(),
             device: None,
-            code_exec_config: None,
         }
     }
 
@@ -93,22 +93,7 @@ impl GgufModelBuilder {
         name: impl Into<String>,
         callback: Arc<ToolCallback>,
     ) -> Self {
-        let name = name.into();
-        self.tool_callbacks.insert(
-            name.clone(),
-            ToolCallbackWithTool {
-                callback: ToolCallbackKind::Text(callback),
-                tool: Tool {
-                    tp: ToolType::Function,
-                    function: Function {
-                        description: None,
-                        name,
-                        parameters: None,
-                        strict: None,
-                    },
-                },
-            },
-        );
+        self.tool_callbacks.insert(name.into(), callback);
         self
     }
 
@@ -121,13 +106,8 @@ impl GgufModelBuilder {
         tool: Tool,
     ) -> Self {
         let name = name.into();
-        self.tool_callbacks.insert(
-            name,
-            ToolCallbackWithTool {
-                callback: ToolCallbackKind::Text(callback),
-                tool,
-            },
-        );
+        self.tool_callbacks_with_tools
+            .insert(name, ToolCallbackWithTool { callback, tool });
         self
     }
 

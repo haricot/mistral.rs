@@ -336,18 +336,8 @@ async fn text_interactive_mode(
             logits_processors: None,
             return_raw_logits: false,
             web_search_options: do_search.then(WebSearchOptions::default),
-            enable_code_execution: false,
-            code_execution_permission: None,
-            code_execution_approval_notifier: None,
-            agent_permission: None,
-            agent_approval_handler: None,
-            agent_approval_notifier: None,
-            session_id: None,
-            max_tool_rounds: None,
-            tool_dispatch_url: None,
             model_id: None,
             truncate_sequence: false,
-            files: None,
         }));
         sender.send(req).await.unwrap();
         let start_ttft = Instant::now();
@@ -405,20 +395,6 @@ async fn text_interactive_mode(
                 Response::ValidationError(e) => {
                     error!("Got a validation error: {e:?}");
                     break 'outer;
-                }
-                Response::AgenticToolCallProgress {
-                    tool_name, phase, ..
-                } => {
-                    eprintln!("[tool: {tool_name}] {phase:?}");
-                }
-                Response::AgenticToolApprovalRequired { .. } => continue,
-                Response::File(file) => {
-                    eprintln!(
-                        "[file: {} ({}, {} bytes)]",
-                        file.name,
-                        file.format.as_deref().unwrap_or(""),
-                        file.bytes
-                    );
                 }
                 Response::Done(_) => unreachable!(),
                 Response::CompletionDone(_) => unreachable!(),
@@ -706,18 +682,8 @@ async fn multimodal_interactive_mode(
             logits_processors: None,
             return_raw_logits: false,
             web_search_options: do_search.then(WebSearchOptions::default),
-            enable_code_execution: false,
-            code_execution_permission: None,
-            code_execution_approval_notifier: None,
-            agent_permission: None,
-            agent_approval_handler: None,
-            agent_approval_notifier: None,
-            session_id: None,
-            max_tool_rounds: None,
-            tool_dispatch_url: None,
             model_id: None,
             truncate_sequence: false,
-            files: None,
         }));
         sender.send(req).await.unwrap();
         let start_ttft = Instant::now();
@@ -775,20 +741,6 @@ async fn multimodal_interactive_mode(
                 Response::ValidationError(e) => {
                     error!("Got a validation error: {e:?}");
                     break 'outer;
-                }
-                Response::AgenticToolCallProgress {
-                    tool_name, phase, ..
-                } => {
-                    eprintln!("[tool: {tool_name}] {phase:?}");
-                }
-                Response::AgenticToolApprovalRequired { .. } => continue,
-                Response::File(file) => {
-                    eprintln!(
-                        "[file: {} ({}, {} bytes)]",
-                        file.name,
-                        file.format.as_deref().unwrap_or(""),
-                        file.bytes
-                    );
                 }
                 Response::Done(_) => unreachable!(),
                 Response::CompletionDone(_) => unreachable!(),
@@ -901,18 +853,8 @@ async fn diffusion_interactive_mode(mistralrs: Arc<MistralRs>, do_search: bool) 
             logits_processors: None,
             return_raw_logits: false,
             web_search_options: do_search.then(WebSearchOptions::default),
-            enable_code_execution: false,
-            code_execution_permission: None,
-            code_execution_approval_notifier: None,
-            agent_permission: None,
-            agent_approval_handler: None,
-            agent_approval_notifier: None,
-            session_id: None,
-            max_tool_rounds: None,
-            tool_dispatch_url: None,
             model_id: None,
             truncate_sequence: false,
-            files: None,
         }));
 
         let start = Instant::now();
@@ -1000,18 +942,8 @@ async fn speech_interactive_mode(mistralrs: Arc<MistralRs>, do_search: bool) {
             logits_processors: None,
             return_raw_logits: false,
             web_search_options: do_search.then(WebSearchOptions::default),
-            enable_code_execution: false,
-            code_execution_permission: None,
-            code_execution_approval_notifier: None,
-            agent_permission: None,
-            agent_approval_handler: None,
-            agent_approval_notifier: None,
-            session_id: None,
-            max_tool_rounds: None,
-            tool_dispatch_url: None,
             model_id: None,
             truncate_sequence: false,
-            files: None,
         }));
 
         let start = Instant::now();

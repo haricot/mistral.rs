@@ -7,7 +7,7 @@ use candle_nn::{BatchNorm, Conv1d, Conv1dConfig, LayerNorm, Linear, ModuleT};
 use mistralrs_quant::{Convolution, QuantMethod, ShardedVarBuilder};
 
 use crate::{
-    attention::{AttentionMask, SdpaParams},
+    attention::SdpaParams,
     layers::{self, Activation, Sdpa},
     pipeline::text_models_inputs_processor::FlashParams,
     vision_models::conformer::{
@@ -71,7 +71,7 @@ impl Attention {
     fn forward(
         &self,
         xs: &Tensor,
-        attention_mask: &AttentionMask,
+        attention_mask: Option<&Tensor>,
         relative_attention_bias: Option<&Tensor>,
     ) -> Result<Tensor> {
         let (b_sz, q_len, _) = xs.dims3()?;
@@ -90,7 +90,7 @@ impl Attention {
             .reshape((b_sz, q_len, self.num_heads, self.head_dim))?
             .transpose(1, 2)?;
 
-        let combined_mask = match (attention_mask.as_option_tensor(), relative_attention_bias) {
+        let attention_mask = match (attention_mask, relative_attention_bias) {
             (Some(attention_mask), Some(relative_attention_bias)) => Some(
                 attention_mask
                     .unsqueeze(1)?
@@ -100,17 +100,13 @@ impl Attention {
             (None, None) => None,
             (None, Some(relative_attention_bias)) => Some(relative_attention_bias.contiguous()?),
         };
-        let combined_mask = match combined_mask {
-            Some(t) => AttentionMask::Custom(t),
-            None => AttentionMask::None,
-        };
         let flash_params = FlashParams::empty(false);
 
         let attn_weights = Sdpa.run_attention(
             &q.contiguous()?,
             &k.contiguous()?,
             &v.contiguous()?,
-            &combined_mask,
+            attention_mask.as_ref(),
             Some(&flash_params),
             &SdpaParams {
                 n_kv_groups: 1,
@@ -516,14 +512,9 @@ impl EncoderLayer {
 
         // Self attention with pre-norm
         let norm_x = x.apply(&self.layer_norm_att)?;
-        let attn_out = self.self_attn.forward(
-            &norm_x,
-            &match mask {
-                Some(t) => AttentionMask::Custom(t.clone()),
-                None => AttentionMask::None,
-            },
-            relative_attention_bias,
-        )?;
+        let attn_out = self
+            .self_attn
+            .forward(&norm_x, mask, relative_attention_bias)?;
         x = (x + attn_out)?;
 
         // Conv module

@@ -8,10 +8,7 @@ pub mod paged_attention {
     use candle_core::{Device, Result, Tensor};
 
     use crate::pipeline::text_models_inputs_processor::PagedAttentionInputMetadata;
-    use crate::{
-        attention::{AttentionMask, SdpaParams},
-        pipeline::text_models_inputs_processor::FlashParams,
-    };
+    use crate::{attention::SdpaParams, pipeline::text_models_inputs_processor::FlashParams};
 
     pub struct PagedAttention;
 
@@ -31,7 +28,7 @@ pub mod paged_attention {
             _query: &Tensor,
             _key: &Tensor,
             _value: &Tensor,
-            _attention_mask: &AttentionMask,
+            _attention_mask: Option<&Tensor>,
             _key_cache: Option<Tensor>,
             _value_cache: Option<Tensor>,
             _input_metadata: &PagedAttentionInputMetadata,
@@ -48,7 +45,7 @@ pub mod paged_attention {
             _query: &Tensor,
             _key_cache: &Tensor,
             _value_cache: &Tensor,
-            _attention_mask: &AttentionMask,
+            _attention_mask: Option<&Tensor>,
             _input_metadata: &PagedAttentionInputMetadata,
             _sdpa_params: &SdpaParams,
             _flash_params: Option<&FlashParams>,

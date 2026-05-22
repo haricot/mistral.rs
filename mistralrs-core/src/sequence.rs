@@ -552,10 +552,6 @@ pub struct Sequence {
 
     // Tool calls
     pub tools: Option<Arc<ToolCallingMatcher>>,
-    /// True when `recognizer` was set by mid-stream tool grammar activation
-    /// (as opposed to a user-specified grammar). Used to safely deactivate
-    /// the grammar when the tool call body is complete.
-    tool_grammar_active: bool,
 
     // Unified reasoning parser (think tags, channel tags, or Harmony)
     reasoning_parser: Option<Box<dyn ReasoningParser>>,
@@ -656,7 +652,6 @@ impl Sequence {
                 image_gen_save_file,
             ),
             tools,
-            tool_grammar_active: false,
             sequence_stepping_type,
             return_raw_logits,
             token_offset: 0,
@@ -1334,37 +1329,6 @@ impl Sequence {
             .map(|p| p.finalize_tool_calls())
             .unwrap_or_default()
     }
-
-    /// Check if the Harmony reasoning parser has detected a new tool call
-    /// that needs grammar activation. Returns true once per tool call,
-    /// then auto-clears.
-    pub fn needs_harmony_tool_grammar(&mut self) -> bool {
-        if !self.is_harmony_mode() {
-            return false;
-        }
-        self.reasoning_parser
-            .as_mut()
-            .is_some_and(|p| p.take_needs_tool_grammar_activation())
-    }
-
-    /// Return the recipient of the current in-progress Harmony tool call
-    /// (e.g. `"functions.get_weather"`).  Returns `None` when not in
-    /// Harmony mode or no tool call is active.
-    pub fn harmony_current_tool_recipient(&self) -> Option<String> {
-        self.reasoning_parser
-            .as_ref()
-            .and_then(|p| p.current_tool_recipient())
-    }
-
-    /// Whether the current recognizer was activated mid-stream for tool call
-    /// grammar constraining (as opposed to a user-specified grammar).
-    pub fn is_tool_grammar_active(&self) -> bool {
-        self.tool_grammar_active
-    }
-
-    pub fn set_tool_grammar_active(&mut self, active: bool) {
-        self.tool_grammar_active = active;
-    }
 }
 
 pub struct SequenceGroup {
@@ -1573,7 +1537,6 @@ impl SequenceGroup {
                     system_fingerprint: SYSTEM_FINGERPRINT.to_string(),
                     object: "chat.completion.chunk".to_string(),
                     usage: usage_opt,
-                    session_id: None,
                 }))
                 .await?;
         } else if self.completion_streaming_chunks.len() == self.n_choices && self.is_streaming {

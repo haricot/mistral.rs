@@ -9,13 +9,12 @@ use candle_nn::Linear;
 mod ops;
 
 use crate::{
-    generate_isq, generate_isq_imatrix, has_missing_required_tensors,
+    generate_isq, generate_isq_imatrix,
     hqq::{ISQ_HQQ_DEFAULT_OPT_STEPS, ISQ_HQQ_GROUP_SIZE},
-    make_dummy_or_error,
     utils::{serialize_tensor, UQFF_VERSION},
-    AfqBits, AfqGroupSize, AfqLayer, FP8Linear, GgufMatMul, HqqAxis, HqqBits, HqqConfig, HqqLayer,
-    IsqType, QuantMethod, QuantMethodConfig, QuantizeOntoGuard, QuantizedConfig, QuantizedSerde,
-    QuantizedSerdeType, Shard, ShardedVarBuilder, UnquantLinear,
+    AfqBits, AfqGroupSize, AfqLayer, DummyLayer, FP8Linear, GgufMatMul, HqqAxis, HqqBits,
+    HqqConfig, HqqLayer, IsqType, QuantMethod, QuantMethodConfig, QuantizeOntoGuard,
+    QuantizedConfig, QuantizedSerde, QuantizedSerdeType, Shard, ShardedVarBuilder, UnquantLinear,
 };
 
 /// Per-tensor FP8 Linear layer with static activation scaling.
@@ -70,7 +69,7 @@ impl QuantMethod for PerTensorFP8Linear {
         Ok(self.weight.clone())
     }
 
-    fn forward_raw(&self, x: &Tensor) -> Result<Tensor> {
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
         // Weight is already dequantized, use standard matmul
         let unquant = UnquantLinear::new(QuantMethodConfig::Unquantized(Linear::new(
             self.weight.clone(),
@@ -89,10 +88,6 @@ impl QuantMethod for PerTensorFP8Linear {
 
     fn dtype_and_device(&self) -> (DType, Device) {
         (DType::F8E4M3, self.weight.device().clone())
-    }
-
-    fn unquant_weight_bias(&self) -> Option<(Tensor, Option<Tensor>)> {
-        Some((self.weight.clone(), self.bias.clone()))
     }
 
     fn apply_isq(
@@ -316,8 +311,10 @@ pub fn pertensor_fp8_linear_b(
         return crate::linear_b(in_dim, out_dim, bias, &None, vb);
     }
 
-    if has_missing_required_tensors(&vb, &["weight", "weight_scale_inv"]) {
-        return make_dummy_or_error("pertensor_fp8_linear", &vb, &["weight", "weight_scale_inv"]);
+    // Handle the case where the layer is dummy (no tensors)
+    if !vb.contains_tensor("weight") {
+        let layer = <DummyLayer as QuantMethod>::new(QuantMethodConfig::Dummy)?;
+        return Ok(Arc::new(layer) as Arc<dyn QuantMethod>);
     }
 
     // Load FP8 weight tensor

@@ -21,7 +21,6 @@ use candle_core::{DType, Device, Result, Tensor, D};
 use candle_nn::{Linear, Module};
 use mistralrs_quant::{CollectedImatrixData, QuantMethod, ShardedVarBuilder};
 
-use crate::attention::AttentionMask;
 use crate::{
     amoe::AnyMoeBaseModelMixin,
     device_map::DeviceMapper,
@@ -29,8 +28,7 @@ use crate::{
     layers_masker::masked_fill,
     ops::RepeatInterleaveOp,
     paged_attention::{
-        encoder_cache::{CacheModality, EncoderCacheManager},
-        AttentionImplementation, ModelConfigMetadata,
+        encoder_cache::EncoderCacheManager, AttentionImplementation, ModelConfigMetadata,
     },
     pipeline::{
         text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
@@ -152,7 +150,7 @@ impl MLlamaModel {
                         .lock()
                         .expect("encoder cache lock poisoned");
                     for (i, &hash) in image_hashes.iter().enumerate() {
-                        if let Some(cached) = guard.get(CacheModality::Image, hash) {
+                        if let Some(cached) = guard.get(hash) {
                             per_image.push(cached[0].clone());
                         } else {
                             per_image.push(Tensor::zeros(
@@ -184,11 +182,7 @@ impl MLlamaModel {
                                 .encoder_cache
                                 .lock()
                                 .expect("encoder cache lock poisoned");
-                            guard.insert(
-                                CacheModality::Image,
-                                image_hashes[idx],
-                                vec![feats.clone()],
-                            );
+                            guard.insert(image_hashes[idx], vec![feats.clone()]);
                         }
                         per_image[idx] = feats;
                     }
@@ -222,14 +216,10 @@ impl MLlamaModel {
                 (None, None)
             };
 
-        let cross_attn_mask_enum = match &cross_attn_mask {
-            Some(t) => AttentionMask::Custom(t.clone()),
-            None => AttentionMask::None,
-        };
         self.language_model.forward(
             input_ids,
             cross_attn_states.as_ref(),
-            &cross_attn_mask_enum,
+            cross_attn_mask.as_ref(),
             full_text_row_masked_out_mask.as_ref(),
             seqlen_offsets,
             context_lens,

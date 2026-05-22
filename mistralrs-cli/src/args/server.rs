@@ -2,6 +2,7 @@
 
 use clap::Args;
 use serde::Deserialize;
+use std::path::PathBuf;
 
 /// HTTP server configuration
 #[derive(Args, Clone, Deserialize)]
@@ -16,22 +17,20 @@ pub struct ServerOptions {
     #[serde(default = "default_host")]
     pub host: String,
 
-    /// Disable the built-in web UI (served at /ui by default).
+    /// MCP protocol server port (enables MCP if set)
     #[arg(long)]
     #[serde(default)]
-    pub no_ui: bool,
+    pub mcp_port: Option<u16>,
 
-    /// Default maximum tool-call rounds for the agentic loop.
-    /// Per-request values from the HTTP API override this. Safety cap: 256 if unset.
+    /// MCP client configuration file path
     #[arg(long)]
     #[serde(default)]
-    pub max_tool_rounds: Option<usize>,
+    pub mcp_config: Option<PathBuf>,
 
-    /// URL to POST tool calls to for server-side execution.
-    /// For security, this is only configurable server-side (not per-request via HTTP API).
+    /// Serve the built-in web UI at /ui
     #[arg(long)]
     #[serde(default)]
-    pub tool_dispatch_url: Option<String>,
+    pub ui: bool,
 }
 
 impl Default for ServerOptions {
@@ -39,9 +38,9 @@ impl Default for ServerOptions {
         Self {
             port: 1234,
             host: "0.0.0.0".to_string(),
-            no_ui: false,
-            max_tool_rounds: None,
-            tool_dispatch_url: None,
+            mcp_port: None,
+            mcp_config: None,
+            ui: false,
         }
     }
 }

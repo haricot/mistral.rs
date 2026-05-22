@@ -3,9 +3,7 @@
 // Licensed under the Apache License 2.0
 // Copyright © 2023 Apple Inc.
 
-use candle_metal_kernels::metal::{
-    Buffer, CommandBuffer, CommandsGuard, ComputeCommandEncoder, ComputePipeline,
-};
+use candle_metal_kernels::metal::{Buffer, CommandBuffer, ComputeCommandEncoder, ComputePipeline};
 use objc2_metal::MTLSize;
 use std::ffi::c_void;
 
@@ -217,54 +215,31 @@ impl<T> EncoderParam for &[T] {
 
 impl EncoderParam for &Buffer {
     fn set_param(encoder: &ComputeCommandEncoder, position: usize, data: Self) {
-        encoder.set_input_buffer(position, Some(data), 0);
+        encoder.set_buffer(position, Some(data), 0);
     }
 }
 
 impl EncoderParam for (&Buffer, usize) {
     fn set_param(encoder: &ComputeCommandEncoder, position: usize, data: Self) {
-        encoder.set_input_buffer(position, Some(data.0), data.1);
+        encoder.set_buffer(position, Some(data.0), data.1);
     }
 }
 
 impl EncoderParam for &BufferOffset<'_> {
     fn set_param(encoder: &ComputeCommandEncoder, position: usize, data: Self) {
-        encoder.set_input_buffer(position, Some(data.buffer), data.offset_in_bytes);
+        encoder.set_buffer(position, Some(data.buffer), data.offset_in_bytes);
     }
 }
 
 impl EncoderParam for &mut Buffer {
     fn set_param(encoder: &ComputeCommandEncoder, position: usize, data: Self) {
-        encoder.set_output_buffer(position, Some(data), 0);
+        encoder.set_buffer(position, Some(data), 0);
     }
 }
 
 impl EncoderParam for (&mut Buffer, usize) {
     fn set_param(encoder: &ComputeCommandEncoder, position: usize, data: Self) {
-        encoder.set_output_buffer(position, Some(data.0), data.1);
-    }
-}
-
-/// Wrapper for `set_params!` callers to mark a buffer slot as a kernel output
-/// (writes), so hazard tracking and inter-encoder fence ordering see the write.
-/// Use this whenever a kernel's `device T*` (non-const) argument is passed
-/// through `set_params!`.
-#[derive(Copy, Clone)]
-pub struct Output<'a> {
-    buffer: &'a Buffer,
-    offset: usize,
-}
-
-impl<'a> Output<'a> {
-    #[inline]
-    pub fn new(buffer: &'a Buffer) -> Self {
-        Self { buffer, offset: 0 }
-    }
-}
-
-impl<'a> EncoderParam for Output<'a> {
-    fn set_param(encoder: &ComputeCommandEncoder, position: usize, data: Self) {
-        encoder.set_output_buffer(position, Some(data.buffer), data.offset);
+        encoder.set_buffer(position, Some(data.0), data.1);
     }
 }
 
@@ -311,7 +286,7 @@ impl EncoderProvider for &CommandBuffer {
     where
         Self: 'a;
     fn encoder(&self) -> Self::Encoder<'_> {
-        self.compute_command_encoder_no_fence()
+        self.compute_command_encoder()
     }
 }
 
@@ -325,15 +300,5 @@ impl EncoderProvider for &ComputeCommandEncoder {
             inner: self,
             end_encoding_on_drop: false,
         }
-    }
-}
-
-impl EncoderProvider for &CommandsGuard<'_> {
-    type Encoder<'a>
-        = &'a CommandsGuard<'a>
-    where
-        Self: 'a;
-    fn encoder(&self) -> Self::Encoder<'_> {
-        self
     }
 }

@@ -1,4 +1,3 @@
-use crate::attention::AttentionMask;
 use std::sync::Mutex;
 
 use candle_core::{Result, Tensor, D};
@@ -69,11 +68,11 @@ impl Phi4MMImageAudioEmbedding {
         &self,
         input_ids: &Tensor,
         input_image_embeds: Option<&Tensor>,
-        image_attention_mask: &AttentionMask,
+        image_attention_mask: Option<&Tensor>,
         image_sizes: Option<Vec<(u32, u32)>>,
         input_audio_embeds: Option<&Tensor>,
         audio_embed_sizes: Option<Vec<usize>>,
-        audio_attention_mask: &AttentionMask,
+        audio_attention_mask: Option<&Tensor>,
         input_mode: InputMode,
         image_hashes: &[u64],
         encoder_cache: &Mutex<EncoderCacheManager>,

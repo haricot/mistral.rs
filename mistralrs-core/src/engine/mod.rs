@@ -52,12 +52,8 @@ use crate::{
 };
 
 mod add_request;
-pub(crate) mod agentic_loop;
-pub use agentic_loop::DEFAULT_MAX_TOOL_ROUNDS;
-pub(crate) mod agentic_session;
-mod file_tools;
 mod logger;
-mod tool_dispatch;
+mod search_request;
 
 pub enum EngineInstruction {
     Terminate,
@@ -163,7 +159,8 @@ pub struct Engine {
     pipeline: Arc<Mutex<dyn Pipeline>>,
     search_pipeline: Arc<Mutex<Option<SearchPipeline>>>,
     search_callback: Option<Arc<search::SearchCallback>>,
-    tool_callbacks: tools::ToolCallbacksWithTools,
+    tool_callbacks: tools::ToolCallbacks,
+    tool_callbacks_with_tools: tools::ToolCallbacksWithTools,
     scheduler: Arc<Mutex<dyn Scheduler>>,
     id: Arc<Mutex<usize>>,
     no_kv_cache: bool,
@@ -174,8 +171,6 @@ pub struct Engine {
     logger: Arc<IntervalLogger>,
     handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
     pending_notify: Arc<Notify>,
-    pub(crate) session_store: Arc<std::sync::Mutex<agentic_session::AgenticSessionStore>>,
-    pub(crate) file_store: crate::files::FileStore,
 }
 
 impl Drop for Engine {
@@ -200,10 +195,9 @@ impl Engine {
         throughput_logging_enabled: bool,
         search_embedding_model: Option<SearchEmbeddingModel>,
         search_callback: Option<Arc<search::SearchCallback>>,
-        tool_callbacks: tools::ToolCallbacksWithTools,
+        tool_callbacks: tools::ToolCallbacks,
+        tool_callbacks_with_tools: tools::ToolCallbacksWithTools,
         logger: Arc<IntervalLogger>,
-        session_store: Arc<std::sync::Mutex<agentic_session::AgenticSessionStore>>,
-        file_store: crate::files::FileStore,
     ) -> anyhow::Result<Self> {
         no_kv_cache |= get_mut_arcmutex!(pipeline).get_metadata().no_kv_cache;
 
@@ -235,6 +229,7 @@ impl Engine {
             search_pipeline: Arc::new(Mutex::new(search_pipeline)),
             search_callback,
             tool_callbacks,
+            tool_callbacks_with_tools,
             scheduler: scheduler.clone(),
             id: Arc::new(Mutex::new(0)),
             no_kv_cache,
@@ -249,8 +244,6 @@ impl Engine {
             logger,
             handles: Arc::new(Mutex::new(Vec::new())),
             pending_notify: Arc::new(Notify::new()),
-            session_store,
-            file_store,
         })
     }
 

@@ -1,9 +1,8 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use crate::layers_masker::CausalMaskConfig;
 use crate::{
     amoe::AnyMoeBaseModelMixin,
-    attention::{AttentionMask, SdpaParams},
+    attention::SdpaParams,
     layers::{self, Activation, RotaryEmbedding, Sdpa},
     lora::{linear_no_bias, LinearLayerLike, LoraConfig, Ordering},
     paged_attention::ModelConfigMetadata,
@@ -126,7 +125,7 @@ impl Attention {
     fn forward(
         &self,
         xs: &Tensor,
-        attention_mask: &AttentionMask,
+        attention_mask: Option<&Tensor>,
         seqlen_offsets: &[usize],
         kv_cache: &mut Option<(Tensor, Tensor)>,
         scalings: Option<Tensor>,
@@ -136,24 +135,35 @@ impl Attention {
     ) -> Result<Tensor> {
         let (b_sz, q_len, _) = xs.dims3()?;
 
-        let q = self.q_proj.lora_forward(
-            xs,
+        let original_dtype = xs.dtype();
+        let mut xs = xs.clone();
+        if let Some(t) = self.q_proj.quantized_act_type() {
+            xs = xs.to_dtype(t)?;
+        }
+        let mut q = self.q_proj.lora_forward(
+            &xs,
             scalings.clone(),
             global_scaling_weight,
             is_scaling_pass,
         )?;
-        let k = self.k_proj.lora_forward(
-            xs,
+        let mut k = self.k_proj.lora_forward(
+            &xs,
             scalings.clone(),
             global_scaling_weight,
             is_scaling_pass,
         )?;
-        let v = self.v_proj.lora_forward(
-            xs,
+        let mut v = self.v_proj.lora_forward(
+            &xs,
             scalings.clone(),
             global_scaling_weight,
             is_scaling_pass,
         )?;
+        if self.q_proj.quantized_act_type().is_some() {
+            q = q.to_dtype(original_dtype)?;
+            k = k.to_dtype(original_dtype)?;
+            v = v.to_dtype(original_dtype)?;
+        }
+
         let (q, k, v) = if q_len != 1 {
             let q = q
                 .reshape((b_sz, q_len, self.num_heads, self.head_dim))?
@@ -181,26 +191,28 @@ impl Attention {
             attention_mask,
             self.sliding_window,
         )?;
-        let attn_mask = match attn_mask {
-            Some(t) => AttentionMask::Custom(t),
-            None => AttentionMask::None,
-        };
 
-        let attn_output = Sdpa.run_attention(
+        let mut attn_output = Sdpa.run_attention(
             &q,
             &k,
             &v,
-            &attn_mask,
+            attn_mask.as_ref(),
             Some(flash_params),
             &self.sdpa_params,
         )?;
 
-        let res = self.o_proj.lora_forward(
+        if let Some(t) = self.q_proj.quantized_act_type() {
+            attn_output = attn_output.to_dtype(t)?;
+        }
+        let mut res = self.o_proj.lora_forward(
             &attn_output.transpose(1, 2)?.reshape((b_sz, q_len, ()))?,
             scalings.clone(),
             global_scaling_weight,
             is_scaling_pass,
         )?;
+        if self.q_proj.quantized_act_type().is_some() {
+            res = res.to_dtype(original_dtype)?;
+        }
         Ok(res)
     }
 }
@@ -273,19 +285,35 @@ impl BlockSparseTop2MLP {
         global_scaling_weight: f64,
         is_scaling_pass: Option<f64>,
     ) -> Result<Tensor> {
+        let original_dtype = xs.dtype();
+        let mut xs = xs.clone();
+        if let Some(t) = self.w1.quantized_act_type() {
+            xs = xs.to_dtype(t)?;
+        }
         let lhs = self
             .w1
-            .lora_forward(xs, scalings.clone(), global_scaling_weight, is_scaling_pass)?
+            .lora_forward(
+                &xs,
+                scalings.clone(),
+                global_scaling_weight,
+                is_scaling_pass,
+            )?
             .apply(&self.act_fn)?;
-        let rhs =
-            self.w3
-                .lora_forward(xs, scalings.clone(), global_scaling_weight, is_scaling_pass)?;
-        let res = self.w2.lora_forward(
+        let rhs = self.w3.lora_forward(
+            &xs,
+            scalings.clone(),
+            global_scaling_weight,
+            is_scaling_pass,
+        )?;
+        let mut res = self.w2.lora_forward(
             &(lhs * rhs)?,
             scalings.clone(),
             global_scaling_weight,
             is_scaling_pass,
         )?;
+        if self.w1.quantized_act_type().is_some() {
+            res = res.to_dtype(original_dtype)?;
+        }
         Ok(res)
     }
 }
@@ -353,12 +381,21 @@ impl SparseMoeBlock {
         let (b_size, seq_len, hidden_dim) = xs.dims3()?;
         let xs = xs.reshape(((), hidden_dim))?;
 
-        let router_logits = self.gate.lora_forward(
+        let original_dtype = xs.dtype();
+        let mut xs = xs.clone();
+        if let Some(t) = self.gate.quantized_act_type() {
+            xs = xs.to_dtype(t)?;
+        }
+        let mut router_logits = self.gate.lora_forward(
             &xs,
             scalings.clone(),
             global_scaling_weight,
             is_scaling_pass,
         )?;
+        if self.gate.quantized_act_type().is_some() {
+            router_logits = router_logits.to_dtype(original_dtype)?;
+        }
+
         let routing_weights = candle_nn::ops::softmax_last_dim(&router_logits)?;
 
         // In order to extract topk, we extract the data from the tensor and manipulate it
@@ -484,7 +521,7 @@ impl DecoderLayer {
     fn forward(
         &self,
         xs: &Tensor,
-        attention_mask: &AttentionMask,
+        attention_mask: Option<&Tensor>,
         seqlen_offsets: &[usize],
         kv_cache: &mut Option<(Tensor, Tensor)>,
         scalings: Option<Tensor>,
@@ -709,21 +746,19 @@ impl XLoraModel {
             self.cache.full().lock()
         };
         let mut xs = self.embed_tokens.forward(input_ids)?;
-        let attention_mask = CausalMasker.make_causal_mask(
+        let attention_mask = CausalMasker.make_sliding_window_causal_mask_matrix(
             input_ids,
             &*cache,
+            self.sliding_window,
             xs.dtype(),
-            &CausalMaskConfig {
-                sliding_window: self.sliding_window,
-                ..Default::default()
-            },
+            self.cfg.num_attn_heads,
         )?;
         let attention_mask = DeviceMappedMask::new(attention_mask, &*self.mapper)?;
         for (i, layer) in self.layers.iter().enumerate() {
             xs = self.mapper.map(xs, i)?;
             xs = layer.forward(
                 &xs,
-                &attention_mask.get(xs.device()),
+                attention_mask.as_ref().map(|m| m.get(xs.device())),
                 seqlen_offsets,
                 &mut cache[i],
                 scalings.clone(),
@@ -777,7 +812,10 @@ impl XLoraModel {
                         flash_params_full,
                     )?
                     .contiguous()?;
-                let res = extract_logits(&res, context_lens)?;
+                let mut res = extract_logits(&res, context_lens)?;
+                if let Some(t) = self.lm_head.quantized_act_type() {
+                    res = res.to_dtype(t)?;
+                }
                 self.lm_head.lora_forward(&res, None, 1.0, None)
             } else {
                 // is_full_pass=true is ok because no_kv_cache=false
@@ -792,7 +830,10 @@ impl XLoraModel {
                         flash_params,
                     )?
                     .contiguous()?;
-                let res = extract_logits(&res, context_lens)?;
+                let mut res = extract_logits(&res, context_lens)?;
+                if let Some(t) = self.lm_head.quantized_act_type() {
+                    res = res.to_dtype(t)?;
+                }
                 self.lm_head.lora_forward(&res, None, 1.0, None)
             }
         } else {
@@ -807,7 +848,10 @@ impl XLoraModel {
                     flash_params,
                 )?
                 .contiguous()?;
-            let res = extract_logits(&res, context_lens)?;
+            let mut res = extract_logits(&res, context_lens)?;
+            if let Some(t) = self.lm_head.quantized_act_type() {
+                res = res.to_dtype(t)?;
+            }
             self.lm_head.lora_forward(&res, None, 1.0, None)
         }
     }

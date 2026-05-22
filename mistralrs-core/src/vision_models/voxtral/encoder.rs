@@ -1,6 +1,5 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use crate::layers_masker::CausalMaskConfig;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -8,8 +7,8 @@ use candle_core::{DType, Module, Result, Tensor};
 use mistralrs_quant::{QuantMethod, ShardedVarBuilder};
 
 use crate::{
-    attention::{AttentionMask, SdpaParams},
-    layers::{CausalMasker, RmsNorm, RotaryEmbedding, Sdpa},
+    attention::SdpaParams,
+    layers::{CausalMasker, MatMul, RmsNorm, RotaryEmbedding, Sdpa},
     layers_masker::PastKvLenCache,
     pipeline::{KvCache, NormalCache},
 };
@@ -73,15 +72,15 @@ impl EncoderAttention {
     fn forward(
         &self,
         xs: &Tensor,
-        attention_mask: &AttentionMask,
+        attention_mask: Option<&Tensor>,
         seqlen_offsets: &[usize],
         kv_cache: &mut KvCache,
     ) -> Result<Tensor> {
         let (b_sz, q_len, _) = xs.dims3()?;
 
-        let q = self.wq.forward(xs)?;
-        let k = self.wk.forward(xs)?;
-        let v = self.wv.forward(xs)?;
+        let q = MatMul.qmethod_matmul(xs, &*self.wq)?;
+        let k = MatMul.qmethod_matmul(xs, &*self.wk)?;
+        let v = MatMul.qmethod_matmul(xs, &*self.wv)?;
 
         let (q, k, v) = if q_len != 1 {
             let q = q
@@ -114,12 +113,12 @@ impl EncoderAttention {
             &self.sdpa_params,
         )?;
 
-        let attn_output = if !matches!(attention_mask, AttentionMask::None) {
+        let attn_output = if attention_mask.is_some() {
             attn_output.transpose(1, 2)?.reshape((b_sz, q_len, ()))?
         } else {
             attn_output.reshape((b_sz, q_len, ()))?
         };
-        self.wo.forward(&attn_output)
+        MatMul.qmethod_matmul(&attn_output, &*self.wo)
     }
 }
 
@@ -145,11 +144,11 @@ impl EncoderMlp {
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         // SwiGLU: silu(w1(x)) * w3(x), then w2
-        let gate = self.w1.forward(xs)?;
+        let gate = MatMul.qmethod_matmul(xs, &*self.w1)?;
         let gate = candle_nn::ops::silu(&gate)?;
-        let up = self.w3.forward(xs)?;
+        let up = MatMul.qmethod_matmul(xs, &*self.w3)?;
         let xs = (gate * up)?;
-        self.w2.forward(&xs)
+        MatMul.qmethod_matmul(&xs, &*self.w2)
     }
 }
 
@@ -181,7 +180,7 @@ impl EncoderLayer {
     fn forward(
         &self,
         xs: &Tensor,
-        attention_mask: &AttentionMask,
+        attention_mask: Option<&Tensor>,
         seqlen_offsets: &[usize],
         kv_cache: &mut KvCache,
     ) -> Result<Tensor> {
@@ -212,7 +211,6 @@ pub struct VoxtralEncoder {
     pub(super) layers: Vec<EncoderLayer>,
     pub(super) norm: RmsNorm,
     cache: Arc<Mutex<NormalCache>>,
-    #[allow(dead_code)]
     num_heads: usize,
     sliding_window: Option<usize>,
     n_layers: usize,
@@ -325,19 +323,22 @@ impl VoxtralEncoder {
         // Create causal mask with sliding window for the encoder
         let seqlen_offsets = vec![0usize; b_sz];
         let dummy_toks = Tensor::zeros((b_sz, seq_len), DType::U32, xs.device())?;
-        let attention_mask = CausalMasker.make_causal_mask(
+        let attention_mask = CausalMasker.make_sliding_window_causal_mask_matrix(
             &dummy_toks,
             &cache.0 as &dyn PastKvLenCache,
+            self.sliding_window,
             xs.dtype(),
-            &CausalMaskConfig {
-                sliding_window: self.sliding_window,
-                ..Default::default()
-            },
+            self.num_heads,
         )?;
 
         let mut hidden = xs;
         for (i, layer) in self.layers.iter().enumerate() {
-            hidden = layer.forward(&hidden, &attention_mask, &seqlen_offsets, &mut cache.0[i])?;
+            hidden = layer.forward(
+                &hidden,
+                attention_mask.as_ref(),
+                &seqlen_offsets,
+                &mut cache.0[i],
+            )?;
         }
 
         self.norm.forward(&hidden)

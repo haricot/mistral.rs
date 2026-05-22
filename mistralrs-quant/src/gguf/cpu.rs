@@ -29,10 +29,6 @@ type Q4_1ExpertCacheKey = (usize, usize);
 type Q4KExpertCacheKey = (usize, usize);
 type Q4KMatmulCacheKey = usize;
 
-const DEFAULT_DEQUANT_EXPERT_CACHE_LIMIT: usize = 0;
-const DEFAULT_Q4_1_EXPERT_CACHE_LIMIT: usize = 256;
-const DEFAULT_Q4K_EXPERT_CACHE_LIMIT: usize = 1024;
-
 #[derive(Default)]
 struct ExpertCache {
     map: HashMap<ExpertCacheKey, Tensor>,
@@ -117,7 +113,7 @@ fn expert_cache_limit() -> usize {
     std::env::var("MISTRALRS_GGUF_CPU_MOE_EXPERT_CACHE")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(DEFAULT_DEQUANT_EXPERT_CACHE_LIMIT)
+        .unwrap_or(1024)
 }
 
 fn dtype_key(dtype: DType) -> u8 {
@@ -169,7 +165,7 @@ fn q4_1_expert_cache_limit() -> usize {
     std::env::var("MISTRALRS_GGUF_CPU_MOE_Q4_1_EXPERT_CACHE")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(DEFAULT_Q4_1_EXPERT_CACHE_LIMIT)
+        .unwrap_or_else(expert_cache_limit)
 }
 
 fn cached_q4_1_expert(
@@ -208,7 +204,7 @@ fn q4k_expert_cache_limit() -> usize {
     std::env::var("MISTRALRS_GGUF_CPU_MOE_Q4K_EXPERT_CACHE")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(DEFAULT_Q4K_EXPERT_CACHE_LIMIT)
+        .unwrap_or_else(expert_cache_limit)
 }
 
 fn cached_q4k_expert(
@@ -1269,67 +1265,6 @@ mod tests {
                 );
             }
         }
-
-        Ok(())
-    }
-
-    #[test]
-    fn cpu_indexed_moe_accepts_supported_gguf_quant_dtypes() -> Result<()> {
-        let dtypes = [
-            GgmlDType::Q4_0,
-            GgmlDType::Q4_1,
-            GgmlDType::Q5_0,
-            GgmlDType::Q5_1,
-            GgmlDType::Q8_0,
-            GgmlDType::Q8_1,
-            GgmlDType::Q2K,
-            GgmlDType::Q3K,
-            GgmlDType::Q4K,
-            GgmlDType::Q5K,
-            GgmlDType::Q6K,
-            GgmlDType::Q8K,
-        ];
-        let num_experts = 3;
-        let out_features = 8;
-        let in_features = QK_K;
-        let tokens = 2;
-        let topk = 2;
-        let weights = (0..num_experts * out_features * in_features)
-            .map(|i| ((i % 127) as f32 - 63.0) / 101.0)
-            .collect::<Vec<_>>();
-        let input = (0..tokens * in_features)
-            .map(|i| ((i % 67) as f32 - 33.0) / 79.0)
-            .collect::<Vec<_>>();
-        let ids = Tensor::from_vec(vec![0u32, 2, 1, 0], (tokens, topk), &Device::Cpu)?;
-        let weight = Tensor::from_vec(
-            weights,
-            (num_experts, out_features, in_features),
-            &Device::Cpu,
-        )?;
-        let input = Tensor::from_vec(input, (tokens, 1, in_features), &Device::Cpu)?;
-
-        let mut tested = 0;
-        for dtype in dtypes {
-            let qtensor = match QTensor::quantize(&weight, dtype) {
-                Ok(qtensor) => qtensor,
-                Err(err) if err.to_string().contains("not supported") => continue,
-                Err(err) => return Err(err),
-            };
-            let qmatmul = match QMatMul::from_arc(Arc::new(qtensor)) {
-                Ok(qmatmul) => qmatmul,
-                Err(err) if err.to_string().contains("not supported") => continue,
-                Err(err) => return Err(err),
-            };
-            let output = match cpu_indexed_moe_forward(&qmatmul, &input, &ids) {
-                Ok(output) => output,
-                Err(err) if err.to_string().contains("not supported") => continue,
-                Err(err) => return Err(err),
-            };
-
-            assert_eq!(output.dims(), &[tokens, topk, out_features], "{dtype:?}");
-            tested += 1;
-        }
-        assert!(tested > 0);
 
         Ok(())
     }

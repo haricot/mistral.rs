@@ -5,7 +5,6 @@
     clippy::too_many_arguments
 )]
 
-use crate::layers_masker::CausalMaskConfig;
 use std::sync::Arc;
 
 use candle_core::{DType, Device, Result, Tensor};
@@ -17,7 +16,7 @@ use mistralrs_quant::{
 
 use crate::{
     amoe::{AnyMoeBaseModelMixin, AnyMoeTrainableLayer, MlpLayer, MoeMlp},
-    attention::{AttentionMask, SdpaParams},
+    attention::SdpaParams,
     device_map::{DeviceMappedMask, DeviceMapper},
     get_delta_from_lora_ab,
     layers::{
@@ -54,7 +53,7 @@ impl CausalSelfAttention {
     fn forward(
         &self,
         x: &Tensor,
-        attention_mask: &AttentionMask,
+        attention_mask: &Option<Tensor>,
         seqlen_offsets: &[usize],
         block_idx: usize,
         kv_cache: &mut crate::pipeline::LayerCaches,
@@ -64,9 +63,20 @@ impl CausalSelfAttention {
     ) -> Result<Tensor> {
         let (b_sz, seq_len, _) = x.dims3()?;
 
-        let q = self.q_proj.forward(x)?;
-        let k = self.k_proj.forward(x)?;
-        let v = self.v_proj.forward(x)?;
+        let original_dtype = x.dtype();
+        let mut x = x.clone();
+        if let Some(t) = self.q_proj.quantized_act_type() {
+            x = x.to_dtype(t)?;
+        }
+        let mut q = MatMul.qmethod_matmul(&x, &*self.q_proj)?;
+        let mut k = MatMul.qmethod_matmul(&x, &*self.k_proj)?;
+        let mut v = MatMul.qmethod_matmul(&x, &*self.v_proj)?;
+        if self.q_proj.quantized_act_type().is_some() {
+            q = q.to_dtype(original_dtype)?;
+            k = k.to_dtype(original_dtype)?;
+            v = v.to_dtype(original_dtype)?;
+        }
+
         let mut q = q
             .reshape((b_sz, seq_len, self.num_attention_heads, self.head_dim))?
             .transpose(1, 2)?
@@ -87,7 +97,7 @@ impl CausalSelfAttention {
                     &q,
                     &k,
                     &v,
-                    attention_mask,
+                    attention_mask.clone().as_ref(),
                     Some(key_cache),
                     Some(value_cache),
                     input_metadata,
@@ -99,12 +109,12 @@ impl CausalSelfAttention {
                     // Generating the dummy metadata with the assumption that we are not generating text (only processing prompts).
                     let input_metadata = PagedAttentionInputMetadata::dummy(q.device())?;
                     // Sanity check.
-                    assert!(!matches!(attention_mask, AttentionMask::None));
+                    assert!(attention_mask.is_some());
                     paged_attn.forward(
                         &q,
                         &k,
                         &v,
-                        attention_mask,
+                        attention_mask.clone().as_ref(),
                         None,
                         None,
                         &input_metadata,
@@ -121,19 +131,25 @@ impl CausalSelfAttention {
                     &q,
                     &k,
                     &v,
-                    attention_mask,
+                    attention_mask.clone().as_ref(),
                     Some(flash_params),
                     &self.sdpa_params,
                 )?
             }
         };
 
-        y = if !matches!(attention_mask, AttentionMask::None) {
+        if let Some(t) = self.q_proj.quantized_act_type() {
+            y = y.to_dtype(t)?;
+        }
+        y = if attention_mask.is_some() {
             y.transpose(1, 2)?.reshape((b_sz, seq_len, ()))?
         } else {
             y.reshape((b_sz, seq_len, ()))?
         };
-        let res = self.o_proj.forward(&y)?;
+        let mut res = MatMul.qmethod_matmul(&y, &*self.o_proj)?;
+        if self.q_proj.quantized_act_type().is_some() {
+            res = res.to_dtype(original_dtype)?;
+        }
         Ok(res)
     }
 
@@ -262,8 +278,17 @@ impl AnyMoeTrainableLayer for Mlp {}
 
 impl MlpLayer for Mlp {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let x = (candle_nn::ops::silu(&self.c_fc1.forward(x)?)? * self.c_fc2.forward(x)?)?;
-        let res = self.c_proj.forward(&x)?;
+        let original_dtype = x.dtype();
+        let mut x = x.clone();
+        if let Some(t) = self.c_fc1.quantized_act_type() {
+            x = x.to_dtype(t)?;
+        }
+        let x = (candle_nn::ops::silu(&MatMul.qmethod_matmul(&x, &*self.c_fc1)?)?
+            * MatMul.qmethod_matmul(&x, &*self.c_fc2)?)?;
+        let mut res = MatMul.qmethod_matmul(&x, &*self.c_proj)?;
+        if self.c_fc1.quantized_act_type().is_some() {
+            res = res.to_dtype(original_dtype)?;
+        }
         Ok(res)
     }
     fn get_isq_layers(&mut self) -> Vec<&mut Arc<dyn QuantMethod>> {
@@ -321,7 +346,7 @@ impl Block {
     fn forward(
         &self,
         x: &Tensor,
-        attention_mask: &AttentionMask,
+        attention_mask: &Option<Tensor>,
         seqlen_offsets: &[usize],
         block_idx: usize,
         kv_cache: &mut crate::pipeline::LayerCaches,
@@ -560,30 +585,27 @@ impl LLaVALLM for Llama {
     ) -> Result<Tensor> {
         let mut x = input_embed;
         let mut cache = self.kv_cache.full().lock();
-        let mask = CausalMasker.make_causal_mask(
+        let mask = CausalMasker.make_causal_mask_matrix(
             input_ids,
             metadata
                 .as_ref()
                 .map(|(_, _)| &seqlen_offsets as &dyn PastKvLenCache)
                 .unwrap_or(&*cache as &dyn PastKvLenCache),
             x.dtype(),
-            &CausalMaskConfig::default(),
+            self.blocks[0].attn.num_attention_heads,
         )?;
-        let mask = if metadata
-            .as_ref()
-            .map(|(_, meta)| meta.is_first_prompt_chunk)
-            .unwrap_or(true)
-        {
-            mask
-        } else {
-            AttentionMask::None
-        };
+        let mask = mask.filter(|_| {
+            metadata
+                .as_ref()
+                .map(|(_, meta)| meta.is_first_prompt_chunk)
+                .unwrap_or(true)
+        });
         let mask = DeviceMappedMask::new(mask, &*self.mapper)?;
         for (block_idx, block) in self.blocks.iter().enumerate() {
             x = self.mapper.map(x, block_idx)?;
             x = block.forward(
                 &x,
-                &mask.get(x.device()),
+                &mask.as_ref().map(|m| m.get(x.device()).clone()),
                 seqlen_offsets,
                 block_idx,
                 &mut cache,
@@ -595,8 +617,11 @@ impl LLaVALLM for Llama {
         }
         let x = x.to_device(&self.device)?;
         let x = self.ln_f.forward(&x)?;
-        let x = extract_logits(&x, context_lens)?;
-        self.lm_head.forward(&x)
+        let mut x = extract_logits(&x, context_lens)?;
+        if let Some(t) = self.lm_head.quantized_act_type() {
+            x = x.to_dtype(t)?;
+        }
+        MatMul.qmethod_matmul(&x, &*self.lm_head)
     }
 }
 

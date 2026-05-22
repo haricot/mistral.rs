@@ -1,6 +1,6 @@
 use candle_core::Device;
 use mistralrs_core::*;
-use mistralrs_core::{SearchCallback, Tool, ToolCallback, ToolCallbackKind};
+use mistralrs_core::{SearchCallback, Tool, ToolCallback};
 
 use crate::{IsqBits, IsqSetting};
 use std::collections::HashMap;
@@ -32,7 +32,8 @@ pub struct MultimodalModelBuilder {
     pub(crate) hf_cache_path: Option<PathBuf>,
     pub(crate) search_embedding_model: Option<SearchEmbeddingModel>,
     pub(crate) search_callback: Option<Arc<SearchCallback>>,
-    pub(crate) tool_callbacks: HashMap<String, ToolCallbackWithTool>,
+    pub(crate) tool_callbacks: HashMap<String, Arc<ToolCallback>>,
+    pub(crate) tool_callbacks_with_tools: HashMap<String, ToolCallbackWithTool>,
     pub(crate) device: Option<Device>,
     pub(crate) matformer_config_path: Option<PathBuf>,
     pub(crate) matformer_slice_name: Option<String>,
@@ -88,6 +89,7 @@ impl MultimodalModelBuilder {
             search_embedding_model: None,
             search_callback: None,
             tool_callbacks: HashMap::new(),
+            tool_callbacks_with_tools: HashMap::new(),
             device: None,
             matformer_config_path: None,
             matformer_slice_name: None,

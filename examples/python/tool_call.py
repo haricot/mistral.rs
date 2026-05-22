@@ -1,11 +1,6 @@
-"""
-Basic client-side tool calling with the Python SDK.
-
-Usage:
-    python examples/python/tool_call.py
-"""
-
+from io import StringIO
 import json
+import sys
 from mistralrs import Runner, ToolChoice, Which, ChatCompletionRequest, Architecture
 
 tools = [
@@ -13,70 +8,109 @@ tools = [
         {
             "type": "function",
             "function": {
-                "name": "get_weather",
-                "description": "Get the current weather for a city.",
+                "name": "run_python",
+                "description": "Run some Python code",
                 "parameters": {
-                    "type": "object",
+                    "type": "string",
                     "properties": {
-                        "city": {
+                        "code": {
                             "type": "string",
-                            "description": "City name",
+                            "description": "The Python code to evaluate. The return value whatever was printed out from `print`.",
                         },
                     },
-                    "required": ["city"],
+                    "required": ["code"],
                 },
-                "strict": True,
             },
         }
     )
 ]
 
 
-def get_weather(city: str) -> str:
-    """Simulated weather lookup."""
-    data = {"tokyo": "Sunny, 22C", "london": "Cloudy, 15C"}
-    return data.get(city.lower(), f"Unknown city: {city}")
+def custom_serializer(obj):
+    try:
+        res = json.dumps(obj)
+    except:
+        # Handle serializing, for example, an imported module
+        res = None
+    return res
 
 
-messages = [{"role": "user", "content": "What's the weather in Tokyo?"}]
+def run_python(code: str) -> str:
+    lcls = dict()
+    # No opening of files
+    glbls = {"open": None}
+
+    print(f"Running:\n```py\n{code}\n```")
+
+    old_stdout = sys.stdout
+    out = StringIO()
+    sys.stdout = out
+    exec(code, glbls, lcls)
+    sys.stdout = old_stdout
+
+    return out.getvalue()
+
+
+functions = {
+    "run_python": run_python,
+}
+
+messages = [
+    {
+        "role": "user",
+        "content": "What is the value of the area of a circle with radius 4?",
+    }
+]
 
 runner = Runner(
-    which=Which.Plain(model_id="Qwen/Qwen3-4B", arch=Architecture.Qwen3),
+    which=Which.Plain(
+        model_id="meta-llama/Meta-Llama-3.1-8B-Instruct",
+        arch=Architecture.Llama,
+    ),
 )
 
-# Step 1: Model generates a tool call
 res = runner.send_chat_completion_request(
     ChatCompletionRequest(
         model="default",
         messages=messages,
         max_tokens=256,
+        presence_penalty=1.0,
+        top_p=0.1,
+        temperature=0.1,
         tool_schemas=tools,
         tool_choice=ToolChoice.Auto,
     )
 )
+# print(res.choices[0].message)
+# print(res.usage)
 
 tool_called = res.choices[0].message.tool_calls[0].function
-args = json.loads(tool_called.arguments)
-result = get_weather(**args)
-print(f"Called tool `{tool_called.name}`: {result}")
 
-# Step 2: Send the result back
-messages.append(
-    {
-        "role": "assistant",
-        "content": json.dumps({"name": tool_called.name, "parameters": args}),
-    }
-)
-messages.append({"role": "tool", "content": result})
+if tool_called.name in functions:
+    args = json.loads(tool_called.arguments)
+    result = functions[tool_called.name](**args)
+    print(f"Called tool `{tool_called.name}`")
 
-# Step 3: Model produces the final answer
-res = runner.send_chat_completion_request(
-    ChatCompletionRequest(
-        model="default",
-        messages=messages,
-        max_tokens=256,
-        tool_schemas=tools,
-        tool_choice=ToolChoice.Auto,
+    messages.append(
+        {
+            "role": "assistant",
+            "content": json.dumps({"name": tool_called.name, "parameters": args}),
+        }
     )
-)
-print(res.choices[0].message.content)
+
+    messages.append({"role": "tool", "content": result})
+
+    res = runner.send_chat_completion_request(
+        ChatCompletionRequest(
+            model="default",
+            messages=messages,
+            max_tokens=256,
+            presence_penalty=1.0,
+            top_p=0.1,
+            temperature=0.1,
+            tool_schemas=tools,
+            tool_choice=ToolChoice.Auto,
+        )
+    )
+    # print(res.usage)
+    print(res.choices[0].message.content)

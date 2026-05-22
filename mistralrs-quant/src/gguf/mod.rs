@@ -1,16 +1,12 @@
 mod cpu;
 #[cfg(feature = "cuda")]
-pub(crate) mod cuda;
-#[cfg(feature = "cuda")]
-pub mod fast_mmq;
-#[cfg(feature = "cuda")]
-pub mod fast_mmvq;
+mod cuda;
 #[cfg(feature = "cuda")]
 mod ffi;
 
 use std::{
     borrow::Cow,
-    io::Cursor,
+    io::{Cursor, Read},
     sync::{atomic::AtomicUsize, Arc},
 };
 
@@ -52,51 +48,6 @@ pub struct GgufMatMul {
     pub(crate) b: Option<Tensor>,
 }
 
-impl GgufMatMul {
-    fn add_bias(&self, x: Tensor) -> Result<Tensor> {
-        if let Some(ref b) = self.b {
-            x.broadcast_add(b)
-        } else {
-            Ok(x)
-        }
-    }
-
-    #[cfg(feature = "cuda")]
-    fn uses_fast_mmvq(&self) -> bool {
-        matches!(
-            &self.w,
-            QMatMul::QTensor(q) if q.device().is_cuda() && fast_mmvq::supports(q.dtype())
-        )
-    }
-
-    #[cfg(feature = "cuda")]
-    fn try_fast_forward(&self, a: &Tensor) -> Result<Option<Tensor>> {
-        if !self.uses_fast_mmvq() || !matches!(a.dtype(), DType::BF16 | DType::F16 | DType::F32) {
-            return Ok(None);
-        }
-
-        let flat_batch = a.dims()[..a.dims().len().saturating_sub(1)]
-            .iter()
-            .product::<usize>();
-
-        let QMatMul::QTensor(q) = &self.w else {
-            unreachable!("uses_fast_mmvq() requires QTensor weights")
-        };
-
-        // Batch 1-8: use MMVQ (decode kernel)
-        if (1..=fast_mmvq::MMVQ_MAX_BATCH).contains(&flat_batch) {
-            return Ok(Some(fast_mmvq::plain(q, a)?));
-        }
-
-        // Batch > 8: use MMQ (prompt kernel)
-        if flat_batch > fast_mmvq::MMVQ_MAX_BATCH {
-            return Ok(Some(fast_mmq::plain(q, a)?));
-        }
-
-        Ok(None)
-    }
-}
-
 impl QuantMethod for GgufMatMul {
     fn new(method: QuantMethodConfig) -> Result<Self>
     where
@@ -124,49 +75,30 @@ impl QuantMethod for GgufMatMul {
         self.w.dequantize_f16()?.to_dtype(DType::F32)
     }
 
-    fn forward_raw(&self, a: &Tensor) -> Result<Tensor> {
-        #[cfg(feature = "cuda")]
-        {
-            if let Some(out) = self.try_fast_forward(a)? {
-                return self.add_bias(out);
-            }
-        }
-
-        if let Some(x) = cpu_q4k_matmul(&self.w, a)? {
-            return self.add_bias(x);
-        }
-
-        // Fallback: Candle QMatMul requires F32
-        let original_dtype = a.dtype();
-        let a_f32 = if original_dtype == DType::F32 {
-            a.clone()
-        } else {
-            a.to_dtype(DType::F32)?
-        };
-        let x = self.w.forward(&a_f32)?;
-        let x = if original_dtype == DType::F32 {
+    fn forward(&self, a: &Tensor) -> Result<Tensor> {
+        let x = if let Some(x) = cpu_q4k_matmul(&self.w, a)? {
             x
         } else {
-            x.to_dtype(original_dtype)?
+            self.w.forward(a)?
         };
-        self.add_bias(x)
+        if let Some(ref b) = self.b {
+            x.broadcast_add(b)
+        } else {
+            Ok(x)
+        }
     }
 
     /// Compute matmul of `self` and `a`. `self` should contain the weights.
     ///
     /// If `a` is (n_tokens, 1, cols), `self` weights are (n_experts, rows, cols),
     /// then the indices are (n_tokens, n_experts_per_tok).
-    fn gather_forward_raw(&self, x: &Tensor, indices: &Tensor) -> Result<Tensor> {
+    fn gather_forward(&self, x: &Tensor, indices: &Tensor) -> Result<Tensor> {
         // Use indexed_moe_forward for efficient indexed matmul
         // Expected shapes:
         // - x: (n_tokens, 1, hidden_dim) or (n_tokens, n_experts_per_tok, hidden_dim)
         // - indices: (n_tokens, n_experts_per_tok)
         // - weights (self): (n_experts, out_features, in_features)
-        let weights_device = match &self.w {
-            QMatMul::QTensor(q) => q.device(),
-            QMatMul::Tensor(t) | QMatMul::TensorF16(t) => t.device().clone(),
-        };
-        let res = if weights_device.is_cuda() && x.device().is_cuda() {
+        let res = if x.device().is_cuda() {
             #[cfg(feature = "cuda")]
             {
                 cuda::qmatmul_indexed_moe_forward(&self.w, x, indices)?
@@ -175,34 +107,18 @@ impl QuantMethod for GgufMatMul {
             {
                 candle_core::bail!("GGUF indexed MoE CUDA path requires the `cuda` feature")
             }
-        } else if weights_device.is_cpu() && !x.device().is_cpu() {
-            let x_cpu = x.to_device(&Device::Cpu)?;
-            let indices_cpu = indices.to_device(&Device::Cpu)?;
-            return self
-                .add_bias(cpu::cpu_indexed_moe_forward(&self.w, &x_cpu, &indices_cpu)?)?
-                .to_device(x.device());
         } else {
             cpu::cpu_indexed_moe_forward(&self.w, x, indices)?
         };
 
-        self.add_bias(res)
-    }
-
-    #[cfg(feature = "cuda")]
-    fn get_qtensor(&self) -> Option<&candle_core::quantized::QTensor> {
-        match &self.w {
-            candle_core::quantized::QMatMul::QTensor(qt) => Some(qt),
-            _ => None,
+        if let Some(ref b) = self.b {
+            res.broadcast_add(b)
+        } else {
+            Ok(res)
         }
     }
 
     fn quantized_act_type(&self) -> Option<DType> {
-        #[cfg(feature = "cuda")]
-        {
-            if self.uses_fast_mmvq() {
-                return None;
-            }
-        }
         Some(DType::F32)
     }
 
@@ -455,18 +371,10 @@ impl QuantizedSerde for GgufMatMul {
             dims.push(buffer.read_u32::<LittleEndian>()? as usize)
         }
 
-        let _acquired_load_guard = guard.acquire(device);
-        let tensor_start = buffer.position() as usize;
-        let tensor_end = tensor_start + data_len;
-        if tensor_end > buffer.get_ref().as_ref().len() {
-            candle_core::bail!("UQFF GGUF tensor data exceeds artifact length");
-        }
-        let w = {
-            let backing = buffer.get_ref().as_ref();
-            qtensor_from_ggml(dtype, &backing[tensor_start..tensor_end], dims, device)?
-        };
-        buffer.set_position(tensor_end as u64);
+        let mut tensor_data = vec![0; data_len];
+        buffer.read_exact(&mut tensor_data)?;
 
+        let _acquired_load_guard = guard.acquire(device);
         // If we have bias
         let b = if has_bias {
             Some(deserialize_tensor(&mut buffer, device)?)
@@ -474,6 +382,7 @@ impl QuantizedSerde for GgufMatMul {
             None
         };
 
+        let w = qtensor_from_ggml(dtype, &tensor_data, dims, device)?;
         Ok(Arc::new(Self {
             w: QMatMul::QTensor(w.into()),
             b,
@@ -532,18 +441,10 @@ impl QuantizedSerde for GgufMatMul {
             dims.push(buffer.read_u32::<LittleEndian>()? as usize)
         }
 
-        let _acquired_load_guard = guard.acquire(device);
-        let tensor_start = buffer.position() as usize;
-        let tensor_end = tensor_start + data_len;
-        if tensor_end > buffer.get_ref().as_ref().len() {
-            candle_core::bail!("UQFF GGUF tensor data exceeds artifact length");
-        }
-        let w = {
-            let backing = buffer.get_ref().as_ref();
-            qtensor_from_ggml(dtype, &backing[tensor_start..tensor_end], dims, device)?
-        };
-        buffer.set_position(tensor_end as u64);
+        let mut tensor_data = vec![0; data_len];
+        buffer.read_exact(&mut tensor_data)?;
 
+        let _acquired_load_guard = guard.acquire(device);
         // If we have bias
         let b = if has_bias {
             Some(deserialize_tensor(&mut buffer, device)?)
@@ -551,6 +452,7 @@ impl QuantizedSerde for GgufMatMul {
             None
         };
 
+        let w = qtensor_from_ggml(dtype, &tensor_data, dims, device)?;
         Ok((
             Arc::new(Self {
                 w: QMatMul::QTensor(w.into()),

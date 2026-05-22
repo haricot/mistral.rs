@@ -162,7 +162,6 @@ pub enum AgentEvent {
 }
 
 /// Internal state for the agent stream
-#[allow(clippy::large_enum_variant)]
 enum AgentStreamState {
     /// Currently streaming model response
     Streaming {
@@ -289,9 +288,6 @@ impl<'a> AgentStream<'a> {
                                                         total_prompt_time_sec: 0.0,
                                                         total_completion_time_sec: 0.0,
                                                     },
-                                                    agentic_tool_calls: None,
-                                                    files: None,
-                                                    session_id: None,
                                                 };
 
                                                 self.state = AgentStreamState::ExecutingTools {
@@ -650,7 +646,7 @@ impl Agent {
                 // Run sync callback in spawn_blocking to not block async runtime
                 let callback = Arc::clone(callback);
                 let function = tool_call.function.clone();
-                tokio::task::spawn_blocking(move || callback(&function, &Default::default()))
+                tokio::task::spawn_blocking(move || callback(&function))
                     .await
                     .map_err(|e| anyhow::anyhow!("Task join error: {}", e))
                     .and_then(|r| r)
@@ -797,7 +793,7 @@ mod tests {
     #[test]
     fn test_tool_callback_type_clone() {
         // Ensure ToolCallbackType can be cloned
-        let sync_cb: Arc<ToolCallback> = Arc::new(|_, _| Ok("test".to_string()));
+        let sync_cb: Arc<ToolCallback> = Arc::new(|_| Ok("test".to_string()));
         let cb_type = ToolCallbackType::Sync(sync_cb);
         let _ = cb_type.clone();
     }

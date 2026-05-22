@@ -921,7 +921,7 @@ impl QuantMethod for HqqLayer {
         self.dequantize()
     }
 
-    fn forward_raw(&self, a: &Tensor) -> Result<Tensor> {
+    fn forward(&self, a: &Tensor) -> Result<Tensor> {
         /*
         if self.cfg.force_dequantize {
             self.dequantize_matmul(a)
@@ -941,10 +941,6 @@ impl QuantMethod for HqqLayer {
 
     fn dtype_and_device(&self) -> (DType, Device) {
         (self.scales.dtype(), self.scales.device().clone())
-    }
-
-    fn unquant_weight_bias(&self) -> Option<(Tensor, Option<Tensor>)> {
-        Some((self.dequantize_w().ok()?, self.bias.clone()))
     }
 
     fn apply_isq(

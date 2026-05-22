@@ -1,11 +1,10 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use crate::layers_masker::CausalMaskConfig;
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     amoe::AnyMoeBaseModelMixin,
-    attention::{AttentionMask, SdpaParams},
+    attention::SdpaParams,
     layers::{Activation, RotaryEmbedding, Sdpa},
     lora::{linear, LinearLayerLike, LoraConfig, Ordering},
     paged_attention::ModelConfigMetadata,
@@ -92,15 +91,28 @@ impl MLP {
         global_scaling_weight: f64,
         is_scaling_pass: Option<f64>,
     ) -> Result<Tensor> {
-        let res = self.fc2.lora_forward(
+        let original_dtype = xs.dtype();
+        let mut xs = xs.clone();
+        if let Some(t) = self.fc1.quantized_act_type() {
+            xs = xs.to_dtype(t)?;
+        }
+        let mut res = self.fc2.lora_forward(
             &self
                 .fc1
-                .lora_forward(xs, scalings.clone(), global_scaling_weight, is_scaling_pass)?
+                .lora_forward(
+                    &xs,
+                    scalings.clone(),
+                    global_scaling_weight,
+                    is_scaling_pass,
+                )?
                 .apply(&self.act)?,
             scalings,
             global_scaling_weight,
             is_scaling_pass,
         )?;
+        if self.fc1.quantized_act_type().is_some() {
+            res = res.to_dtype(original_dtype)?;
+        }
         Ok(res)
     }
 }
@@ -208,7 +220,7 @@ impl Attention {
     fn forward(
         &self,
         xs: &Tensor,
-        mask: &AttentionMask,
+        mask: Option<&Tensor>,
         seqlen_offsets: &[usize],
         kv_cache: &mut Option<(Tensor, Tensor)>,
         scalings: Option<Tensor>,
@@ -217,24 +229,35 @@ impl Attention {
         flash_params: &FlashParams,
     ) -> Result<Tensor> {
         let (b_size, seq_len, _n_embd) = xs.dims3()?;
-        let q = self.q_proj.lora_forward(
-            xs,
+        let original_dtype = xs.dtype();
+        let mut xs = xs.clone();
+        if let Some(t) = self.q_proj.quantized_act_type() {
+            xs = xs.to_dtype(t)?;
+        }
+        let mut q = self.q_proj.lora_forward(
+            &xs,
             scalings.clone(),
             global_scaling_weight,
             is_scaling_pass,
         )?;
-        let k = self.k_proj.lora_forward(
-            xs,
+        let mut k = self.k_proj.lora_forward(
+            &xs,
             scalings.clone(),
             global_scaling_weight,
             is_scaling_pass,
         )?;
-        let v = self.v_proj.lora_forward(
-            xs,
+        let mut v = self.v_proj.lora_forward(
+            &xs,
             scalings.clone(),
             global_scaling_weight,
             is_scaling_pass,
         )?;
+        if self.q_proj.quantized_act_type().is_some() {
+            q = q.to_dtype(original_dtype)?;
+            k = k.to_dtype(original_dtype)?;
+            v = v.to_dtype(original_dtype)?;
+        }
+
         let q = match &self.q_layernorm {
             None => q,
             Some(ln) => q.apply(ln)?,
@@ -269,15 +292,21 @@ impl Attention {
         let attn_output =
             Sdpa.run_attention(&q, &k, &v, mask, Some(flash_params), &self.sdpa_params)?;
 
-        let attn_output = attn_output
+        let mut attn_output = attn_output
             .transpose(1, 2)?
             .reshape((b_size, seq_len, ()))?;
-        let res = self.dense.lora_forward(
+        if let Some(t) = self.q_proj.quantized_act_type() {
+            attn_output = attn_output.to_dtype(t)?;
+        }
+        let mut res = self.dense.lora_forward(
             &attn_output,
             scalings,
             global_scaling_weight,
             is_scaling_pass,
         )?;
+        if self.q_proj.quantized_act_type().is_some() {
+            res = res.to_dtype(original_dtype)?;
+        }
         Ok(res)
     }
 }
@@ -341,7 +370,7 @@ impl DecoderLayer {
     fn forward(
         &self,
         xs: &Tensor,
-        mask: &AttentionMask,
+        mask: Option<&Tensor>,
         seqlen_offsets: &[usize],
         kv_cache: &mut Option<(Tensor, Tensor)>,
         scalings: Option<Tensor>,
@@ -549,18 +578,18 @@ impl Model {
         } else {
             self.cache.full().lock()
         };
-        let mask = CausalMasker.make_causal_mask(
+        let mask = CausalMasker.make_causal_mask_matrix(
             input_ids,
             &*cache,
             xs.dtype(),
-            &CausalMaskConfig::default(),
+            self.cfg.num_attn_heads,
         )?;
         let mask = DeviceMappedMask::new(mask, &*self.mapper)?;
         for (i, layer) in self.layers.iter().enumerate() {
             xs = self.mapper.map(xs, i)?;
             xs = layer.forward(
                 &xs,
-                &mask.get(xs.device()),
+                mask.as_ref().map(|m| m.get(xs.device())),
                 seqlen_offsets,
                 &mut cache[i],
                 scalings.clone(),
@@ -614,7 +643,10 @@ impl Model {
                         flash_params_full,
                     )?
                     .contiguous()?;
-                let res = extract_logits(&res, context_lens)?;
+                let mut res = extract_logits(&res, context_lens)?;
+                if let Some(t) = self.lm_head.quantized_act_type() {
+                    res = res.to_dtype(t)?;
+                }
                 self.lm_head.lora_forward(&res, None, 1.0, None)
             } else {
                 // is_full_pass=true is ok because no_kv_cache=false
@@ -629,7 +661,10 @@ impl Model {
                         flash_params,
                     )?
                     .contiguous()?;
-                let res = extract_logits(&res, context_lens)?;
+                let mut res = extract_logits(&res, context_lens)?;
+                if let Some(t) = self.lm_head.quantized_act_type() {
+                    res = res.to_dtype(t)?;
+                }
                 self.lm_head.lora_forward(&res, None, 1.0, None)
             }
         } else {
@@ -644,7 +679,10 @@ impl Model {
                     flash_params,
                 )?
                 .contiguous()?;
-            let res = extract_logits(&res, context_lens)?;
+            let mut res = extract_logits(&res, context_lens)?;
+            if let Some(t) = self.lm_head.quantized_act_type() {
+                res = res.to_dtype(t)?;
+            }
             self.lm_head.lora_forward(&res, None, 1.0, None)
         }
     }

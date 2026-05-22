@@ -1,7 +1,5 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use crate::attention::AttentionMask;
-use crate::layers_masker::CausalMaskConfig;
 use std::{
     any::Any,
     sync::{Arc, Mutex},
@@ -18,8 +16,7 @@ use crate::{
     layers::CausalMasker,
     layers_masker::{masked_fill, PastKvLenCache},
     paged_attention::{
-        encoder_cache::{CacheModality, EncoderCacheManager},
-        AttentionImplementation, ModelConfigMetadata,
+        encoder_cache::EncoderCacheManager, AttentionImplementation, ModelConfigMetadata,
     },
     pipeline::{
         text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
@@ -91,7 +88,7 @@ impl Qwen2_5VLModel {
         input_ids: &Tensor,
         image_grid_thw: Option<&Tensor>,
         video_grid_thw: Option<&Tensor>,
-        attention_mask: &AttentionMask,
+        attention_mask: Option<&Tensor>,
         attention_mask_indices: Option<&Tensor>,
         input_ids_searching: Vec<Vec<u32>>,
         image_nums: Vec<usize>,
@@ -228,7 +225,7 @@ impl Qwen2_5VLModel {
 
                 let llm_positions = Tensor::cat(&llm_pos_ids, 1)?.reshape((3, ()))?;
                 let positions_mask = attention_mask
-                    .as_option_tensor()
+                    .as_ref()
                     .unwrap()
                     .i(i)?
                     .eq(1f64)?
@@ -252,7 +249,7 @@ impl Qwen2_5VLModel {
             )?
             .unsqueeze(1)?;
             Ok((position_ids, mrope_position_deltas))
-        } else if let AttentionMask::Custom(attention_mask) = attention_mask {
+        } else if let Some(attention_mask) = attention_mask {
             let position_ids = (attention_mask.to_dtype(DType::F32)?.cumsum(D::Minus1)? - 1f64)?;
             let position_ids = masked_fill(&position_ids, &attention_mask.eq(0f64)?, 1i64)?;
             let position_ids = position_ids.unsqueeze(0)?.repeat((3, 1, 1))?;
@@ -298,14 +295,12 @@ impl Qwen2_5VLModel {
         image_hashes: &[u64],
         flash_params: &FlashParams,
     ) -> Result<Tensor> {
-        let attention_mask = CausalMasker.make_causal_mask(
+        let attention_mask = CausalMasker.make_sliding_window_causal_mask_matrix(
             input_ids,
             &seqlen_offsets as &dyn PastKvLenCache,
+            self.text.cfg.sliding_window,
             self.text.dtype,
-            &CausalMaskConfig {
-                sliding_window: self.text.cfg.sliding_window,
-                ..Default::default()
-            },
+            self.text.cfg.num_attn_heads,
         )?;
 
         let input_embeds = if pixel_values.is_some() || pixel_values_videos.is_some() {
@@ -338,7 +333,7 @@ impl Qwen2_5VLModel {
                             .lock()
                             .expect("encoder cache lock poisoned");
                         for (i, &hash) in image_hashes.iter().enumerate() {
-                            if let Some(cached) = guard.get(CacheModality::Image, hash) {
+                            if let Some(cached) = guard.get(hash) {
                                 per_image[i] = Some(cached[0].clone());
                             } else {
                                 miss_indices.push(i);
@@ -390,11 +385,7 @@ impl Qwen2_5VLModel {
                                 let n_out = miss_output_tokens[j];
                                 let single = encoded.narrow(0, enc_offset, n_out)?;
                                 enc_offset += n_out;
-                                guard.insert(
-                                    CacheModality::Image,
-                                    image_hashes[orig_idx],
-                                    vec![single.clone()],
-                                );
+                                guard.insert(image_hashes[orig_idx], vec![single.clone()]);
                                 per_image[orig_idx] = Some(single);
                             }
                         }
@@ -468,7 +459,7 @@ impl Qwen2_5VLModel {
         }
         let ropeidx_attn_mask_indices = Tensor::stack(&ropeidx_attn_mask_indices_bs, 0)?;
 
-        let ropeidx_input_ids = if !matches!(attention_mask, AttentionMask::None) {
+        let ropeidx_input_ids = if attention_mask.is_some() {
             input_ids
         } else {
             input_ids_full
@@ -477,14 +468,14 @@ impl Qwen2_5VLModel {
             ropeidx_input_ids,
             rope_img_grid_thw.as_ref(),
             rope_vid_grid_thw.as_ref(),
-            &AttentionMask::Custom(ropeidx_attn_mask.clone()),
+            Some(&ropeidx_attn_mask),
             Some(&ropeidx_attn_mask_indices),
             input_ids_searching,
             image_nums,
             video_nums,
         )?;
 
-        let position_ids = if !matches!(attention_mask, AttentionMask::None) {
+        let position_ids = if attention_mask.is_some() {
             position_ids
         } else {
             let mut position_ids = Tensor::new(
@@ -501,7 +492,7 @@ impl Qwen2_5VLModel {
 
         let out = self.text.forward_embeds(
             input_embeds,
-            &attention_mask,
+            attention_mask.as_ref(),
             &position_ids,
             context_lens,
             flash_params,

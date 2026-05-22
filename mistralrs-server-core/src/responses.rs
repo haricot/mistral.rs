@@ -1150,24 +1150,7 @@ impl futures::Stream for OpenResponsesStreamer {
                             .json_data(event),
                     ))
                 }
-                Response::AgenticToolCallProgress {
-                    round,
-                    tool_name,
-                    phase,
-                } => Poll::Ready(Some(
-                    Event::default()
-                        .event("agentic_tool_call_progress")
-                        .json_data(crate::chat_completion::serialize_agentic_progress(
-                            round, &tool_name, &phase,
-                        )),
-                )),
-                Response::File(file) => Poll::Ready(Some(
-                    Event::default().event("file_produced").json_data(file),
-                )),
-                _ => {
-                    cx.waker().wake_by_ref();
-                    Poll::Pending
-                }
+                _ => Poll::Pending,
             },
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
@@ -1481,11 +1464,6 @@ async fn parse_openresponses_request(
         tool_choice: oairequest.tool_choice,
         response_format,
         web_search_options: oairequest.web_search_options,
-        enable_code_execution: false,
-        agent_permission: None,
-        code_execution_permission: None,
-        session_id: None,
-        max_tool_rounds: None,
         top_k: oairequest.top_k,
         grammar: oairequest.grammar,
         min_p: oairequest.min_p,
@@ -1496,11 +1474,9 @@ async fn parse_openresponses_request(
         enable_thinking,
         truncate_sequence,
         reasoning_effort,
-        files: None,
     };
 
-    let (request, is_streaming) =
-        parse_chat_request(chat_request, state, tx, None, None, None).await?;
+    let (request, is_streaming) = parse_chat_request(chat_request, state, tx).await?;
     Ok((
         request,
         is_streaming,
@@ -1581,16 +1557,8 @@ pub async fn create_response(
                 return;
             }
 
-            // Wait for response. Files are reachable via GET /v1/files/{id}.
-            let response = loop {
-                match bg_rx.recv().await {
-                    Some(Response::AgenticToolCallProgress { .. }) => continue,
-                    Some(Response::File(_)) => continue,
-                    other => break other,
-                }
-            };
-
-            match response {
+            // Wait for response
+            match bg_rx.recv().await {
                 Some(Response::Done(chat_resp)) => {
                     let response = chat_response_to_response_resource(
                         &chat_resp,
@@ -1678,17 +1646,9 @@ pub async fn create_response(
 
         OpenResponsesResponder::Sse(sse)
     } else {
-        // Non-streaming response. Files are reachable via GET /v1/files/{id}.
+        // Non-streaming response
         let mut rx = rx;
-        let response = loop {
-            match rx.recv().await {
-                Some(Response::AgenticToolCallProgress { .. }) => continue,
-                Some(Response::File(_)) => continue,
-                other => break other,
-            }
-        };
-
-        match response {
+        match rx.recv().await {
             Some(Response::Done(chat_resp)) => {
                 let response = chat_response_to_response_resource(
                     &chat_resp,

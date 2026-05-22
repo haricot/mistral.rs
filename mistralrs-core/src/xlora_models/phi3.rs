@@ -2,10 +2,9 @@
 
 // This implementation is based on:
 // https://huggingface.co/microsoft/Phi-3-mini-4k-instruct/blob/main/modeling_phi3.py
-use crate::layers_masker::CausalMaskConfig;
 use crate::{
     amoe::AnyMoeBaseModelMixin,
-    attention::{AttentionMask, SdpaParams},
+    attention::SdpaParams,
     layers::{self, Activation, Sdpa},
     lora::{linear_no_bias, LinearLayerLike, LoraConfig, Ordering},
     paged_attention::ModelConfigMetadata,
@@ -103,7 +102,7 @@ impl Attention {
     fn forward(
         &self,
         xs: &Tensor,
-        attention_mask: &AttentionMask,
+        attention_mask: Option<&Tensor>,
         seqlen_offsets: &[usize],
         position_ids: &[usize],
         kv_cache: &mut Option<(Tensor, Tensor)>,
@@ -114,12 +113,20 @@ impl Attention {
     ) -> Result<Tensor> {
         let (b_sz, q_len, _) = xs.dims3()?;
 
-        let qkv = self.qkv_proj.lora_forward(
-            xs,
+        let original_dtype = xs.dtype();
+        let mut xs = xs.clone();
+        if let Some(t) = self.qkv_proj.quantized_act_type() {
+            xs = xs.to_dtype(t)?;
+        }
+        let mut qkv = self.qkv_proj.lora_forward(
+            &xs,
             scalings.clone(),
             global_scaling_weight,
             is_scaling_pass,
         )?;
+        if self.qkv_proj.quantized_act_type().is_some() {
+            qkv = qkv.to_dtype(original_dtype)?;
+        }
         let query_pos = self.num_heads * self.head_dim;
         let q = qkv.narrow(D::Minus1, 0, query_pos)?;
         let k = qkv.narrow(D::Minus1, query_pos, self.num_kv_heads * self.head_dim)?;
@@ -158,26 +165,28 @@ impl Attention {
             attention_mask,
             self.sliding_window,
         )?;
-        let attn_mask = match attn_mask {
-            Some(t) => AttentionMask::Custom(t),
-            None => AttentionMask::None,
-        };
 
-        let attn_output = Sdpa.run_attention(
+        let mut attn_output = Sdpa.run_attention(
             &q,
             &k,
             &v,
-            &attn_mask,
+            attn_mask.as_ref(),
             Some(flash_params),
             &self.sdpa_params,
         )?;
 
-        let res = self.o_proj.lora_forward(
+        if let Some(t) = self.qkv_proj.quantized_act_type() {
+            attn_output = attn_output.to_dtype(t)?;
+        }
+        let mut res = self.o_proj.lora_forward(
             &attn_output.transpose(1, 2)?.reshape((b_sz, q_len, ()))?,
             scalings.clone(),
             global_scaling_weight,
             is_scaling_pass,
         )?;
+        if self.qkv_proj.quantized_act_type().is_some() {
+            res = res.to_dtype(original_dtype)?;
+        }
         Ok(res)
     }
 }
@@ -240,8 +249,13 @@ impl Mlp {
         global_scaling_weight: f64,
         is_scaling_pass: Option<f64>,
     ) -> Result<Tensor> {
+        let original_dtype = xs.dtype();
+        let mut xs = xs.clone();
+        if let Some(t) = self.gate_up_proj.quantized_act_type() {
+            xs = xs.to_dtype(t)?;
+        }
         let up_states = self.gate_up_proj.lora_forward(
-            xs,
+            &xs,
             scalings.clone(),
             global_scaling_weight,
             is_scaling_pass,
@@ -249,12 +263,15 @@ impl Mlp {
         let gate = up_states.narrow(D::Minus1, 0, self.i_size)?;
         let up_states = up_states.narrow(D::Minus1, self.i_size, self.i_size)?;
         let up_states = (up_states * gate.apply(&self.act_fn))?;
-        let res = self.down_proj.lora_forward(
+        let mut res = self.down_proj.lora_forward(
             &up_states,
             scalings,
             global_scaling_weight,
             is_scaling_pass,
         )?;
+        if self.gate_up_proj.quantized_act_type().is_some() {
+            res = res.to_dtype(original_dtype)?;
+        }
         Ok(res)
     }
 }
@@ -325,7 +342,7 @@ impl DecoderLayer {
     fn forward(
         &self,
         xs: &Tensor,
-        attention_mask: &AttentionMask,
+        attention_mask: Option<&Tensor>,
         seqlen_offsets: &[usize],
         position_ids: &[usize],
         kv_cache: &mut Option<(Tensor, Tensor)>,
@@ -533,14 +550,12 @@ impl Model {
         } else {
             self.cache.full().lock()
         };
-        let attention_mask = CausalMasker.make_causal_mask(
+        let attention_mask = CausalMasker.make_sliding_window_causal_mask_matrix(
             input_ids,
             &*cache,
+            self.sliding_window,
             xs.dtype(),
-            &CausalMaskConfig {
-                sliding_window: self.sliding_window,
-                ..Default::default()
-            },
+            self.cfg.num_attn_heads,
         )?;
         let attention_mask = DeviceMappedMask::new(attention_mask, &*self.mapper)?;
 
@@ -548,7 +563,7 @@ impl Model {
             xs = self.mapper.map(xs, i)?;
             xs = layer.forward(
                 &xs,
-                &attention_mask.get(xs.device()),
+                attention_mask.as_ref().map(|m| m.get(xs.device())),
                 seqlen_offsets,
                 position_ids,
                 &mut cache[i],
@@ -605,7 +620,10 @@ impl Model {
                         flash_params_full,
                     )?
                     .contiguous()?;
-                let res = extract_logits(&res, context_lens)?;
+                let mut res = extract_logits(&res, context_lens)?;
+                if let Some(t) = self.lm_head.quantized_act_type() {
+                    res = res.to_dtype(t)?;
+                }
                 self.lm_head.lora_forward(&res, None, 1.0, None)
             } else {
                 // is_full_pass=true is ok because no_kv_cache=false
@@ -621,7 +639,10 @@ impl Model {
                         flash_params,
                     )?
                     .contiguous()?;
-                let res = extract_logits(&res, context_lens)?;
+                let mut res = extract_logits(&res, context_lens)?;
+                if let Some(t) = self.lm_head.quantized_act_type() {
+                    res = res.to_dtype(t)?;
+                }
                 self.lm_head.lora_forward(&res, None, 1.0, None)
             }
         } else {
@@ -637,7 +658,10 @@ impl Model {
                     flash_params,
                 )?
                 .contiguous()?;
-            let res = extract_logits(&res, context_lens)?;
+            let mut res = extract_logits(&res, context_lens)?;
+            if let Some(t) = self.lm_head.quantized_act_type() {
+                res = res.to_dtype(t)?;
+            }
             self.lm_head.lora_forward(&res, None, 1.0, None)
         }
     }

@@ -84,13 +84,14 @@ fn flush_uqff_shard(
 
 use anyhow::Result;
 use candle_core::{quantized, Context, Device, Tensor};
-use indicatif::{MultiProgress, ProgressBar, ProgressIterator, ProgressStyle};
+use indicatif::{MultiProgress, ParallelProgressIterator, ProgressBar, ProgressStyle};
 use itertools::Itertools;
 use mistralrs_quant::{
     AfqLayer, CollectedImatrixData, ColumnParallelLayer, DistributedKind, F8Q8Linear, FP8Linear,
     GgufMatMul, HqqLayer, IsqBits, IsqType, MXFP4Layer, QuantMethod, QuantizeOntoGuard,
     QuantizedSerde, QuantizedSerdeType, ReplicatedLayer, RowParallelLayer, UnquantLinear,
 };
+use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 use regex::Regex;
 use serde::Deserialize;
 use tokenizers::Tokenizer;
@@ -106,6 +107,7 @@ use crate::{
 };
 
 pub(crate) const UQFF_RESIDUAL_SAFETENSORS: &str = "residual.safetensors";
+const UQFF_LOAD_THREADS_ENV: &str = "MISTRALRS_UQFF_LOAD_THREADS";
 // 10 GB max per file
 #[cfg(target_pointer_width = "64")]
 const MAX_UQFF_SIZE_BYTES: usize = 10 * 1024 * 1024 * 1024;
@@ -113,106 +115,74 @@ const MAX_UQFF_SIZE_BYTES: usize = 10 * 1024 * 1024 * 1024;
 const MAX_UQFF_SIZE_BYTES: usize = usize::MAX;
 pub const UQFF_MULTI_FILE_DELIMITER: &str = ";";
 
-pub(crate) struct WeightLoadingState {
-    pub(crate) from_uqff: bool,
-    pub(crate) loading_isq: bool,
-    pub(crate) immediate_isq: bool,
-    pub(crate) write_uqff: bool,
-}
-
-pub(crate) enum WeightLoadingMode {
-    Uqff,
-    ImmediateIsq,
-    PostLoadIsq,
-    UqffSerialization,
-    Plain,
-}
-
-impl From<WeightLoadingState> for WeightLoadingMode {
-    fn from(state: WeightLoadingState) -> Self {
-        if state.from_uqff {
-            Self::Uqff
-        } else if state.immediate_isq {
-            Self::ImmediateIsq
-        } else if state.loading_isq {
-            Self::PostLoadIsq
-        } else if state.write_uqff {
-            Self::UqffSerialization
-        } else {
-            Self::Plain
-        }
+fn uqff_load_threads() -> usize {
+    match env::var(UQFF_LOAD_THREADS_ENV) {
+        Ok(value) => match value.parse::<usize>() {
+            Ok(threads) if threads > 0 => threads,
+            _ => {
+                warn!(
+                    "Ignoring invalid {UQFF_LOAD_THREADS_ENV}={value:?}; falling back to sequential UQFF loading."
+                );
+                1
+            }
+        },
+        Err(_) => 1,
     }
 }
 
-impl WeightLoadingMode {
-    pub(crate) fn message(self, target: &'static str) -> Cow<'static, str> {
-        match self {
-            Self::Uqff => {
-                Cow::Borrowed("Loading residual weights and preparing UQFF placeholders.")
-            }
-            Self::ImmediateIsq => {
-                Cow::Owned(format!("Loading {target} weights with immediate ISQ."))
-            }
-            Self::PostLoadIsq => Cow::Owned(format!(
-                "Loading full-precision {target} weights for post-load ISQ."
-            )),
-            Self::UqffSerialization => {
-                Cow::Owned(format!("Loading {target} weights for UQFF serialization."))
-            }
-            Self::Plain => Cow::Owned(format!("Loading {target} weights.")),
-        }
-    }
-}
-
-fn deserialize_uqff_layer(
-    tensor: &Arc<dyn QuantMethod>,
+fn deserialize_uqff_artifact(
+    tensor: &mut Arc<dyn QuantMethod>,
     artifact: &[u8],
     device: &Device,
     comm: &Arc<mistralrs_quant::Comm>,
     guard: QuantizeOntoGuard,
-) -> candle_core::Result<Arc<dyn QuantMethod>> {
-    match tensor.is_distributed() {
+) -> candle_core::Result<()> {
+    let deserialized = match tensor.is_distributed() {
         Some(DistributedKind::ColumnParallel) => {
-            ColumnParallelLayer::deserialize(Cow::from(artifact), device, comm, guard)
+            ColumnParallelLayer::deserialize(Cow::Borrowed(artifact), device, comm, guard.clone())?
         }
         Some(DistributedKind::RowParallel) => {
-            RowParallelLayer::deserialize(Cow::from(artifact), device, comm, guard)
+            RowParallelLayer::deserialize(Cow::Borrowed(artifact), device, comm, guard.clone())?
         }
         Some(DistributedKind::Replicated) => {
-            ReplicatedLayer::deserialize(Cow::from(artifact), device, comm, guard)
+            ReplicatedLayer::deserialize(Cow::Borrowed(artifact), device, comm, guard.clone())?
         }
         None => {
+            // NOTE(EricLBuehler): isq type is ALWAYS byte 4 (5th) of the tensor.
             let isq_type = artifact[mistralrs_quant::UQFF_QUANT_TYPE_OFFSET];
             match QuantizedSerdeType::try_from(isq_type as usize)? {
                 QuantizedSerdeType::Gguf => {
-                    GgufMatMul::deserialize(Cow::from(artifact), device, comm, guard)
+                    GgufMatMul::deserialize(Cow::Borrowed(artifact), device, comm, guard.clone())?
                 }
-                QuantizedSerdeType::Unquant => {
-                    UnquantLinear::deserialize(Cow::from(artifact), device, comm, guard)
-                }
+                QuantizedSerdeType::Unquant => UnquantLinear::deserialize(
+                    Cow::Borrowed(artifact),
+                    device,
+                    comm,
+                    guard.clone(),
+                )?,
                 QuantizedSerdeType::Hqq => {
-                    HqqLayer::deserialize(Cow::from(artifact), device, comm, guard)
+                    HqqLayer::deserialize(Cow::Borrowed(artifact), device, comm, guard.clone())?
                 }
                 QuantizedSerdeType::Fp8 => {
-                    FP8Linear::deserialize(Cow::from(artifact), device, comm, guard)
+                    FP8Linear::deserialize(Cow::Borrowed(artifact), device, comm, guard.clone())?
                 }
                 QuantizedSerdeType::Afq => {
-                    AfqLayer::deserialize(Cow::from(artifact), device, comm, guard)
+                    AfqLayer::deserialize(Cow::Borrowed(artifact), device, comm, guard.clone())?
                 }
                 QuantizedSerdeType::F8Q8 => {
-                    F8Q8Linear::deserialize(Cow::from(artifact), device, comm, guard)
+                    F8Q8Linear::deserialize(Cow::Borrowed(artifact), device, comm, guard.clone())?
                 }
                 QuantizedSerdeType::Mxfp4 => {
-                    MXFP4Layer::deserialize(Cow::from(artifact), device, comm, guard)
+                    MXFP4Layer::deserialize(Cow::Borrowed(artifact), device, comm, guard.clone())?
                 }
-                QuantizedSerdeType::Vocab => {
-                    candle_core::bail!(
-                        "Vocab artifact type is not supported in this match arm (use isq_vocab loop)"
-                    )
-                }
+                QuantizedSerdeType::Vocab => candle_core::bail!(
+                    "Vocab artifact type is not supported in this match arm (use isq_vocab loop)"
+                ),
             }
         }
-    }
+    };
+    *tensor = deserialized;
+    Ok(())
 }
 
 /// Parse ISQ value.
@@ -826,7 +796,7 @@ pub trait IsqModel {
                     let vocabs = self.get_isq_vocab();
                     if !vocabs.is_empty() {
                         info!("Quantizing {} vocabulary stores in-memory.", vocabs.len());
-                        for (vocab, _) in vocabs {
+                        for (vocab, _) in vocabs.into_iter() {
                             if let Some(isq_ty) = dtype {
                                 if let Some(new_vocab) = vocab.quantize(isq_ty, device.clone())? {
                                     *vocab = new_vocab;
@@ -938,6 +908,7 @@ pub trait IsqModel {
                 flush_uqff_shard(parent, &file_stem, shard_index, &mut current_chunk)?;
             }
 
+            // 3. Serialize Residuals, Configs, Tokenizer, etc.
             let residual = match organization {
                 IsqOrganization::Default => self.residual_tensors(),
                 IsqOrganization::MoeExpertsOnly => self
@@ -946,98 +917,53 @@ pub trait IsqModel {
             };
 
             let residual_out = parent.join(UQFF_RESIDUAL_SAFETENSORS);
-            let config_out = parent.join("config.json");
-            let modules_out = parent.join("modules.json");
-            let tokenizer_out = parent.join("tokenizer.json");
-            let tokenizer_cfg_out = parent.join("tokenizer_config.json");
-            let chat_template_jinja_out = parent.join("chat_template.jinja");
-            let gen_cfg_out = parent.join("generation_config.json");
-            let processor_out = parent.join("processor_config.json");
-            let preprocessor_out = parent.join("preprocessor_config.json");
-
             info!(
                 "Serializing {} residual tensors to `{}`.",
                 residual.len(),
                 residual_out.display()
             );
-
             safetensors::serialize_to_file(residual, None, &residual_out)?;
 
-            let UqffFullSer {
-                tokenizer,
-                template_filename,
-                modules,
-                module_paths,
-                generation_config,
-                config,
-                config_filename: _,
-                processor_filename,
-                preprocessor_filename,
-            } = full_ser;
-
+            let config_out = parent.join(full_ser.config_filename);
             info!("Serializing configuration to `{}`.", config_out.display());
+            std::fs::write(config_out, &full_ser.config)?;
 
-            std::fs::write(config_out, config)?;
-
+            let tokenizer_out = parent.join("tokenizer.json");
             info!("Serializing tokenizer to `{}`.", tokenizer_out.display());
-
-            serde_json::to_writer_pretty(File::create(&tokenizer_out)?, tokenizer)
+            serde_json::to_writer_pretty(File::create(&tokenizer_out)?, full_ser.tokenizer)
                 .map_err(candle_core::Error::msg)?;
 
-            if let Some(template_filename) = template_filename {
-                let template = std::fs::read(template_filename).map_err(candle_core::Error::msg)?;
-
-                if template_filename.extension().map(|e| e.to_str()) == Some(Some("jinja")) {
-                    info!(
-                        "Serializing chat template to `{}`.",
-                        chat_template_jinja_out.display()
-                    );
-                    std::fs::write(&chat_template_jinja_out, template)
-                        .map_err(candle_core::Error::msg)?;
-
-                    // When the chat template is a .jinja file, also save the
-                    // tokenizer_config.json that lives alongside it. This file
-                    // contains bos_token/eos_token/unk_token which are needed
-                    // to render the template correctly. Without it, special
-                    // tokens render as "none" in minijinja.
-                    let sibling_cfg = template_filename
-                        .parent()
-                        .map(|dir| dir.join("tokenizer_config.json"));
-                    if let Some(cfg_path) = sibling_cfg.filter(|p| p.exists()) {
-                        info!(
-                            "Serializing tokenizer config to `{}`.",
-                            tokenizer_cfg_out.display()
-                        );
-                        std::fs::copy(&cfg_path, &tokenizer_cfg_out)
-                            .map_err(candle_core::Error::msg)?;
-                    }
+            if let Some(tf) = full_ser.template_filename {
+                let template = std::fs::read(&tf).map_err(candle_core::Error::msg)?;
+                let dest = if tf.extension().map(|e| e.to_str()) == Some(Some("jinja")) {
+                    parent.join("chat_template.jinja")
                 } else {
-                    info!(
-                        "Serializing tokenizer config to `{}`.",
-                        tokenizer_cfg_out.display()
-                    );
-                    std::fs::write(&tokenizer_cfg_out, template)
-                        .map_err(candle_core::Error::msg)?;
-                }
+                    parent.join("tokenizer_config.json")
+                };
+                info!(
+                    "Serializing chat template / tokenizer config to `{}`.",
+                    dest.display()
+                );
+                std::fs::write(dest, template).map_err(candle_core::Error::msg)?;
             }
 
-            if let Some(gc) = generation_config {
+            if let Some(gc) = full_ser.generation_config {
                 info!("Copying generation config to `generation_config.json`.");
-                std::fs::copy(gc, gen_cfg_out)?;
+                std::fs::copy(gc, parent.join("generation_config.json"))?;
             }
-            if let Some(pf) = processor_filename {
+            if let Some(pf) = full_ser.processor_filename {
                 info!("Copying processor config to `processor_config.json`.");
-                std::fs::copy(pf, processor_out)?;
+                std::fs::copy(pf, parent.join("processor_config.json"))?;
             }
-            if let Some(ppf) = preprocessor_filename {
+            if let Some(ppf) = full_ser.preprocessor_filename {
                 info!("Copying preprocessor config to `preprocessor_config.json`.");
-                std::fs::copy(ppf, preprocessor_out)?;
+                std::fs::copy(ppf, parent.join("preprocessor_config.json"))?;
             }
 
-            if let Some(mod_data) = modules {
+            if let Some(mod_data) = full_ser.modules {
                 info!("Serializing modules manifest to `modules.json`.");
-                std::fs::write(modules_out, mod_data)?;
-                if let Some(paths) = module_paths {
+                std::fs::write(parent.join("modules.json"), mod_data)?;
+                if let Some(paths) = full_ser.module_paths {
                     for module in paths {
                         if let Some(path) = match module {
                             EmbeddingModulePaths::Transformer { path }
@@ -1138,7 +1064,6 @@ pub trait IsqModel {
                 artifact_isqs.len(),
             );
         }
-        info!("Loading UQFF artifacts into {total_tensors} quantized tensors.");
 
         let bar = ProgressBar::new(total_tensors as u64);
         configure_progress_bar(&bar);
@@ -1152,38 +1077,94 @@ pub trait IsqModel {
         let t_start = Instant::now();
 
         let guard = QuantizeOntoGuard::new();
-
-        let load_layer = |i: usize, tensor: &mut Arc<dyn QuantMethod>| -> candle_core::Result<()> {
-            if let Some(artifact) = artifact_isqs.get(&i) {
-                let artifact = artifact.data();
-                let deserialized = deserialize_uqff_layer(
-                    tensor,
-                    artifact,
-                    &devices[i],
-                    &comms[i],
-                    guard.clone(),
-                )?;
-                *tensor = deserialized;
-            }
-            Ok(())
-        };
-
-        if silent {
-            for (i, (tensor, _)) in tensors.into_iter().enumerate() {
-                load_layer(i, tensor)?;
-            }
+        let load_threads = uqff_load_threads();
+        if load_threads == 1 {
+            info!(
+                "Loading UQFF artifacts sequentially to keep peak memory bounded. Set {UQFF_LOAD_THREADS_ENV}=N to opt into parallel loading."
+            );
         } else {
-            for (i, (tensor, _)) in tensors.into_iter().enumerate().progress_with(bar) {
-                load_layer(i, tensor)?;
-            }
+            info!("Loading UQFF artifacts with {load_threads} worker threads.");
         }
 
-        let total_layer_tensors = artifact_isqs.len();
-        let vocabs = self.get_isq_vocab();
-        for (i, (vocab, _)) in vocabs.into_iter().enumerate() {
-            let identifier = total_layer_tensors + i;
-            if let Some(artifact) = artifact_isqs.get(&identifier) {
-                *vocab = QuantizedVocabStore::deserialize_vocab(artifact.data(), &device)?;
+        if load_threads == 1 {
+            for (i, (tensor, _)) in (0..total_tensors).zip(tensors) {
+                if let Some(artifact) = artifact_isqs.get(&i) {
+                    let comm = comms[i].clone();
+                    deserialize_uqff_artifact(
+                        tensor,
+                        artifact.data(),
+                        &devices[i],
+                        &comm,
+                        guard.clone(),
+                    )?;
+                }
+                if !silent {
+                    bar.inc(1);
+                }
+            }
+            if !silent {
+                bar.finish();
+            }
+        } else if silent {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(load_threads)
+                .build()
+                .map_err(candle_core::Error::msg)?;
+            pool.install(|| {
+                (0..total_tensors)
+                    .into_par_iter()
+                    .zip(tensors)
+                    .map(|(i, (tensor, _))| {
+                        if let Some(artifact) = artifact_isqs.get(&i) {
+                            let comm = comms[i].clone();
+                            deserialize_uqff_artifact(
+                                tensor,
+                                artifact.data(),
+                                &devices[i],
+                                &comm,
+                                guard.clone(),
+                            )?;
+                        }
+                        Ok(())
+                    })
+                    .collect::<candle_core::Result<Vec<_>>>()
+            })?;
+        } else {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(load_threads)
+                .build()
+                .map_err(candle_core::Error::msg)?;
+            pool.install(|| {
+                (0..total_tensors)
+                    .into_par_iter()
+                    .zip(tensors)
+                    .progress_with(bar)
+                    .map(|(i, (tensor, _))| {
+                        if let Some(artifact) = artifact_isqs.get(&i) {
+                            let comm = comms[i].clone();
+                            deserialize_uqff_artifact(
+                                tensor,
+                                artifact.data(),
+                                &devices[i],
+                                &comm,
+                                guard.clone(),
+                            )?;
+                        }
+                        Ok(())
+                    })
+                    .collect::<candle_core::Result<Vec<_>>>()
+            })?;
+        }
+
+        if !silent {
+            // Load vocabs
+            let total_layer_tensors = artifact_isqs.len();
+            let vocabs = self.get_isq_vocab();
+            for (i, (vocab, _)) in vocabs.into_iter().enumerate() {
+                let identifier = total_layer_tensors + i;
+                if let Some(artifact) = artifact_isqs.get(&identifier) {
+                    *vocab = QuantizedVocabStore::deserialize_vocab(artifact.data(), &device)?;
+                }
             }
         }
 
@@ -1191,22 +1172,16 @@ pub trait IsqModel {
         {
             let (check_tensors, _) = self.get_layers();
             for (i, (tensor, layer_num)) in check_tensors.iter().enumerate() {
-                if let Some(info) = tensor.dummy_info() {
-                    let artifact_note = if artifact_isqs.contains_key(&i) {
-                        "the matching UQFF artifact did not deserialize into a real layer"
-                    } else {
-                        "the UQFF artifact set did not contain an entry for this layer index"
-                    };
+                if tensor.name() == "dummy" {
                     candle_core::bail!(
-                        "UQFF placeholder was not replaced at artifact index {i}, model layer {layer_num:?}: {artifact_note}. {}",
-                        info.message("UQFF artifact loading")
+                        "DummyLayer not replaced at index {i}, layer {layer_num:?} after load_from_artifacts"
                     );
                 }
             }
         }
 
         let delta = Instant::now().duration_since(t_start).as_secs_f32();
-        info!("Loaded UQFF artifacts into {total_tensors} quantized tensors. Took {delta:.2}s");
+        info!("Loaded in-situ quantization artifacts into {total_tensors} total tensors. Took {delta:.2}s", );
 
         Ok(())
     }

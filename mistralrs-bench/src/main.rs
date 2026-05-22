@@ -85,18 +85,8 @@ async fn run_bench(
         logits_processors: None,
         return_raw_logits: false,
         web_search_options: None,
-        enable_code_execution: false,
-        code_execution_permission: None,
-        code_execution_approval_notifier: None,
-        agent_permission: None,
-        agent_approval_handler: None,
-        agent_approval_notifier: None,
-        max_tool_rounds: None,
-        tool_dispatch_url: None,
         model_id: None,
         truncate_sequence: false,
-        session_id: None,
-        files: None,
     }));
 
     let mut usages = Vec::new();
@@ -108,43 +98,32 @@ async fn run_bench(
             }
         }
         for _ in 0..concurrency {
-            loop {
-                match rx.recv().await {
-                    Some(Response::AgenticToolCallProgress { .. }) => continue,
-                    Some(Response::AgenticToolApprovalRequired { .. }) => continue,
-                    Some(Response::File(_)) => continue,
-                    Some(r) => {
-                        match r {
-                            Response::InternalError(e) => {
-                                unreachable!("Got an internal error: {e:?}");
-                            }
-                            Response::ModelError(e, resp) => {
-                                unreachable!("Got a model error: {e:?}, response: {resp:?}");
-                            }
-                            Response::ValidationError(e) => {
-                                unreachable!("Got a validation error: {e:?}");
-                            }
-                            Response::Done(res) => {
-                                usages.push(res.usage);
-                            }
-                            Response::Chunk(_) => unreachable!(),
-                            Response::CompletionModelError(_, _) => unreachable!(),
-                            Response::CompletionDone(res) => {
-                                usages.push(res.usage);
-                            }
-                            Response::CompletionChunk(_) => unreachable!(),
-                            Response::ImageGeneration(_) => unreachable!(),
-                            Response::Speech { .. } => unreachable!(),
-                            Response::Raw { .. } => unreachable!(),
-                            Response::Embeddings { .. } => unreachable!(),
-                            Response::AgenticToolCallProgress { .. } => unreachable!(),
-                            Response::AgenticToolApprovalRequired { .. } => unreachable!(),
-                            Response::File(_) => unreachable!(),
-                        }
-                        break;
+            match rx.recv().await {
+                Some(r) => match r {
+                    Response::InternalError(e) => {
+                        unreachable!("Got an internal error: {e:?}");
                     }
-                    None => unreachable!("Expected a Done response, got None",),
-                }
+                    Response::ModelError(e, resp) => {
+                        unreachable!("Got a model error: {e:?}, response: {resp:?}");
+                    }
+                    Response::ValidationError(e) => {
+                        unreachable!("Got a validation error: {e:?}");
+                    }
+                    Response::Done(res) => {
+                        usages.push(res.usage);
+                    }
+                    Response::Chunk(_) => unreachable!(),
+                    Response::CompletionModelError(_, _) => unreachable!(),
+                    Response::CompletionDone(res) => {
+                        usages.push(res.usage);
+                    }
+                    Response::CompletionChunk(_) => unreachable!(),
+                    Response::ImageGeneration(_) => unreachable!(),
+                    Response::Speech { .. } => unreachable!(),
+                    Response::Raw { .. } => unreachable!(),
+                    Response::Embeddings { .. } => unreachable!(),
+                },
+                None => unreachable!("Expected a Done response, got None",),
             }
         }
     }
@@ -271,18 +250,8 @@ async fn warmup_run(mistralrs: Arc<MistralRs>) {
         logits_processors: None,
         return_raw_logits: false,
         web_search_options: None,
-        enable_code_execution: false,
-        code_execution_permission: None,
-        code_execution_approval_notifier: None,
-        agent_permission: None,
-        agent_approval_handler: None,
-        agent_approval_notifier: None,
-        max_tool_rounds: None,
-        tool_dispatch_url: None,
         model_id: None,
         truncate_sequence: false,
-        session_id: None,
-        files: None,
     }));
 
     if sender.send(req.clone()).await.is_err() {

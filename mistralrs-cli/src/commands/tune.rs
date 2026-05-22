@@ -5,11 +5,9 @@ use comfy_table::{presets::UTF8_FULL, Cell, Color, ContentArrangement, Table};
 
 use mistralrs_core::{auto_tune, AutoTuneRequest, FitStatus, ModelSelected, QualityTier};
 
-use crate::args::{GlobalOptions, MatformerSelection, ModelType, TuneProfileArg};
+use crate::args::{GlobalOptions, ModelType, TuneProfileArg};
 
-use super::serve::{
-    convert_to_model_selected, extract_device_settings, extract_isq_setting, extract_quant_flag,
-};
+use super::serve::{convert_to_model_selected, extract_device_settings, extract_isq_setting};
 
 pub async fn run_tune(
     model_type: ModelType,
@@ -18,20 +16,13 @@ pub async fn run_tune(
     json: bool,
     emit_config: Option<PathBuf>,
 ) -> Result<()> {
-    let model_selected = convert_to_model_selected(&model_type, &MatformerSelection::default())?;
+    let model_selected = convert_to_model_selected(&model_type)?;
     let (cpu, _device_layers, _active_layers_on_vram) = extract_device_settings(&model_type);
-    let requested = match extract_quant_flag(&model_type) {
-        Some(v) if v.trim().eq_ignore_ascii_case("auto") => {
-            anyhow::bail!("`--quant auto` is meaningless for `tune`; tune is the recommender")
-        }
-        Some(v) => Some(v),
-        None => extract_isq_setting(&model_type),
-    };
-    let requested_isq = requested
+    let requested_isq = extract_isq_setting(&model_type)
         .as_deref()
         .map(|s| {
             mistralrs_core::parse_isq_value(s, None)
-                .map_err(|err| anyhow::anyhow!("Invalid quantization value: {err}"))
+                .map_err(|err| anyhow::anyhow!("Invalid --isq value: {err}"))
         })
         .transpose()?;
 

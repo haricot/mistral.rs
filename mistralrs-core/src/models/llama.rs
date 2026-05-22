@@ -1,6 +1,5 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use crate::layers_masker::CausalMaskConfig;
 use candle_core::{Device, Result, Tensor};
 use candle_nn::{Embedding, Module};
 use mistralrs_quant::{
@@ -12,7 +11,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     amoe::{AnyMoeBaseModelMixin, AnyMoeConfig, AnyMoeExpertType, MlpLayer, MoeMlp},
-    attention::{AttentionMask, SdpaParams},
+    attention::SdpaParams,
     device_map::{DeviceMappedMask, DeviceMapper},
     get_delta_from_lora_ab,
     layers::{
@@ -69,7 +68,7 @@ impl CausalSelfAttention {
     fn forward(
         &self,
         x: &Tensor,
-        attention_mask: &AttentionMask,
+        attention_mask: &Option<Tensor>,
         seqlen_offsets: &[usize],
         kv_cache: &mut KvCache,
         metadata: Option<((Tensor, Tensor), &PagedAttentionInputMetadata)>,
@@ -77,9 +76,20 @@ impl CausalSelfAttention {
     ) -> Result<Tensor> {
         let (b_sz, seq_len, _) = x.dims3()?;
 
-        let q = self.q_proj.forward(x)?;
-        let k = self.k_proj.forward(x)?;
-        let v = self.v_proj.forward(x)?;
+        let original_dtype = x.dtype();
+        let mut x = x.clone();
+        if let Some(t) = self.q_proj.quantized_act_type() {
+            x = x.to_dtype(t)?;
+        }
+        let mut q = MatMul.qmethod_matmul(&x, &*self.q_proj)?;
+        let mut k = MatMul.qmethod_matmul(&x, &*self.k_proj)?;
+        let mut v = MatMul.qmethod_matmul(&x, &*self.v_proj)?;
+        if self.q_proj.quantized_act_type().is_some() {
+            q = q.to_dtype(original_dtype)?;
+            k = k.to_dtype(original_dtype)?;
+            v = v.to_dtype(original_dtype)?;
+        }
+
         let (q, k, v) = if seq_len != 1 {
             let q = q
                 .reshape((b_sz, seq_len, self.num_attention_heads, self.head_dim))?
@@ -106,7 +116,7 @@ impl CausalSelfAttention {
                     &q,
                     &k,
                     &v,
-                    attention_mask,
+                    attention_mask.clone().as_ref(),
                     Some(key_cache),
                     Some(value_cache),
                     input_metadata,
@@ -118,12 +128,12 @@ impl CausalSelfAttention {
                     // Generating the dummy metadata with the assumption that we are not generating text (only processing prompts).
                     let input_metadata = PagedAttentionInputMetadata::dummy(q.device())?;
                     // Sanity check.
-                    assert!(!matches!(attention_mask, AttentionMask::None));
+                    assert!(attention_mask.is_some());
                     paged_attn.forward(
                         &q,
                         &k,
                         &v,
-                        attention_mask,
+                        attention_mask.clone().as_ref(),
                         None,
                         None,
                         &input_metadata,
@@ -139,19 +149,25 @@ impl CausalSelfAttention {
                     &q,
                     &k,
                     &v,
-                    attention_mask,
+                    attention_mask.clone().as_ref(),
                     Some(flash_params),
                     &self.sdpa_params,
                 )?
             }
         };
 
-        y = if !matches!(attention_mask, AttentionMask::None) {
+        if let Some(t) = self.q_proj.quantized_act_type() {
+            y = y.to_dtype(t)?;
+        }
+        y = if attention_mask.is_some() {
             y.transpose(1, 2)?.reshape((b_sz, seq_len, ()))?
         } else {
             y.reshape((b_sz, seq_len, ()))?
         };
-        let res = self.o_proj.forward(&y)?;
+        let mut res = MatMul.qmethod_matmul(&y, &*self.o_proj)?;
+        if self.q_proj.quantized_act_type().is_some() {
+            res = res.to_dtype(original_dtype)?;
+        }
         Ok(res)
     }
 
@@ -242,7 +258,7 @@ impl Block {
     fn forward(
         &self,
         x: &Tensor,
-        attention_mask: &AttentionMask,
+        attention_mask: &Option<Tensor>,
         seqlen_offsets: &[usize],
         kv_cache: &mut KvCache,
         metadata: Option<((Tensor, Tensor), &PagedAttentionInputMetadata)>,
@@ -489,32 +505,29 @@ impl Llama {
     ) -> Result<Tensor> {
         let mut x = input_embeds;
         let cache = &mut self.kv_cache.normal().0;
-        let mask = CausalMasker.make_causal_mask(
+        let mask = CausalMasker.make_causal_mask_matrix(
             input_ids,
             metadata
                 .as_ref()
                 .map(|(_, _)| &seqlen_offsets as &dyn PastKvLenCache)
                 .unwrap_or(cache as &dyn PastKvLenCache),
             x.dtype(),
-            &CausalMaskConfig::default(),
+            self.blocks[0].attn.num_attention_heads,
         )?;
         // PagedAttention prompt chunking
-        let mask = if metadata
-            .as_ref()
-            .map(|(_, meta)| meta.is_first_prompt_chunk)
-            .unwrap_or(true)
-        {
-            mask
-        } else {
-            AttentionMask::None
-        };
+        let mask = mask.filter(|_| {
+            metadata
+                .as_ref()
+                .map(|(_, meta)| meta.is_first_prompt_chunk)
+                .unwrap_or(true)
+        });
         let mask = DeviceMappedMask::new(mask, &*self.mapper)?;
         for (block_idx, block) in self.blocks.iter().enumerate() {
             x = self.mapper.map(x, block_idx)?;
-            let mask_for_layer = &mask.get(x.device());
+            let mask_for_layer = mask.as_ref().map(|m| m.get(x.device()).clone());
             x = block.forward(
                 &x,
-                mask_for_layer,
+                &mask_for_layer,
                 seqlen_offsets,
                 &mut cache[block_idx],
                 metadata
@@ -525,8 +538,11 @@ impl Llama {
         }
         let x = x.to_device(&self.device)?;
         let x = self.ln_f.forward(&x)?;
-        let x = extract_logits(&x, context_lens)?;
-        self.lm_head.forward(&x)
+        let mut x = extract_logits(&x, context_lens)?;
+        if let Some(t) = self.lm_head.quantized_act_type() {
+            x = x.to_dtype(t)?;
+        }
+        MatMul.qmethod_matmul(&x, &*self.lm_head)
     }
 
     pub fn residual_tensors_m(&self, uvb_m: UnVarBuilder) -> Vec<(String, Tensor)> {

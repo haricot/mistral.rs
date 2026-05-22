@@ -1,4 +1,3 @@
-use crate::attention::AttentionMask;
 use std::{
     fmt::Debug,
     sync::{Arc, LazyLock, Mutex},
@@ -10,7 +9,7 @@ use mistralrs_quant::{NonZeroOp, QuantMethod, ShardedVarBuilder};
 
 use crate::{
     layers::{AvgPool2d, ReflectionPad2d},
-    paged_attention::encoder_cache::{CacheModality, EncoderCacheManager},
+    paged_attention::encoder_cache::EncoderCacheManager,
     utils::unvarbuilder::UnVarBuilder,
     vision_models::{
         phi4::config::Phi4MMImgProcessorConfig,
@@ -310,7 +309,7 @@ impl ImageEmbedding {
     fn get_image_features(
         &self,
         img_embeds: &Tensor,
-        attention_mask: &AttentionMask,
+        attention_mask: Option<&Tensor>,
     ) -> Result<Tensor> {
         assert!(self.layer_idx < 0);
         let img_feature = self.image_processor.forward_get_hidden_states(
@@ -384,7 +383,7 @@ impl ImageEmbedding {
         &self,
         input_ids: &Tensor,
         input_embeds: &Tensor,
-        image_attention_mask: &AttentionMask,
+        image_attention_mask: Option<&Tensor>,
         image_sizes: Option<Vec<(u32, u32)>>,
         image_hashes: &[u64],
         encoder_cache: &Mutex<EncoderCacheManager>,
@@ -412,7 +411,7 @@ impl ImageEmbedding {
                         let mut cached_results = Vec::with_capacity(bs);
                         let mut all_hit = true;
                         for &hash in image_hashes {
-                            if let Some(cached) = guard.get(CacheModality::Image, hash) {
+                            if let Some(cached) = guard.get(hash) {
                                 cached_results.push(cached[0].clone());
                             } else {
                                 all_hit = false;
@@ -432,11 +431,11 @@ impl ImageEmbedding {
                         image_set_tensor = Some(cached_results);
                     } else {
                         let img_features = match image_attention_mask {
-                            AttentionMask::Custom(attn_mask) => self.get_image_features(
+                            Some(attn_mask) => self.get_image_features(
                                 &input_embeds.flatten(0, 1)?,
-                                &AttentionMask::Custom(attn_mask.ne(0.)?.flatten(0, 1)?),
+                                Some(&attn_mask.ne(0.)?.flatten(0, 1)?),
                             )?,
-                            _ => self.get_image_features(input_embeds, &AttentionMask::None)?,
+                            None => self.get_image_features(input_embeds, None)?,
                         };
 
                         let base_feat_height_target = self.base_feat_height_target.unwrap();
@@ -543,96 +542,93 @@ impl ImageEmbedding {
                                     base_feat_height_reduction * base_feat_height_reduction * C,
                                 ))?;
 
-                            let (temp_sub_GN, temp_len) =
-                                if let AttentionMask::Custom(image_attention_mask) =
-                                    image_attention_mask
-                                {
-                                    let h_indices = Tensor::arange_step(
-                                        0,
-                                        image_attention_mask.dim(2)? as u32,
-                                        2,
-                                        &target_dev,
-                                    )?;
-                                    let w_indices = Tensor::arange_step(
-                                        0,
-                                        image_attention_mask.dim(3)? as u32,
-                                        2,
-                                        &target_dev,
-                                    )?;
+                            let (temp_sub_GN, temp_len) = if let Some(image_attention_mask) =
+                                image_attention_mask
+                            {
+                                let h_indices = Tensor::arange_step(
+                                    0,
+                                    image_attention_mask.dim(2)? as u32,
+                                    2,
+                                    &target_dev,
+                                )?;
+                                let w_indices = Tensor::arange_step(
+                                    0,
+                                    image_attention_mask.dim(3)? as u32,
+                                    2,
+                                    &target_dev,
+                                )?;
 
-                                    let reshaped_image_attention_mask = {
-                                        let mut selected =
-                                            image_attention_mask.i((bs_, 1..B_ + 1))?;
-                                        selected = selected.index_select(&h_indices, 1)?;
-                                        selected = selected.index_select(&w_indices, 2)?;
-                                        selected
-                                            .reshape((
-                                                1,
-                                                h,
-                                                w,
-                                                base_feat_height / base_feat_height_reduction,
-                                                base_feat_width / base_feat_height_reduction,
-                                            ))?
-                                            .permute((0, 1, 3, 2, 4))?
-                                            .reshape((
-                                                1,
-                                                h * base_feat_height / base_feat_height_reduction,
-                                                w * base_feat_width / base_feat_height_reduction,
-                                            ))?
-                                    };
-
-                                    let useful_height = reshaped_image_attention_mask
-                                        .i((0, .., 0))?
-                                        .sum_all()?
-                                        .to_scalar::<u32>()?;
-                                    let useful_width = reshaped_image_attention_mask
-                                        .i((0, 0, ..))?
-                                        .sum_all()?
-                                        .to_scalar::<u32>()?;
-
-                                    sub_img = sub_img.i((
-                                        ..,
-                                        ..useful_height as usize,
-                                        ..useful_width as usize,
-                                    ))?;
-
-                                    let temp_len = {
-                                        let mut selected =
-                                            image_attention_mask.i((bs_, ..B_ + 1))?;
-                                        selected = selected.index_select(&h_indices, 1)?;
-                                        selected = selected.index_select(&w_indices, 2)?;
-                                        selected.sum_all()?.to_scalar::<u32>()?
-                                    };
-                                    let temp_len = temp_len as usize
-                                        + useful_height as usize
-                                        + 1
-                                        + base_feat_height / base_feat_height_reduction;
-
-                                    (
-                                        self.sub_gn
-                                            .as_ref()
-                                            .expect("Need `sub_gn` if `use_hd_transform`")
-                                            .repeat((1, useful_height as usize, 1, 1))?,
-                                        temp_len,
-                                    )
-                                } else {
-                                    let temp_len = (h * w + 1) * self.num_img_tokens
-                                        + 1
-                                        + (h + 1) * base_feat_height / base_feat_height_reduction;
-
-                                    (
-                                        self.sub_gn
-                                            .as_ref()
-                                            .expect("Need `sub_gn` if `use_hd_transform`")
-                                            .repeat((
-                                                1,
-                                                h * base_feat_height / base_feat_height_reduction,
-                                                1,
-                                                1,
-                                            ))?,
-                                        temp_len,
-                                    )
+                                let reshaped_image_attention_mask = {
+                                    let mut selected = image_attention_mask.i((bs_, 1..B_ + 1))?;
+                                    selected = selected.index_select(&h_indices, 1)?;
+                                    selected = selected.index_select(&w_indices, 2)?;
+                                    selected
+                                        .reshape((
+                                            1,
+                                            h,
+                                            w,
+                                            base_feat_height / base_feat_height_reduction,
+                                            base_feat_width / base_feat_height_reduction,
+                                        ))?
+                                        .permute((0, 1, 3, 2, 4))?
+                                        .reshape((
+                                            1,
+                                            h * base_feat_height / base_feat_height_reduction,
+                                            w * base_feat_width / base_feat_height_reduction,
+                                        ))?
                                 };
+
+                                let useful_height = reshaped_image_attention_mask
+                                    .i((0, .., 0))?
+                                    .sum_all()?
+                                    .to_scalar::<u32>()?;
+                                let useful_width = reshaped_image_attention_mask
+                                    .i((0, 0, ..))?
+                                    .sum_all()?
+                                    .to_scalar::<u32>()?;
+
+                                sub_img = sub_img.i((
+                                    ..,
+                                    ..useful_height as usize,
+                                    ..useful_width as usize,
+                                ))?;
+
+                                let temp_len = {
+                                    let mut selected = image_attention_mask.i((bs_, ..B_ + 1))?;
+                                    selected = selected.index_select(&h_indices, 1)?;
+                                    selected = selected.index_select(&w_indices, 2)?;
+                                    selected.sum_all()?.to_scalar::<u32>()?
+                                };
+                                let temp_len = temp_len as usize
+                                    + useful_height as usize
+                                    + 1
+                                    + base_feat_height / base_feat_height_reduction;
+
+                                (
+                                    self.sub_gn
+                                        .as_ref()
+                                        .expect("Need `sub_gn` if `use_hd_transform`")
+                                        .repeat((1, useful_height as usize, 1, 1))?,
+                                    temp_len,
+                                )
+                            } else {
+                                let temp_len = (h * w + 1) * self.num_img_tokens
+                                    + 1
+                                    + (h + 1) * base_feat_height / base_feat_height_reduction;
+
+                                (
+                                    self.sub_gn
+                                        .as_ref()
+                                        .expect("Need `sub_gn` if `use_hd_transform`")
+                                        .repeat((
+                                            1,
+                                            h * base_feat_height / base_feat_height_reduction,
+                                            1,
+                                            1,
+                                        ))?,
+                                    temp_len,
+                                )
+                            };
 
                             let sub_img = Tensor::cat(&[sub_img, temp_sub_GN], 2)?.reshape((
                                 1,
@@ -688,11 +684,7 @@ impl ImageEmbedding {
                             if idx < image_hashes.len() {
                                 let mut guard =
                                     encoder_cache.lock().expect("encoder cache lock poisoned");
-                                guard.insert(
-                                    CacheModality::Image,
-                                    image_hashes[idx],
-                                    vec![layerout.clone()],
-                                );
+                                guard.insert(image_hashes[idx], vec![layerout.clone()]);
                             }
                             image_set_tensor_inner.push(layerout);
                         }

@@ -60,19 +60,14 @@ pub use distributed::{
     socket::{Client, Server},
     BarrierLike, Comm, Id, RingConfig, SumAllReduce,
 };
-pub use dummy::{DummyLayer, DummyLayerInfo};
+pub use dummy::DummyLayer;
 pub use f8q8::F8Q8Linear;
 pub use fp8::FP8Linear;
 #[cfg(feature = "cuda")]
 pub use gemv::gemv;
 pub use gemv::{should_use_gemv, GEMV_CONTROLLER};
-#[cfg(feature = "cuda")]
-pub use gguf::cuda::{
-    grouped_moe_gemm_prequantized, indexed_moe_fused_decode, moe_dispatch_build,
-    quantize_input_q8_1, ACT_GELU_PYTORCH_TANH, ACT_SILU,
-};
 pub use gguf::GgufMatMul;
-pub use gptq::{gptq_moe_linear, GptqLayer};
+pub use gptq::GptqLayer;
 pub use hqq::{HqqAxis, HqqBits, HqqConfig, HqqLayer};
 pub use imatrix::{CollectedImatrixData, ImatrixLayerStats};
 pub use lora::{
@@ -638,6 +633,11 @@ impl MatMul {
     pub fn qmatmul(&self, x: &Tensor, matmul: &QMatMul) -> Result<Tensor> {
         matmul.forward(x)
     }
+
+    /// Compute quantized matrix-matrix product.
+    pub fn qmethod_matmul(&self, x: &Tensor, matmul: &dyn QuantMethod) -> Result<Tensor> {
+        matmul.forward(x)
+    }
 }
 
 /// Device/configurable intelligent convolution
@@ -1079,70 +1079,44 @@ pub trait QuantMethod: Send + Sync + Debug + QuantizedSerde {
     fn dequantize_w(&self) -> Result<Tensor>;
 
     /// Compute matmul of `self` and `a`. `self` should contain the weights.
-    /// Automatically casts to the required quantization activation type and back.
-    fn forward(&self, a: &Tensor) -> Result<Tensor> {
-        if let Some(t) = self.quantized_act_type() {
-            let original_ty = a.dtype();
-            self.forward_raw(&a.to_dtype(t)?)?.to_dtype(original_ty)
-        } else {
-            self.forward_raw(a)
-        }
-    }
-
-    /// Raw matmul without dtype casting. Implementors override this.
-    /// Callers should use `forward` instead.
-    fn forward_raw(&self, a: &Tensor) -> Result<Tensor>;
-
-    /// Compute gather matmul of `self` and `a`. `self` should contain the weights.
-    /// Automatically casts to the required quantization activation type and back.
-    ///
-    /// If `a` is (n_tokens, n_experts, cols), `self` weights are (n_experts, rows, cols),
-    /// then the indices are (n_tokens, n_experts).
-    fn gather_forward(&self, a: &Tensor, indices: &Tensor) -> Result<Tensor> {
+    /// Automatically cast to required quantization activation type and back
+    fn forward_autocast(&self, a: &Tensor) -> Result<Tensor> {
         let original_ty = a.dtype();
-        let original_device = a.device().clone();
-        let (_, weight_device) = self.dtype_and_device();
         let a = if let Some(t) = self.quantized_act_type() {
             a.to_dtype(t)?
         } else {
             a.clone()
         };
-        let a = if a.device().same_device(&weight_device) {
-            a
-        } else {
-            a.to_device(&weight_device)?
-        };
-        let indices = if indices.device().same_device(&weight_device) {
-            indices.clone()
-        } else {
-            indices.to_device(&weight_device)?
-        };
-        let result = self
-            .gather_forward_raw(&a, &indices)?
-            .to_dtype(original_ty)?;
-        if result.device().same_device(&original_device) {
-            Ok(result)
-        } else {
-            result.to_device(&original_device)
-        }
+        self.forward(&a)?.to_dtype(original_ty)
     }
 
-    /// Raw gather matmul without dtype casting. Implementors override this.
-    /// Callers should use `gather_forward` instead.
-    fn gather_forward_raw(&self, a: &Tensor, indices: &Tensor) -> Result<Tensor> {
-        let (weight, bias) = if let Some(weight_bias) = self.unquant_weight_bias() {
-            weight_bias
+    /// Compute matmul of `self` and `a`. `self` should contain the weights.
+    fn forward(&self, a: &Tensor) -> Result<Tensor>;
+
+    /// Compute matmul of `self` and `a`. `self` should contain the weights.
+    /// Automatically cast to required quantization activation type and back.
+    ///
+    /// If `a` is (n_tokens, n_experts, cols), `self` weights are (n_experts, rows, cols),
+    /// then the indices are (n_tokens, n_experts).
+    fn gather_forward_autocast(&self, a: &Tensor, indices: &Tensor) -> Result<Tensor> {
+        let original_ty = a.dtype();
+        let a = if let Some(t) = self.quantized_act_type() {
+            a.to_dtype(t)?
         } else {
-            (self.dequantize_w()?, None)
+            a.clone()
         };
-        gather_forward_dequantized(self.name(), weight, bias, a, indices)
+        self.gather_forward(&a, indices)?.to_dtype(original_ty)
     }
 
-    /// Get the underlying QTensor if this is a GGUF quantized layer.
-    /// Used for direct kernel access in the grouped MoE prefill path.
-    #[cfg(feature = "cuda")]
-    fn get_qtensor(&self) -> Option<&candle_core::quantized::QTensor> {
-        None
+    /// Compute matmul of `self` and `a`. `self` should contain the weights.
+    ///
+    /// If `a` is (n_tokens, n_experts, cols), `self` weights are (n_experts, rows, cols),
+    /// then the indices are (n_tokens, n_experts).
+    fn gather_forward(&self, _a: &Tensor, _indices: &Tensor) -> Result<Tensor> {
+        candle_core::bail!(
+            "{} does not support `gather_forward`. Please raise an issue.",
+            self.name()
+        )
     }
 
     /// If a quantized method, return the activation dtype.
@@ -1187,37 +1161,6 @@ pub trait QuantMethod: Send + Sync + Debug + QuantizedSerde {
     fn is_distributed(&self) -> Option<DistributedKind> {
         None
     }
-
-    fn dummy_info(&self) -> Option<&DummyLayerInfo> {
-        None
-    }
-}
-
-pub(crate) fn gather_forward_dequantized(
-    name: &str,
-    weight: Tensor,
-    bias: Option<Tensor>,
-    a: &Tensor,
-    indices: &Tensor,
-) -> Result<Tensor> {
-    let weight = if weight.device().same_device(a.device()) {
-        weight
-    } else {
-        weight.to_device(a.device())?
-    };
-    let bias = bias
-        .map(|bias| {
-            if bias.device().same_device(a.device()) {
-                Ok(bias)
-            } else {
-                bias.to_device(a.device())
-            }
-        })
-        .transpose()?;
-    let unquant = UnquantLinear::new(QuantMethodConfig::Unquantized(Linear::new(weight, bias)))?;
-    unquant
-        .gather_forward_raw(a, indices)
-        .map_err(|err| err.with_path(name))
 }
 
 pub fn gguf_cpu_fused_moe_q4k_forward<F>(
@@ -1247,60 +1190,8 @@ where
 
 impl Module for dyn QuantMethod {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        QuantMethod::forward(self, xs)
+        Self::forward(self, xs)
     }
-}
-
-fn tensor_prefix(vb: &ShardedVarBuilder) -> String {
-    let prefix = vb.prefix();
-    if prefix.is_empty() {
-        "<root>".to_string()
-    } else {
-        prefix
-    }
-}
-
-fn missing_required_tensors(vb: &ShardedVarBuilder, required: &[&str]) -> Vec<String> {
-    required
-        .iter()
-        .copied()
-        .filter(|name| !vb.contains_tensor(name))
-        .map(|name| safetensors::full_tensor_name(vb, name))
-        .collect()
-}
-
-pub(crate) fn has_missing_required_tensors(vb: &ShardedVarBuilder, required: &[&str]) -> bool {
-    required.iter().any(|name| !vb.contains_tensor(name))
-}
-
-pub(crate) fn make_dummy_or_error(
-    context: &str,
-    vb: &ShardedVarBuilder,
-    required: &[&str],
-) -> Result<Arc<dyn QuantMethod>> {
-    let missing = missing_required_tensors(vb, required);
-    if missing.is_empty() {
-        candle_core::bail!(
-            "Internal error: requested DummyLayer for {context} without missing tensors"
-        );
-    }
-
-    let has_uqff_placeholder = required
-        .iter()
-        .any(|name| safetensors::is_uqff_dummy_tensor(vb, name));
-    if !has_uqff_placeholder {
-        candle_core::bail!(
-            "Missing required tensor(s) for {context} at prefix `{}`: {}. Dummy layers are only allowed for tensors intentionally omitted while loading UQFF artifacts.",
-            tensor_prefix(vb),
-            missing.join(", ")
-        );
-    }
-
-    Ok(Arc::new(DummyLayer::placeholder(DummyLayerInfo {
-        context: context.to_string(),
-        prefix: tensor_prefix(vb),
-        missing_tensors: missing,
-    })))
 }
 
 pub fn linear_no_bias(
@@ -1351,8 +1242,10 @@ pub fn linear_no_bias(
             }
         }
     } else {
+        // Handle the case where the layer is dummy (no tensors)
         if !vb.contains_tensor("weight") {
-            make_dummy_or_error("linear_no_bias", &vb, &["weight"])?
+            let layer = <DummyLayer as QuantMethod>::new(QuantMethodConfig::Dummy)?;
+            Arc::new(layer) as Arc<dyn QuantMethod>
         } else {
             let weight = vb.get_with_hints((out_dim, in_dim), "weight", Default::default())?;
             let weight = merge_lora_weights(&vb, weight, in_dim, out_dim, Default::default())?;
@@ -1414,8 +1307,10 @@ pub fn linear(
             }
         }
     } else {
-        if has_missing_required_tensors(&vb, &["weight", "bias"]) {
-            make_dummy_or_error("linear", &vb, &["weight", "bias"])?
+        // Handle the case where the layer is dummy (no tensors)
+        if !(vb.contains_tensor("weight") && vb.contains_tensor("bias")) {
+            let layer = <DummyLayer as QuantMethod>::new(QuantMethodConfig::Dummy)?;
+            Arc::new(layer) as Arc<dyn QuantMethod>
         } else {
             let weight = vb.get_with_hints((out_dim, in_dim), "weight", Default::default())?;
             let weight = merge_lora_weights(&vb, weight, in_dim, out_dim, Default::default())?;
@@ -1441,66 +1336,5 @@ pub fn linear_b(
         linear(in_dim, out_dim, config, vb)
     } else {
         linear_no_bias(in_dim, out_dim, config, vb)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::HashMap;
-
-    use super::*;
-
-    fn empty_vb(make_dummy_regexes: Option<Vec<&str>>) -> ShardedVarBuilder {
-        let backend: HashMap<String, Tensor> = HashMap::new();
-        let make_dummy_regexes = make_dummy_regexes.map(|regexes| {
-            Arc::new(
-                regexes
-                    .into_iter()
-                    .map(Regex::new)
-                    .collect::<std::result::Result<Vec<_>, _>>()
-                    .unwrap(),
-            )
-        });
-        ShardedSafeTensors::wrap_with_dummy_regexes(
-            Box::new(backend),
-            DType::F32,
-            Device::Cpu,
-            make_dummy_regexes,
-        )
-    }
-
-    #[test]
-    fn missing_linear_weight_outside_uqff_errors() {
-        let err = linear_no_bias(2, 3, &None, empty_vb(None).pp("foo")).unwrap_err();
-        let msg = err.to_string();
-
-        assert!(msg.contains("Missing required tensor(s)"));
-        assert!(msg.contains("foo.weight"));
-        assert!(msg.contains("UQFF"));
-    }
-
-    #[test]
-    fn missing_uqff_placeholder_creates_contextual_dummy() -> Result<()> {
-        let layer = linear_no_bias(
-            2,
-            3,
-            &None,
-            empty_vb(Some(vec![r"^foo\.weight$"])).pp("foo"),
-        )?;
-
-        let info = layer.dummy_info().unwrap();
-        assert_eq!(layer.name(), "dummy");
-        assert_eq!(info.context, "linear_no_bias");
-        assert_eq!(info.prefix, "foo");
-        assert_eq!(info.missing_tensors, vec!["foo.weight"]);
-
-        let input = Tensor::zeros((1, 2), DType::F32, &Device::Cpu)?;
-        let err = layer.forward_raw(&input).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("forward pass"));
-        assert!(msg.contains("foo.weight"));
-        assert!(msg.contains("temporary UQFF placeholders"));
-
-        Ok(())
     }
 }

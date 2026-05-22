@@ -1,6 +1,4 @@
-use crate::tools::{
-    Function, Tool, ToolCallback, ToolCallbackKind, ToolCallbackWithTool, ToolType,
-};
+use crate::tools::{Function, Tool, ToolCallback, ToolCallbackWithTool, ToolType};
 use crate::transport::{HttpTransport, McpTransport, ProcessTransport, WebSocketTransport};
 use crate::types::McpToolResult;
 use crate::{McpClientConfig, McpServerConfig, McpServerSource, McpToolInfo};
@@ -441,7 +439,7 @@ impl McpClient {
                 let timeout_duration =
                     Duration::from_secs(self.config.tool_timeout_secs.unwrap_or(30));
 
-                let callback: Arc<ToolCallback> = Arc::new(move |called_function, _ctx| {
+                let callback: Arc<ToolCallback> = Arc::new(move |called_function| {
                     let connection = Arc::clone(&connection_clone);
                     let tool_name = original_tool_name.clone();
                     let semaphore = Arc::clone(&semaphore_clone);
@@ -476,17 +474,11 @@ impl McpClient {
                     .map_err(|_| anyhow::anyhow!("Tool call thread panicked"))?
                 });
 
-                // MCP tools always provide an inputSchema, so we can always enable strict mode and let constrained decoding enforce it.
-                let parameters = Self::convert_mcp_schema_to_parameters(&tool.input_schema);
+                // Convert MCP tool schema to Tool definition
                 let function_def = Function {
                     name: tool_name.clone(),
                     description: tool.description.clone(),
-                    strict: if parameters.is_some() {
-                        Some(true)
-                    } else {
-                        None
-                    },
-                    parameters,
+                    parameters: Self::convert_mcp_schema_to_parameters(&tool.input_schema),
                 };
 
                 let tool_def = Tool {
@@ -500,7 +492,7 @@ impl McpClient {
                 self.tool_callbacks_with_tools.insert(
                     tool_name.clone(),
                     ToolCallbackWithTool {
-                        callback: ToolCallbackKind::Text(callback),
+                        callback,
                         tool: tool_def,
                     },
                 );
@@ -594,7 +586,7 @@ impl McpClient {
             let semaphore_clone = Arc::clone(&self.concurrency_semaphore);
             let timeout_duration = Duration::from_secs(self.config.tool_timeout_secs.unwrap_or(30));
 
-            let callback: Arc<ToolCallback> = Arc::new(move |called_function, _ctx| {
+            let callback: Arc<ToolCallback> = Arc::new(move |called_function| {
                 let connection = Arc::clone(&connection_clone);
                 let tool_name = original_tool_name.clone();
                 let semaphore = Arc::clone(&semaphore_clone);
@@ -630,18 +622,11 @@ impl McpClient {
                 .map_err(|_| anyhow::anyhow!("Tool call thread panicked"))?
             });
 
-            // Convert MCP tool schema to Tool definition.
-            // Auto-enable strict mode when a schema is available.
-            let parameters = Self::convert_mcp_schema_to_parameters(&tool.input_schema);
+            // Convert MCP tool schema to Tool definition
             let function_def = Function {
                 name: tool_name.clone(),
                 description: tool.description.clone(),
-                strict: if parameters.is_some() {
-                    Some(true)
-                } else {
-                    None
-                },
-                parameters,
+                parameters: Self::convert_mcp_schema_to_parameters(&tool.input_schema),
             };
 
             let tool_def = Tool {
@@ -655,7 +640,7 @@ impl McpClient {
             self.tool_callbacks_with_tools.insert(
                 tool_name.clone(),
                 ToolCallbackWithTool {
-                    callback: ToolCallbackKind::Text(callback),
+                    callback,
                     tool: tool_def,
                 },
             );

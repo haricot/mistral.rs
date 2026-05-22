@@ -14,7 +14,7 @@ pub(crate) fn maybe_synchronize(device: &Device) -> Result<()> {
     const FOUR_GIB: usize = 4 * 1024 * 1024 * 1024;
     #[cfg(not(target_pointer_width = "64"))]
     const FOUR_GIB: usize = usize::MAX;
-    if MemoryUsage.query(device)?.available() < FOUR_GIB {
+    if MemoryUsage.get_memory_available(device)? < FOUR_GIB {
         device.synchronize()?;
     }
     Ok(())
@@ -45,15 +45,7 @@ pub(crate) fn naive_sdpa(
             att = att.broadcast_add(mask)?;
         }
 
-        // Compute softmax in F32 for precision (BF16 exp() loses information).
-        let att_dtype = att.dtype();
-        if att_dtype == candle_core::DType::BF16 || att_dtype == candle_core::DType::F16 {
-            att = att.to_dtype(candle_core::DType::F32)?;
-        }
         att = candle_nn::ops::softmax_last_dim(&att)?;
-        if att.dtype() != att_dtype {
-            att = att.to_dtype(att_dtype)?;
-        }
         MatMul.matmul(&att, v)
     })
 }

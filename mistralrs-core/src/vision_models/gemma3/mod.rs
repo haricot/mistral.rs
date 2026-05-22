@@ -1,6 +1,5 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use crate::attention::AttentionMask;
 use std::sync::{Arc, Mutex};
 
 use candle_core::{Context, DType, Device, Result, Tensor, D};
@@ -13,7 +12,7 @@ use crate::{
     amoe::{AnyMoeBaseModelMixin, MlpLayer},
     device_map::DeviceMapper,
     paged_attention::{
-        encoder_cache::{cached_encode_images, CacheModality, EncoderCacheManager},
+        encoder_cache::{cached_encode_images, EncoderCacheManager},
         AttentionImplementation, ModelConfigMetadata,
     },
     pipeline::{
@@ -135,12 +134,11 @@ impl Gemma3Model {
             let dtype = vision_tower.dtype();
 
             let image_features = cached_encode_images(
-                CacheModality::Image,
                 image_hashes,
                 &pixel_values.to_dtype(dtype)?,
                 &self.encoder_cache,
                 |pv| {
-                    let vision_outputs = vision_tower.forward(pv, &AttentionMask::None, None)?;
+                    let vision_outputs = vision_tower.forward(pv, None, None)?;
                     Ok(vec![multi_modal_projector.forward(&vision_outputs)?])
                 },
             )?[0]

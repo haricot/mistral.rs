@@ -233,7 +233,7 @@ impl QuantMethod for BnbLinear {
         Self::dequantize(&self.weight, &self.params, self.quant_ty)
     }
 
-    fn forward_raw(&self, xs: &Tensor) -> Result<Tensor> {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let w = Self::dequantize(&self.weight, &self.params, self.quant_ty)?
             .t()?
             .to_dtype(xs.dtype())?;
@@ -255,10 +255,6 @@ impl QuantMethod for BnbLinear {
 
     fn dtype_and_device(&self) -> (DType, Device) {
         (self.params.dtype.into(), self.weight.device().clone())
-    }
-
-    fn unquant_weight_bias(&self) -> Option<(Tensor, Option<Tensor>)> {
-        Some((self.dequantize_w().ok()?, self.bias.clone()))
     }
 
     fn apply_isq(

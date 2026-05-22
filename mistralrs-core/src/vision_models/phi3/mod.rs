@@ -4,7 +4,6 @@ pub(crate) mod phi3_inputs_processor;
 
 // This implementation is based on:
 // https://huggingface.co/microsoft/Phi-3-mini-4k-instruct/blob/main/modeling_phi3.py
-use crate::layers_masker::CausalMaskConfig;
 use candle_core::{
     shape::ShapeWithOneHole, DType, Device, IndexOp, Module, Result, Shape, Tensor, D,
 };
@@ -21,7 +20,7 @@ use std::{
 
 use crate::{
     amoe::{AnyMoeBaseModelMixin, AnyMoeTrainableLayer, MlpLayer, MoeMlp},
-    attention::{AttentionMask, SdpaParams},
+    attention::SdpaParams,
     device_map::{DeviceMappedMask, DeviceMapper},
     get_delta_from_lora_ab,
     layers::{
@@ -30,8 +29,8 @@ use crate::{
     },
     layers_masker::PastKvLenCache,
     paged_attention::{
-        encoder_cache::{CacheModality, EncoderCacheManager},
-        AttentionImplementation, ModelConfigMetadata, PagedAttention,
+        encoder_cache::EncoderCacheManager, AttentionImplementation, ModelConfigMetadata,
+        PagedAttention,
     },
     pipeline::{
         extract_logits,
@@ -224,7 +223,7 @@ impl Attention {
     fn forward(
         &self,
         xs: &Tensor,
-        attention_mask: &AttentionMask,
+        attention_mask: Option<&Tensor>,
         seqlen_offsets: &[usize],
         position_ids: &[usize],
         kv_cache: &mut KvCache,
@@ -233,7 +232,15 @@ impl Attention {
     ) -> Result<Tensor> {
         let (b_sz, q_len, _) = xs.dims3()?;
 
-        let qkv = self.qkv_proj.forward(xs)?;
+        let original_dtype = xs.dtype();
+        let mut xs = xs.clone();
+        if let Some(t) = self.qkv_proj.quantized_act_type() {
+            xs = xs.to_dtype(t)?;
+        }
+        let mut qkv = MatMul.qmethod_matmul(&xs, &*self.qkv_proj)?;
+        if self.qkv_proj.quantized_act_type().is_some() {
+            qkv = qkv.to_dtype(original_dtype)?;
+        }
         let query_pos = self.num_heads * self.head_dim;
         let q = qkv.narrow(D::Minus1, 0, query_pos)?;
         let k = qkv.narrow(D::Minus1, query_pos, self.num_kv_heads * self.head_dim)?;
@@ -283,7 +290,7 @@ impl Attention {
                     // Generating the dummy metadata with the assumption that we are not generating text (only processing prompts).
                     let input_metadata = PagedAttentionInputMetadata::dummy(q.device())?;
                     // Sanity check.
-                    assert!(!matches!(attention_mask, AttentionMask::None));
+                    assert!(attention_mask.is_some());
                     paged_attn.forward(
                         &q,
                         &k.contiguous()?,
@@ -311,12 +318,18 @@ impl Attention {
             }
         };
 
-        attn_output = if !matches!(attention_mask, AttentionMask::None) {
+        if let Some(t) = self.qkv_proj.quantized_act_type() {
+            attn_output = attn_output.to_dtype(t)?;
+        }
+        attn_output = if attention_mask.is_some() {
             attn_output.transpose(1, 2)?.reshape((b_sz, q_len, ()))?
         } else {
             attn_output.reshape((b_sz, q_len, ()))?
         };
-        let res = self.o_proj.forward(&attn_output)?;
+        let mut res = MatMul.qmethod_matmul(&attn_output, &*self.o_proj)?;
+        if self.qkv_proj.quantized_act_type().is_some() {
+            res = res.to_dtype(original_dtype)?;
+        }
         Ok(res)
     }
 }
@@ -364,11 +377,19 @@ impl AnyMoeTrainableLayer for Mlp {}
 
 impl MlpLayer for Mlp {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let up_states = self.gate_up_proj.forward(xs)?;
+        let original_dtype = xs.dtype();
+        let mut xs = xs.clone();
+        if let Some(t) = self.gate_up_proj.quantized_act_type() {
+            xs = xs.to_dtype(t)?;
+        }
+        let up_states = MatMul.qmethod_matmul(&xs, &*self.gate_up_proj)?;
         let gate = up_states.narrow(D::Minus1, 0, self.i_size)?;
         let up_states = up_states.narrow(D::Minus1, self.i_size, self.i_size)?;
         let up_states = (up_states * gate.apply(&self.act_fn))?;
-        let res = self.down_proj.forward(&up_states)?;
+        let mut res = MatMul.qmethod_matmul(&up_states, &*self.down_proj)?;
+        if self.gate_up_proj.quantized_act_type().is_some() {
+            res = res.to_dtype(original_dtype)?;
+        }
         Ok(res)
     }
     fn get_isq_layers(&mut self) -> Vec<&mut Arc<dyn QuantMethod>> {
@@ -456,7 +477,7 @@ impl DecoderLayer {
     fn forward(
         &self,
         xs: &Tensor,
-        attention_mask: &AttentionMask,
+        attention_mask: Option<&Tensor>,
         seqlen_offsets: &[usize],
         position_ids: &[usize],
         kv_cache: &mut KvCache,
@@ -739,7 +760,7 @@ impl ImageEmbedding {
                     if n_hashes > 0 && n_hashes == bs {
                         let mut guard = encoder_cache.lock().expect("encoder cache lock poisoned");
                         for (i, &hash) in image_hashes.iter().enumerate() {
-                            if let Some(cached) = guard.get(CacheModality::Image, hash) {
+                            if let Some(cached) = guard.get(hash) {
                                 per_image_cached[i] = Some(cached[0].clone());
                             } else {
                                 miss_indices.push(i);
@@ -885,11 +906,7 @@ impl ImageEmbedding {
                         if n_hashes > 0 && bs_ < n_hashes {
                             let mut guard =
                                 encoder_cache.lock().expect("encoder cache lock poisoned");
-                            guard.insert(
-                                CacheModality::Image,
-                                image_hashes[bs_],
-                                vec![layerout.clone()],
-                            );
+                            guard.insert(image_hashes[bs_], vec![layerout.clone()]);
                         }
 
                         image_set_tensor_inner.push(layerout);
@@ -907,7 +924,7 @@ impl ImageEmbedding {
                     {
                         let mut guard = encoder_cache.lock().expect("encoder cache lock poisoned");
                         for (i, &hash) in image_hashes.iter().enumerate() {
-                            if let Some(cached) = guard.get(CacheModality::Image, hash) {
+                            if let Some(cached) = guard.get(hash) {
                                 per_image_features[i] = Some(cached[0].clone());
                             } else {
                                 miss_indices.push(i);
@@ -926,11 +943,7 @@ impl ImageEmbedding {
                             {
                                 let mut guard =
                                     encoder_cache.lock().expect("encoder cache lock poisoned");
-                                guard.insert(
-                                    CacheModality::Image,
-                                    image_hashes[idx],
-                                    vec![feats.clone()],
-                                );
+                                guard.insert(image_hashes[idx], vec![feats.clone()]);
                             }
                             per_image_features[idx] = Some(feats);
                         }
@@ -1185,34 +1198,29 @@ impl Model {
             self.embed_tokens.forward(input_ids)?
         };
         let cache = &mut self.cache.normal().0;
-        let attention_mask = CausalMasker.make_causal_mask(
+        let attention_mask = CausalMasker.make_sliding_window_causal_mask_matrix(
             input_ids,
             metadata
                 .as_ref()
                 .map(|(_, _)| &seqlen_offsets as &dyn PastKvLenCache)
                 .unwrap_or(&*cache as &dyn PastKvLenCache),
+            self.sliding_window,
             xs.dtype(),
-            &CausalMaskConfig {
-                sliding_window: self.sliding_window,
-                ..Default::default()
-            },
+            self.cfg.num_attn_heads,
         )?;
-        let attention_mask = if metadata
-            .as_ref()
-            .map(|(_, meta)| meta.is_first_prompt_chunk)
-            .unwrap_or(true)
-        {
-            attention_mask
-        } else {
-            AttentionMask::None
-        };
+        let attention_mask = attention_mask.filter(|_| {
+            metadata
+                .as_ref()
+                .map(|(_, meta)| meta.is_first_prompt_chunk)
+                .unwrap_or(true)
+        });
         let attention_mask = DeviceMappedMask::new(attention_mask, &*self.mapper)?;
 
         for (i, layer) in self.layers.iter().enumerate() {
             xs = self.mapper.map(xs, i)?;
             xs = layer.forward(
                 &xs,
-                &attention_mask.get(xs.device()),
+                attention_mask.as_ref().map(|m| m.get(xs.device())),
                 seqlen_offsets,
                 position_ids,
                 &mut cache[i],
@@ -1224,8 +1232,11 @@ impl Model {
         }
         let xs = xs.to_device(&self.device)?;
         let xs = xs.apply(&self.norm)?;
-        let xs = extract_logits(&xs, context_lens)?;
-        self.lm_head.forward(&xs)
+        let mut xs = extract_logits(&xs, context_lens)?;
+        if let Some(t) = self.lm_head.quantized_act_type() {
+            xs = xs.to_dtype(t)?;
+        }
+        MatMul.qmethod_matmul(&xs, &*self.lm_head)
     }
 }
 

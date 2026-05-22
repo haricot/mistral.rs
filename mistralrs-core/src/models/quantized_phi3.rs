@@ -2,10 +2,10 @@
 
 use std::sync::Arc;
 
-use crate::attention::{AttentionMask, SdpaParams};
+use crate::attention::SdpaParams;
 use crate::device_map::{DeviceMappedMask, DeviceMapper};
 use crate::gguf::Content;
-use crate::layers::{CausalMaskConfig, CausalMasker, MatMul, RmsNorm, Sdpa};
+use crate::layers::{CausalMasker, MatMul, RmsNorm, Sdpa};
 use crate::layers_masker::PastKvLenCache;
 use crate::paged_attention::{AttentionImplementation, PagedAttention};
 use crate::pipeline::text_models_inputs_processor::PagedAttentionInputMetadata;
@@ -28,12 +28,12 @@ struct Mlp {
 
 impl Module for Mlp {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let up_states = self.ffn_up.forward(xs)?;
+        let up_states = MatMul.qmethod_matmul(xs, &*self.ffn_up)?;
         let gate = up_states.narrow(D::Minus1, 0, self.i_size)?;
         let up_states = up_states.narrow(D::Minus1, self.i_size, self.i_size)?;
         let up_states =
             crate::ops::mul_and_act(&gate, &up_states, crate::layers::Activation::Silu)?;
-        self.ffn_down.forward(&up_states)
+        MatMul.qmethod_matmul(&up_states, &*self.ffn_down)
     }
 }
 
@@ -78,13 +78,15 @@ impl LayerWeights {
     fn forward_attn(
         &self,
         x: &Tensor,
-        mask: &AttentionMask,
+        mask: Option<&Tensor>,
         seqlen_offsets: &[usize],
         kv_cache: &mut KvCache,
         metadata: Option<((Tensor, Tensor), &PagedAttentionInputMetadata)>,
     ) -> Result<Tensor> {
         let (b_sz, seq_len, _) = x.dims3()?;
-        let qkv = self.attn_qkv.forward(x)?.to_dtype(self.dtype)?;
+        let qkv = MatMul
+            .qmethod_matmul(x, &*self.attn_qkv)?
+            .to_dtype(self.dtype)?;
         let query_pos = self.n_head * self.head_dim;
         let q = qkv.narrow(D::Minus1, 0, query_pos)?;
         let k = qkv.narrow(D::Minus1, query_pos, self.n_kv_head * self.head_dim)?;
@@ -136,12 +138,12 @@ impl LayerWeights {
             }
         };
 
-        let y = if mask.is_custom() {
+        let y = if mask.is_some() {
             y.transpose(1, 2)?.reshape((b_sz, seq_len, ()))?
         } else {
             y.reshape((b_sz, seq_len, ()))?
         };
-        let y = self.attn_output.forward(&y.to_dtype(x.dtype())?)?;
+        let y = MatMul.qmethod_matmul(&y.to_dtype(x.dtype())?, &*self.attn_output)?;
         Ok(y)
     }
 }
@@ -369,27 +371,22 @@ impl ModelWeights {
         let (_b_sz, seq_len) = input_ids.dims2()?;
         let mut xs = self.tok_embeddings.forward(input_ids)?;
         let cache = &mut self.cache.normal().0;
-        let mask = CausalMasker.make_causal_mask(
+        let mask = CausalMasker.make_sliding_window_causal_mask_matrix(
             input_ids,
             metadata
                 .as_ref()
                 .map(|(_, _)| &seqlen_offsets as &dyn PastKvLenCache)
                 .unwrap_or(cache as &dyn PastKvLenCache),
+            Some(self.max_seq_len),
             self.dtype,
-            &CausalMaskConfig {
-                sliding_window: Some(self.max_seq_len),
-                ..Default::default()
-            },
+            self.layers[0].n_head,
         )?;
-        let mask = if metadata
-            .as_ref()
-            .map(|(_, meta)| meta.is_first_prompt_chunk)
-            .unwrap_or(true)
-        {
-            mask
-        } else {
-            AttentionMask::None
-        };
+        let mask = mask.filter(|_| {
+            metadata
+                .as_ref()
+                .map(|(_, meta)| meta.is_first_prompt_chunk)
+                .unwrap_or(true)
+        });
         let mask = DeviceMappedMask::new(mask, &**self.mapper.as_ref().unwrap())?;
         for (i, layer) in self.layers.iter().enumerate() {
             if let Some(ref mapper) = self.mapper {
@@ -399,7 +396,7 @@ impl ModelWeights {
             let ys = xs.apply(&layer.attn_norm)?;
             let ys = layer.forward_attn(
                 &ys,
-                &mask.get(xs.device()),
+                mask.as_ref().map(|m| m.get(xs.device())),
                 seqlen_offsets,
                 &mut cache[i],
                 metadata

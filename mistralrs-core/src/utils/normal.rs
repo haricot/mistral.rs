@@ -4,9 +4,8 @@ use std::{fmt::Display, str::FromStr};
 
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
-use mistralrs_quant::log::once_log_info;
 use serde::{Deserialize, Serialize};
-use tracing::debug;
+use tracing::info;
 
 #[derive(Clone, Copy, Default, Debug, Deserialize, Serialize, PartialEq)]
 #[cfg_attr(feature = "pyo3_macros", pyo3::pyclass(eq, eq_int))]
@@ -58,10 +57,10 @@ pub trait TryIntoDType {
 
 impl TryIntoDType for DType {
     fn try_into_dtype(&self, _: &[&Device]) -> Result<DType> {
+        info!("DType selected is {self:?}.");
         if !matches!(self, DType::BF16 | DType::F32 | DType::F64 | DType::F16) {
             anyhow::bail!("DType must be one of BF16, F16, F32, F64");
         }
-        once_log_info(format!("DType selected is {self:?}."));
         Ok(*self)
     }
 }
@@ -90,7 +89,7 @@ fn get_dtypes() -> Vec<DType> {
         .map(|cc| cc.trim().parse::<f32>().unwrap())
         .reduce(|a, b| if a < b { a } else { b })
         .unwrap();
-    debug!("Detected minimum CUDA compute capability {min_cc}");
+    info!("Detected minimum CUDA compute capability {min_cc}");
     // 7.5 -> 750
     #[allow(clippy::cast_possible_truncation)]
     let min_cc = (min_cc * 100.) as usize;
@@ -99,12 +98,12 @@ fn get_dtypes() -> Vec<DType> {
     if min_cc >= MIN_BF16_CC {
         dtypes.push(DType::BF16);
     } else {
-        debug!("Skipping BF16 because CC < 8.0");
+        info!("Skipping BF16 because CC < 8.0");
     }
     if min_cc >= MIN_F16_CC {
         dtypes.push(DType::F16);
     } else {
-        debug!("Skipping F16 because CC < 5.3");
+        info!("Skipping F16 because CC < 5.3");
     }
     dtypes
 }
@@ -164,13 +163,13 @@ fn determine_auto_dtype_all(devices: &[&Device]) -> candle_core::Result<DType> {
 impl TryIntoDType for ModelDType {
     fn try_into_dtype(&self, devices: &[&Device]) -> Result<DType> {
         let dtype = match self {
-            Self::Auto => determine_auto_dtype_all(devices).map_err(anyhow::Error::msg)?,
-            Self::BF16 => DType::BF16,
-            Self::F16 => DType::F16,
-            Self::F32 => DType::F32,
+            Self::Auto => Ok(determine_auto_dtype_all(devices).map_err(anyhow::Error::msg)?),
+            Self::BF16 => Ok(DType::BF16),
+            Self::F16 => Ok(DType::F16),
+            Self::F32 => Ok(DType::F32),
         };
-        once_log_info(format!("DType selected is {dtype:?}."));
-        Ok(dtype)
+        info!("DType selected is {:?}.", dtype.as_ref().unwrap());
+        dtype
     }
 }
 

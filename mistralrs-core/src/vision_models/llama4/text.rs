@@ -1,6 +1,5 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use crate::layers_masker::CausalMaskConfig;
 use candle_core::{DType, Device, Result, Tensor, D};
 use candle_nn::{Embedding, Module};
 use mistralrs_quant::{
@@ -11,7 +10,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     amoe::AnyMoeBaseModelMixin,
-    attention::{AttentionMask, SdpaParams},
+    attention::SdpaParams,
     device_map::{DeviceMappedMask, DeviceMapper},
     layers::{embedding, Activation, CausalMasker, Llama3RotaryEmbedding, RmsNorm, Sdpa},
     layers_masker::PastKvLenCache,
@@ -148,7 +147,7 @@ impl CausalSelfAttention {
         &self,
         x: &Tensor,
         position_ids: &Tensor,
-        attention_mask: &AttentionMask,
+        attention_mask: &Option<Tensor>,
         seqlen_offsets: &[usize],
         kv_cache: &mut KvCache,
         metadata: Option<((Tensor, Tensor), &PagedAttentionInputMetadata)>,
@@ -156,9 +155,9 @@ impl CausalSelfAttention {
     ) -> Result<Tensor> {
         let (b_sz, seq_len, _) = x.dims3()?;
 
-        let mut q = self.q_proj.forward(x)?;
-        let mut k = self.k_proj.forward(x)?;
-        let mut v = self.v_proj.forward(x)?;
+        let mut q = self.q_proj.forward_autocast(x)?;
+        let mut k = self.k_proj.forward_autocast(x)?;
+        let mut v = self.v_proj.forward_autocast(x)?;
 
         q = q
             .reshape((b_sz, seq_len, self.num_attention_heads, self.head_dim))?
@@ -197,7 +196,7 @@ impl CausalSelfAttention {
                     &q,
                     &k,
                     &v,
-                    attention_mask,
+                    attention_mask.clone().as_ref(),
                     Some(key_cache),
                     Some(value_cache),
                     input_metadata,
@@ -209,12 +208,12 @@ impl CausalSelfAttention {
                     // Generating the dummy metadata with the assumption that we are not generating text (only processing prompts).
                     let input_metadata = PagedAttentionInputMetadata::dummy(q.device())?;
                     // Sanity check.
-                    assert!(!matches!(attention_mask, AttentionMask::None));
+                    assert!(attention_mask.is_some());
                     paged_attn.forward(
                         &q,
                         &k,
                         &v,
-                        attention_mask,
+                        attention_mask.clone().as_ref(),
                         None,
                         None,
                         &input_metadata,
@@ -230,19 +229,19 @@ impl CausalSelfAttention {
                     &q.contiguous()?,
                     &k.contiguous()?,
                     &v.contiguous()?,
-                    attention_mask,
+                    attention_mask.clone().as_ref(),
                     Some(flash_params),
                     &self.sdpa_params,
                 )?
             }
         };
 
-        y = if !matches!(attention_mask, AttentionMask::None) {
+        y = if attention_mask.is_some() {
             y.transpose(1, 2)?.reshape((b_sz, seq_len, ()))?
         } else {
             y.reshape((b_sz, seq_len, ()))?
         };
-        self.o_proj.forward(&y)
+        self.o_proj.forward_autocast(&y)
     }
 }
 
@@ -292,11 +291,11 @@ impl Mlp {
     }
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let lhs = self.gate.forward(xs)?;
-        let rhs = self.up.forward(xs)?;
+        let lhs = self.gate.forward_autocast(xs)?;
+        let rhs = self.up.forward_autocast(xs)?;
 
         self.down
-            .forward(&crate::ops::mul_and_act(&lhs, &rhs, self.act)?)
+            .forward_autocast(&crate::ops::mul_and_act(&lhs, &rhs, self.act)?)
     }
 }
 
@@ -361,7 +360,7 @@ impl TextMoe {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let (bs, seq_len, hidden_dim) = xs.dims3()?;
         let xs_flat = xs.reshape(((), hidden_dim))?;
-        let router_logits = self.router.forward(&xs_flat)?;
+        let router_logits = self.router.forward_autocast(&xs_flat)?;
 
         let TopKOutput {
             values: router_top_value,
@@ -480,7 +479,7 @@ impl Block {
         &self,
         x: &Tensor,
         position_ids: &Tensor,
-        attention_mask: &AttentionMask,
+        attention_mask: &Option<Tensor>,
         chunked_mask: &Option<Tensor>,
         seqlen_offsets: &[usize],
         kv_cache: &mut KvCache,
@@ -490,17 +489,14 @@ impl Block {
         let residual = x;
         let x = self.rms_1.forward(x)?;
         let mask = if self.use_chunked_attention {
-            match chunked_mask {
-                Some(t) => AttentionMask::Custom(t.clone()),
-                None => AttentionMask::None,
-            }
+            chunked_mask
         } else {
-            attention_mask.clone()
+            attention_mask
         };
         let x = (self.attn.forward(
             &x,
             position_ids,
-            &mask,
+            mask,
             seqlen_offsets,
             kv_cache,
             metadata,
@@ -688,11 +684,11 @@ impl TextModel {
             input_ids.device(),
         )?;
 
-        let mask = CausalMasker.make_causal_mask(
+        let mask = CausalMasker.make_causal_mask_matrix(
             input_ids,
             cache_for_mask,
             x.dtype(),
-            &CausalMaskConfig::default(),
+            self.blocks[0].attn.num_attention_heads,
         )?;
         let chunked_mask = CausalMasker.make_chunked_mask_matrix(
             input_ids,
@@ -702,33 +698,25 @@ impl TextModel {
             self.blocks[0].attn.num_attention_heads,
         )?;
         // PagedAttention prompt chunking
-        let mask = if metadata
-            .as_ref()
-            .map(|(_, meta)| meta.is_first_prompt_chunk)
-            .unwrap_or(true)
-        {
-            mask
-        } else {
-            AttentionMask::None
-        };
+        let mask = mask.filter(|_| {
+            metadata
+                .as_ref()
+                .map(|(_, meta)| meta.is_first_prompt_chunk)
+                .unwrap_or(true)
+        });
         // PagedAttention prompt chunking
-        let chunked_mask = if metadata
-            .as_ref()
-            .map(|(_, meta)| meta.is_first_prompt_chunk)
-            .unwrap_or(true)
-        {
-            chunked_mask
-        } else {
-            None
-        };
+        let chunked_mask = chunked_mask.filter(|_| {
+            metadata
+                .as_ref()
+                .map(|(_, meta)| meta.is_first_prompt_chunk)
+                .unwrap_or(true)
+        });
         let mask = DeviceMappedMask::new(mask, &*self.mapper)?;
+        let chunked_mask = DeviceMappedMask::new(chunked_mask, &*self.mapper)?;
         for (block_idx, block) in self.blocks.iter().enumerate() {
             x = self.mapper.map(x, block_idx)?;
-            let mask_for_layer = mask.get(x.device());
-            let chunked_mask_for_layer = chunked_mask
-                .as_ref()
-                .map(|m| m.to_device(x.device()))
-                .transpose()?;
+            let mask_for_layer = mask.as_ref().map(|m| m.get(x.device()).clone());
+            let chunked_mask_for_layer = chunked_mask.as_ref().map(|m| m.get(x.device()).clone());
             x = block.forward(
                 &x,
                 &position_ids.to_device(x.device())?,
@@ -745,7 +733,7 @@ impl TextModel {
         let x = x.to_device(&self.device)?;
         let x = self.ln_f.forward(&x)?;
         let x = extract_logits(&x, context_lens)?;
-        self.lm_head.forward(&x)
+        self.lm_head.forward_autocast(&x)
     }
 
     pub fn residual_tensors_m(&self, uvb_m: UnVarBuilder) -> Vec<(String, Tensor)> {

@@ -9,14 +9,8 @@ use mistralrs_server_core::{
     mistralrs_server_router_builder::MistralRsServerRouterBuilder,
 };
 
-use crate::args::{MatformerSelection, RuntimeOptions};
 use crate::commands::run::interactive_mode;
-#[cfg(feature = "code-execution")]
-use crate::commands::serve::build_code_exec_config;
-use crate::commands::serve::{
-    apply_agent_mode, convert_to_model_selected, extract_sandbox_settings, load_mcp_config,
-    log_agent_runtime, validate_agent_options,
-};
+use crate::commands::serve::convert_to_model_selected;
 use crate::config::{load_cli_config, CliConfig};
 use crate::ui::build_ui_router;
 
@@ -35,18 +29,14 @@ pub async fn run_from_config(path: std::path::PathBuf) -> Result<()> {
 async fn run_serve_config(cfg: crate::config::ServeConfig) -> Result<()> {
     let crate::config::ServeConfig {
         global,
-        mut runtime,
+        runtime,
         server,
         paged_attn,
-        sandbox,
         models,
         default_model_id,
     } = cfg;
 
     let global = global.to_global_options()?;
-    apply_agent_mode(&mut runtime);
-    validate_agent_options(&runtime)?;
-    log_agent_runtime(&runtime, server.max_tool_rounds);
 
     let (
         paged_attn,
@@ -57,7 +47,7 @@ async fn run_serve_config(cfg: crate::config::ServeConfig) -> Result<()> {
         paged_cache_type,
     ) = paged_attn.into_builder_flags();
 
-    let (model_configs, cpu) = build_model_configs(&models, &runtime, &global.token_source).await?;
+    let (model_configs, cpu) = build_model_configs(&models)?;
 
     let mut builder = MistralRsForServerBuilder::new()
         .with_max_seqs(runtime.max_seqs)
@@ -100,46 +90,19 @@ async fn run_serve_config(cfg: crate::config::ServeConfig) -> Result<()> {
         builder = builder.with_search_embedding_model(model.into());
     }
 
-    let mcp_client_config = load_mcp_config(runtime.mcp_config.as_deref())?;
-    builder = builder.with_mcp_config_optional(mcp_client_config);
-
-    let sandbox_policy = extract_sandbox_settings(sandbox);
-
-    #[cfg(feature = "code-execution")]
-    {
-        builder = builder
-            .with_code_exec_config_optional(build_code_exec_config(&runtime, sandbox_policy));
-    }
-    #[cfg(not(feature = "code-execution"))]
-    let _ = sandbox_policy;
-
     let mistralrs = builder.build().await?;
     let mistralrs_for_ui = mistralrs.clone();
 
     let mut app = MistralRsServerRouterBuilder::new()
         .with_mistralrs(mistralrs)
-        .with_max_tool_rounds_optional(server.max_tool_rounds)
-        .with_tool_dispatch_url_optional(server.tool_dispatch_url.clone())
         .build()
         .await?;
 
-    if !server.no_ui {
-        let enable_code_execution = {
-            #[cfg(feature = "code-execution")]
-            {
-                runtime.enable_code_execution
-            }
-            #[cfg(not(feature = "code-execution"))]
-            {
-                false
-            }
-        };
+    if server.ui {
         let ui_router = build_ui_router(
             mistralrs_for_ui,
             runtime.enable_search,
             runtime.search_embedding_model.map(|m| m.into()),
-            enable_code_execution,
-            server.tool_dispatch_url.clone(),
         )
         .await?;
         app = app.nest("/ui", ui_router);
@@ -159,17 +122,13 @@ async fn run_serve_config(cfg: crate::config::ServeConfig) -> Result<()> {
 async fn run_run_config(cfg: crate::config::RunConfig) -> Result<()> {
     let crate::config::RunConfig {
         global,
-        mut runtime,
+        runtime,
         paged_attn,
-        sandbox,
         models,
         thinking,
     } = cfg;
 
     let global = global.to_global_options()?;
-    apply_agent_mode(&mut runtime);
-    validate_agent_options(&runtime)?;
-    log_agent_runtime(&runtime, None);
 
     let (
         paged_attn,
@@ -180,7 +139,7 @@ async fn run_run_config(cfg: crate::config::RunConfig) -> Result<()> {
         paged_cache_type,
     ) = paged_attn.into_builder_flags();
 
-    let (model_configs, cpu) = build_model_configs(&models, &runtime, &global.token_source).await?;
+    let (model_configs, cpu) = build_model_configs(&models)?;
 
     let mut builder = MistralRsForServerBuilder::new()
         .with_max_seqs(runtime.max_seqs)
@@ -219,45 +178,16 @@ async fn run_run_config(cfg: crate::config::RunConfig) -> Result<()> {
         builder = builder.with_search_embedding_model(model.into());
     }
 
-    let mcp_client_config = load_mcp_config(runtime.mcp_config.as_deref())?;
-    builder = builder.with_mcp_config_optional(mcp_client_config);
-
-    let sandbox_policy = extract_sandbox_settings(sandbox);
-
-    #[cfg(feature = "code-execution")]
-    {
-        builder = builder
-            .with_code_exec_config_optional(build_code_exec_config(&runtime, sandbox_policy));
-    }
-    #[cfg(not(feature = "code-execution"))]
-    let _ = sandbox_policy;
-
     let mistralrs = builder.build().await?;
-
-    #[cfg(feature = "code-execution")]
-    let do_code_exec = runtime.enable_code_execution;
-    #[cfg(not(feature = "code-execution"))]
-    let do_code_exec = false;
 
     info!("Model(s) loaded, starting interactive mode...");
 
-    interactive_mode(
-        mistralrs.clone(),
-        runtime.enable_search,
-        do_code_exec,
-        runtime.code_exec_permission.into(),
-        thinking,
-    )
-    .await;
+    interactive_mode(mistralrs.clone(), runtime.enable_search, thinking).await;
 
     Ok(())
 }
 
-async fn build_model_configs(
-    models: &[crate::config::ModelEntry],
-    runtime: &RuntimeOptions,
-    token_source: &mistralrs_core::TokenSource,
-) -> Result<(Vec<ModelConfig>, bool)> {
+fn build_model_configs(models: &[crate::config::ModelEntry]) -> Result<(Vec<ModelConfig>, bool)> {
     let mut cpu_setting: Option<bool> = None;
     let mut configs = Vec::new();
 
@@ -278,26 +208,10 @@ async fn build_model_configs(
     let cpu = cpu_setting.unwrap_or(false);
 
     for entry in models {
-        let mut model_type = entry.to_model_type(cpu);
-        let matformer = MatformerSelection {
-            config_path: entry
-                .matformer_config_path
-                .clone()
-                .or_else(|| runtime.matformer_config_path.clone()),
-            slice_name: entry
-                .matformer_slice_name
-                .clone()
-                .or_else(|| runtime.matformer_slice_name.clone()),
-        };
-        crate::commands::serve::apply_quant_resolution(&mut model_type, token_source, &matformer)
-            .await?;
-        let model_selected = convert_to_model_selected(&model_type, &matformer)?;
+        let model_type = entry.to_model_type(cpu);
+        let model_selected = convert_to_model_selected(&model_type)?;
 
-        let resolved_loader_id = crate::commands::serve::model_id_of(&model_type);
         let mut config = ModelConfig::new(entry.model_id.clone(), model_selected);
-        if resolved_loader_id != entry.model_id {
-            config = config.with_alias(entry.model_id.clone());
-        }
 
         if let Some(chat_template) = entry.chat_template.as_ref() {
             config = config.with_chat_template(chat_template.to_string_lossy().to_string());
@@ -311,7 +225,7 @@ async fn build_model_configs(
             config = config.with_num_device_layers(device_layers);
         }
 
-        if let Some(isq) = crate::commands::serve::extract_isq_setting(&model_type) {
+        if let Some(isq) = entry.quantization.in_situ_quant.clone() {
             config = config.with_in_situ_quant(isq);
         }
 

@@ -1,22 +1,12 @@
 use crate::{
-    gptq::cpu_dequant::{self, GptqCpuParams},
-    has_missing_required_tensors, make_dummy_or_error, IsqType, QuantMethod, QuantMethodConfig,
-    QuantizeOntoGuard, QuantizedConfig, QuantizedSerde, ShardedVarBuilder,
+    DummyLayer, IsqType, QuantMethod, QuantMethodConfig, QuantizeOntoGuard, QuantizedConfig,
+    QuantizedSerde, ShardedVarBuilder,
 };
 use candle_core::{DType, Device, Result, Tensor};
 use std::sync::{atomic::AtomicUsize, Arc};
 
 #[derive(Debug)]
-pub struct GptqLayer {
-    q_weight: Tensor,
-    qzeros: Option<Tensor>,
-    scales: Tensor,
-    bias: Option<Tensor>,
-    g_idx: Option<Tensor>,
-    bits: i32,
-    is_marlin: bool,
-    is_awq: bool,
-}
+pub struct GptqLayer;
 
 impl QuantMethod for GptqLayer {
     fn new(method: QuantMethodConfig) -> Result<Self>
@@ -24,26 +14,9 @@ impl QuantMethod for GptqLayer {
         Self: Sized,
     {
         match method {
-            QuantMethodConfig::GptqAwq {
-                bits,
-                q_weight,
-                qzeros,
-                scales,
-                g_idx,
-                bias,
-                is_marlin,
-                is_awq,
-                ..
-            } => Ok(Self {
-                q_weight,
-                qzeros,
-                scales,
-                g_idx,
-                bits,
-                bias,
-                is_marlin,
-                is_awq,
-            }),
+            QuantMethodConfig::GptqAwq { .. } => {
+                candle_core::bail!("GPTQ is only supported on CUDA.")
+            }
             QuantMethodConfig::Gguf { .. }
             | QuantMethodConfig::Unquantized(_)
             | QuantMethodConfig::Hqq { .. }
@@ -60,27 +33,23 @@ impl QuantMethod for GptqLayer {
     }
 
     fn dequantize_w(&self) -> Result<Tensor> {
-        cpu_dequant::dequantize_w(&self.cpu_params())
+        todo!()
     }
 
-    fn forward_raw(&self, a: &Tensor) -> Result<Tensor> {
-        cpu_dequant::forward(&self.cpu_params(), a)
+    fn forward(&self, _a: &Tensor) -> Result<Tensor> {
+        todo!()
     }
 
     fn quantized_act_type(&self) -> Option<DType> {
-        Some(DType::F16)
-    }
-
-    fn gather_forward_raw(&self, a: &Tensor, indices: &Tensor) -> Result<Tensor> {
-        cpu_dequant::gather_forward(&self.cpu_params(), a, indices)
+        todo!()
     }
 
     fn add_delta_w(&self, _delta: &Tensor) -> Result<Arc<dyn QuantMethod>> {
-        candle_core::bail!("GPTQ quantization does not support adding weight delta.")
+        todo!()
     }
 
     fn dtype_and_device(&self) -> (DType, candle_core::Device) {
-        (self.scales.dtype(), self.scales.device().clone())
+        todo!()
     }
 
     fn apply_isq(
@@ -91,29 +60,13 @@ impl QuantMethod for GptqLayer {
         _imatrix_weight: Option<Vec<f32>>,
         _guard: QuantizeOntoGuard,
     ) -> Result<Arc<dyn QuantMethod>> {
-        candle_core::bail!("GPTQ quantization does not support ISQ.")
+        todo!()
     }
 }
 
 impl QuantizedSerde for GptqLayer {
     fn name(&self) -> &'static str {
         "gptq"
-    }
-}
-
-impl GptqLayer {
-    fn cpu_params(&self) -> GptqCpuParams<'_> {
-        GptqCpuParams {
-            q_weight: &self.q_weight,
-            qzeros: self.qzeros.as_ref(),
-            scales: &self.scales,
-            g_idx: self.g_idx.as_ref(),
-            bias: self.bias.as_ref(),
-            bits: self.bits,
-            is_marlin: self.is_marlin,
-            is_awq: self.is_awq,
-            name: self.name(),
-        }
     }
 }
 
@@ -145,12 +98,14 @@ pub fn gptq_linear(
         return crate::linear_b(in_dim, out_dim, false, &None, vb);
     }
 
-    let mut required = vec!["qweight", "qzeros", "scales"];
-    if !is_awq {
-        required.push("g_idx");
-    }
-    if has_missing_required_tensors(&vb, &required) {
-        return make_dummy_or_error("gptq_awq_linear", &vb, &required);
+    // Handle the case where the layer is dummy (no tensors)
+    if !vb.contains_tensor("qweight")
+        || !vb.contains_tensor("qzeros")
+        || !vb.contains_tensor("scales")
+        || !is_awq && !vb.contains_tensor("g_idx")
+    {
+        let layer = <DummyLayer as QuantMethod>::new(QuantMethodConfig::Dummy)?;
+        return Ok(Arc::new(layer) as Arc<dyn QuantMethod>);
     }
 
     let qw_shape = if !is_awq {

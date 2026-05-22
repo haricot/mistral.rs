@@ -5,12 +5,12 @@ use std::{collections::HashMap, sync::Arc};
 use candle_core::{DType, Device, Result, Tensor, D};
 use candle_nn::{Embedding, Linear, Module};
 use mistralrs_quant::{
-    ColumnParallelLayer, QuantMethod, ReplicatedLayer, RowParallelLayer, ShardedVarBuilder,
+    ColumnParallelLayer, MatMul, QuantMethod, ReplicatedLayer, RowParallelLayer, ShardedVarBuilder,
 };
 
 use super::config::TextConfig;
 use crate::{
-    attention::{AttentionMask, SdpaParams},
+    attention::SdpaParams,
     device_map::{DeviceMappedMask, DeviceMapper},
     layers::{self, Activation, Qwen3VLRotaryEmbedding, RmsNorm, Sdpa},
     moe::{MoEExperts, MoEExpertsConfig},
@@ -75,9 +75,19 @@ impl Mlp {
     }
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let lhs = self.gate_proj.forward(xs)?.apply(&self.act_fn)?;
-        let rhs = self.up_proj.forward(xs)?;
-        let res = self.down_proj.forward(&(lhs * rhs)?)?;
+        let original_dtype = xs.dtype();
+        let mut xs = xs.clone();
+        if let Some(t) = self.gate_proj.quantized_act_type() {
+            xs = xs.to_dtype(t)?;
+        }
+        let lhs = MatMul
+            .qmethod_matmul(&xs, &*self.gate_proj)?
+            .apply(&self.act_fn)?;
+        let rhs = MatMul.qmethod_matmul(&xs, &*self.up_proj)?;
+        let mut res = MatMul.qmethod_matmul(&(lhs * rhs)?, &*self.down_proj)?;
+        if self.gate_proj.quantized_act_type().is_some() {
+            res = res.to_dtype(original_dtype)?;
+        }
         Ok(res)
     }
 }
@@ -290,7 +300,7 @@ impl Attention {
     fn forward(
         &self,
         xs: &Tensor,
-        attention_mask: &AttentionMask,
+        attention_mask: Option<&Tensor>,
         cos_sin: &(Tensor, Tensor),
         kv_cache: &mut KvCache,
         metadata: Option<((Tensor, Tensor), &PagedAttentionInputMetadata)>,
@@ -298,9 +308,20 @@ impl Attention {
     ) -> Result<Tensor> {
         let (b_sz, q_len, _) = xs.dims3()?;
 
-        let mut q = self.q_proj.forward(xs)?;
-        let mut k = self.k_proj.forward(xs)?;
-        let mut v = self.v_proj.forward(xs)?;
+        let original_dtype = xs.dtype();
+        let mut xs = xs.clone();
+        if let Some(t) = self.q_proj.quantized_act_type() {
+            xs = xs.to_dtype(t)?;
+        }
+        let mut q = MatMul.qmethod_matmul(&xs, &*self.q_proj)?;
+        let mut k = MatMul.qmethod_matmul(&xs, &*self.k_proj)?;
+        let mut v = MatMul.qmethod_matmul(&xs, &*self.v_proj)?;
+        if self.q_proj.quantized_act_type().is_some() {
+            q = q.to_dtype(original_dtype)?;
+            k = k.to_dtype(original_dtype)?;
+            v = v.to_dtype(original_dtype)?;
+        }
+
         (q, k, v) = if q_len != 1 {
             let q = q
                 .reshape((b_sz, q_len, self.num_heads, self.head_dim))?
@@ -343,7 +364,7 @@ impl Attention {
                 )?,
                 None => {
                     let input_metadata = PagedAttentionInputMetadata::dummy(q.device())?;
-                    assert!(!matches!(attention_mask, AttentionMask::None));
+                    assert!(attention_mask.is_some());
                     paged_attn.forward(
                         &q,
                         &k,
@@ -370,12 +391,18 @@ impl Attention {
             }
         };
 
-        attn_output = if !matches!(attention_mask, AttentionMask::None) {
+        if let Some(t) = self.q_proj.quantized_act_type() {
+            attn_output = attn_output.to_dtype(t)?;
+        }
+        attn_output = if attention_mask.is_some() {
             attn_output.transpose(1, 2)?.reshape((b_sz, q_len, ()))?
         } else {
             attn_output.reshape((b_sz, q_len, ()))?
         };
-        let res = self.o_proj.forward(&attn_output)?;
+        let mut res = self.o_proj.forward(&attn_output)?;
+        if self.q_proj.quantized_act_type().is_some() {
+            res = res.to_dtype(original_dtype)?;
+        }
         Ok(res)
     }
 }
@@ -454,7 +481,7 @@ impl DecoderLayer {
     fn forward(
         &self,
         xs: &Tensor,
-        attention_mask: &AttentionMask,
+        attention_mask: Option<&Tensor>,
         cos_sin: &(Tensor, Tensor),
         kv_cache: &mut KvCache,
         metadata: Option<((Tensor, Tensor), &PagedAttentionInputMetadata)>,
@@ -621,7 +648,7 @@ impl Qwen3VLMoETextModel {
     pub fn forward_embeds(
         &self,
         mut xs: Tensor,
-        attention_mask: &AttentionMask,
+        attention_mask: Option<&Tensor>,
         position_ids: &Tensor,
         context_lens: Vec<(usize, usize)>,
         metadata: Option<(Vec<(Tensor, Tensor)>, &PagedAttentionInputMetadata)>,
@@ -635,12 +662,12 @@ impl Qwen3VLMoETextModel {
             .rotary_emb
             .compute_cos_sin(position_ids, xs.dtype())?;
 
-        let attention_mask = DeviceMappedMask::new(attention_mask.clone(), &*self.mapper)?;
+        let attention_mask = DeviceMappedMask::new(attention_mask.cloned(), &*self.mapper)?;
         for (i, layer) in self.layers.iter().enumerate() {
             xs = self.mapper.map(xs, i)?;
             xs = layer.forward(
                 &xs,
-                &attention_mask.get(xs.device()),
+                attention_mask.as_ref().map(|m| m.get(xs.device())),
                 &cos_sin,
                 &mut cache[i],
                 metadata
@@ -660,7 +687,10 @@ impl Qwen3VLMoETextModel {
         }
         let xs = xs.to_device(&self.device)?;
         let xs = xs.apply(&self.norm)?;
-        let xs = extract_logits(&xs, context_lens)?;
+        let mut xs = extract_logits(&xs, context_lens)?;
+        if let Some(t) = self.lm_head.quantized_act_type() {
+            xs = xs.to_dtype(t)?;
+        }
         self.lm_head.forward(&xs)
     }
 

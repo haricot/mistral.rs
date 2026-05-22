@@ -8,7 +8,7 @@ use candle_core::{DType, Device, Tensor, D};
 use candle_nn::Conv2dConfig;
 use image::{ColorType, DynamicImage};
 use itertools::Itertools;
-use mistralrs_quant::log::once_log_debug;
+use mistralrs_quant::log::once_log_info;
 use mistralrs_quant::ShardedVarBuilder;
 
 #[cfg(feature = "pyo3_macros")]
@@ -338,7 +338,7 @@ impl AutoMultimodalLoader {
 
         // Voxtral: params.json has `multimodal` but no `architectures`
         if auto_cfg.multimodal.is_some() && auto_cfg.architectures.is_empty() {
-            once_log_debug("Automatic loader type determined to be `voxtral`");
+            once_log_info("Automatic loader type determined to be `voxtral`");
             return Ok(Box::new(VoxtralLoader));
         }
 
@@ -349,7 +349,7 @@ impl AutoMultimodalLoader {
         let name = &auto_cfg.architectures[0];
         let tp = MultimodalLoaderType::from_causal_lm_name(name)?;
 
-        once_log_debug(format!("Automatic loader type determined to be `{tp}`"));
+        once_log_info(format!("Automatic loader type determined to be `{tp}`"));
 
         // Delegate to the concrete loader
         Ok(match tp {
@@ -6702,8 +6702,8 @@ impl Qwen3_5MoeLoader {
     }
 }
 
-fn cpu_moe_enabled() -> bool {
-    crate::topology::cpu_moe_enabled()
+fn qwen35_cpu_moe_enabled() -> bool {
+    crate::topology::qwen35_cpu_moe_enabled()
 }
 
 pub struct Qwen3_5MoePrefixer;
@@ -7014,7 +7014,7 @@ impl DeviceMappedModelLoader for Qwen3_5MoeLoader {
         let cfg: Qwen3_5MoeConfig = serde_json::from_str(config)?;
         let text_cfg = &cfg.text_config;
         let layer_types = text_cfg.layer_types();
-        let cpu_moe = cpu_moe_enabled();
+        let cpu_moe = qwen35_cpu_moe_enabled();
 
         let mut layer_sizes = Vec::with_capacity(text_cfg.num_hidden_layers);
 
@@ -7799,7 +7799,7 @@ impl DeviceMappedModelLoader for Gemma4Loader {
 
                 let moe = if tc.enable_moe_block {
                     let ne = tc.num_experts.unwrap_or(0);
-                    let ei = tc.expert_intermediate_size().unwrap_or(0);
+                    let ei = tc.expert_intermediate_size.unwrap_or(0);
                     ne * tc.hidden_size * ei * 2
                         + ne * ei * tc.hidden_size
                         + ne

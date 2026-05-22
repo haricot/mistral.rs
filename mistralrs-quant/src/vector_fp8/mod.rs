@@ -10,9 +10,9 @@ pub use ops::{fp8_vector_dequantize, fp8_vector_quantize};
 pub(crate) mod ffi;
 
 use crate::{
-    generate_isq, generate_isq_imatrix, has_missing_required_tensors,
+    generate_isq, generate_isq_imatrix,
     hqq::{ISQ_HQQ_DEFAULT_OPT_STEPS, ISQ_HQQ_GROUP_SIZE},
-    make_dummy_or_error, AfqBits, AfqGroupSize, AfqLayer, FP8Linear, GgufMatMul, HqqAxis, HqqBits,
+    AfqBits, AfqGroupSize, AfqLayer, DummyLayer, FP8Linear, GgufMatMul, HqqAxis, HqqBits,
     HqqConfig, HqqLayer, IsqType, QuantMethod, QuantMethodConfig, QuantizeOntoGuard,
     QuantizedSerde, Shard, ShardedVarBuilder, UnquantLinear,
 };
@@ -51,7 +51,7 @@ impl QuantMethod for VectorFP8Linear {
         ops::fp8_vector_dequantize(&self.weight, &self.weight_scale_inv, self.dequant_dtype)
     }
 
-    fn forward_raw(&self, x: &Tensor) -> Result<Tensor> {
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
         // Dequantize matmul always.
         let weight = self.dequantize_w()?;
         // Dispatch to unquant. This uses some cublaslt for bias & on cuda always, so it is better
@@ -72,10 +72,6 @@ impl QuantMethod for VectorFP8Linear {
 
     fn dtype_and_device(&self) -> (DType, candle_core::Device) {
         (DType::F8E4M3, self.weight.device().clone())
-    }
-
-    fn unquant_weight_bias(&self) -> Option<(Tensor, Option<Tensor>)> {
-        Some((self.dequantize_w().ok()?, self.bias.clone()))
     }
 
     fn apply_isq(
@@ -272,8 +268,10 @@ pub fn vector_fp8_linear_b(
         return crate::linear_b(in_dim, out_dim, bias, &None, vb);
     }
 
-    if has_missing_required_tensors(&vb, &["weight", "weight_scale_inv"]) {
-        return make_dummy_or_error("vector_fp8_linear", &vb, &["weight", "weight_scale_inv"]);
+    // Handle the case where the layer is dummy (no tensors)
+    if !(vb.contains_tensor("weight") && vb.contains_tensor("weight_scale_inv")) {
+        let layer = <DummyLayer as QuantMethod>::new(QuantMethodConfig::Dummy)?;
+        return Ok(Arc::new(layer) as Arc<dyn QuantMethod>);
     }
 
     let weight = vb.get_with_hints_dtype((out_dim, in_dim), "weight", hints, DType::F8E4M3)?;

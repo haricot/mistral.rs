@@ -3,7 +3,6 @@
 /// Mixtral Model
 /// https://github.com/huggingface/transformers/blob/main/src/transformers/models/mixtral/modeling_mixtral.py
 /// https://mistral.ai/news/mixtral-of-experts/
-use crate::layers_masker::CausalMaskConfig;
 use candle_core::{DType, Device, Module, Result, Tensor};
 use mistralrs_quant::{
     ColumnParallelLayer, QuantMethod, QuantizedConfig, ReplicatedLayer, RowParallelLayer,
@@ -14,9 +13,9 @@ use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     amoe::AnyMoeBaseModelMixin,
-    attention::{AttentionMask, SdpaParams},
+    attention::SdpaParams,
     device_map::{DeviceMappedMask, DeviceMapper},
-    layers::{self, Activation, CausalMasker, RmsNorm, RotaryEmbedding, Sdpa},
+    layers::{self, Activation, CausalMasker, MatMul, RmsNorm, RotaryEmbedding, Sdpa},
     layers_masker::PastKvLenCache,
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
     pipeline::{
@@ -143,7 +142,7 @@ impl Attention {
     fn forward(
         &self,
         xs: &Tensor,
-        attention_mask: &AttentionMask,
+        attention_mask: Option<&Tensor>,
         seqlen_offsets: &[usize],
         kv_cache: &mut KvCache,
         metadata: Option<((Tensor, Tensor), &PagedAttentionInputMetadata)>,
@@ -151,9 +150,20 @@ impl Attention {
     ) -> Result<Tensor> {
         let (b_sz, q_len, _) = xs.dims3()?;
 
-        let q = self.q_proj.forward(xs)?;
-        let k = self.k_proj.forward(xs)?;
-        let v = self.v_proj.forward(xs)?;
+        let original_dtype = xs.dtype();
+        let mut xs = xs.clone();
+        if let Some(t) = self.q_proj.quantized_act_type() {
+            xs = xs.to_dtype(t)?;
+        }
+        let mut q = MatMul.qmethod_matmul(&xs, &*self.q_proj)?;
+        let mut k = MatMul.qmethod_matmul(&xs, &*self.k_proj)?;
+        let mut v = MatMul.qmethod_matmul(&xs, &*self.v_proj)?;
+        if self.q_proj.quantized_act_type().is_some() {
+            q = q.to_dtype(original_dtype)?;
+            k = k.to_dtype(original_dtype)?;
+            v = v.to_dtype(original_dtype)?;
+        }
+
         let (q, k, v) = if q_len != 1 {
             let q = q
                 .reshape((b_sz, q_len, self.num_heads, self.head_dim))?
@@ -192,7 +202,7 @@ impl Attention {
                     // Generating the dummy metadata with the assumption that we are not generating text (only processing prompts).
                     let input_metadata = PagedAttentionInputMetadata::dummy(q.device())?;
                     // Sanity check.
-                    assert!(!matches!(attention_mask, AttentionMask::None));
+                    assert!(attention_mask.is_some());
                     paged_attn.forward(
                         &q,
                         &k,
@@ -220,12 +230,18 @@ impl Attention {
             }
         };
 
-        attn_output = if !matches!(attention_mask, AttentionMask::None) {
+        if let Some(t) = self.q_proj.quantized_act_type() {
+            attn_output = attn_output.to_dtype(t)?;
+        }
+        attn_output = if attention_mask.is_some() {
             attn_output.transpose(1, 2)?.reshape((b_sz, q_len, ()))?
         } else {
             attn_output.reshape((b_sz, q_len, ()))?
         };
-        let res = self.o_proj.forward(&attn_output)?;
+        let mut res = MatMul.qmethod_matmul(&attn_output, &*self.o_proj)?;
+        if self.q_proj.quantized_act_type().is_some() {
+            res = res.to_dtype(original_dtype)?;
+        }
         Ok(res)
     }
 }
@@ -277,10 +293,18 @@ impl BlockSparseTop2MLP {
 
 impl Module for BlockSparseTop2MLP {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let w1_out = self.w1.forward(xs)?;
-        let w3_out = self.w3.forward(xs)?;
+        let original_dtype = xs.dtype();
+        let mut xs = xs.clone();
+        if let Some(t) = self.w1.quantized_act_type() {
+            xs = xs.to_dtype(t)?;
+        }
+        let w1_out = MatMul.qmethod_matmul(&xs, &*self.w1)?;
+        let w3_out = MatMul.qmethod_matmul(&xs, &*self.w3)?;
         let activated = crate::ops::mul_and_act(&w1_out, &w3_out, self.act_fn)?;
-        let res = self.w2.forward(&activated)?;
+        let mut res = MatMul.qmethod_matmul(&activated, &*self.w2)?;
+        if self.w1.quantized_act_type().is_some() {
+            res = res.to_dtype(original_dtype)?;
+        }
         Ok(res)
     }
 }
@@ -319,7 +343,16 @@ impl Module for SparseMoeBlock {
         let (b_size, seq_len, hidden_dim) = xs.dims3()?;
         let xs = xs.reshape(((), hidden_dim))?;
 
-        let router_logits = self.gate.forward(&xs)?;
+        let original_dtype = xs.dtype();
+        let mut xs = xs.clone();
+        if let Some(t) = self.gate.quantized_act_type() {
+            xs = xs.to_dtype(t)?;
+        }
+        let mut router_logits = MatMul.qmethod_matmul(&xs, &*self.gate)?;
+        if self.gate.quantized_act_type().is_some() {
+            router_logits = router_logits.to_dtype(original_dtype)?;
+        }
+
         let routing_weights = candle_nn::ops::softmax_last_dim(&router_logits)?;
 
         // In order to extract topk, we extract the data from the tensor and manipulate it
@@ -427,7 +460,7 @@ impl DecoderLayer {
     fn forward(
         &self,
         xs: &Tensor,
-        attention_mask: &AttentionMask,
+        attention_mask: Option<&Tensor>,
         seqlen_offsets: &[usize],
         kv_cache: &mut KvCache,
         metadata: Option<((Tensor, Tensor), &PagedAttentionInputMetadata)>,
@@ -601,34 +634,29 @@ impl Model {
     ) -> Result<Tensor> {
         let mut xs = self.embed_tokens.forward(input_ids)?;
         let cache = &mut self.cache.normal().0;
-        let attention_mask = CausalMasker.make_causal_mask(
+        let attention_mask = CausalMasker.make_sliding_window_causal_mask_matrix(
             input_ids,
             metadata
                 .as_ref()
                 .map(|(_, _)| &seqlen_offsets as &dyn PastKvLenCache)
                 .unwrap_or(cache as &dyn PastKvLenCache),
+            self.sliding_window,
             xs.dtype(),
-            &CausalMaskConfig {
-                sliding_window: self.sliding_window,
-                ..Default::default()
-            },
+            self.cfg.num_attn_heads,
         )?;
         // PagedAttention prompt chunking
-        let attention_mask = if metadata
-            .as_ref()
-            .map(|(_, meta)| meta.is_first_prompt_chunk)
-            .unwrap_or(true)
-        {
-            attention_mask
-        } else {
-            AttentionMask::None
-        };
+        let attention_mask = attention_mask.filter(|_| {
+            metadata
+                .as_ref()
+                .map(|(_, meta)| meta.is_first_prompt_chunk)
+                .unwrap_or(true)
+        });
         let attention_mask = DeviceMappedMask::new(attention_mask, &*self.mapper)?;
         for (i, layer) in self.layers.iter().enumerate() {
             xs = self.mapper.map(xs, i)?;
             xs = layer.forward(
                 &xs,
-                &attention_mask.get(xs.device()),
+                attention_mask.as_ref().map(|m| m.get(xs.device())),
                 seqlen_offsets,
                 &mut cache[i],
                 metadata
@@ -639,8 +667,11 @@ impl Model {
         }
         let xs = xs.to_device(&self.device)?;
         let xs = xs.apply(&self.norm)?;
-        let xs = extract_logits(&xs, context_lens)?;
-        self.lm_head.forward(&xs)
+        let mut xs = extract_logits(&xs, context_lens)?;
+        if let Some(t) = self.lm_head.quantized_act_type() {
+            xs = xs.to_dtype(t)?;
+        }
+        MatMul.qmethod_matmul(&xs, &*self.lm_head)
     }
 }
 

@@ -1,6 +1,5 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use crate::layers_masker::CausalMaskConfig;
 use std::{collections::HashMap, sync::Arc};
 
 use candle_core::{Device, IndexOp, Result, Tensor};
@@ -10,7 +9,7 @@ use mistralrs_quant::{
 };
 
 use crate::{
-    attention::{AttentionMask, SdpaParams},
+    attention::SdpaParams,
     device_map::{DeviceMappedMask, DeviceMapper},
     layers::{embedding, CausalMasker, Llama3RotaryEmbedding, RmsNorm, Sdpa},
     layers_masker::PastKvLenCache,
@@ -66,12 +65,20 @@ impl MLlamaTextMlp {
     }
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let res = self.down_proj.forward(
+        let original_dtype = xs.dtype();
+        let mut xs = xs.clone();
+        if let Some(t) = self.gate_proj.quantized_act_type() {
+            xs = xs.to_dtype(t)?;
+        }
+        let mut res = self.down_proj.forward(
             &self
                 .act
-                .forward(&self.gate_proj.forward(xs)?)?
-                .broadcast_mul(&self.up_proj.forward(xs)?)?,
+                .forward(&self.gate_proj.forward(&xs)?)?
+                .broadcast_mul(&self.up_proj.forward(&xs)?)?,
         )?;
+        if self.gate_proj.quantized_act_type().is_some() {
+            res = res.to_dtype(original_dtype)?;
+        }
         Ok(res)
     }
 }
@@ -147,15 +154,26 @@ impl MLlamaTextSelfAttention {
     fn forward(
         &self,
         hidden_states: &Tensor,
-        attention_mask: &AttentionMask,
+        attention_mask: Option<&Tensor>,
         seqlen_offsets: &[usize],
         kv_cache: &mut KvCache,
     ) -> Result<Tensor> {
         let (bs, q_len, _) = hidden_states.dims3()?;
 
-        let q = self.q_proj.forward(hidden_states)?;
-        let k = self.k_proj.forward(hidden_states)?;
-        let v = self.v_proj.forward(hidden_states)?;
+        let mut hidden_states = hidden_states.clone();
+        let original_dtype = hidden_states.dtype();
+        if let Some(t) = self.q_proj.quantized_act_type() {
+            hidden_states = hidden_states.to_dtype(t)?;
+        }
+        let mut q = self.q_proj.forward(&hidden_states)?;
+        let mut k = self.k_proj.forward(&hidden_states)?;
+        let mut v = self.v_proj.forward(&hidden_states)?;
+        if self.q_proj.quantized_act_type().is_some() {
+            q = q.to_dtype(original_dtype)?;
+            k = k.to_dtype(original_dtype)?;
+            v = v.to_dtype(original_dtype)?;
+        }
+
         let (q, k, mut v) = if q_len != 1 {
             let q = q
                 .reshape((bs, q_len, self.num_heads, self.head_dim))?
@@ -178,7 +196,7 @@ impl MLlamaTextSelfAttention {
 
         (k, v) = kv_cache.append(&k, &v)?;
 
-        let attn_output = Sdpa
+        let mut attn_output = Sdpa
             .run_attention(
                 &q.contiguous()?,
                 &k.contiguous()?,
@@ -192,7 +210,13 @@ impl MLlamaTextSelfAttention {
             .reshape((bs, q_len, ()))?
             .to_dtype(q.dtype())?;
 
-        let res = self.o_proj.forward(&attn_output)?;
+        if let Some(t) = self.q_proj.quantized_act_type() {
+            attn_output = attn_output.to_dtype(t)?;
+        }
+        let mut res = self.o_proj.forward(&attn_output)?;
+        if self.q_proj.quantized_act_type().is_some() {
+            res = res.to_dtype(original_dtype)?;
+        }
         Ok(res)
     }
 }
@@ -247,7 +271,7 @@ impl MLlamaSelfAttentionDecoderLayer {
     fn forward(
         &self,
         hidden_states: &Tensor,
-        attention_mask: &AttentionMask,
+        attention_mask: Option<&Tensor>,
         seqlen_offsets: &[usize],
         kv_cache: &mut KvCache,
     ) -> Result<Tensor> {
@@ -349,24 +373,43 @@ impl MLlamaTextCrossAttention {
         &self,
         hidden_states: &Tensor,
         cross_attn_states: Option<&Tensor>,
-        attention_mask: &AttentionMask,
+        attention_mask: Option<&Tensor>,
     ) -> Result<Tensor> {
         let (bs, q_len, _) = hidden_states.dims3()?;
 
-        let mut q = self.q_proj.forward(hidden_states)?;
+        let mut hidden_states = hidden_states.clone();
+        let original_dtype = hidden_states.dtype();
+        if let Some(t) = self.q_proj.quantized_act_type() {
+            hidden_states = hidden_states.to_dtype(t)?;
+        }
+        let mut q = self.q_proj.forward(&hidden_states)?;
+        if self.q_proj.quantized_act_type().is_some() {
+            q = q.to_dtype(original_dtype)?;
+        }
         q = q
             .reshape((bs, q_len, self.num_heads, self.head_dim))?
             .transpose(1, 2)?;
         q = self.q_norm.forward(&q)?;
 
         let (k, v) = if let Some(cross_attn_states) = cross_attn_states {
-            let mut k = self.k_proj.forward(cross_attn_states)?;
+            let mut cross_attn_states = cross_attn_states.clone();
+            let original_dtype = cross_attn_states.dtype();
+            if let Some(t) = self.k_proj.quantized_act_type() {
+                cross_attn_states = cross_attn_states.to_dtype(t)?;
+            }
+            let mut k = self.k_proj.forward(&cross_attn_states)?;
             k = k
                 .reshape((bs, (), self.num_kv_heads, self.head_dim))?
                 .transpose(1, 2)?;
+            if self.q_proj.quantized_act_type().is_some() {
+                k = k.to_dtype(original_dtype)?;
+            }
             k = self.k_norm.forward(&k)?;
 
-            let mut v = self.v_proj.forward(cross_attn_states)?;
+            let mut v = self.v_proj.forward(&cross_attn_states)?;
+            if self.q_proj.quantized_act_type().is_some() {
+                v = v.to_dtype(original_dtype)?;
+            }
             v = v
                 .reshape((bs, (), self.num_kv_heads, self.head_dim))?
                 .transpose(1, 2)?;
@@ -376,18 +419,14 @@ impl MLlamaTextCrossAttention {
             candle_core::bail!("Cross attn cannot find k,v cache or cross attn hidden states!")
         };
 
-        let repeated_mask = match attention_mask {
-            AttentionMask::Custom(m) => {
-                AttentionMask::Custom(m.repeat((1, self.num_heads, 1, 1))?)
-            }
-            other => other.clone(),
-        };
-        let attn_output = Sdpa
+        let mut attn_output = Sdpa
             .run_attention(
                 &q.contiguous()?,
                 &k.contiguous()?,
                 &v.contiguous()?,
-                &repeated_mask,
+                attention_mask
+                    .map(|m| m.repeat((1, self.num_heads, 1, 1)).unwrap())
+                    .as_ref(),
                 None,
                 &self.sdpa_params,
             )?
@@ -396,7 +435,13 @@ impl MLlamaTextCrossAttention {
             .reshape((bs, q_len, ()))?
             .to_dtype(q.dtype())?;
 
-        let res = self.o_proj.forward(&attn_output)?;
+        if let Some(t) = self.q_proj.quantized_act_type() {
+            attn_output = attn_output.to_dtype(t)?;
+        }
+        let mut res = self.o_proj.forward(&attn_output)?;
+        if self.q_proj.quantized_act_type().is_some() {
+            res = res.to_dtype(original_dtype)?;
+        }
         Ok(res)
     }
 }
@@ -460,7 +505,7 @@ impl MLlamaCrossAttentionDecoderLayer {
         &self,
         hidden_states: &Tensor,
         cross_attn_states: Option<&Tensor>,
-        attention_mask: &AttentionMask,
+        attention_mask: Option<&Tensor>,
         full_text_row_masked_out_mask: Option<&Tensor>,
     ) -> Result<Tensor> {
         let residual = hidden_states;
@@ -636,7 +681,7 @@ impl MLlamaTextModel {
         &self,
         input_ids: &Tensor,
         cross_attn_states: Option<&Tensor>,
-        cross_attention_mask: &AttentionMask,
+        cross_attention_mask: Option<&Tensor>,
         full_text_row_masked_out_mask: Option<&Tensor>,
         seqlen_offsets: &[usize],
         context_lens: Vec<(usize, usize)>,
@@ -644,30 +689,25 @@ impl MLlamaTextModel {
         let mut hidden_states = self.embed_tokens.forward(input_ids)?;
 
         let cache = &mut self.cache.normal().0;
-        let self_mask = CausalMasker.make_causal_mask(
+        let self_mask = CausalMasker.make_causal_mask_matrix(
             input_ids,
             cache as &dyn PastKvLenCache,
             hidden_states.dtype(),
-            &CausalMaskConfig::default(),
+            self.cfg.num_attn_heads,
         )?;
 
         let self_mask = DeviceMappedMask::new(self_mask, &*self.mapper)?;
         let cross_attention_mask =
-            DeviceMappedMask::new(cross_attention_mask.clone(), &*self.mapper)?;
-        let full_text_row_masked_out_mask_mapped = DeviceMappedMask::new(
-            match full_text_row_masked_out_mask {
-                Some(t) => AttentionMask::Custom(t.clone()),
-                None => AttentionMask::None,
-            },
-            &*self.mapper,
-        )?;
+            DeviceMappedMask::new(cross_attention_mask.cloned(), &*self.mapper)?;
+        let full_text_row_masked_out_mask =
+            DeviceMappedMask::new(full_text_row_masked_out_mask.cloned(), &*self.mapper)?;
         for (i, layer) in self.layers.iter().enumerate() {
             hidden_states = self.mapper.map(hidden_states, i)?;
             match layer {
                 MLlamaDecoderLayer::SelfAttn(attn) => {
                     hidden_states = attn.forward(
                         &hidden_states,
-                        &self_mask.get(hidden_states.device()),
+                        self_mask.as_ref().map(|m| m.get(hidden_states.device())),
                         seqlen_offsets,
                         &mut cache[i],
                     )?;
@@ -679,16 +719,18 @@ impl MLlamaTextModel {
                     if cross_attn_states.is_none() {
                         continue;
                     }
-                    let cross_mask = cross_attention_mask.get(hidden_states.device());
-                    let ftrmom = full_text_row_masked_out_mask_mapped.get(hidden_states.device());
                     hidden_states = attn.forward(
                         &hidden_states,
                         cross_attn_states
                             .as_ref()
                             .map(|x| x.to_device(hidden_states.device()).unwrap())
                             .as_ref(),
-                        &cross_mask,
-                        ftrmom.as_option_tensor(),
+                        cross_attention_mask
+                            .as_ref()
+                            .map(|m| m.get(hidden_states.device())),
+                        full_text_row_masked_out_mask
+                            .as_ref()
+                            .map(|m| m.get(hidden_states.device())),
                     )?;
                 }
             }

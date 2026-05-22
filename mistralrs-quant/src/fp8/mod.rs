@@ -66,7 +66,7 @@ impl QuantMethod for FP8Linear {
         Ok(self.dequantize(DType::F32)?.weight().clone())
     }
 
-    fn forward_raw(&self, x: &Tensor) -> Result<Tensor> {
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
         // Batch matrix multiplication
         maybe_init_cublas_lt_wrapper(x.device().clone());
 
@@ -146,11 +146,6 @@ impl QuantMethod for FP8Linear {
 
     fn dtype_and_device(&self) -> (DType, candle_core::Device) {
         (DType::F8E4M3, self.lin.weight().device().clone())
-    }
-
-    fn unquant_weight_bias(&self) -> Option<(Tensor, Option<Tensor>)> {
-        let dequant = self.dequantize(DType::F32).ok()?;
-        Some((dequant.weight().clone(), dequant.bias().cloned()))
     }
 
     fn apply_isq(

@@ -5,7 +5,7 @@ use axum::{
     extract::DefaultBodyLimit,
     http::{self, Method},
     routing::{get, post},
-    Extension, Router,
+    Router,
 };
 use tower_http::cors::{AllowOrigin, CorsLayer};
 #[cfg(feature = "swagger-ui")]
@@ -14,30 +14,18 @@ use utoipa_swagger_ui::SwaggerUi;
 #[cfg(feature = "swagger-ui")]
 use crate::openapi_doc::get_openapi_doc;
 use crate::{
-    approvals::{resolve_agent_approval, ApprovalBroker},
     chat_completion::chatcompletions,
     completions::completions,
     embeddings::embeddings,
-    files::{delete_file, get_file, get_file_content, list_files},
     handlers::{
-        delete_session, get_model_status, get_session, health, models, put_session, re_isq,
-        reload_model, system_doctor, system_info, tune_model, unload_model,
+        get_model_status, health, models, re_isq, reload_model, system_doctor, system_info,
+        tune_model, unload_model,
     },
     image_generation::image_generation,
     responses::{cancel_response, create_response, delete_response, get_response},
     speech_generation::speech_generation,
     types::SharedMistralRsState,
 };
-
-/// Server-level defaults for agentic features.
-/// Injected as an axum Extension so handlers can apply them to incoming requests.
-#[derive(Clone, Default)]
-pub struct AgenticDefaults {
-    pub max_tool_rounds: Option<usize>,
-    pub tool_dispatch_url: Option<String>,
-    pub agent_permission: Option<mistralrs_core::AgentPermission>,
-    pub approval_broker: ApprovalBroker,
-}
 
 // NOTE(EricLBuehler): Accept up to 50mb input
 const N_INPUT_SIZE: usize = 50;
@@ -86,8 +74,6 @@ pub struct MistralRsServerRouterBuilder {
     allowed_origins: Option<Vec<String>>,
     /// Optional axum default request body limit
     max_body_limit: Option<usize>,
-    /// Server-level agentic defaults
-    agentic_defaults: AgenticDefaults,
 }
 
 impl Default for MistralRsServerRouterBuilder {
@@ -101,7 +87,6 @@ impl Default for MistralRsServerRouterBuilder {
             base_path: None,
             allowed_origins: None,
             max_body_limit: None,
-            agentic_defaults: AgenticDefaults::default(),
         }
     }
 }
@@ -165,51 +150,6 @@ impl MistralRsServerRouterBuilder {
         self
     }
 
-    /// Sets the default maximum tool-call rounds for the agentic loop.
-    pub fn with_max_tool_rounds(mut self, rounds: usize) -> Self {
-        self.agentic_defaults.max_tool_rounds = Some(rounds);
-        self
-    }
-
-    /// Sets the default maximum tool-call rounds if provided.
-    pub fn with_max_tool_rounds_optional(mut self, rounds: Option<usize>) -> Self {
-        if let Some(rounds) = rounds {
-            self = self.with_max_tool_rounds(rounds);
-        }
-        self
-    }
-
-    /// Sets the URL to POST tool calls to for server-side execution.
-    pub fn with_tool_dispatch_url(mut self, url: String) -> Self {
-        self.agentic_defaults.tool_dispatch_url = Some(url);
-        self
-    }
-
-    /// Sets the tool dispatch URL if provided.
-    pub fn with_tool_dispatch_url_optional(mut self, url: Option<String>) -> Self {
-        if let Some(url) = url {
-            self = self.with_tool_dispatch_url(url);
-        }
-        self
-    }
-
-    pub fn with_agent_permission(mut self, permission: mistralrs_core::AgentPermission) -> Self {
-        self.agentic_defaults.agent_permission = Some(permission);
-        self
-    }
-
-    pub fn with_code_execution_permission(
-        self,
-        permission: mistralrs_core::CodeExecutionPermission,
-    ) -> Self {
-        self.with_agent_permission(permission.into())
-    }
-
-    pub fn with_approval_broker(mut self, broker: ApprovalBroker) -> Self {
-        self.agentic_defaults.approval_broker = broker;
-        self
-    }
-
     /// Builds the configured axum router.
     ///
     /// ### Examples
@@ -228,12 +168,7 @@ impl MistralRsServerRouterBuilder {
         })?;
 
         #[allow(unused_mut)]
-        let mut router = init_router(
-            mistralrs,
-            self.allowed_origins,
-            self.max_body_limit,
-            self.agentic_defaults,
-        )?;
+        let mut router = init_router(mistralrs, self.allowed_origins, self.max_body_limit)?;
 
         #[cfg(feature = "swagger-ui")]
         if self.include_swagger_routes {
@@ -257,7 +192,6 @@ fn init_router(
     state: SharedMistralRsState,
     allowed_origins: Option<Vec<String>>,
     max_body_limit: Option<usize>,
-    agentic_defaults: AgenticDefaults,
 ) -> Result<Router> {
     let allow_origin = if let Some(origins) = allowed_origins {
         let parsed_origins: Result<Vec<_>, _> = origins.into_iter().map(|o| o.parse()).collect();
@@ -273,7 +207,7 @@ fn init_router(
     let router_max_body_limit = max_body_limit.unwrap_or(DEFAULT_MAX_BODY_LIMIT);
 
     let cors_layer = CorsLayer::new()
-        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
+        .allow_methods([Method::GET, Method::POST])
         .allow_headers([http::header::CONTENT_TYPE, http::header::AUTHORIZATION])
         .allow_origin(allow_origin);
 
@@ -292,28 +226,15 @@ fn init_router(
         .route("/", get(health))
         .route("/re_isq", post(re_isq))
         .route("/v1/images/generations", post(image_generation))
-        .route("/v1/files", get(list_files))
-        .route("/v1/files/{id}", get(get_file).delete(delete_file))
-        .route("/v1/files/{id}/content", get(get_file_content))
         .route("/v1/audio/speech", post(speech_generation))
-        .route(
-            "/v1/agent/approvals/{approval_id}",
-            post(resolve_agent_approval),
-        )
         .route("/v1/responses", post(create_response))
         .route(
             "/v1/responses/{response_id}",
             get(get_response).delete(delete_response),
         )
         .route("/v1/responses/{response_id}/cancel", post(cancel_response))
-        .route(
-            "/v1/sessions/{session_id}",
-            get(get_session).put(put_session).delete(delete_session),
-        )
         .layer(cors_layer)
         .layer(DefaultBodyLimit::max(router_max_body_limit))
-        .layer(Extension(agentic_defaults.approval_broker.clone()))
-        .layer(Extension(agentic_defaults))
         .with_state(state);
 
     Ok(router)

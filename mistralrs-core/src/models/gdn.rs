@@ -6,7 +6,7 @@
 
 use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
 use candle_nn::Linear;
-use mistralrs_quant::{QuantMethod, QuantizedConfig, RowParallelLayer, ShardedVarBuilder};
+use mistralrs_quant::{MatMul, QuantMethod, QuantizedConfig, RowParallelLayer, ShardedVarBuilder};
 use std::{sync::Arc, time::Instant};
 
 use crate::device_map::DeviceMapper;
@@ -15,7 +15,7 @@ fn gdn_profile_enabled() -> bool {
     matches!(
         std::env::var("MISTRALRS_GDN_PROFILE"),
         Ok(v) if !v.is_empty() && v != "0"
-    ) || crate::topology::profile_enabled()
+    ) || crate::topology::qwen35_profile_enabled()
 }
 
 fn elapsed_ms(start: Instant) -> f64 {
@@ -395,8 +395,16 @@ impl GatedDeltaNet {
         let mut section_start = total_start;
 
         // 1. Project input
-        let mixed_qkvz = self.in_proj_qkvz.forward(x)?;
-        let mixed_ba = self.in_proj_ba.forward(x)?;
+        let mut x_q = x.clone();
+        if let Some(t) = self.in_proj_qkvz.quantized_act_type() {
+            x_q = x_q.to_dtype(t)?;
+        }
+        let mut mixed_qkvz = MatMul.qmethod_matmul(&x_q, &*self.in_proj_qkvz)?;
+        let mut mixed_ba = MatMul.qmethod_matmul(&x_q, &*self.in_proj_ba)?;
+        if self.in_proj_qkvz.quantized_act_type().is_some() {
+            mixed_qkvz = mixed_qkvz.to_dtype(dtype)?;
+            mixed_ba = mixed_ba.to_dtype(dtype)?;
+        }
         let proj_ms = profile_tick(profile, &mut section_start);
 
         // 2. Grouped head layout
@@ -580,8 +588,15 @@ impl GatedDeltaNet {
         let rms_ms = profile_tick(profile, &mut section_start);
 
         // 11. Output projection
-        let y_proj = y;
-        let res = self.out_proj.forward(&y_proj)?;
+        let original_dtype = x.dtype();
+        let mut y_proj = y;
+        if let Some(t) = self.out_proj.quantized_act_type() {
+            y_proj = y_proj.to_dtype(t)?;
+        }
+        let mut res = MatMul.qmethod_matmul(&y_proj, &*self.out_proj)?;
+        if self.out_proj.quantized_act_type().is_some() {
+            res = res.to_dtype(original_dtype)?;
+        }
         let out_proj_ms = profile_tick(profile, &mut section_start);
         if profile {
             tracing::info!(
@@ -617,7 +632,6 @@ impl GatedDeltaNet {
     }
 
     #[cfg(feature = "cuda")]
-    #[allow(clippy::too_many_arguments)]
     fn recurrence_cuda(
         &self,
         q: &Tensor,
@@ -849,7 +863,6 @@ impl GatedDeltaNet {
         let (batch_size, seq_len, conv_dim) = x.dims3()?;
         let x_t = x.transpose(1, 2)?.contiguous()?;
         let conv_weight = self.conv1d_weight.to_device(x.device())?;
-        #[cfg(any(feature = "cuda", feature = "metal"))]
         let conv_state = cache.conv_state.to_device(x.device())?;
 
         #[cfg(feature = "cuda")]

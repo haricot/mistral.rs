@@ -143,9 +143,6 @@ pub struct HarmonyContext {
     current_tool_call: Option<(String, String)>,
     // Track how much of current tool call args have been sent
     sent_tool_args_len: usize,
-    // Set when a new tool call starts, signaling that a JSON grammar
-    // should be activated for the argument tokens.
-    needs_grammar_activation: bool,
 }
 
 impl HarmonyContext {
@@ -166,7 +163,6 @@ impl HarmonyContext {
             tool_calls: Vec::new(),
             current_tool_call: None,
             sent_tool_args_len: 0,
-            needs_grammar_activation: false,
         })
     }
 
@@ -233,7 +229,6 @@ impl HarmonyContext {
                         // Start new tool call
                         self.current_tool_call = Some((recipient.clone(), content.clone()));
                         self.sent_tool_args_len = 0;
-                        self.needs_grammar_activation = true;
                     }
                     // Don't accumulate tool call content to final_content
                     return delta;
@@ -273,12 +268,6 @@ impl HarmonyContext {
         }
 
         delta
-    }
-
-    /// Check if grammar activation is needed for a new tool call,
-    /// clearing the flag after reading.
-    pub fn take_needs_grammar_activation(&mut self) -> bool {
-        std::mem::replace(&mut self.needs_grammar_activation, false)
     }
 
     /// Get the currently active channel
@@ -433,16 +422,6 @@ impl super::ReasoningParser for HarmonyContext {
 
     fn finalize_tool_calls(&mut self) -> Vec<HarmonyToolCall> {
         Self::finalize_tool_calls(self)
-    }
-
-    fn take_needs_tool_grammar_activation(&mut self) -> bool {
-        Self::take_needs_grammar_activation(self)
-    }
-
-    fn current_tool_recipient(&self) -> Option<String> {
-        self.current_tool_call
-            .as_ref()
-            .map(|(recipient, _)| recipient.clone())
     }
 }
 

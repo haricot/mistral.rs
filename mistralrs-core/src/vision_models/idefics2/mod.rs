@@ -12,7 +12,6 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::attention::AttentionMask;
 use crate::{
     amoe::{AnyMoeBaseModelMixin, MlpLayer},
     device_map::DeviceMapper,
@@ -22,8 +21,7 @@ use crate::{
     },
     models::mistral::Model as Mistral,
     paged_attention::{
-        encoder_cache::{CacheModality, EncoderCacheManager},
-        AttentionImplementation, ModelConfigMetadata,
+        encoder_cache::EncoderCacheManager, AttentionImplementation, ModelConfigMetadata,
     },
     pipeline::{
         text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
@@ -411,7 +409,7 @@ impl Attention {
         })
     }
 
-    fn forward(&self, xs: &Tensor, attention_mask: &AttentionMask) -> Result<Tensor> {
+    fn forward(&self, xs: &Tensor, attention_mask: Option<&Tensor>) -> Result<Tensor> {
         let (b_sz, q_len, _) = xs.dims3()?;
 
         let original_dtype = xs.dtype();
@@ -442,10 +440,7 @@ impl Attention {
             (MatMul.matmul(&q.contiguous()?, &k.transpose(2, 3)?.contiguous()?)? * self.scale)?;
 
         let attn_weights = CausalMasker.apply_mask_one_and_zero(
-            &match attention_mask {
-                AttentionMask::Custom(t) => Some(t.to_dtype(DType::U8).unwrap()),
-                _ => None,
-            },
+            &attention_mask.map(|x| x.to_dtype(DType::U8).unwrap()),
             attn_weights,
             &self.neg_inf,
         )?;
@@ -548,7 +543,7 @@ impl EncoderLayer {
         })
     }
 
-    fn forward(&self, xs: &Tensor, attention_mask: &AttentionMask) -> Result<Tensor> {
+    fn forward(&self, xs: &Tensor, attention_mask: Option<&Tensor>) -> Result<Tensor> {
         let residual = xs.clone();
 
         let hidden_states = self.layer_norm_1.forward(xs)?;
@@ -576,7 +571,7 @@ impl Encoder {
         Ok(Self { layers })
     }
 
-    fn forward(&self, xs: &Tensor, attention_mask: &AttentionMask) -> Result<Tensor> {
+    fn forward(&self, xs: &Tensor, attention_mask: Option<&Tensor>) -> Result<Tensor> {
         let mut hidden_states = xs.clone();
         for layer in &self.layers {
             hidden_states = layer.forward(&hidden_states, attention_mask)?;
@@ -609,9 +604,9 @@ impl VisionTransformer {
         })
     }
 
-    fn forward(&self, pixel_values: &Tensor, attention_mask: &AttentionMask) -> Result<Tensor> {
+    fn forward(&self, pixel_values: &Tensor, attention_mask: Option<&Tensor>) -> Result<Tensor> {
         let bs = pixel_values.dim(0)?;
-        let patch_attention_mask = if let AttentionMask::Custom(attn_mask) = attention_mask {
+        let patch_attention_mask = if let Some(attn_mask) = attention_mask {
             attn_mask.clone()
         } else {
             let patch_size = self.config.patch_size;
@@ -630,15 +625,17 @@ impl VisionTransformer {
             .embeddings
             .forward(pixel_values, &patch_attention_mask)?;
 
-        let attention_mask2 = if matches!(attention_mask, AttentionMask::None) {
-            AttentionMask::None
+        let attention_mask = if attention_mask.is_none() {
+            None
         } else {
             let mask = patch_attention_mask
                 .reshape((patch_attention_mask.dim(0)?, ()))?
                 .to_dtype(hidden_states.dtype())?;
-            AttentionMask::Custom(CausalMasker.expand_mask(&mask, hidden_states.dtype(), None)?)
+            Some(CausalMasker.expand_mask(&mask, hidden_states.dtype(), None)?)
         };
-        let hidden_states = self.encoder.forward(&hidden_states, &attention_mask2)?;
+        let hidden_states = self
+            .encoder
+            .forward(&hidden_states, attention_mask.as_ref())?;
         hidden_states.apply(&self.post_layernorm)
     }
 
@@ -1192,7 +1189,7 @@ impl Idefics2 {
                         .lock()
                         .expect("encoder cache lock poisoned");
                     for (i, &hash) in image_hashes.iter().enumerate() {
-                        if let Some(cached) = guard.get(CacheModality::Image, hash) {
+                        if let Some(cached) = guard.get(hash) {
                             per_image[i] = Some(cached[0].clone());
                         } else {
                             miss_indices.push(i);
@@ -1203,9 +1200,7 @@ impl Idefics2 {
                     for &i in &miss_indices {
                         let pv = pixel_values.get(i)?.unsqueeze(0)?;
                         let mask = patch_attention_mask.get(i)?.unsqueeze(0)?;
-                        let hidden = self
-                            .vision_model
-                            .forward(&pv, &AttentionMask::Custom(mask.clone()))?;
+                        let hidden = self.vision_model.forward(&pv, Some(&mask))?;
                         let hidden = self
                             .connector
                             .forward(&hidden, &mask.reshape((1_usize, ()))?)?;
@@ -1215,11 +1210,7 @@ impl Idefics2 {
                                 .encoder_cache
                                 .lock()
                                 .expect("encoder cache lock poisoned");
-                            guard.insert(
-                                CacheModality::Image,
-                                image_hashes[i],
-                                vec![result.clone()],
-                            );
+                            guard.insert(image_hashes[i], vec![result.clone()]);
                         }
                         per_image[i] = Some(result);
                     }
@@ -1228,10 +1219,9 @@ impl Idefics2 {
                 Tensor::stack(&slices, 0)?
             } else {
                 // No caching: original path
-                let image_hidden_states = self.vision_model.forward(
-                    &pixel_values,
-                    &AttentionMask::Custom(patch_attention_mask.clone()),
-                )?;
+                let image_hidden_states = self
+                    .vision_model
+                    .forward(&pixel_values, Some(&patch_attention_mask))?;
                 self.connector.forward(
                     &image_hidden_states,
                     &patch_attention_mask.reshape((pixel_values.dim(0)?, ()))?,

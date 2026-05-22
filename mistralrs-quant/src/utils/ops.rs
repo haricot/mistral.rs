@@ -3521,7 +3521,7 @@ mod tests {
 
         let mut max_diff: f32 = 0.0;
         let mut num_mismatches = 0;
-        for (f, fb) in fused_f32.iter().zip(fallback_f32.iter()) {
+        for (_i, (f, fb)) in fused_f32.iter().zip(fallback_f32.iter()).enumerate() {
             let diff = (f - fb).abs();
             if diff > max_diff {
                 max_diff = diff;
@@ -3742,7 +3742,7 @@ mod tests {
 
         let mut max_diff: f32 = 0.0;
         let mut num_mismatches = 0;
-        for (f, fb) in fused_f32.iter().zip(fallback_f32.iter()) {
+        for (_i, (f, fb)) in fused_f32.iter().zip(fallback_f32.iter()).enumerate() {
             let diff = (f - fb).abs();
             if diff > max_diff {
                 max_diff = diff;
