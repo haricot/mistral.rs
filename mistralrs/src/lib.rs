@@ -243,9 +243,23 @@ pub use messages::{
     RequestBuilder, RequestLike, TextMessageRole, TextMessages,
 };
 pub use mistralrs_core::{
+    AgentPermission, AgentToolApproval, AgentToolApprovalAsyncCallback, AgentToolApprovalCallback,
+    AgentToolApprovalDecision, AgentToolApprovalFuture, AgentToolApprovalHandler, AgentToolKind,
+    AgentToolMetadata, AgentToolSource, CodeExecutionApproval, CodeExecutionApprovalCallback,
+    CodeExecutionConfig, CodeExecutionPermission, NetworkMode, SandboxPolicy,
+};
+pub use mistralrs_core::{
+    AgenticToolCallRecord, File, FileContent, FileSource, RequestedFile, MODEL_INLINE_BYTES,
+    WIRE_EMBED_LIMIT_BYTES,
+};
+pub use mistralrs_core::{
     McpClient, McpClientConfig, McpServerConfig, McpServerSource, McpToolInfo,
 };
-pub use mistralrs_core::{SearchCallback, SearchResult, ToolCallback};
+pub use mistralrs_core::{
+    MultimodalToolCallback, SearchCallback, SearchResult, ToolCallContext, ToolCallback,
+    ToolCallbackKind, ToolOutput,
+};
+pub use mistralrs_core::{SerializedSession, SerializedVideo};
 pub use model::{best_device, Model};
 pub use model_builder_trait::{AnyModelBuilder, MultiModelBuilder};
 pub use multimodal_model::{MultimodalModelBuilder, UqffMultimodalModelBuilder};

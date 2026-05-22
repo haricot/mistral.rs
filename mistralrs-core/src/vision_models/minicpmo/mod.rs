@@ -9,12 +9,14 @@ pub use inputs_processor::MiniCpmOProcessor;
 use mistralrs_quant::{CollectedImatrixData, QuantMethod, ShardedVarBuilder};
 use resampler::Resampler;
 
+use crate::attention::AttentionMask;
 use crate::{
     amoe::AnyMoeBaseModelMixin,
     device_map::DeviceMapper,
     models::qwen2,
     paged_attention::{
-        encoder_cache::EncoderCacheManager, AttentionImplementation, ModelConfigMetadata,
+        encoder_cache::{CacheModality, EncoderCacheManager},
+        AttentionImplementation, ModelConfigMetadata,
     },
     pipeline::{
         text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
@@ -126,7 +128,7 @@ impl MiniCpmOModel {
                         .lock()
                         .expect("encoder cache lock poisoned");
                     for (i, &hash) in image_hashes.iter().enumerate() {
-                        if let Some(cached) = guard.get(hash) {
+                        if let Some(cached) = guard.get(CacheModality::Image, hash) {
                             per_image_features[i] = Some(cached[0].clone());
                         } else {
                             miss_indices.push(i);
@@ -158,7 +160,7 @@ impl MiniCpmOModel {
 
                         let vpm_out = self.vpm.forward(
                             &single_pv,
-                            Some(&patch_attn_mask),
+                            &AttentionMask::Custom(patch_attn_mask.clone()),
                             Some(&tgt_size_tensor),
                         )?;
                         let feats = self.resampler.forward(&vpm_out, &tgt_size_vec)?;
@@ -169,7 +171,11 @@ impl MiniCpmOModel {
                                 .encoder_cache
                                 .lock()
                                 .expect("encoder cache lock poisoned");
-                            guard.insert(image_hashes[idx], vec![feats.clone()]);
+                            guard.insert(
+                                CacheModality::Image,
+                                image_hashes[idx],
+                                vec![feats.clone()],
+                            );
                         }
                         per_image_features[idx] = Some(feats);
                     }
@@ -232,15 +238,18 @@ impl MiniCpmOModel {
                         let end_idx = i + vision_batch_size;
                         let tmp_hs = self.vpm.forward(
                             &all_pixel_values.i(start_idx..end_idx)?,
-                            Some(&patch_attn_mask.i(start_idx..end_idx)?),
+                            &AttentionMask::Custom(patch_attn_mask.i(start_idx..end_idx)?),
                             Some(&tgt_sizes.i(start_idx..end_idx)?),
                         )?;
                         hs.push(tmp_hs);
                     }
                     Tensor::cat(&hs, 0)?
                 } else {
-                    self.vpm
-                        .forward(&all_pixel_values, Some(&patch_attn_mask), Some(&tgt_sizes))?
+                    self.vpm.forward(
+                        &all_pixel_values,
+                        &AttentionMask::Custom(patch_attn_mask.clone()),
+                        Some(&tgt_sizes),
+                    )?
                 };
                 vision_embedding = self.resampler.forward(&vision_embedding, &tgt_sizes_vec)?;
                 vision_embedding

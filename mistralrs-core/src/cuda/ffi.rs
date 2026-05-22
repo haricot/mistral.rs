@@ -116,7 +116,6 @@ extern "C" {
     );
 
     // for unquntized models (decoding)
-    #[link_name = "mistralrs_moe_gemm"]
     pub fn moe_gemm(
         input: *const c_void,   // input [size_m, size_k]
         weights: *const c_void, // weights [num_experts, size_n, size_k]
@@ -134,7 +133,6 @@ extern "C" {
     );
 
     // for unquntized models (prefill)
-    #[link_name = "mistralrs_moe_gemm_wmma"]
     pub fn moe_gemm_wmma(
         input: *const c_void,         // device pointer [size_m, size_k]
         weights: *const c_void,       // device pointer [num_experts, size_n, size_k]
@@ -150,26 +148,8 @@ extern "C" {
         dtype: i32, // 0=float16, 1=bf16 (for input/output)
         stream: i64,
     );
-    #[link_name = "mistralrs_moe_gemm_hfma2"]
-    pub fn moe_gemm_hfma2(
-        input: *const c_void,         // device pointer [size_m, size_k]
-        weights: *const c_void,       // device pointer [num_experts, size_n, size_k]
-        sorted_token_ids: *const i32, // device pointer [size_m]
-        expert_ids: *const i32,       // host array [size_m] (expert id per sorted token)
-        topk_weights: *const f32,
-        output: *mut c_void, // device pointer [size_m, size_n]
-        expert_offsets: *mut i32,
-        num_experts: i32,
-        topk: i32,
-        size_m: i32,
-        size_n: i32,
-        size_k: i32,
-        dtype: i32, // 0=float16, 1=bf16 (for input/output)
-        stream: i64,
-    );
 
     // for unquntized models (decoding) with transposed weights [num_experts, size_k, size_n]
-    #[link_name = "mistralrs_moe_gemm_transposed"]
     pub fn moe_gemm_transposed(
         input: *const c_void,   // input [size_m, size_k]
         weights: *const c_void, // weights [num_experts, size_k, size_n] - transposed layout
@@ -187,7 +167,6 @@ extern "C" {
     );
 
     // for unquntized models (prefill) with transposed weights [num_experts, size_k, size_n]
-    #[link_name = "mistralrs_moe_gemm_wmma_transposed"]
     pub fn moe_gemm_wmma_transposed(
         input: *const c_void,         // device pointer [size_m, size_k]
         weights: *const c_void, // device pointer [num_experts, size_k, size_n] - transposed layout
@@ -205,7 +184,6 @@ extern "C" {
     );
 
     // MoE GEMV for decode phase (optimized for small batch sizes M <= 8)
-    #[link_name = "mistralrs_moe_gemv"]
     pub fn moe_gemv(
         input: *const c_void,   // input [size_m or size_m / topk, size_k]
         weights: *const c_void, // weights [num_experts, size_n, size_k]
@@ -223,7 +201,6 @@ extern "C" {
     );
 
     // MoE GEMV for decode phase with transposed weights [num_experts, size_k, size_n]
-    #[link_name = "mistralrs_moe_gemv_transposed"]
     pub fn moe_gemv_transposed(
         input: *const c_void,   // input [size_m or size_m / topk, size_k]
         weights: *const c_void, // weights [num_experts, size_k, size_n] - transposed layout

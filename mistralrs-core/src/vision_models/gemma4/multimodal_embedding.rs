@@ -51,15 +51,13 @@ impl Gemma4MultimodalEmbedder {
             normed = normed.to_dtype(norm_dtype)?;
         }
         let normed = self.embedding_pre_projection_norm.forward(&normed)?;
-        self.embedding_projection.forward_autocast(&normed)
-    }
-
-    pub fn get_isq_layers(&mut self) -> Vec<(&mut Arc<dyn QuantMethod>, Option<usize>)> {
-        vec![(&mut self.embedding_projection, None)]
+        self.embedding_projection.forward(&normed)
     }
 
     pub fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let uvb = UnVarBuilder::new();
+        uvb.pp("embedding_projection")
+            .add(&self.embedding_projection);
         uvb.pp("embedding_pre_projection_norm")
             .add(&self.embedding_pre_projection_norm);
         uvb.to_safetensors()

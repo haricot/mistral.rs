@@ -7,11 +7,10 @@ use mistralrs_quant::{ColumnParallelLayer, QuantMethod, RowParallelLayer, Sharde
 
 use crate::{
     amoe::{AnyMoeBaseModelMixin, MlpLayer},
-    attention::SdpaParams,
+    attention::{AttentionMask, SdpaParams},
     device_map::DeviceMapper,
     layers::{
-        vocab_embedding, Gemma3RotaryEmbedding, GemmaRmsNorm, MatMul, Mlp, RotaryEmbedding, Sdpa,
-        VocabEmbedding,
+        embedding, Gemma3RotaryEmbedding, GemmaRmsNorm, Mlp, RotaryEmbedding, ScaledEmbedding, Sdpa,
     },
     layers_masker::BidirectionalMasker,
     paged_attention::AttentionImplementation,
@@ -208,20 +207,9 @@ impl Attention {
     ) -> Result<Tensor> {
         let (b_sz, q_len, _) = xs.dims3()?;
 
-        let original_dtype = xs.dtype();
-        let mut xs = xs.clone();
-        if let Some(t) = self.q_proj.quantized_act_type() {
-            xs = xs.to_dtype(t)?;
-        }
-        let mut q = MatMul.qmethod_matmul(&xs, &*self.q_proj)?;
-        let mut k = MatMul.qmethod_matmul(&xs, &*self.k_proj)?;
-        let mut v = MatMul.qmethod_matmul(&xs, &*self.v_proj)?;
-        if self.q_proj.quantized_act_type().is_some() {
-            q = q.to_dtype(original_dtype)?;
-            k = k.to_dtype(original_dtype)?;
-            v = v.to_dtype(original_dtype)?;
-        }
-
+        let mut q = self.q_proj.forward(xs)?;
+        let mut k = self.k_proj.forward(xs)?;
+        let mut v = self.v_proj.forward(xs)?;
         q = q
             .reshape((b_sz, q_len, self.num_heads, self.head_dim))?
             .transpose(1, 2)?;
@@ -250,19 +238,13 @@ impl Attention {
             &q,
             &k,
             &v,
-            Some(mask),
+            &AttentionMask::Custom(mask.clone()),
             Some(flash_params),
             &self.sdpa_params,
         )?;
 
-        if let Some(t) = self.q_proj.quantized_act_type() {
-            attn_output = attn_output.to_dtype(t)?;
-        }
         attn_output = attn_output.transpose(1, 2)?.reshape((b_sz, q_len, ()))?;
-        let mut res = MatMul.qmethod_matmul(&attn_output, &*self.o_proj)?;
-        if self.q_proj.quantized_act_type().is_some() {
-            res = res.to_dtype(original_dtype)?;
-        }
+        let res = self.o_proj.forward(&attn_output)?;
         Ok(res)
     }
 }
@@ -367,7 +349,7 @@ impl DecoderLayer {
 }
 
 pub struct EmbeddingGemma {
-    embed_tokens: VocabEmbedding,
+    embed_tokens: ScaledEmbedding,
     layers: Vec<DecoderLayer>,
     norm: GemmaRmsNorm,
     device: Device,
@@ -398,13 +380,15 @@ impl EmbeddingGemma {
 
         let mapper = normal_loading_metadata.mapper;
 
-        let embed_tokens = vocab_embedding(
+        let embed_tokens = ScaledEmbedding::new(
             (cfg.hidden_size as f64).sqrt(),
-            cfg.vocab_size,
-            cfg.hidden_size,
-            mapper.set_nm_device(vb.pp("embed_tokens"), false),
-            &cfg.quantization_config,
-        )?;
+            embedding(
+                cfg.vocab_size,
+                cfg.hidden_size,
+                mapper.set_nm_device(vb.pp("embed_tokens"), false),
+                &cfg.quantization_config,
+            )?,
+        );
 
         let mut global_ropes = HashMap::new();
         for layer_idx in 0..cfg.num_hidden_layers {

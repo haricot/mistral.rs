@@ -89,8 +89,11 @@ pub struct Gemma4TextConfig {
     pub enable_moe_block: bool,
     pub num_experts: Option<usize>,
     pub top_k_experts: Option<usize>,
-    #[serde(alias = "moe_intermediate_size")]
-    pub expert_intermediate_size: Option<usize>,
+    // Some configs ship both keys; `#[serde(alias)]` would trip duplicate-field detection.
+    #[serde(default, rename = "expert_intermediate_size")]
+    expert_intermediate_size_field: Option<usize>,
+    #[serde(default, rename = "moe_intermediate_size")]
+    moe_intermediate_size_field: Option<usize>,
     #[serde(default = "num_kv_shared_layers")]
     pub num_kv_shared_layers: usize,
     pub hidden_size_per_layer_input: Option<usize>,
@@ -102,6 +105,11 @@ pub struct Gemma4TextConfig {
 }
 
 impl Gemma4TextConfig {
+    pub fn expert_intermediate_size(&self) -> Option<usize> {
+        self.expert_intermediate_size_field
+            .or(self.moe_intermediate_size_field)
+    }
+
     /// Effective sliding window size, adjusted for bidirectional attention.
     /// `self.sliding_window = (self.sliding_window // 2) + 1` only when `use_bidirectional_attention == "all"`.
     pub fn effective_sliding_window(&self) -> usize {
@@ -332,7 +340,7 @@ serde_default_fn!(usize, eoa_token_id, 258883);
 #[allow(dead_code)]
 pub struct Gemma4Config {
     pub text_config: Gemma4TextConfig,
-    pub vision_config: Option<Gemma4VisionConfig>,
+    pub vision_config: Gemma4VisionConfig,
     pub audio_config: Option<Gemma4AudioConfig>,
     #[serde(default = "image_token_id")]
     pub image_token_id: usize,

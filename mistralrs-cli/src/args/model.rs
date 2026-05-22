@@ -84,6 +84,13 @@ pub struct AdapterOptions {
 /// Quantization options
 #[derive(Args, Clone, Default, Deserialize)]
 pub struct QuantizationOptions {
+    /// Quantization front-door. Numeric levels (`2`, `3`, `4`, `5`, `6`, `8`) and ISQ
+    /// names prefer a prebuilt UQFF from `mistralrs-community/<model>-UQFF`, then
+    /// fall back to ISQ. `auto` is for `serve`, `run`, and `bench`; `tune` rejects
+    /// it because `tune` is the recommender. Use `--isq` for the explicit knob.
+    #[arg(long, conflicts_with_all = ["in_situ_quant", "from_uqff"])]
+    pub quant: Option<String>,
+
     /// In-situ quantization level (e.g., "4", "8", "q4_0", "q4_1", etc.)
     #[arg(long = "isq")]
     pub in_situ_quant: Option<String>,
@@ -140,11 +147,6 @@ pub struct DeviceOptions {
     #[arg(long, default_value_t = AutoDeviceMapParams::DEFAULT_MAX_BATCH_SIZE)]
     #[serde(default = "default_max_batch_size")]
     pub max_batch_size: usize,
-
-    /// Prefer conservative automatic mapping for active GPU layers on tight VRAM.
-    #[arg(long)]
-    #[serde(default)]
-    pub active_layers_on_vram: bool,
 }
 
 /// Multimodal model specific options
@@ -153,19 +155,6 @@ pub struct MultimodalOptions {
     /// Maximum edge length for image resizing (aspect ratio preserved)
     #[arg(long)]
     pub max_edge: Option<u32>,
-
-    /// Disable vision loading for supported multimodal models.
-    /// On Gemma 4 this also disables video, which shares the vision tower.
-    #[arg(long)]
-    pub disable_vision: bool,
-
-    /// Disable audio loading for supported multimodal models.
-    #[arg(long)]
-    pub disable_audio: bool,
-
-    /// Convenience flag to disable all non-text modalities for supported multimodal models.
-    #[arg(long)]
-    pub text_only: bool,
 
     /// Maximum number of images per request
     #[arg(long)]

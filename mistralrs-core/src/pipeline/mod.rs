@@ -29,15 +29,17 @@ pub use amoe::{AnyMoeLoader, AnyMoePipeline};
 pub use auto::{AutoLoader, AutoLoaderBuilder};
 use chat_template::ChatTemplate;
 pub use diffusion::{DiffusionLoader, DiffusionLoaderBuilder};
+pub(crate) use embedding::EmbeddingLoadContext;
 pub use embedding::{EmbeddingLoader, EmbeddingLoaderBuilder, EmbeddingSpecificConfig};
 pub use ggml::{GGMLLoader, GGMLLoaderBuilder, GGMLSpecificConfig};
 pub use gguf::{GGUFLoader, GGUFLoaderBuilder, GGUFSpecificConfig};
 use image::DynamicImage;
 pub use inputs_processor::InputProcessorOutput;
+pub(crate) use isq::IsqModelLoader;
 pub use isq::{
-    expand_isq_value, parse_isq_value, IsqModel, IsqOrganization, UQFF_MULTI_FILE_DELIMITER,
+    expand_isq_value, parse_isq_value, parse_uqff_shard, resolve_uqff_shorthand, IsqModel,
+    IsqOrganization, UQFF_MULTI_FILE_DELIMITER,
 };
-pub(crate) use isq::{IsqModelLoader, ISQ_CPU_DEVICE_SENTINEL};
 use llguidance::toktrie::TokEnv;
 pub use loaders::{
     AdapterKind, AutoDeviceMapParams, AutoEmbeddingLoader, AutoMultimodalLoader, AutoNormalLoader,
@@ -83,9 +85,7 @@ pub(crate) fn get_device_layers_for_loader(
     )
 }
 use mistralrs_quant::IsqType;
-pub use multimodal::{
-    DisabledModalities, MultimodalLoader, MultimodalLoaderBuilder, MultimodalSpecificConfig,
-};
+pub use multimodal::{MultimodalLoader, MultimodalLoaderBuilder, MultimodalSpecificConfig};
 pub use normal::{NormalLoader, NormalLoaderBuilder, NormalSpecificConfig};
 pub(crate) use paths::{get_chat_template, get_model_paths, get_xlora_paths};
 pub use paths::{AdapterPaths, LoraAdapterPaths};
@@ -99,6 +99,7 @@ use std::fmt::Debug;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
 use tokenizers::Tokenizer;
 
 use anyhow::Result;
@@ -601,7 +602,7 @@ pub trait Pipeline:
                 let logits = logits
                     .into_iter()
                     .map(|l| {
-                        let l = l.expect("Did not get any inputs. This is shocking.");
+                        let l = l.expect("missing forward result");
                         if logits_on_cpu {
                             l.to_device(&Device::Cpu)
                         } else {
@@ -838,7 +839,7 @@ pub trait Pipeline:
                 let logits = logits
                     .into_iter()
                     .map(|l| {
-                        let l = l.expect("Did not get any inputs. This is shocking.");
+                        let l = l.expect("missing forward result");
                         if logits_on_cpu {
                             l.to_device(&Device::Cpu)
                         } else {
@@ -846,7 +847,6 @@ pub trait Pipeline:
                         }
                     })
                     .collect::<candle_core::Result<Vec<_>>>()?;
-
                 match &logits[0] {
                     ForwardInputsResult::RawLogits { .. }
                     | ForwardInputsResult::Embeddings { .. } => unreachable!(),

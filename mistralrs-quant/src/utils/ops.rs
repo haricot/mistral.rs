@@ -2727,21 +2727,6 @@ impl CustomOp2 for FusedGlu {
         let n_elements = l1.shape().elem_count();
         let dtype = s1.dtype();
         let out_shape = l1.shape().clone();
-        if n_elements == 0 {
-            let dst = match dtype {
-                DType::F16 => {
-                    CudaStorage::wrap_cuda_slice(device.alloc_zeros::<f16>(0)?, device.clone())
-                }
-                DType::BF16 => {
-                    CudaStorage::wrap_cuda_slice(device.alloc_zeros::<bf16>(0)?, device.clone())
-                }
-                DType::F32 => {
-                    CudaStorage::wrap_cuda_slice(device.alloc_zeros::<f32>(0)?, device.clone())
-                }
-                _ => candle_core::bail!("fused_glu: unsupported dtype {:?}", dtype),
-            };
-            return Ok((dst, out_shape));
-        }
         let stream = device.cuda_stream().cu_stream();
         let a_offset = l1.start_offset();
         let b_offset = l2.start_offset();
@@ -3521,7 +3506,7 @@ mod tests {
 
         let mut max_diff: f32 = 0.0;
         let mut num_mismatches = 0;
-        for (_i, (f, fb)) in fused_f32.iter().zip(fallback_f32.iter()).enumerate() {
+        for (f, fb) in fused_f32.iter().zip(fallback_f32.iter()) {
             let diff = (f - fb).abs();
             if diff > max_diff {
                 max_diff = diff;
@@ -3680,26 +3665,6 @@ mod tests {
 
     #[cfg(feature = "cuda")]
     #[test]
-    fn test_fused_glu_cuda_empty_f32() {
-        use super::{fused_glu, GluActivationType};
-        use candle_core::Tensor;
-
-        let cuda = candle_core::Device::new_cuda(0).unwrap();
-        let cpu = candle_core::Device::Cpu;
-        let a = Tensor::from_vec(Vec::<f32>::new(), &[0], &cuda).unwrap();
-        let b = Tensor::from_vec(Vec::<f32>::new(), &[0], &cuda).unwrap();
-
-        let out = fused_glu(&a, &b, GluActivationType::Silu)
-            .unwrap()
-            .to_device(&cpu)
-            .unwrap();
-
-        assert_eq!(out.dims(), &[0]);
-        assert!(out.to_vec1::<f32>().unwrap().is_empty());
-    }
-
-    #[cfg(feature = "cuda")]
-    #[test]
     fn test_fused_glu_matches_candle_fallback_bf16_cuda() {
         use super::{fused_glu, GluActivationType};
         use candle_core::{DType, Tensor};
@@ -3742,7 +3707,7 @@ mod tests {
 
         let mut max_diff: f32 = 0.0;
         let mut num_mismatches = 0;
-        for (_i, (f, fb)) in fused_f32.iter().zip(fallback_f32.iter()).enumerate() {
+        for (f, fb) in fused_f32.iter().zip(fallback_f32.iter()) {
             let diff = (f - fb).abs();
             if diff > max_diff {
                 max_diff = diff;

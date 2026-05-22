@@ -8,7 +8,7 @@ use candle_core::{DType, Device, Tensor, D};
 use candle_nn::Conv2dConfig;
 use image::{ColorType, DynamicImage};
 use itertools::Itertools;
-use mistralrs_quant::log::once_log_info;
+use mistralrs_quant::log::once_log_debug;
 use mistralrs_quant::ShardedVarBuilder;
 
 #[cfg(feature = "pyo3_macros")]
@@ -30,8 +30,8 @@ use crate::pipeline::isq::IsqModelLoader;
 use crate::pipeline::loaders::AutoDeviceMapParams;
 use crate::pipeline::text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata};
 use crate::pipeline::{
-    DisabledModalities, EitherCache, IsqModel, Modalities, MultimodalPromptPrefixer, Processor,
-    ProcessorCreator, SupportedModality,
+    EitherCache, IsqModel, Modalities, MultimodalPromptPrefixer, Processor, ProcessorCreator,
+    SupportedModality,
 };
 use crate::speculative::SpeculativeTargetMixin;
 use crate::utils::varbuilder_utils::DeviceForLoadTensor;
@@ -322,24 +322,15 @@ struct AutoMultimodalLoaderConfig {
 }
 
 /// Automatically selects a MultimodalModelLoader implementation based on the JSON `architectures` field.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct AutoMultimodalLoader {
-    disabled_modalities: DisabledModalities,
-}
+pub struct AutoMultimodalLoader;
 
 impl AutoMultimodalLoader {
-    pub fn new(disabled_modalities: DisabledModalities) -> Self {
-        Self {
-            disabled_modalities,
-        }
-    }
-
-    fn get_loader(&self, config: &str) -> Result<Box<dyn MultimodalModelLoader>> {
+    fn get_loader(config: &str) -> Result<Box<dyn MultimodalModelLoader>> {
         let auto_cfg: AutoMultimodalLoaderConfig = serde_json::from_str(config)?;
 
         // Voxtral: params.json has `multimodal` but no `architectures`
         if auto_cfg.multimodal.is_some() && auto_cfg.architectures.is_empty() {
-            once_log_info("Automatic loader type determined to be `voxtral`");
+            once_log_debug("Automatic loader type determined to be `voxtral`");
             return Ok(Box::new(VoxtralLoader));
         }
 
@@ -350,7 +341,7 @@ impl AutoMultimodalLoader {
         let name = &auto_cfg.architectures[0];
         let tp = MultimodalLoaderType::from_causal_lm_name(name)?;
 
-        once_log_info(format!("Automatic loader type determined to be `{tp}`"));
+        once_log_debug(format!("Automatic loader type determined to be `{tp}`"));
 
         // Delegate to the concrete loader
         Ok(match tp {
@@ -370,12 +361,10 @@ impl AutoMultimodalLoader {
             MultimodalLoaderType::Gemma3n => Box::new(Gemma3nLoader),
             MultimodalLoaderType::Qwen3VL => Box::new(Qwen3VLLoader),
             MultimodalLoaderType::Qwen3VLMoE => Box::new(Qwen3VLMoELoader),
-            MultimodalLoaderType::Qwen3_5 => Box::new(Qwen3_5Loader::new(self.disabled_modalities)),
-            MultimodalLoaderType::Qwen3_5Moe => {
-                Box::new(Qwen3_5MoeLoader::new(self.disabled_modalities))
-            }
+            MultimodalLoaderType::Qwen3_5 => Box::new(Qwen3_5Loader),
+            MultimodalLoaderType::Qwen3_5Moe => Box::new(Qwen3_5MoeLoader),
             MultimodalLoaderType::Voxtral => Box::new(VoxtralLoader),
-            MultimodalLoaderType::Gemma4 => Box::new(Gemma4Loader::new(self.disabled_modalities)),
+            MultimodalLoaderType::Gemma4 => Box::new(Gemma4Loader),
         })
     }
 }
@@ -388,18 +377,17 @@ impl MultimodalModelLoader for AutoMultimodalLoader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn MultimodalModel + Send + Sync>> {
-        self.get_loader(config)?
-            .load(config, vb, normal_loading_metadata, attention_mechanism)
+        Self::get_loader(config)?.load(config, vb, normal_loading_metadata, attention_mechanism)
     }
 
     fn is_gptx(&self, config: &str) -> bool {
-        self.get_loader(config)
+        Self::get_loader(config)
             .expect("AutoMultimodalLoader get_loader")
             .is_gptx(config)
     }
 
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        self.get_loader(config)?.get_config_repr(config)
+        Self::get_loader(config)?.get_config_repr(config)
     }
 
     fn get_processor(
@@ -409,39 +397,39 @@ impl MultimodalModelLoader for AutoMultimodalLoader {
         preproc_cfg: PreProcessorConfig,
         max_edge: Option<u32>,
     ) -> Arc<dyn Processor + Send + Sync> {
-        self.get_loader(model_config)
+        Self::get_loader(model_config)
             .expect("AutoMultimodalLoader get_loader")
             .get_processor(model_config, proc_cfg, preproc_cfg, max_edge)
     }
 
     fn supports_paged_attention(&self, config: &str) -> bool {
-        self.get_loader(config)
+        Self::get_loader(config)
             .expect("AutoMultimodalLoader")
             .supports_paged_attention(config)
     }
 
     fn modalities(&self, config: &str) -> Result<Modalities> {
-        self.get_loader(config)?.modalities(config)
+        Self::get_loader(config)?.modalities(config)
     }
 
     fn supports_prefix_cacher(&self, config: &str) -> bool {
-        self.get_loader(config)
+        Self::get_loader(config)
             .expect("AutoMultimodalLoader")
             .supports_prefix_cacher(config)
     }
 
     fn prefixer(&self, config: &str) -> Arc<dyn MultimodalPromptPrefixer> {
-        self.get_loader(config)
+        Self::get_loader(config)
             .expect("AutoMultimodalLoader")
             .prefixer(config)
     }
 
     fn default_chat_template(&self, config: &str) -> Option<String> {
-        self.get_loader(config).ok()?.default_chat_template(config)
+        Self::get_loader(config).ok()?.default_chat_template(config)
     }
 
     fn default_bos_eos(&self, config: &str) -> Option<(String, String)> {
-        self.get_loader(config).ok()?.default_bos_eos(config)
+        Self::get_loader(config).ok()?.default_bos_eos(config)
     }
 
     fn get_device_for_tensor(
@@ -450,24 +438,22 @@ impl MultimodalModelLoader for AutoMultimodalLoader {
         mapper: &dyn DeviceMapper,
         loading_isq: bool,
     ) -> Result<Arc<dyn Fn(String) -> DeviceForLoadTensor + Send + Sync + 'static>> {
-        self.get_loader(config)?
-            .get_device_for_tensor(config, mapper, loading_isq)
+        Self::get_loader(config)?.get_device_for_tensor(config, mapper, loading_isq)
     }
 }
 
 impl IsqModelLoader for AutoMultimodalLoader {
     fn isq_layer_regexes(&self, config: &str) -> Result<Vec<Regex>> {
-        self.get_loader(config)?.isq_layer_regexes(config)
+        Self::get_loader(config)?.isq_layer_regexes(config)
     }
     fn immediate_isq_predicates(&self, config: &str) -> Result<Vec<Regex>> {
-        self.get_loader(config)?.immediate_isq_predicates(config)
+        Self::get_loader(config)?.immediate_isq_predicates(config)
     }
     fn isq_layer_regexes_moqe(&self, config: &str) -> Result<Vec<Regex>> {
-        self.get_loader(config)?.isq_layer_regexes_moqe(config)
+        Self::get_loader(config)?.isq_layer_regexes_moqe(config)
     }
     fn immediate_isq_predicates_moqe(&self, config: &str) -> Result<Vec<Regex>> {
-        self.get_loader(config)?
-            .immediate_isq_predicates_moqe(config)
+        Self::get_loader(config)?.immediate_isq_predicates_moqe(config)
     }
 }
 
@@ -477,16 +463,14 @@ impl DeviceMappedModelLoader for AutoMultimodalLoader {
         config: &str,
         params: &AutoDeviceMapParams,
     ) -> Result<usize> {
-        self.get_loader(config)?
-            .mapped_max_act_size_elems(config, params)
+        Self::get_loader(config)?.mapped_max_act_size_elems(config, params)
     }
     fn non_mapped_max_act_size_elems(
         &self,
         config: &str,
         params: &AutoDeviceMapParams,
     ) -> Result<usize> {
-        self.get_loader(config)?
-            .non_mapped_max_act_size_elems(config, params)
+        Self::get_loader(config)?.non_mapped_max_act_size_elems(config, params)
     }
     fn non_mapped_size_in_bytes(
         &self,
@@ -495,7 +479,7 @@ impl DeviceMappedModelLoader for AutoMultimodalLoader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        self.get_loader(config)?.non_mapped_size_in_bytes(
+        Self::get_loader(config)?.non_mapped_size_in_bytes(
             config,
             dtype,
             weight_pack_factor,
@@ -509,7 +493,7 @@ impl DeviceMappedModelLoader for AutoMultimodalLoader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        self.get_loader(config)?.layer_sizes_in_bytes(
+        Self::get_loader(config)?.layer_sizes_in_bytes(
             config,
             dtype,
             weight_pack_factor,
@@ -517,10 +501,10 @@ impl DeviceMappedModelLoader for AutoMultimodalLoader {
         )
     }
     fn num_layers(&self, config: &str) -> Result<usize> {
-        self.get_loader(config)?.num_layers(config)
+        Self::get_loader(config)?.num_layers(config)
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        self.get_loader(config)?.model_config(config)
+        Self::get_loader(config)?.model_config(config)
     }
 }
 
@@ -5420,7 +5404,7 @@ impl DeviceMappedModelLoader for Gemma3nLoader {
 
             // Audio multimodal embedder (embed_audio)
             let embed_audio_elems = {
-                // Embedding layer (VocabEmbedding backed by TensorVocabStore - NOT quantizable)
+                // Embedding layer (ScaledEmbedding - NOT quantizable)
                 let embedding = audio_cfg.vocab_size * audio_cfg.hidden_size;
 
                 // RMS norms (NOT quantizable)
@@ -6321,18 +6305,7 @@ impl DeviceMappedModelLoader for Qwen3VLMoELoader {
 /// [`MultimodalLoader`] for a Qwen3.5 dense (hybrid GDN + full attention) model.
 ///
 /// [`MultimodalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.MultimodalLoader.html
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Qwen3_5Loader {
-    disabled_modalities: DisabledModalities,
-}
-
-impl Qwen3_5Loader {
-    pub fn new(disabled_modalities: DisabledModalities) -> Self {
-        Self {
-            disabled_modalities,
-        }
-    }
-}
+pub struct Qwen3_5Loader;
 
 pub struct Qwen3_5Prefixer;
 
@@ -6354,7 +6327,6 @@ impl MultimodalModelLoader for Qwen3_5Loader {
             &cfg,
             vb,
             self.is_gptx(config),
-            self.disabled_modalities,
             normal_loading_metadata,
             attention_mechanism,
         )?))
@@ -6435,15 +6407,7 @@ impl DeviceMappedModelLoader for Qwen3_5Loader {
         let cfg: Qwen3_5Config = serde_json::from_str(config)?;
 
         let img_seq_len = {
-            let Some(cfg) = cfg
-                .vision_config
-                .as_ref()
-                .filter(|_| !self.disabled_modalities.vision)
-            else {
-                let cfg = &cfg.text_config;
-                let max_seq_len = max_seq_len.min(&ATTENTION_CHUNK_SIZE);
-                return Ok(max_batch_size * cfg.num_attention_heads * max_seq_len * max_seq_len);
-            };
+            let cfg = &cfg.vision_config;
             let grid_t = 1;
             let grid_h = (max_image_shape.0 / cfg.patch_size) / cfg.spatial_merge_size;
             let grid_w = (max_image_shape.1 / cfg.patch_size) / cfg.spatial_merge_size;
@@ -6477,13 +6441,7 @@ impl DeviceMappedModelLoader for Qwen3_5Loader {
         let cfg: Qwen3_5Config = serde_json::from_str(config)?;
 
         let img_seq_len = {
-            let Some(cfg) = cfg
-                .vision_config
-                .as_ref()
-                .filter(|_| !self.disabled_modalities.vision)
-            else {
-                return Ok(0);
-            };
+            let cfg = &cfg.vision_config;
             let grid_t = 1;
             let grid_h = max_image_shape.0 / cfg.patch_size;
             let grid_w = max_image_shape.1 / cfg.patch_size;
@@ -6491,7 +6449,7 @@ impl DeviceMappedModelLoader for Qwen3_5Loader {
         };
 
         let max_vision_attn = {
-            let cfg = cfg.vision_config.as_ref().unwrap();
+            let cfg = &cfg.vision_config;
             (max_batch_size * max_num_images) * cfg.num_heads * img_seq_len * img_seq_len
         };
 
@@ -6519,16 +6477,8 @@ impl DeviceMappedModelLoader for Qwen3_5Loader {
             embed_tokens + lm_head + norm
         };
 
-        let Some(vision_cfg) = cfg
-            .vision_config
-            .as_ref()
-            .filter(|_| !self.disabled_modalities.vision)
-        else {
-            return Ok(text_elems * dtype.size_in_bytes());
-        };
-
         let (patch_merger, deepstack_mergers) = {
-            let cfg = vision_cfg;
+            let cfg = &cfg.vision_config;
             let hidden_size = cfg.hidden_size * cfg.spatial_merge_size.pow(2);
 
             let mlp0 = hidden_size * hidden_size + hidden_size;
@@ -6545,7 +6495,7 @@ impl DeviceMappedModelLoader for Qwen3_5Loader {
         };
 
         let patch_embed = {
-            let cfg = vision_cfg;
+            let cfg = &cfg.vision_config;
             let conv_cfg = Conv3dConfig {
                 stride: cfg.patch_size,
                 ..Default::default()
@@ -6560,12 +6510,12 @@ impl DeviceMappedModelLoader for Qwen3_5Loader {
         };
 
         let pos_embed = {
-            let cfg = vision_cfg;
+            let cfg = &cfg.vision_config;
             cfg.num_position_embeddings * cfg.hidden_size
         };
 
         let encoder_layer = {
-            let cfg = vision_cfg;
+            let cfg = &cfg.vision_config;
             let norm1 = cfg.hidden_size + bias_if!(true, cfg.hidden_size);
             let norm2 = cfg.hidden_size + bias_if!(true, cfg.hidden_size);
 
@@ -6583,7 +6533,7 @@ impl DeviceMappedModelLoader for Qwen3_5Loader {
             + deepstack_mergers
             + patch_embed
             + pos_embed
-            + encoder_layer * vision_cfg.depth;
+            + encoder_layer * cfg.vision_config.depth;
 
         Ok(elems * dtype.size_in_bytes())
     }
@@ -6681,7 +6631,7 @@ impl DeviceMappedModelLoader for Qwen3_5Loader {
     }
 
     fn non_mapped_sub_models(&self) -> Option<Vec<NonMappedSubModel>> {
-        (!self.disabled_modalities.vision).then_some(vec![NonMappedSubModel::Vision])
+        Some(vec![NonMappedSubModel::Vision])
     }
 }
 
@@ -6690,22 +6640,7 @@ impl DeviceMappedModelLoader for Qwen3_5Loader {
 /// [`MultimodalLoader`] for a Qwen3.5 MoE (hybrid GDN + full attention) model.
 ///
 /// [`MultimodalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.MultimodalLoader.html
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Qwen3_5MoeLoader {
-    disabled_modalities: DisabledModalities,
-}
-
-impl Qwen3_5MoeLoader {
-    pub fn new(disabled_modalities: DisabledModalities) -> Self {
-        Self {
-            disabled_modalities,
-        }
-    }
-}
-
-fn qwen35_cpu_moe_enabled() -> bool {
-    crate::topology::qwen35_cpu_moe_enabled()
-}
+pub struct Qwen3_5MoeLoader;
 
 pub struct Qwen3_5MoePrefixer;
 
@@ -6727,7 +6662,6 @@ impl MultimodalModelLoader for Qwen3_5MoeLoader {
             &cfg,
             vb,
             self.is_gptx(config),
-            self.disabled_modalities,
             normal_loading_metadata,
             attention_mechanism,
         )?))
@@ -6852,15 +6786,7 @@ impl DeviceMappedModelLoader for Qwen3_5MoeLoader {
         let cfg: Qwen3_5MoeConfig = serde_json::from_str(config)?;
 
         let img_seq_len = {
-            let Some(cfg) = cfg
-                .vision_config
-                .as_ref()
-                .filter(|_| !self.disabled_modalities.vision)
-            else {
-                let cfg = &cfg.text_config;
-                let max_seq_len = max_seq_len.min(&ATTENTION_CHUNK_SIZE);
-                return Ok(max_batch_size * cfg.num_attention_heads * max_seq_len * max_seq_len);
-            };
+            let cfg = &cfg.vision_config;
             let grid_t = 1;
             let grid_h = (max_image_shape.0 / cfg.patch_size) / cfg.spatial_merge_size;
             let grid_w = (max_image_shape.1 / cfg.patch_size) / cfg.spatial_merge_size;
@@ -6894,13 +6820,7 @@ impl DeviceMappedModelLoader for Qwen3_5MoeLoader {
         let cfg: Qwen3_5MoeConfig = serde_json::from_str(config)?;
 
         let img_seq_len = {
-            let Some(cfg) = cfg
-                .vision_config
-                .as_ref()
-                .filter(|_| !self.disabled_modalities.vision)
-            else {
-                return Ok(0);
-            };
+            let cfg = &cfg.vision_config;
             let grid_t = 1;
             let grid_h = max_image_shape.0 / cfg.patch_size;
             let grid_w = max_image_shape.1 / cfg.patch_size;
@@ -6908,7 +6828,7 @@ impl DeviceMappedModelLoader for Qwen3_5MoeLoader {
         };
 
         let max_vision_attn = {
-            let cfg = cfg.vision_config.as_ref().unwrap();
+            let cfg = &cfg.vision_config;
             (max_batch_size * max_num_images) * cfg.num_heads * img_seq_len * img_seq_len
         };
 
@@ -6936,16 +6856,8 @@ impl DeviceMappedModelLoader for Qwen3_5MoeLoader {
             embed_tokens + lm_head + norm
         };
 
-        let Some(vision_cfg) = cfg
-            .vision_config
-            .as_ref()
-            .filter(|_| !self.disabled_modalities.vision)
-        else {
-            return Ok(text_elems * dtype.size_in_bytes());
-        };
-
         let (patch_merger, deepstack_mergers) = {
-            let cfg = vision_cfg;
+            let cfg = &cfg.vision_config;
             let hidden_size = cfg.hidden_size * cfg.spatial_merge_size.pow(2);
 
             let mlp0 = hidden_size * hidden_size + hidden_size;
@@ -6962,7 +6874,7 @@ impl DeviceMappedModelLoader for Qwen3_5MoeLoader {
         };
 
         let patch_embed = {
-            let cfg = vision_cfg;
+            let cfg = &cfg.vision_config;
             let conv_cfg = Conv3dConfig {
                 stride: cfg.patch_size,
                 ..Default::default()
@@ -6977,12 +6889,12 @@ impl DeviceMappedModelLoader for Qwen3_5MoeLoader {
         };
 
         let pos_embed = {
-            let cfg = vision_cfg;
+            let cfg = &cfg.vision_config;
             cfg.num_position_embeddings * cfg.hidden_size
         };
 
         let encoder_layer = {
-            let cfg = vision_cfg;
+            let cfg = &cfg.vision_config;
             let norm1 = cfg.hidden_size + bias_if!(true, cfg.hidden_size);
             let norm2 = cfg.hidden_size + bias_if!(true, cfg.hidden_size);
 
@@ -7000,7 +6912,7 @@ impl DeviceMappedModelLoader for Qwen3_5MoeLoader {
             + deepstack_mergers
             + patch_embed
             + pos_embed
-            + encoder_layer * vision_cfg.depth;
+            + encoder_layer * cfg.vision_config.depth;
 
         Ok(elems * dtype.size_in_bytes())
     }
@@ -7015,7 +6927,6 @@ impl DeviceMappedModelLoader for Qwen3_5MoeLoader {
         let cfg: Qwen3_5MoeConfig = serde_json::from_str(config)?;
         let text_cfg = &cfg.text_config;
         let layer_types = text_cfg.layer_types();
-        let cpu_moe = qwen35_cpu_moe_enabled();
 
         let mut layer_sizes = Vec::with_capacity(text_cfg.num_hidden_layers);
 
@@ -7078,25 +6989,13 @@ impl DeviceMappedModelLoader for Qwen3_5MoeLoader {
                     gate_proj + up_proj + down_proj
                 };
                 let shared_expert_gate = text_cfg.hidden_size;
-                let routed_experts = if cpu_moe {
-                    0
-                } else {
-                    per_expert * text_cfg.num_experts
-                };
-                gate + routed_experts + shared_expert + shared_expert_gate
+                gate + per_expert * text_cfg.num_experts + shared_expert + shared_expert_gate
             };
 
             let per_layer_elems =
                 input_layernorm + post_attention_layernorm + attn_elems + moe_elems;
 
-            let mut per_layer_bytes = per_layer_elems * dtype.size_in_bytes();
-            if weight_pack_factor > 1 {
-                // UQFF/ISQ artifacts for Qwen3.5 MoE need extra temporary and allocator
-                // headroom while loading fused expert tensors. The raw packed weight
-                // estimate is otherwise too optimistic and can fill small GPUs to OOM.
-                per_layer_bytes = per_layer_bytes.saturating_mul(5) / 4;
-            }
-            layer_sizes.push(per_layer_bytes);
+            layer_sizes.push(per_layer_elems * dtype.size_in_bytes());
         }
 
         Ok(layer_sizes)
@@ -7127,7 +7026,7 @@ impl DeviceMappedModelLoader for Qwen3_5MoeLoader {
     }
 
     fn non_mapped_sub_models(&self) -> Option<Vec<NonMappedSubModel>> {
-        (!self.disabled_modalities.vision).then_some(vec![NonMappedSubModel::Vision])
+        Some(vec![NonMappedSubModel::Vision])
     }
 }
 
@@ -7367,26 +7266,7 @@ impl DeviceMappedModelLoader for VoxtralLoader {
 
 // ── Gemma4 ─────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Gemma4Loader {
-    disabled_modalities: DisabledModalities,
-}
-
-impl Gemma4Loader {
-    pub fn new(disabled_modalities: DisabledModalities) -> Self {
-        Self {
-            disabled_modalities,
-        }
-    }
-
-    fn supports_vision(self) -> bool {
-        !self.disabled_modalities.vision
-    }
-
-    fn supports_audio(self, cfg: &Gemma4Config) -> bool {
-        cfg.audio_config.is_some() && !self.disabled_modalities.audio
-    }
-}
+pub struct Gemma4Loader;
 
 #[allow(dead_code)]
 pub struct Gemma4Prefixer;
@@ -7413,7 +7293,6 @@ impl MultimodalModelLoader for Gemma4Loader {
             &cfg,
             vb,
             self.is_gptx(config),
-            self.disabled_modalities,
             normal_loading_metadata,
             attention_mechanism,
         )?))
@@ -7435,15 +7314,11 @@ impl MultimodalModelLoader for Gemma4Loader {
         let cfg: Gemma4Config = serde_json::from_str(config).expect("Failed to parse Gemma4Config");
         Arc::new(Gemma4Processor::new(
             processor_config.unwrap_or_default(),
-            cfg.vision_config.as_ref().map_or(14, |v| v.patch_size),
-            cfg.vision_config
-                .as_ref()
-                .map_or(2, |v| v.pooling_kernel_size),
-            cfg.vision_config
-                .as_ref()
-                .map_or(1024, |v| v.default_output_length),
-            self.supports_vision(),
-            self.supports_audio(&cfg),
+            cfg.vision_config.patch_size,
+            cfg.vision_config.pooling_kernel_size,
+            cfg.vision_config.default_output_length,
+            true,
+            cfg.audio_config.is_some(),
         ))
     }
     fn supports_paged_attention(&self, _config: &str) -> bool {
@@ -7457,12 +7332,12 @@ impl MultimodalModelLoader for Gemma4Loader {
     }
     fn modalities(&self, config: &str) -> Result<Modalities> {
         let cfg: Gemma4Config = serde_json::from_str(config)?;
-        let mut input = vec![SupportedModality::Text];
-        if self.supports_vision() {
-            input.push(SupportedModality::Vision);
-            input.push(SupportedModality::Video);
-        }
-        if self.supports_audio(&cfg) {
+        let mut input = vec![
+            SupportedModality::Text,
+            SupportedModality::Vision,
+            SupportedModality::Video,
+        ];
+        if cfg.audio_config.is_some() {
             input.push(SupportedModality::Audio);
         }
         Ok(Modalities {
@@ -7496,8 +7371,6 @@ impl IsqModelLoader for Gemma4Loader {
     fn immediate_isq_predicates(&self, _config: &str) -> Result<Vec<Regex>> {
         Ok(vec![
             Regex::new(r"lm_head\.(weight|bias)$")?,
-            Regex::new(r"model\.language_model\.embed_tokens\.weight$")?,
-            Regex::new(r"model\.language_model\.embed_tokens_per_layer\.weight$")?,
             Regex::new(r"model\.language_model\.layers\.(\d+)\.self_attn\.q_proj\.(weight|bias)$")?,
             Regex::new(r"model\.language_model\.layers\.(\d+)\.self_attn\.k_proj\.(weight|bias)$")?,
             Regex::new(r"model\.language_model\.layers\.(\d+)\.self_attn\.v_proj\.(weight|bias)$")?,
@@ -7539,12 +7412,8 @@ impl DeviceMappedModelLoader for Gemma4Loader {
         let cfg: Gemma4Config = serde_json::from_str(config)?;
         let tc = &cfg.text_config;
 
-        let vision_tokens_per_image = if self.supports_vision() {
-            cfg.vision_soft_tokens_per_image.unwrap_or(280)
-        } else {
-            0
-        };
-        let audio_tokens = if self.supports_audio(&cfg) { 750 } else { 0 };
+        let vision_tokens_per_image = cfg.vision_soft_tokens_per_image.unwrap_or(280);
+        let audio_tokens = if cfg.audio_config.is_some() { 750 } else { 0 };
         let total_seq_len = *max_seq_len + vision_tokens_per_image * max_num_images + audio_tokens;
         let max_text_attn = max_batch_size * tc.num_attention_heads * total_seq_len * total_seq_len;
 
@@ -7567,50 +7436,36 @@ impl DeviceMappedModelLoader for Gemma4Loader {
         };
 
         let cfg: Gemma4Config = serde_json::from_str(config)?;
+        let vc = &cfg.vision_config;
 
-        let (max_vision_attn, max_vision_hidden) = if self.supports_vision() {
-            cfg.vision_config.as_ref().map_or((0, 0), |vc| {
-                let max_patches =
-                    vc.default_output_length * vc.pooling_kernel_size * vc.pooling_kernel_size;
-                (
-                    max_batch_size
-                        * max_num_images
-                        * vc.num_attention_heads
-                        * max_patches
-                        * max_patches,
-                    max_batch_size
-                        * max_num_images
-                        * max_patches
-                        * vc.hidden_size.max(vc.intermediate_size),
-                )
-            })
-        } else {
-            (0, 0)
-        };
+        let max_patches =
+            vc.default_output_length * vc.pooling_kernel_size * vc.pooling_kernel_size;
+        let max_vision_attn =
+            max_batch_size * max_num_images * vc.num_attention_heads * max_patches * max_patches;
+        let max_vision_hidden = max_batch_size
+            * max_num_images
+            * max_patches
+            * vc.hidden_size.max(vc.intermediate_size);
 
-        let max_audio_activation = if self.supports_audio(&cfg) {
-            cfg.audio_config.as_ref().map_or(0, |audio_cfg| {
-                let subsample_factor: usize = audio_cfg
-                    .sscp_conv_stride_size
-                    .iter()
-                    .map(|stride| stride[0])
-                    .product();
-                let max_audio_frames = 750 * subsample_factor.max(1);
-                let audio_seq_after_subsample = max_audio_frames / subsample_factor.max(1);
+        let max_audio_activation = cfg.audio_config.as_ref().map_or(0, |audio_cfg| {
+            let subsample_factor: usize = audio_cfg
+                .sscp_conv_stride_size
+                .iter()
+                .map(|stride| stride[0])
+                .product();
+            let max_audio_frames = 750 * subsample_factor.max(1);
+            let audio_seq_after_subsample = max_audio_frames / subsample_factor.max(1);
 
-                let audio_encoder_act = audio_seq_after_subsample * (audio_cfg.hidden_size * 4);
-                let chunk_size = audio_cfg.conf_attention_chunk_size;
-                let context_size = chunk_size + audio_cfg.conf_attention_context_left - 1
-                    + audio_cfg.conf_attention_context_right;
-                let num_chunks = audio_seq_after_subsample.div_ceil(chunk_size);
-                let audio_attn_act =
-                    audio_cfg.conf_num_attention_heads * num_chunks * chunk_size * context_size;
+            let audio_encoder_act = audio_seq_after_subsample * (audio_cfg.hidden_size * 4);
+            let chunk_size = audio_cfg.conf_attention_chunk_size;
+            let context_size = chunk_size + audio_cfg.conf_attention_context_left - 1
+                + audio_cfg.conf_attention_context_right;
+            let num_chunks = audio_seq_after_subsample.div_ceil(chunk_size);
+            let audio_attn_act =
+                audio_cfg.conf_num_attention_heads * num_chunks * chunk_size * context_size;
 
-                max_batch_size * audio_encoder_act.max(audio_attn_act)
-            })
-        } else {
-            0
-        };
+            max_batch_size * audio_encoder_act.max(audio_attn_act)
+        });
 
         Ok(max_vision_attn
             .max(max_vision_hidden)
@@ -7626,6 +7481,7 @@ impl DeviceMappedModelLoader for Gemma4Loader {
     ) -> Result<usize> {
         let cfg: Gemma4Config = serde_json::from_str(config)?;
         let tc = &cfg.text_config;
+        let vc = &cfg.vision_config;
 
         let text_elems = {
             let embed_tokens = tc.hidden_size * tc.vocab_size;
@@ -7638,7 +7494,7 @@ impl DeviceMappedModelLoader for Gemma4Loader {
 
             let ple_dim = tc.hidden_size_per_layer_input.unwrap_or(0);
             let ple_vocab = tc.vocab_size_per_layer_input.unwrap_or(tc.vocab_size);
-            let embed_tokens_per_layer = if ple_dim > 0 && cfg!(feature = "metal") {
+            let embed_tokens_per_layer = if ple_dim > 0 {
                 ple_vocab * tc.num_hidden_layers * ple_dim
             } else {
                 0
@@ -7658,96 +7514,87 @@ impl DeviceMappedModelLoader for Gemma4Loader {
                 + per_layer_projection_norm
         };
 
-        let vision_elems = if self.supports_vision() {
-            cfg.vision_config.as_ref().map_or(0, |vc| {
-                let vision_layer_elems = {
-                    let quantized = vc.hidden_size * vc.num_attention_heads * vc.head_dim
-                        + 3 * (vc.hidden_size * vc.num_key_value_heads * vc.head_dim)
-                        + 2 * (vc.hidden_size * vc.intermediate_size)
-                        + vc.intermediate_size * vc.hidden_size;
-                    let norms = 2 * vc.head_dim + 4 * vc.hidden_size;
-                    // Gemma 4 UQFF only quantizes the language model today.
-                    // Vision and audio towers remain in `residual.safetensors`, so their
-                    // memory footprint must be estimated at full precision.
-                    quantized + norms
-                };
-                let patch_embed = vc.patch_size * vc.patch_size * 3 * vc.hidden_size;
-                let position_embedding_table = 2 * vc.position_embedding_size * vc.hidden_size;
-                let patch_embedder = patch_embed + position_embedding_table;
-                let encoder = vc.num_hidden_layers * vision_layer_elems;
-                let embed_vision = vc.hidden_size * tc.hidden_size;
+        let vision_layer_elems = {
+            let quantized = vc.hidden_size * vc.num_attention_heads * vc.head_dim
+                + 3 * (vc.hidden_size * vc.num_key_value_heads * vc.head_dim)
+                + 2 * (vc.hidden_size * vc.intermediate_size)
+                + vc.intermediate_size * vc.hidden_size;
+            let norms = 2 * vc.head_dim + 4 * vc.hidden_size;
+            quantized / weight_pack_factor + norms
+        };
+        let vision_elems = {
+            let patch_embed = vc.patch_size * vc.patch_size * 3 * vc.hidden_size;
+            let position_embedding_table = 2 * vc.position_embedding_size * vc.hidden_size;
+            let patch_embedder = patch_embed / weight_pack_factor + position_embedding_table;
+            let encoder = vc.num_hidden_layers * vision_layer_elems;
+            let embed_vision = vc.hidden_size * tc.hidden_size / weight_pack_factor;
 
-                patch_embedder + encoder + embed_vision
-            })
-        } else {
-            0
+            patch_embedder + encoder + embed_vision
         };
 
-        let audio_elems = if self.supports_audio(&cfg) {
-            cfg.audio_config.as_ref().map_or(0, |audio_cfg| {
-                let mut f_out = audio_cfg.input_feat_size;
-                for i in 0..2 {
-                    let kernel_w = audio_cfg.sscp_conv_kernel_size[i][1];
-                    let stride_w = audio_cfg.sscp_conv_stride_size[i][1];
-                    let pad_left = 1;
-                    let pad_right = 1;
-                    f_out = (f_out + pad_left + pad_right + stride_w - kernel_w) / stride_w;
-                }
+        let audio_elems = cfg.audio_config.as_ref().map_or(0, |audio_cfg| {
+            let mut f_out = audio_cfg.input_feat_size;
+            for i in 0..2 {
+                let kernel_w = audio_cfg.sscp_conv_kernel_size[i][1];
+                let stride_w = audio_cfg.sscp_conv_stride_size[i][1];
+                let pad_left = 1;
+                let pad_right = 1;
+                f_out = (f_out + pad_left + pad_right + stride_w - kernel_w) / stride_w;
+            }
 
-                let subsample_conv_projection = {
-                    let conv_0 = audio_cfg.sscp_conv_channel_size[0]
-                        * audio_cfg.sscp_conv_kernel_size[0][0]
-                        * audio_cfg.sscp_conv_kernel_size[0][1];
-                    let conv_1 = audio_cfg.sscp_conv_channel_size[0]
-                        * audio_cfg.sscp_conv_channel_size[1]
-                        * audio_cfg.sscp_conv_kernel_size[1][0]
-                        * audio_cfg.sscp_conv_kernel_size[1][1];
-                    let norms =
-                        audio_cfg.sscp_conv_channel_size[0] + audio_cfg.sscp_conv_channel_size[1];
-                    let input_proj =
-                        audio_cfg.sscp_conv_channel_size[1] * f_out * audio_cfg.hidden_size;
-                    conv_0 + conv_1 + norms + input_proj
-                };
+            let subsample_conv_projection = {
+                let conv_0 = audio_cfg.sscp_conv_channel_size[0]
+                    * audio_cfg.sscp_conv_kernel_size[0][0]
+                    * audio_cfg.sscp_conv_kernel_size[0][1];
+                let conv_1 = audio_cfg.sscp_conv_channel_size[0]
+                    * audio_cfg.sscp_conv_channel_size[1]
+                    * audio_cfg.sscp_conv_kernel_size[1][0]
+                    * audio_cfg.sscp_conv_kernel_size[1][1];
+                let norms =
+                    audio_cfg.sscp_conv_channel_size[0] + audio_cfg.sscp_conv_channel_size[1];
+                let input_proj =
+                    audio_cfg.sscp_conv_channel_size[1] * f_out * audio_cfg.hidden_size
+                        / weight_pack_factor;
+                conv_0 + conv_1 + norms + input_proj
+            };
 
-                let conformer_block = {
-                    let attention = 5 * (audio_cfg.hidden_size * audio_cfg.hidden_size)
-                        + 2 * audio_cfg.hidden_size
-                        + audio_cfg.hidden_size / audio_cfg.conf_num_attention_heads
-                        + audio_cfg.hidden_size / 2
-                        + (audio_cfg.conf_attention_context_left
-                            + audio_cfg.conf_attention_context_right
-                            + 1)
-                        + (audio_cfg.conf_attention_chunk_size
-                            * (audio_cfg.conf_attention_chunk_size
-                                + audio_cfg.conf_attention_context_left
-                                - 1
-                                + audio_cfg.conf_attention_context_right))
-                        + 1;
-                    let ffw = 2
-                        * (2 * audio_cfg.hidden_size
-                            + 2 * (audio_cfg.hidden_size * (audio_cfg.hidden_size * 4)));
-                    let conv = 2 * audio_cfg.hidden_size
-                        + audio_cfg.hidden_size * (audio_cfg.hidden_size * 2)
-                        + audio_cfg.hidden_size * audio_cfg.hidden_size
-                        + audio_cfg.hidden_size * audio_cfg.conf_conv_kernel_size;
-                    attention + ffw + conv + audio_cfg.hidden_size
-                };
+            let conformer_block = {
+                let attention = 5 * (audio_cfg.hidden_size * audio_cfg.hidden_size)
+                    / weight_pack_factor
+                    + 2 * audio_cfg.hidden_size
+                    + audio_cfg.hidden_size / audio_cfg.conf_num_attention_heads
+                    + audio_cfg.hidden_size / 2
+                    + (audio_cfg.conf_attention_context_left
+                        + audio_cfg.conf_attention_context_right
+                        + 1)
+                    + (audio_cfg.conf_attention_chunk_size
+                        * (audio_cfg.conf_attention_chunk_size
+                            + audio_cfg.conf_attention_context_left
+                            - 1
+                            + audio_cfg.conf_attention_context_right))
+                    + 1;
+                let ffw = 2
+                    * (2 * audio_cfg.hidden_size
+                        + 2 * (audio_cfg.hidden_size * (audio_cfg.hidden_size * 4))
+                            / weight_pack_factor);
+                let conv = 2 * audio_cfg.hidden_size
+                    + audio_cfg.hidden_size * (audio_cfg.hidden_size * 2) / weight_pack_factor
+                    + audio_cfg.hidden_size * audio_cfg.hidden_size / weight_pack_factor
+                    + audio_cfg.hidden_size * audio_cfg.conf_conv_kernel_size;
+                attention + ffw + conv + audio_cfg.hidden_size
+            };
 
-                let output_proj = audio_cfg.output_proj_dims.map_or(0, |output_dim| {
-                    audio_cfg.hidden_size * output_dim + output_dim
-                });
-                let audio_embed_hidden =
-                    audio_cfg.output_proj_dims.unwrap_or(audio_cfg.hidden_size);
-                let embed_audio = audio_embed_hidden * tc.hidden_size;
+            let output_proj = audio_cfg.output_proj_dims.map_or(0, |output_dim| {
+                audio_cfg.hidden_size * output_dim / weight_pack_factor + output_dim
+            });
+            let audio_embed_hidden = audio_cfg.output_proj_dims.unwrap_or(audio_cfg.hidden_size);
+            let embed_audio = audio_embed_hidden * tc.hidden_size / weight_pack_factor;
 
-                subsample_conv_projection
-                    + audio_cfg.conf_num_hidden_layers * conformer_block
-                    + output_proj
-                    + embed_audio
-            })
-        } else {
-            0
-        };
+            subsample_conv_projection
+                + audio_cfg.conf_num_hidden_layers * conformer_block
+                + output_proj
+                + embed_audio
+        });
 
         let vision_dtype = if dtype == DType::F16 {
             DType::F32
@@ -7800,7 +7647,7 @@ impl DeviceMappedModelLoader for Gemma4Loader {
 
                 let moe = if tc.enable_moe_block {
                     let ne = tc.num_experts.unwrap_or(0);
-                    let ei = tc.expert_intermediate_size.unwrap_or(0);
+                    let ei = tc.expert_intermediate_size().unwrap_or(0);
                     ne * tc.hidden_size * ei * 2
                         + ne * ei * tc.hidden_size
                         + ne
@@ -7832,31 +7679,25 @@ impl DeviceMappedModelLoader for Gemma4Loader {
     }
 
     fn non_mapped_sub_models(&self) -> Option<Vec<NonMappedSubModel>> {
-        let mut models = Vec::new();
-        if self.supports_vision() {
-            models.push(NonMappedSubModel::Vision);
-        }
-        if !self.disabled_modalities.audio {
-            models.push(NonMappedSubModel::Audio);
-        }
-        Some(models)
+        Some(vec![NonMappedSubModel::Vision, NonMappedSubModel::Audio])
     }
 
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         let cfg: Gemma4Config = serde_json::from_str(config)?;
         let tc = &cfg.text_config;
-        let res = ModelConfigMetadata {
+
+        let cfg = ModelConfigMetadata {
             max_seq_len: tc.max_position_embeddings,
             num_layers: tc.num_hidden_layers,
             hidden_size: tc.hidden_size,
             num_kv_heads: tc.num_key_value_heads,
             num_attn_heads: tc.num_attention_heads,
-            sliding_window: Some(tc.sliding_window_pattern),
+            sliding_window: Some(tc.sliding_window),
             k_head_dim: tc.global_head_dim,
             v_head_dim: tc.global_head_dim,
             kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
         };
 
-        Ok(Box::new(res))
+        Ok(Box::new(cfg))
     }
 }

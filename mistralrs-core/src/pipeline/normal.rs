@@ -23,7 +23,7 @@ use crate::kv_cache::{FullCacheManager, HybridCacheManager, NormalCacheManager};
 use crate::lora::Ordering;
 use crate::paged_attention::{calculate_cache_config, AttentionImplementation, CacheEngine};
 use crate::pipeline::chat_template::{calculate_eos_tokens, GenerationConfig};
-use crate::pipeline::isq::UqffFullSer;
+use crate::pipeline::isq::{UqffFullSer, WeightLoadingMode, WeightLoadingState};
 use crate::pipeline::loaders::auto_device_map;
 use crate::pipeline::loaders::QuantizationConfigShim;
 use crate::pipeline::sampling::sample_and_add_toks;
@@ -64,7 +64,7 @@ use std::time::Instant;
 use std::{env, fs};
 use tokenizers::Tokenizer;
 use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tracing::{debug, info, trace, warn};
 
 pub struct NormalPipeline {
     model: Box<dyn NormalModel + Send + Sync>,
@@ -328,7 +328,7 @@ impl Loader for NormalLoader {
             paged_attn_config = None;
         }
 
-        info!("Prompt chunk size is {ATTENTION_CHUNK_SIZE}.");
+        debug!("Prompt chunk size is {ATTENTION_CHUNK_SIZE}.");
 
         let use_nccl = mistralrs_quant::distributed::use_nccl();
 
@@ -396,9 +396,6 @@ impl Loader for NormalLoader {
                                 }
                                 QuantizedSerdeType::F8Q8 => IsqType::F8Q8.pack_factor(dtype),
                                 QuantizedSerdeType::Mxfp4 => IsqType::MXFP4.pack_factor(dtype),
-                                QuantizedSerdeType::Vocab => {
-                                    anyhow::bail!("Vocab artifact type is not supported in normal pipeline packing")
-                                }
                             };
                             total_pack_factors += pack_factor;
                         }
@@ -510,7 +507,7 @@ impl Loader for NormalLoader {
             paged_attn_config = None;
         }
 
-        info!("Model config: {:?}", self.inner.get_config_repr(&config)?);
+        trace!("Model config: {:?}", self.inner.get_config_repr(&config)?);
         if crate::using_flash_attn() {
             once_log_info("FlashAttention is enabled.");
         }
@@ -540,9 +537,7 @@ impl Loader for NormalLoader {
             .as_ref()
             .is_some_and(|topology| topology.requires_post_quantization());
 
-        let writing_uqff = self.config.write_uqff.is_some();
-        let allow_immediate_cli = !writing_uqff
-            && self.config.imatrix.is_none()
+        let allow_immediate_cli = self.config.imatrix.is_none()
             && self.config.calibration_file.is_none()
             && in_situ_quant.is_some();
 
@@ -560,13 +555,9 @@ impl Loader for NormalLoader {
             if immediate_predicates.is_empty() {
                 warn!("No predicates for this model and ISQ setting detected. ISQ will not be applied to any weights!");
             }
-        } else if writing_uqff && in_situ_quant.is_some() {
-            info!(
-                "Deferring ISQ until after model load for UQFF generation to reduce peak memory."
-            );
         }
 
-        let use_immediate = !writing_uqff && (allow_immediate_cli || has_override_isq);
+        let use_immediate = allow_immediate_cli || has_override_isq;
         if use_immediate {
             let (pool, num_threads) = mistralrs_quant::create_isq_thread_pool(immediate_ty);
             info!("Applying immediate ISQ in parallel on {num_threads} threads.");
@@ -642,6 +633,17 @@ impl Loader for NormalLoader {
         } else {
             None
         };
+
+        info!(
+            "{}",
+            WeightLoadingMode::from(WeightLoadingState {
+                from_uqff: self.config.from_uqff.is_some(),
+                loading_isq,
+                immediate_isq: use_immediate,
+                write_uqff: self.config.write_uqff.is_some(),
+            })
+            .message("model")
+        );
 
         let mut model = if use_nccl || cfg!(feature = "ring") {
             let (mapper, sharded_vb) = distributed::prepare_distributed_mapper(
@@ -895,9 +897,9 @@ impl Loader for NormalLoader {
             };
 
             if should_quantize_pass {
-                info!("Applying ISQ to all ranks.");
+                debug!("Applying ISQ to all ranks.");
             } else {
-                info!("Serializing existing ISQ tensors without additional quantization.");
+                debug!("Serializing existing ISQ tensors without additional quantization.");
             }
 
             let multi_progress = Arc::new(new_multi_progress());
@@ -916,7 +918,6 @@ impl Loader for NormalLoader {
                     template_filename: paths.get_template_filename(),
                     generation_config: paths.get_gen_conf_filename(),
                     config: config.clone(),
-                    config_filename: "config.json",
                     processor_filename: &None,
                     preprocessor_filename: &None,
                     modules: None,
@@ -1075,7 +1076,6 @@ impl IsqPipelineMixin for NormalPipeline {
                 template_filename: &self.template_filename,
                 generation_config: self.generation_config.as_ref(),
                 config: self.config.clone(),
-                config_filename: "config.json",
                 processor_filename: &None,
                 preprocessor_filename: &None,
                 modules: None,
@@ -1394,10 +1394,10 @@ impl AnyMoePipelineMixin for NormalPipeline {
             ));
 
             let mut filenames = vec![];
-            for rfilename in
-                api_dir_list!(api, model_id, true).filter(|x| x.ends_with(".safetensors"))
+            for rfilename in api_dir_list!(api, model_id, true, &revision)
+                .filter(|x| x.ends_with(".safetensors"))
             {
-                filenames.push(api_get_file!(api, &rfilename, model_id));
+                filenames.push(api_get_file!(api, &rfilename, model_id, &revision));
             }
 
             let regex = regex.clone();
@@ -1452,10 +1452,10 @@ impl AnyMoePipelineMixin for NormalPipeline {
             ));
 
             let mut gate_filenames = vec![];
-            for rfilename in
-                api_dir_list!(api, model_id, true).filter(|x| x.ends_with(".safetensors"))
+            for rfilename in api_dir_list!(api, model_id, true, &revision)
+                .filter(|x| x.ends_with(".safetensors"))
             {
-                gate_filenames.push(api_get_file!(api, &rfilename, model_id));
+                gate_filenames.push(api_get_file!(api, &rfilename, model_id, &revision));
             }
             assert_eq!(
                 gate_filenames.len(),

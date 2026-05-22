@@ -541,13 +541,8 @@ impl HybridCache {
         for cache in &self.caches {
             if let HybridLayerCache::Recurrent(pool) = cache {
                 let idx_tensor = Tensor::from_vec(vec![slot_idx as u32], (1,), pool.device())?;
-                // Prefix snapshots can accumulate across block hashes; keep them off VRAM.
-                let conv = pool
-                    .gather_conv_state(&idx_tensor)?
-                    .to_device(&Device::Cpu)?;
-                let recurrent = pool
-                    .gather_recurrent_state(&idx_tensor)?
-                    .to_device(&Device::Cpu)?;
+                let conv = pool.gather_conv_state(&idx_tensor)?;
+                let recurrent = pool.gather_recurrent_state(&idx_tensor)?;
                 snapshots.push(RecurrentStateSnapshot {
                     conv_state: conv,
                     recurrent_state: recurrent,

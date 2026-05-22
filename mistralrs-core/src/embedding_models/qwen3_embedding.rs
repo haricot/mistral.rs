@@ -1,6 +1,7 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 /// Mistral LLM, https://github.com/mistralai/mistral-src
+use crate::layers_masker::CausalMaskConfig;
 use candle_core::{Device, Module, Result, Tensor};
 use mistralrs_quant::{
     ColumnParallelLayer, QuantMethod, QuantizedConfig, RowParallelLayer, ShardedVarBuilder,
@@ -10,9 +11,9 @@ use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     amoe::{AnyMoeBaseModelMixin, MlpLayer},
-    attention::SdpaParams,
-    device_map::DeviceMapper,
-    layers::{embedding, Activation, CausalMasker, MatMul, Mlp, RmsNorm, RotaryEmbedding, Sdpa},
+    attention::{AttentionMask, SdpaParams},
+    device_map::{DeviceMappedMask, DeviceMapper},
+    layers::{embedding, Activation, CausalMasker, Mlp, RmsNorm, RotaryEmbedding, Sdpa},
     layers_masker::NotACache,
     paged_attention::{AttentionImplementation, ModelConfigMetadata},
     pipeline::{
@@ -173,26 +174,15 @@ impl Attention {
     fn forward(
         &self,
         xs: &Tensor,
-        attention_mask: &Tensor,
+        attention_mask: &AttentionMask,
         seqlen_offsets: &[usize],
         flash_params: &FlashParams,
     ) -> Result<Tensor> {
         let (b_sz, q_len, _) = xs.dims3()?;
 
-        let original_dtype = xs.dtype();
-        let mut xs = xs.clone();
-        if let Some(t) = self.q_proj.quantized_act_type() {
-            xs = xs.to_dtype(t)?;
-        }
-        let mut q = MatMul.qmethod_matmul(&xs, &*self.q_proj)?;
-        let mut k = MatMul.qmethod_matmul(&xs, &*self.k_proj)?;
-        let mut v = MatMul.qmethod_matmul(&xs, &*self.v_proj)?;
-        if self.q_proj.quantized_act_type().is_some() {
-            q = q.to_dtype(original_dtype)?;
-            k = k.to_dtype(original_dtype)?;
-            v = v.to_dtype(original_dtype)?;
-        }
-
+        let mut q = self.q_proj.forward(xs)?;
+        let mut k = self.k_proj.forward(xs)?;
+        let mut v = self.v_proj.forward(xs)?;
         q = q
             .reshape((b_sz, q_len, self.num_heads, self.head_dim))?
             .transpose(1, 2)?;
@@ -212,19 +202,13 @@ impl Attention {
             &q,
             &k,
             &v,
-            Some(attention_mask),
+            attention_mask,
             Some(flash_params),
             &self.sdpa_params,
         )?;
 
-        if let Some(t) = self.q_proj.quantized_act_type() {
-            attn_output = attn_output.to_dtype(t)?;
-        }
         attn_output = attn_output.transpose(1, 2)?.reshape((b_sz, q_len, ()))?;
-        let mut res = MatMul.qmethod_matmul(&attn_output, &*self.o_proj)?;
-        if self.q_proj.quantized_act_type().is_some() {
-            res = res.to_dtype(original_dtype)?;
-        }
+        let res = self.o_proj.forward(&attn_output)?;
         Ok(res)
     }
 }
@@ -286,7 +270,7 @@ impl DecoderLayer {
     fn forward(
         &self,
         xs: &Tensor,
-        attention_mask: &Tensor,
+        attention_mask: &AttentionMask,
         seqlen_offsets: &[usize],
         flash_params: &FlashParams,
     ) -> Result<Tensor> {
@@ -311,6 +295,7 @@ pub struct Model {
     sliding_window: Option<usize>,
     device: Device,
     mapper: Box<dyn DeviceMapper + Send + Sync>,
+    #[allow(dead_code)]
     cfg: ModelConfigMetadata,
 }
 
@@ -450,22 +435,22 @@ impl Model {
         let (bs, _seqlen) = input_ids.dims2()?;
         let seqlen_offsets = vec![0; bs];
 
-        let attention_mask = CausalMasker.make_sliding_window_causal_mask_matrix(
+        let attention_mask = CausalMasker.make_causal_mask(
             input_ids,
             &NotACache,
-            self.sliding_window,
             xs.dtype(),
-            self.cfg.num_attn_heads,
+            &CausalMaskConfig {
+                sliding_window: self.sliding_window,
+                ..Default::default()
+            },
         )?;
-        let Some(attention_mask) = attention_mask else {
-            unreachable!()
-        };
+        let attention_mask = DeviceMappedMask::new(attention_mask, &*self.mapper)?;
 
         for (i, layer) in self.layers.iter().enumerate() {
             xs = self.mapper.map(xs, i)?;
             xs = layer.forward(
                 &xs,
-                &attention_mask.to_device(xs.device())?,
+                &attention_mask.get(xs.device()),
                 &seqlen_offsets,
                 flash_params,
             )?;

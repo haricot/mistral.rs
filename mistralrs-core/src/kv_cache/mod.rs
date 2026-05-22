@@ -1,3 +1,4 @@
+use crate::attention::AttentionMask;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use candle_core::{Result, Tensor, D};
@@ -89,6 +90,30 @@ impl KvCache {
         match self {
             Self::Normal { v, .. } => v.current_data(),
             Self::Rotating { v, .. } => v.current_data(),
+            Self::Shared { .. } => Ok(None),
+        }
+    }
+
+    /// Return the K tensor from the last `append()` call.
+    ///
+    /// For Normal caches this is identical to `k()`. For Rotating caches it
+    /// returns the full (retained + new) tensor that `append()` produced,
+    /// which during prefill may be larger than the internal sliding-window
+    /// buffer returned by `k()`.  Shared KV layers must use this instead of
+    /// `k()` so they see the same K/V the donor used for its own attention.
+    pub fn appended_k(&self) -> Result<Option<Tensor>> {
+        match self {
+            Self::Normal { k, .. } => k.current_data(),
+            Self::Rotating { k, .. } => Ok(k.last_append_result().cloned()),
+            Self::Shared { .. } => Ok(None),
+        }
+    }
+
+    /// Same as [`appended_k`](Self::appended_k) but for the V tensor.
+    pub fn appended_v(&self) -> Result<Option<Tensor>> {
+        match self {
+            Self::Normal { v, .. } => v.current_data(),
+            Self::Rotating { v, .. } => Ok(v.last_append_result().cloned()),
             Self::Shared { .. } => Ok(None),
         }
     }
@@ -520,6 +545,7 @@ impl<T: CacheManagerMixin + MetadataMixin + ?Sized> CacheManager<T> for NormalCa
                             current_seq_len: template_cache_csl,
                             max_seq_len: template_cache_msl,
                             capacity_seq_len: template_cache_capsl,
+                            last_append_result: None,
                         },
                         v: RotatingCache {
                             all_data: v_cache.map(|x| x.contiguous().unwrap()),
@@ -527,6 +553,7 @@ impl<T: CacheManagerMixin + MetadataMixin + ?Sized> CacheManager<T> for NormalCa
                             current_seq_len: template_cache_csl,
                             max_seq_len: template_cache_msl,
                             capacity_seq_len: template_cache_capsl,
+                            last_append_result: None,
                         },
                     });
                 }
@@ -615,6 +642,7 @@ impl<T: CacheManagerMixin + MetadataMixin + ?Sized> CacheManager<T> for NormalCa
                                 current_seq_len: cache_k.current_seq_len,
                                 max_seq_len: cache_k.max_seq_len,
                                 capacity_seq_len: cache_k.capacity_seq_len,
+                                last_append_result: None,
                             },
                             v: RotatingCache {
                                 all_data: Some(v),
@@ -622,6 +650,7 @@ impl<T: CacheManagerMixin + MetadataMixin + ?Sized> CacheManager<T> for NormalCa
                                 current_seq_len: cache_v.current_seq_len,
                                 max_seq_len: cache_v.max_seq_len,
                                 capacity_seq_len: cache_v.capacity_seq_len,
+                                last_append_result: None,
                             },
                         });
                     }
@@ -674,6 +703,7 @@ impl<T: CacheManagerMixin + MetadataMixin + ?Sized> CacheManager<T> for NormalCa
                             current_seq_len: 0,
                             max_seq_len: k.max_seq_len,
                             capacity_seq_len: k.capacity_seq_len,
+                            last_append_result: None,
                         },
                         v: RotatingCache {
                             all_data: None,
@@ -681,6 +711,7 @@ impl<T: CacheManagerMixin + MetadataMixin + ?Sized> CacheManager<T> for NormalCa
                             current_seq_len: 0,
                             max_seq_len: k.max_seq_len,
                             capacity_seq_len: k.capacity_seq_len,
+                            last_append_result: None,
                         },
                     };
                     continue;
@@ -838,13 +869,17 @@ impl Cache {
         cache: &mut Option<(Tensor, Tensor)>,
         k: Tensor,
         v: Tensor,
-        attention_mask: Option<&Tensor>,
+        attention_mask: &AttentionMask,
         sliding_window: Option<usize>,
     ) -> Result<(Tensor, Tensor, Option<Tensor>)> {
+        let mask_tensor = match attention_mask {
+            AttentionMask::Custom(t) => Some(t.clone()),
+            _ => None,
+        };
         let (k, v, attention_mask) = match cache.clone() {
-            None => (k, v, attention_mask.cloned()),
+            None => (k, v, mask_tensor),
             Some((mut prev_k, mut prev_v)) => {
-                let mut mask = attention_mask.cloned();
+                let mut mask = mask_tensor;
                 if let Some(sliding_window) = sliding_window {
                     let kv_seq_len = prev_k.dim(2)?;
                     if kv_seq_len > sliding_window {

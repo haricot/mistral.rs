@@ -9,9 +9,9 @@ use mistralrs_quant::MULTI_LORA_DELIMITER;
 use crate::{
     get_toml_selected_model_dtype,
     pipeline::{
-        AutoLoaderBuilder, DiffusionLoaderBuilder, DisabledModalities, GGMLLoaderBuilder,
-        GGMLSpecificConfig, GGUFLoaderBuilder, GGUFSpecificConfig, MultimodalLoaderBuilder,
-        MultimodalSpecificConfig, NormalLoaderBuilder, NormalSpecificConfig,
+        AutoLoaderBuilder, DiffusionLoaderBuilder, GGMLLoaderBuilder, GGMLSpecificConfig,
+        GGUFLoaderBuilder, GGUFSpecificConfig, MultimodalLoaderBuilder, MultimodalSpecificConfig,
+        NormalLoaderBuilder, NormalSpecificConfig,
     },
     toml_selector::get_toml_selected_model_device_map_params,
     AutoDeviceMapParams, EmbeddingLoaderBuilder, EmbeddingSpecificConfig, Loader, ModelDType,
@@ -283,8 +283,6 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
             imatrix,
             calibration_file,
             max_edge,
-            disable_vision,
-            disable_audio,
             max_seq_len: _,
             max_batch_size: _,
             max_num_images: _,
@@ -320,7 +318,6 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
                             .collect::<Vec<_>>()
                     }),
                     max_edge,
-                    disabled_modalities: DisabledModalities::new(disable_vision, disable_audio),
                     calibration_file,
                     imatrix,
                     hf_cache_path: hf_cache_path.clone(),
@@ -361,8 +358,6 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
             write_uqff,
             from_uqff,
             max_edge,
-            disable_vision,
-            disable_audio,
             calibration_file,
             max_seq_len: _,
             max_batch_size: _,
@@ -384,7 +379,6 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
                         .collect::<Vec<_>>()
                 }),
                 max_edge,
-                disabled_modalities: DisabledModalities::new(disable_vision, disable_audio),
                 calibration_file,
                 imatrix,
                 hf_cache_path,

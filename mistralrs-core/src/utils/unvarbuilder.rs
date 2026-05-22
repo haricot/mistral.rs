@@ -8,9 +8,7 @@ use candle_nn::{Conv2d, Embedding, LayerNorm, Linear};
 use itertools::Itertools;
 use mistralrs_quant::QuantMethod;
 
-use crate::layers::{
-    F32RmsNorm, GemmaRmsNorm, QLinear, RmsNorm, TensorVocabStore, VocabEmbedding, VocabStore,
-};
+use crate::layers::{F32RmsNorm, GemmaRmsNorm, QLinear, RmsNorm, ScaledEmbedding};
 
 pub trait ToTensors {
     /// Tensor names to tensors
@@ -23,29 +21,9 @@ impl ToTensors for Embedding {
     }
 }
 
-impl ToTensors for TensorVocabStore {
+impl ToTensors for ScaledEmbedding {
     fn to_tensors(&self) -> HashMap<String, Tensor> {
         HashMap::from_iter([("weight".to_string(), self.embeddings().clone())])
-    }
-}
-
-impl ToTensors for VocabEmbedding {
-    fn to_tensors(&self) -> HashMap<String, Tensor> {
-        self.dequantized_embeddings()
-            .ok()
-            .flatten()
-            .map(|embeddings| HashMap::from_iter([("weight".to_string(), embeddings)]))
-            .unwrap_or_default()
-    }
-}
-
-impl ToTensors for Box<dyn VocabStore> {
-    fn to_tensors(&self) -> HashMap<String, Tensor> {
-        self.dequantized_embeddings()
-            .ok()
-            .flatten()
-            .map(|embeddings| HashMap::from_iter([("weight".to_string(), embeddings)]))
-            .unwrap_or_default()
     }
 }
 

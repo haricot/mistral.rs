@@ -5,7 +5,7 @@ use serde::Deserialize;
 
 use crate::{
     amoe::AnyMoeConfig,
-    pipeline::{DisabledModalities, EmbeddingLoaderType, IsqOrganization},
+    pipeline::{EmbeddingLoaderType, IsqOrganization},
     AnyMoeLoader, AutoDeviceMapParams, EmbeddingLoaderBuilder, EmbeddingSpecificConfig,
     GGMLLoaderBuilder, GGMLSpecificConfig, GGUFLoaderBuilder, GGUFSpecificConfig, Loader,
     ModelDType, MultimodalLoaderBuilder, MultimodalLoaderType, MultimodalSpecificConfig,
@@ -951,7 +951,6 @@ fn loader_from_selected(
                         .collect::<Vec<_>>()
                 }),
                 max_edge,
-                disabled_modalities: DisabledModalities::default(),
                 calibration_file,
                 imatrix,
                 hf_cache_path,

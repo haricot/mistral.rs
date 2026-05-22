@@ -15,7 +15,7 @@ const UQFF_VERSION_MINOR: u32 = 2;
 const UQFF_VERSION_PATCH: u32 = 0;
 
 /// Format 4 bytes, little endian: [ UNSPECIFIED ] [ MAJOR ] [ MINOR ] [ PATCH ]
-pub const UQFF_VERSION: u32 =
+pub(crate) const UQFF_VERSION: u32 =
     (UQFF_VERSION_MAJOR << (8 * 2)) | (UQFF_VERSION_MINOR << 8) | UQFF_VERSION_PATCH;
 /// Offset for the quant type. UQFF always serializes the version first.
 pub const UQFF_QUANT_TYPE_OFFSET: usize = std::mem::size_of::<u32>();

@@ -135,7 +135,6 @@ pub async fn run_quantize(model_type: QuantizeModelType, global: GlobalOptions) 
             .with_cpu(cpu)
             .with_num_device_layers_optional(device_layers)
             .with_in_situ_quant(isq.to_string())
-            .with_dummy_run(false)
             .build()
             .await?;
 
@@ -266,7 +265,7 @@ base_model_relation: quantized
 
 # `{base_model}`, UQFF quantization
 
-Run with [mistral.rs](https://github.com/EricLBuehler/mistral.rs). Documentation: [UQFF docs](https://ericlbuehler.github.io/mistral.rs/UQFF.html).
+Run with [mistral.rs](https://github.com/EricLBuehler/mistral.rs). Documentation: [UQFF docs](https://ericlbuehler.github.io/mistral.rs/guides/perf/use-uqff/).
 
 1) **Flexible** 🌀: Multiple quantization formats in *one* file format with *one* framework to run them all.
 2) **Reliable** 🔒: Compatibility ensured with *embedded* and *checked* semantic versioning information from day 1.
@@ -275,7 +274,7 @@ Run with [mistral.rs](https://github.com/EricLBuehler/mistral.rs). Documentation
 
 ## Install
 
-Install [mistral.rs](https://github.com/EricLBuehler/mistral.rs) ([full guide](https://ericlbuehler.github.io/mistral.rs/INSTALLATION.html)):
+Install [mistral.rs](https://github.com/EricLBuehler/mistral.rs) ([full guide](https://ericlbuehler.github.io/mistral.rs/guides/install/)):
 
 **Linux/macOS:**
 ```
@@ -371,8 +370,6 @@ fn convert_to_model_selected(
             multimodal,
             ..
         } => {
-            let disable_vision = multimodal.text_only || multimodal.disable_vision;
-            let disable_audio = multimodal.text_only || multimodal.disable_audio;
             let model_selected = ModelSelected::Run {
                 model_id: model.model_id.clone(),
                 tokenizer_json: model
@@ -390,8 +387,6 @@ fn convert_to_model_selected(
                 imatrix: quantization.imatrix.clone(),
                 calibration_file: quantization.calibration_file.clone(),
                 max_edge: multimodal.max_edge,
-                disable_vision,
-                disable_audio,
                 max_seq_len: device.max_seq_len,
                 max_batch_size: device.max_batch_size,
                 max_num_images: multimodal.max_num_images,
@@ -443,8 +438,6 @@ fn convert_to_model_selected(
             multimodal,
             ..
         } => {
-            let disable_vision = multimodal.text_only || multimodal.disable_vision;
-            let disable_audio = multimodal.text_only || multimodal.disable_audio;
             let model_selected = ModelSelected::MultimodalPlain {
                 model_id: model.model_id.clone(),
                 tokenizer_json: model
@@ -460,8 +453,6 @@ fn convert_to_model_selected(
                 write_uqff: Some(output_path),
                 from_uqff: None,
                 max_edge: multimodal.max_edge,
-                disable_vision,
-                disable_audio,
                 calibration_file: quantization.calibration_file.clone(),
                 imatrix: quantization.imatrix.clone(),
                 max_seq_len: device.max_seq_len,

@@ -22,7 +22,22 @@ macro_rules! common_builder_methods {
             name: impl Into<String>,
             callback: Arc<ToolCallback>,
         ) -> Self {
-            self.tool_callbacks.insert(name.into(), callback);
+            let name = name.into();
+            self.tool_callbacks.insert(
+                name.clone(),
+                ToolCallbackWithTool {
+                    callback: ToolCallbackKind::Text(callback),
+                    tool: Tool {
+                        tp: ToolType::Function,
+                        function: Function {
+                            description: None,
+                            name,
+                            parameters: None,
+                            strict: None,
+                        },
+                    },
+                },
+            );
             self
         }
 
@@ -35,8 +50,13 @@ macro_rules! common_builder_methods {
             tool: Tool,
         ) -> Self {
             let name = name.into();
-            self.tool_callbacks_with_tools
-                .insert(name, ToolCallbackWithTool { callback, tool });
+            self.tool_callbacks.insert(
+                name,
+                ToolCallbackWithTool {
+                    callback: ToolCallbackKind::Text(callback),
+                    tool,
+                },
+            );
             self
         }
 

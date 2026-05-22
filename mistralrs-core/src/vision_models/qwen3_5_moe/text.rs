@@ -2,11 +2,7 @@
 
 use std::{
     collections::HashMap,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
-    },
-    time::Instant,
+    sync::{Arc, Mutex},
 };
 
 use candle_core::{DType, Device, Module, Result, Tensor, D};
@@ -18,7 +14,7 @@ use mistralrs_quant::{
 
 use super::config::{LayerType, TextConfig};
 use crate::{
-    attention::SdpaParams,
+    attention::{AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
     kv_cache::{
         HybridCache, HybridCacheConfig, HybridLayerCache, HybridLayerType, RecurrentLayerConfig,
@@ -30,7 +26,7 @@ use crate::{
     pipeline::{
         extract_logits,
         text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
-        EitherCache, IsqModel, KvCache, NormalLoadingMetadata, ISQ_CPU_DEVICE_SENTINEL,
+        EitherCache, IsqModel, KvCache, NormalLoadingMetadata,
     },
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
@@ -168,27 +164,16 @@ impl FullAttention {
     fn forward(
         &self,
         x: &Tensor,
-        attention_mask: Option<&Tensor>,
+        attention_mask: &AttentionMask,
         cos_sin: &(Tensor, Tensor),
         kv_cache: &mut KvCache,
         metadata: Option<((Tensor, Tensor), &PagedAttentionInputMetadata)>,
         flash_params: &FlashParams,
     ) -> Result<Tensor> {
         let (b_sz, seq_len, _) = x.dims3()?;
-        let original_dtype = x.dtype();
-        let mut x = x.clone();
-        if let Some(t) = self.q_proj.quantized_act_type() {
-            x = x.to_dtype(t)?;
-        }
-        let mut q_gate = mistralrs_quant::MatMul.qmethod_matmul(&x, &*self.q_proj)?;
-        let mut k = mistralrs_quant::MatMul.qmethod_matmul(&x, &*self.k_proj)?;
-        let mut v = mistralrs_quant::MatMul.qmethod_matmul(&x, &*self.v_proj)?;
-        if self.q_proj.quantized_act_type().is_some() {
-            q_gate = q_gate.to_dtype(original_dtype)?;
-            k = k.to_dtype(original_dtype)?;
-            v = v.to_dtype(original_dtype)?;
-        }
-
+        let q_gate = self.q_proj.forward(x)?;
+        let k = self.k_proj.forward(x)?;
+        let v = self.v_proj.forward(x)?;
         // Split q_gate into q and gate
         let q_gate = q_gate.reshape((b_sz, seq_len, self.num_heads, self.head_dim * 2))?;
         let q = q_gate.narrow(D::Minus1, 0, self.head_dim)?;
@@ -204,26 +189,17 @@ impl FullAttention {
             let v = v
                 .reshape((b_sz, seq_len, self.num_kv_heads, self.head_dim))?
                 .transpose(1, 2)?;
-            (q.contiguous()?, k.contiguous()?, v.contiguous()?)
+            (q, k, v)
         } else {
             let q = q.reshape((b_sz, self.num_heads, seq_len, self.head_dim))?;
             let k = k.reshape((b_sz, self.num_kv_heads, seq_len, self.head_dim))?;
             let v = v.reshape((b_sz, self.num_kv_heads, seq_len, self.head_dim))?;
-            (q.contiguous()?, k.contiguous()?, v.contiguous()?)
+            (q, k, v)
         };
 
         // Apply QK norm
         q = q.apply(&self.q_norm)?;
         k = k.apply(&self.k_norm)?;
-
-        let cos_sin = if cos_sin.0.device().location() != q.device().location() {
-            (
-                cos_sin.0.to_device(q.device())?,
-                cos_sin.1.to_device(q.device())?,
-            )
-        } else {
-            (cos_sin.0.clone(), cos_sin.1.clone())
-        };
 
         // Apply partial MRoPE: split into rotated and pass-through portions
         if self.rot_dim < self.head_dim {
@@ -232,20 +208,20 @@ impl FullAttention {
             let mut k_rot = k.narrow(D::Minus1, 0, self.rot_dim)?;
             let k_pass = k.narrow(D::Minus1, self.rot_dim, self.head_dim - self.rot_dim)?;
 
-            self.rotary_emb.forward(&cos_sin, &mut q_rot, &mut k_rot)?;
+            self.rotary_emb.forward(cos_sin, &mut q_rot, &mut k_rot)?;
             q = Tensor::cat(&[q_rot, q_pass], D::Minus1)?;
             k = Tensor::cat(&[k_rot, k_pass], D::Minus1)?;
         } else {
-            self.rotary_emb.forward(&cos_sin, &mut q, &mut k)?;
+            self.rotary_emb.forward(cos_sin, &mut q, &mut k)?;
         }
 
         // Standard attention
         let mut y = match &self.paged_attn {
             Some(paged_attn) => match metadata {
                 Some(((key_cache, value_cache), input_metadata)) => paged_attn.forward(
-                    &q.contiguous()?,
-                    &k.contiguous()?,
-                    &v.contiguous()?,
+                    &q,
+                    &k,
+                    &v,
                     attention_mask,
                     Some(key_cache),
                     Some(value_cache),
@@ -255,7 +231,7 @@ impl FullAttention {
                 )?,
                 None => {
                     let input_metadata = PagedAttentionInputMetadata::dummy(q.device())?;
-                    assert!(attention_mask.is_some());
+                    assert!(!matches!(attention_mask, AttentionMask::None));
                     paged_attn.forward(
                         &q,
                         &k,
@@ -272,9 +248,9 @@ impl FullAttention {
             None => {
                 let (cache_k, cache_v) = kv_cache.append(&k, &v)?;
                 Sdpa.run_attention(
-                    &q.contiguous()?,
-                    &cache_k.contiguous()?,
-                    &cache_v.contiguous()?,
+                    &q,
+                    &cache_k,
+                    &cache_v,
                     attention_mask,
                     Some(flash_params),
                     &self.sdpa_params,
@@ -282,10 +258,7 @@ impl FullAttention {
             }
         };
 
-        if let Some(t) = self.q_proj.quantized_act_type() {
-            y = y.to_dtype(t)?;
-        }
-        y = if attention_mask.is_some() {
+        y = if !matches!(attention_mask, AttentionMask::None) {
             y.transpose(1, 2)?.reshape((b_sz, seq_len, ()))?
         } else {
             y.reshape((b_sz, seq_len, ()))?
@@ -295,25 +268,12 @@ impl FullAttention {
         let gate = candle_nn::ops::sigmoid(&gate.to_dtype(y.dtype())?)?;
         y = y.broadcast_mul(&gate)?;
 
-        let mut res = mistralrs_quant::MatMul.qmethod_matmul(&y, &*self.o_proj)?;
-        if self.q_proj.quantized_act_type().is_some() {
-            res = res.to_dtype(original_dtype)?;
-        }
+        let res = self.o_proj.forward(&y)?;
         Ok(res)
     }
 }
 
 // ====================== MoE ======================
-
-fn qwen35_profile_enabled() -> bool {
-    crate::topology::qwen35_profile_enabled()
-}
-
-fn qwen35_cpu_moe_enabled() -> bool {
-    crate::topology::qwen35_cpu_moe_enabled()
-}
-
-static LOG_QWEN35_CPU_MOE: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone)]
 struct Mlp {
@@ -365,18 +325,10 @@ impl Mlp {
     }
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let original_dtype = xs.dtype();
-        let mut xs = xs.clone();
-        if let Some(t) = self.gate_proj.quantized_act_type() {
-            xs = xs.to_dtype(t)?;
-        }
-        let gate = mistralrs_quant::MatMul.qmethod_matmul(&xs, &*self.gate_proj)?;
-        let up = mistralrs_quant::MatMul.qmethod_matmul(&xs, &*self.up_proj)?;
+        let gate = self.gate_proj.forward(xs)?;
+        let up = self.up_proj.forward(xs)?;
         let activated = crate::ops::mul_and_act(&gate, &up, self.act_fn)?;
-        let mut res = mistralrs_quant::MatMul.qmethod_matmul(&activated, &*self.down_proj)?;
-        if self.gate_proj.quantized_act_type().is_some() {
-            res = res.to_dtype(original_dtype)?;
-        }
+        let res = self.down_proj.forward(&activated)?;
         Ok(res)
     }
 
@@ -423,22 +375,10 @@ impl SparseMoeBlock {
             moe_intermediate_size: cfg.moe_intermediate_size,
         };
 
-        let experts_device = if qwen35_cpu_moe_enabled() {
-            if !layer_device.is_cpu() && !LOG_QWEN35_CPU_MOE.swap(true, Ordering::Relaxed) {
-                tracing::info!(
-                    "Using Qwen3.5 CPU-MoE mode: routed experts stay on CPU while hot layer weights stay on {:?}",
-                    layer_device
-                );
-            }
-            Device::Cpu
-        } else {
-            layer_device.clone()
-        };
-
         let experts = MoEExperts::new(
             &moe_cfg,
             vb.clone(),
-            experts_device,
+            layer_device.clone(),
             comm,
             loading_isq,
             &cfg.quantization_config,
@@ -473,12 +413,9 @@ impl SparseMoeBlock {
     }
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let profile = qwen35_profile_enabled();
-        let t_total = profile.then(Instant::now);
         let (b_size, seq_len, hidden_dim) = xs.dims3()?;
         let xs_flat = xs.reshape(((), hidden_dim))?;
 
-        let t_router = profile.then(Instant::now);
         let router_logits = self.gate.forward(&xs_flat)?;
         let routing_weights =
             candle_nn::ops::softmax_last_dim(&router_logits.to_dtype(DType::F32)?)?;
@@ -493,14 +430,10 @@ impl SparseMoeBlock {
         if self.norm_topk_prob {
             topk_weights = topk_weights.broadcast_div(&topk_weights.sum_keepdim(D::Minus1)?)?;
         }
-        let router_ms = t_router.map(|t| t.elapsed().as_secs_f64() * 1000.0);
 
-        let t_experts = profile.then(Instant::now);
         let mut y = self.experts.forward(xs, topk_weights, &topk_ids)?;
         y = y.reshape((b_size, seq_len, hidden_dim))?;
-        let experts_ms = t_experts.map(|t| t.elapsed().as_secs_f64() * 1000.0);
 
-        let t_shared = profile.then(Instant::now);
         let shared_out = self.shared_expert.forward(xs)?;
         let shared_gate = candle_nn::ops::sigmoid(
             &self
@@ -509,35 +442,13 @@ impl SparseMoeBlock {
         )?;
         let shared_gate = shared_gate.reshape((b_size, seq_len, 1))?;
         let shared_out = shared_out.broadcast_mul(&shared_gate)?;
-        let shared_ms = t_shared.map(|t| t.elapsed().as_secs_f64() * 1000.0);
-
-        if profile {
-            tracing::info!(
-                target: "mistralrs_profile",
-                "qwen35_moe seq={seq_len} router_topk_ms={:.3} experts_ms={:.3} shared_ms={:.3} total_ms={:.3}",
-                router_ms.unwrap(),
-                experts_ms.unwrap(),
-                shared_ms.unwrap(),
-                t_total.unwrap().elapsed().as_secs_f64() * 1000.0,
-            );
-        }
 
         y + shared_out
     }
 
-    fn get_isq_layers(&mut self) -> Vec<(&mut Arc<dyn QuantMethod>, bool)> {
-        let mut layers = self
-            .experts
-            .get_isq_layers()
-            .into_iter()
-            .map(|layer| (layer, true))
-            .collect::<Vec<_>>();
-        layers.extend(
-            self.shared_expert
-                .get_isq_layers()
-                .into_iter()
-                .map(|layer| (layer, false)),
-        );
+    fn get_isq_layers(&mut self) -> Vec<&mut Arc<dyn QuantMethod>> {
+        let mut layers = self.experts.get_isq_layers();
+        layers.extend(self.shared_expert.get_isq_layers());
         layers
     }
 }
@@ -561,7 +472,7 @@ impl DecoderLayer {
     fn forward_attention(
         &self,
         x: &Tensor,
-        attention_mask: Option<&Tensor>,
+        attention_mask: &AttentionMask,
         cos_sin: &(Tensor, Tensor),
         kv_cache: &mut KvCache,
         metadata: Option<((Tensor, Tensor), &PagedAttentionInputMetadata)>,
@@ -847,7 +758,7 @@ impl Qwen3_5MoeTextModel {
     pub fn forward_embeds(
         &self,
         mut xs: Tensor,
-        attention_mask: Option<&Tensor>,
+        attention_mask: &AttentionMask,
         position_ids: &Tensor,
         _seqlen_offsets: &[usize],
         context_lens: Vec<(usize, usize)>,
@@ -884,7 +795,7 @@ impl Qwen3_5MoeTextModel {
             }
         };
 
-        let attention_mask = DeviceMappedMask::new(attention_mask.cloned(), &*self.mapper)?;
+        let attention_mask = DeviceMappedMask::new(attention_mask.clone(), &*self.mapper)?;
 
         // Precompute deepstack index tensors once to avoid repeated CPU-GPU syncs
         let deepstack_indices = if let Some(visual_pos_masks) = visual_pos_masks {
@@ -913,18 +824,14 @@ impl Qwen3_5MoeTextModel {
         };
 
         for (i, layer) in self.layers.iter().enumerate() {
-            let profile = qwen35_profile_enabled();
-            let t_layer = profile.then(Instant::now);
-            let t_map = profile.then(Instant::now);
             xs = self.mapper.map(xs, i)?;
-            let map_ms = t_map.map(|t| t.elapsed().as_secs_f64() * 1000.0);
 
             match &self.layer_types[i] {
                 LayerType::FullAttention => {
                     if let Some(HybridLayerCache::Attention(kv_cache)) = hybrid_cache.get_mut(i) {
                         xs = layer.forward_attention(
                             &xs,
-                            attention_mask.as_ref().map(|m| m.get(xs.device())),
+                            &attention_mask.get(xs.device()),
                             &cos_sin,
                             kv_cache,
                             metadata
@@ -963,17 +870,10 @@ impl Qwen3_5MoeTextModel {
                             seqlen_offset: first_offset,
                         };
 
-                        let pool_device = gdn_cache.recurrent_state.device().clone();
                         xs = layer.forward_linear(&xs, &mut gdn_cache)?;
 
-                        pool.scatter_conv_state(
-                            indices,
-                            &gdn_cache.conv_state.to_device(&pool_device)?,
-                        )?;
-                        pool.scatter_recurrent_state(
-                            indices,
-                            &gdn_cache.recurrent_state.to_device(&pool_device)?,
-                        )?;
+                        pool.scatter_conv_state(indices, &gdn_cache.conv_state)?;
+                        pool.scatter_recurrent_state(indices, &gdn_cache.recurrent_state)?;
 
                         let delta = gdn_cache.seqlen_offset.saturating_sub(first_offset);
                         for &idx in &indices_vec {
@@ -987,16 +887,6 @@ impl Qwen3_5MoeTextModel {
                     }
                 }
             }
-            if profile {
-                tracing::info!(
-                    target: "mistralrs_profile",
-                    "qwen35_layer layer={i} kind={:?} device={:?} map_ms={:.3} total_ms={:.3}",
-                    self.layer_types[i],
-                    xs.device(),
-                    map_ms.unwrap(),
-                    t_layer.unwrap().elapsed().as_secs_f64() * 1000.0,
-                );
-            }
 
             // Integrate DeepStack visual features when provided
             if let (Some((idx, idx_expanded)), Some(deepstack)) =
@@ -1009,11 +899,8 @@ impl Qwen3_5MoeTextModel {
         }
         let xs = xs.to_device(&self.device)?;
         let xs = xs.apply(&self.norm)?;
-        let mut xs = extract_logits(&xs, context_lens)?;
-        if let Some(t) = self.lm_head.quantized_act_type() {
-            xs = xs.to_dtype(t)?;
-        }
-        mistralrs_quant::MatMul.qmethod_matmul(&xs, &*self.lm_head)
+        let xs = extract_logits(&xs, context_lens)?;
+        self.lm_head.forward(&xs)
     }
 
     fn deepstack_process(
@@ -1065,13 +952,8 @@ impl IsqModel for Qwen3_5MoeTextModel {
                     tensors.push((&mut gdn.out_proj, Some(i)));
                 }
             }
-            for (l, is_routed_expert) in layer.moe.get_isq_layers() {
-                let layer_num = if is_routed_expert && qwen35_cpu_moe_enabled() {
-                    ISQ_CPU_DEVICE_SENTINEL
-                } else {
-                    i
-                };
-                tensors.push((l, Some(layer_num)));
+            for l in layer.moe.get_isq_layers() {
+                tensors.push((l, Some(i)));
             }
         }
         (tensors, &*self.mapper)
@@ -1096,18 +978,14 @@ impl IsqModel for Qwen3_5MoeTextModel {
                     uvb_l.pp("self_attn").pp("k_norm").add(&attn.k_norm);
                 }
                 LayerImpl::LinearAttention(gdn) => {
-                    uvb_l.pp("linear_attn").add_tensor(
-                        "in_proj_qkvz.weight",
-                        gdn.in_proj_qkvz
-                            .dequantize_w()
-                            .expect("failed to dequantize Qwen3.5 MoE GDN in_proj_qkvz"),
-                    );
-                    uvb_l.pp("linear_attn").add_tensor(
-                        "in_proj_ba.weight",
-                        gdn.in_proj_ba
-                            .dequantize_w()
-                            .expect("failed to dequantize Qwen3.5 MoE GDN in_proj_ba"),
-                    );
+                    uvb_l
+                        .pp("linear_attn")
+                        .pp("in_proj_qkvz")
+                        .add_tensor("weight", gdn.in_proj_qkvz.weight().clone());
+                    uvb_l
+                        .pp("linear_attn")
+                        .pp("in_proj_ba")
+                        .add_tensor("weight", gdn.in_proj_ba.weight().clone());
                     uvb_l
                         .pp("linear_attn")
                         .add_tensor("conv1d.weight", gdn.conv1d_weight.clone());
@@ -1135,30 +1013,5 @@ impl IsqModel for Qwen3_5MoeTextModel {
         }
 
         uvb.to_safetensors()
-    }
-
-    fn imatrix_names(&self) -> candle_core::Result<Vec<Option<String>>> {
-        let mut names = Vec::new();
-        names.push(None);
-        for (i, layer) in self.layers.iter().enumerate() {
-            match &layer.layer_impl {
-                LayerImpl::FullAttention(_) => {
-                    names.push(Some(format!("blk.{i}.attn_q.weight")));
-                    names.push(Some(format!("blk.{i}.attn_k.weight")));
-                    names.push(Some(format!("blk.{i}.attn_v.weight")));
-                    names.push(Some(format!("blk.{i}.attn_output.weight")));
-                }
-                LayerImpl::LinearAttention(_) => {
-                    names.push(None);
-                }
-            }
-            for _ in 0..layer.moe.experts.num_isq_layers() {
-                names.push(None);
-            }
-            names.push(Some(format!("blk.{i}.ffn_gate.weight")));
-            names.push(Some(format!("blk.{i}.ffn_up.weight")));
-            names.push(Some(format!("blk.{i}.ffn_down.weight")));
-        }
-        Ok(names)
     }
 }

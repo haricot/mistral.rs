@@ -1,5 +1,7 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
+use crate::attention::AttentionMask;
+use crate::layers_masker::CausalMaskConfig;
 use std::{
     any::Any,
     sync::{Arc, Mutex},
@@ -15,11 +17,12 @@ use crate::{
     layers::CausalMasker,
     layers_masker::PastKvLenCache,
     paged_attention::{
-        encoder_cache::EncoderCacheManager, AttentionImplementation, ModelConfigMetadata,
+        encoder_cache::{CacheModality, EncoderCacheManager},
+        AttentionImplementation, ModelConfigMetadata,
     },
     pipeline::{
         text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
-        DisabledModalities, EitherCache, IsqModel, MultimodalModel, NormalLoadingMetadata,
+        EitherCache, IsqModel, MultimodalModel, NormalLoadingMetadata,
     },
     vision_models::qwen3_vl::{vision::Qwen3VLVisionModel, Qwen3VLVisionSpecificArgs},
 };
@@ -33,7 +36,7 @@ pub(crate) use crate::vision_models::qwen3_vl::Qwen3VLProcessor as Qwen3_5Proces
 
 pub struct Qwen3_5Model {
     text: Qwen3_5TextModel,
-    vision: Option<Qwen3VLVisionModel>,
+    vision: Qwen3VLVisionModel,
     spatial_merge_size: usize,
     image_token_id: u32,
     video_token_id: u32,
@@ -47,26 +50,19 @@ impl Qwen3_5Model {
         cfg: &Config,
         vb: ShardedVarBuilder,
         _is_gptx: bool,
-        disabled_modalities: DisabledModalities,
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Self> {
-        let vision = if disabled_modalities.vision {
-            None
-        } else if let Some(vision_config) = cfg.vision_config.as_ref() {
-            // Support both original HuggingFace naming (model.visual.*) and MLX naming (vision_tower.*)
-            let vision_vb = if vb.contains_tensor("vision_tower.patch_embed.proj.weight") {
-                vb.pp("vision_tower")
-            } else {
-                vb.pp("model").pp("visual")
-            };
-            Some(Qwen3VLVisionModel::new(
-                vision_config,
-                vision_vb.set_device(normal_loading_metadata.real_device.clone()),
-            )?)
+        // Support both original HuggingFace naming (model.visual.*) and MLX naming (vision_tower.*)
+        let vision_vb = if vb.contains_tensor("vision_tower.patch_embed.proj.weight") {
+            vb.pp("vision_tower")
         } else {
-            None
+            vb.pp("model").pp("visual")
         };
+        let vision = Qwen3VLVisionModel::new(
+            &cfg.vision_config,
+            vision_vb.set_device(normal_loading_metadata.real_device.clone()),
+        )?;
         // Use top-level quantization_config if present, otherwise fall back to text_config's
         let mut text_config = cfg.text_config.clone();
         if cfg.quantization_config.is_some() {
@@ -82,11 +78,7 @@ impl Qwen3_5Model {
         Ok(Self {
             text,
             vision,
-            spatial_merge_size: cfg
-                .vision_config
-                .as_ref()
-                .map(|cfg| cfg.spatial_merge_size)
-                .unwrap_or(1),
+            spatial_merge_size: cfg.vision_config.spatial_merge_size,
             image_token_id: cfg.image_token_id,
             video_token_id: cfg.video_token_id,
             vision_start_token_id: cfg.vision_start_token_id,
@@ -115,18 +107,24 @@ impl Qwen3_5Model {
         metadata: Option<(Vec<(Tensor, Tensor)>, &PagedAttentionInputMetadata)>,
         flash_params: &FlashParams,
     ) -> Result<Tensor> {
-        let mut attention_mask = CausalMasker.make_sliding_window_causal_mask_matrix(
+        let mut attention_mask = CausalMasker.make_causal_mask(
             input_ids,
             &seqlen_offsets as &dyn PastKvLenCache,
-            self.text.cfg.sliding_window,
             self.text.dtype,
-            self.text.cfg.num_attn_heads,
+            &CausalMaskConfig {
+                sliding_window: self.text.cfg.sliding_window,
+                ..Default::default()
+            },
         )?;
         let is_first_chunk = metadata
             .as_ref()
             .map(|(_, meta)| meta.is_first_prompt_chunk)
             .unwrap_or(true);
-        attention_mask = attention_mask.filter(|_| is_first_chunk);
+        attention_mask = if is_first_chunk {
+            attention_mask
+        } else {
+            AttentionMask::None
+        };
 
         let mut input_embeds = self.text.embed_tokens(input_ids)?;
         let (batch_size, seq_len, hidden_dim) = input_embeds.dims3()?;
@@ -138,11 +136,6 @@ impl Qwen3_5Model {
         let mut deepstack_video_opt: Option<Vec<Tensor>> = None;
 
         if let Some(pixel_values) = &pixel_values {
-            let Some(vision) = self.vision.as_ref() else {
-                candle_core::bail!(
-                    "Qwen3.5 was loaded with vision disabled. Remove image/video inputs or omit `--disable-vision`/`--text-only`."
-                );
-            };
             let Some(image_grid_thw_ref) = image_grid_thw.as_ref() else {
                 candle_core::bail!("pixel_values require image_grid_thw");
             };
@@ -176,7 +169,7 @@ impl Qwen3_5Model {
                         .lock()
                         .expect("encoder cache lock poisoned");
                     for (i, &hash) in image_hashes.iter().enumerate() {
-                        if let Some(cached) = guard.get(hash) {
+                        if let Some(cached) = guard.get(CacheModality::Image, hash) {
                             per_image[i] = Some(cached);
                         } else {
                             miss_indices.push(i);
@@ -214,7 +207,8 @@ impl Qwen3_5Model {
                     let miss_pixels = Tensor::cat(&miss_pixel_slices, 0)?;
                     let miss_grid = Tensor::stack(&miss_grid_rows, 0)?;
 
-                    let (encoded_main, encoded_ds) = vision.forward(&miss_pixels, &miss_grid)?;
+                    let (encoded_main, encoded_ds) =
+                        self.vision.forward(&miss_pixels, &miss_grid)?;
 
                     let miss_output_tokens: Vec<usize> = miss_indices
                         .iter()
@@ -236,7 +230,11 @@ impl Qwen3_5Model {
                                 cache_entry.push(single_ds.clone());
                             }
                             enc_offset += n_out;
-                            guard.insert(image_hashes[orig_idx], cache_entry.clone());
+                            guard.insert(
+                                CacheModality::Image,
+                                image_hashes[orig_idx],
+                                cache_entry.clone(),
+                            );
                             per_image[orig_idx] = Some(cache_entry);
                         }
                     }
@@ -258,7 +256,7 @@ impl Qwen3_5Model {
                     (image_embeds, deepstack_layers)
                 }
             } else {
-                vision.forward(&pixel_values, image_grid_thw_ref)?
+                self.vision.forward(&pixel_values, image_grid_thw_ref)?
             };
 
             let image_embeds = image_embeds.to_device(&device)?.to_dtype(self.text.dtype)?;
@@ -300,11 +298,6 @@ impl Qwen3_5Model {
         }
 
         if let Some(pixel_values_videos) = &pixel_values_videos {
-            let Some(vision) = self.vision.as_ref() else {
-                candle_core::bail!(
-                    "Qwen3.5 was loaded with vision disabled. Remove image/video inputs or omit `--disable-vision`/`--text-only`."
-                );
-            };
             let Some(video_grid_thw_ref) = video_grid_thw.as_ref() else {
                 candle_core::bail!("pixel_values_videos require video_grid_thw");
             };
@@ -315,7 +308,7 @@ impl Qwen3_5Model {
                 pixel_values = pixel_values.reshape(((), last_dim))?;
             }
             let (video_embeds, deepstack_video_embeds) =
-                vision.forward(&pixel_values, video_grid_thw_ref)?;
+                self.vision.forward(&pixel_values, video_grid_thw_ref)?;
             let video_embeds = video_embeds.to_device(&device)?.to_dtype(self.text.dtype)?;
             let deepstack_video_embeds = deepstack_video_embeds
                 .into_iter()
@@ -433,14 +426,14 @@ impl Qwen3_5Model {
             input_ids_full,
             rope_img_grid_thw.as_ref(),
             rope_vid_grid_thw.as_ref(),
-            Some(&ropeidx_attn_mask),
+            &AttentionMask::Custom(ropeidx_attn_mask.clone()),
             self.spatial_merge_size,
             self.image_token_id,
             self.video_token_id,
             self.vision_start_token_id,
             self.vision_end_token_id,
         )?;
-        let position_ids = if attention_mask.is_some() {
+        let position_ids = if !matches!(attention_mask, AttentionMask::None) {
             let full_len = position_ids.dim(2)?;
             let trimmed_len = input_ids.dim(1)?;
             position_ids.narrow(2, full_len - trimmed_len, trimmed_len)?
@@ -457,7 +450,7 @@ impl Qwen3_5Model {
 
         let out = self.text.forward_embeds(
             input_embeds,
-            attention_mask.as_ref(),
+            &attention_mask,
             &position_ids,
             seqlen_offsets,
             context_lens,
@@ -581,14 +574,8 @@ impl IsqModel for Qwen3_5Model {
     }
     fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let mut tensors = self.text.residual_tensors();
-        if let Some(vision) = self.vision.as_ref() {
-            tensors.extend(vision.residual_tensors());
-        }
+        tensors.extend(self.vision.residual_tensors());
         tensors
-    }
-
-    fn imatrix_names(&self) -> candle_core::Result<Vec<Option<String>>> {
-        self.text.imatrix_names()
     }
 }
 
