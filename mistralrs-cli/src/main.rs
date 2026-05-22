@@ -73,6 +73,7 @@ async fn main() -> Result<()> {
             image,
             video,
             audio,
+            text_only: _,
         } => {
             let model_type = resolve_model_type(model_type, default_model)?;
             run_interactive(

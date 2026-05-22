@@ -259,14 +259,14 @@ __global__ void moe_gemv_transposed_kernel(
 }
 
 extern "C" void
-moe_gemv(const void *input,   // input [size_m or size_m / topk, size_k]
-         const void *weights, // weights [num_experts, size_n, size_k]
-         const int32_t *sorted_token_ids, const int32_t *expert_ids,
-         const float *topk_weights, // device ptr or nullptr
-         void *output,              // output [size_m, size_n]
-         int num_experts, int topk, int size_m, int size_n, int size_k,
-         int dtype, // 0=float16, 1=bf16
-         cudaStream_t stream) {
+mistralrs_moe_gemv(const void *input,   // input [size_m or size_m / topk, size_k]
+                   const void *weights, // weights [num_experts, size_n, size_k]
+                   const int32_t *sorted_token_ids, const int32_t *expert_ids,
+                   const float *topk_weights, // device ptr or nullptr
+                   void *output,              // output [size_m, size_n]
+                   int num_experts, int topk, int size_m, int size_n, int size_k,
+                   int dtype, // 0=float16, 1=bf16
+                   cudaStream_t stream) {
 
   constexpr int BLOCK_SIZE = 256;
 
@@ -295,7 +295,7 @@ moe_gemv(const void *input,   // input [size_m or size_m / topk, size_k]
   }
 }
 
-extern "C" void moe_gemv_transposed(
+extern "C" void mistralrs_moe_gemv_transposed(
     const void *input, // input [size_m or size_m / topk, size_k]
     const void
         *weights, // weights [num_experts, size_k, size_n] - transposed layout

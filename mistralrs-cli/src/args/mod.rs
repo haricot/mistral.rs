@@ -102,6 +102,10 @@ pub enum Command {
         /// Can be specified multiple times: --audio audio1.wav --audio audio2.mp3
         #[arg(long, requires = "input")]
         audio: Vec<String>,
+
+        /// Force text-only mode. This is the default when no media inputs are provided.
+        #[arg(long)]
+        text_only: bool,
     },
 
     /// Generate shell completions
