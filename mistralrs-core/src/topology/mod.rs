@@ -35,6 +35,7 @@ pub struct TopologyRuntime {
     #[serde(
         alias = "MISTRALRS_QWEN35_CPU_MOE",
         alias = "MISTRALRS_CPU_MOE",
+        alias = "cpu_moe",
         alias = "qwen35-cpu-moe",
         alias = "cpu-moe"
     )]
@@ -42,6 +43,9 @@ pub struct TopologyRuntime {
     #[serde(
         alias = "MISTRALRS_QWEN35_PROFILE",
         alias = "MISTRALRS_CPU_PROFILE",
+        alias = "MISTRALRS_PROFILE",
+        alias = "cpu_profile",
+        alias = "profile",
         alias = "qwen35-profile",
         alias = "cpu-profile"
     )]
@@ -394,15 +398,17 @@ fn env_bool(name: &str) -> Option<bool> {
         .map(|value| !value.is_empty() && value != "0")
 }
 
-pub(crate) fn qwen35_cpu_moe_enabled() -> bool {
+pub(crate) fn cpu_moe_enabled() -> bool {
     load_optional_bool(&QWEN35_CPU_MOE)
         .or_else(|| env_bool("MISTRALRS_CPU_MOE"))
         .or_else(|| env_bool("MISTRALRS_QWEN35_CPU_MOE"))
         .unwrap_or(false)
 }
 
-pub(crate) fn qwen35_profile_enabled() -> bool {
+#[allow(dead_code)]
+pub(crate) fn profile_enabled() -> bool {
     load_optional_bool(&QWEN35_PROFILE)
+        .or_else(|| env_bool("MISTRALRS_PROFILE"))
         .or_else(|| env_bool("MISTRALRS_CPU_PROFILE"))
         .or_else(|| env_bool("MISTRALRS_QWEN35_PROFILE"))
         .unwrap_or(false)

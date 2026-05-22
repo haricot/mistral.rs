@@ -1,4 +1,3 @@
-#[cfg(not(feature = "cuda"))]
 mod cpu;
 #[cfg(feature = "cuda")]
 pub(crate) mod cuda;
@@ -27,6 +26,25 @@ use crate::{
     utils::{deserialize_tensor, serialize_tensor, version_is_compatible, UQFF_VERSION},
     IsqType, QuantMethod, QuantMethodConfig, QuantizeOntoGuard, QuantizedSerde, QuantizedSerdeType,
 };
+
+pub(crate) fn cpu_fused_moe_q4k_forward<F>(
+    gate: &QMatMul,
+    up: &QMatMul,
+    down: &QMatMul,
+    xs: &Tensor,
+    topk_weights: &Tensor,
+    topk_ids: &Tensor,
+    act: F,
+) -> Result<Option<Tensor>>
+where
+    F: Fn(f32) -> f32 + Copy + Send + Sync,
+{
+    cpu::cpu_fused_moe_q4k_forward(gate, up, down, xs, topk_weights, topk_ids, act)
+}
+
+pub(crate) fn cpu_q4k_matmul(qmatmul: &QMatMul, xs: &Tensor) -> Result<Option<Tensor>> {
+    cpu::cpu_q4k_matmul(qmatmul, xs)
+}
 
 #[derive(Debug)]
 pub struct GgufMatMul {
@@ -114,6 +132,10 @@ impl QuantMethod for GgufMatMul {
             }
         }
 
+        if let Some(x) = cpu_q4k_matmul(&self.w, a)? {
+            return self.add_bias(x);
+        }
+
         // Fallback: Candle QMatMul requires F32
         let original_dtype = a.dtype();
         let a_f32 = if original_dtype == DType::F32 {
@@ -140,12 +162,28 @@ impl QuantMethod for GgufMatMul {
         // - x: (n_tokens, 1, hidden_dim) or (n_tokens, n_experts_per_tok, hidden_dim)
         // - indices: (n_tokens, n_experts_per_tok)
         // - weights (self): (n_experts, out_features, in_features)
-        #[cfg(feature = "cuda")]
-        let res = cuda::qmatmul_indexed_moe_forward(&self.w, x, indices)?;
-
-        // For CPU and Metal: use dequantize-then-matmul approach
-        #[cfg(not(feature = "cuda"))]
-        let res = cpu::cpu_indexed_moe_forward(&self.w, x, indices)?;
+        let weights_device = match &self.w {
+            QMatMul::QTensor(q) => q.device(),
+            QMatMul::Tensor(t) | QMatMul::TensorF16(t) => t.device().clone(),
+        };
+        let res = if weights_device.is_cuda() && x.device().is_cuda() {
+            #[cfg(feature = "cuda")]
+            {
+                cuda::qmatmul_indexed_moe_forward(&self.w, x, indices)?
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                candle_core::bail!("GGUF indexed MoE CUDA path requires the `cuda` feature")
+            }
+        } else if weights_device.is_cpu() && !x.device().is_cpu() {
+            let x_cpu = x.to_device(&Device::Cpu)?;
+            let indices_cpu = indices.to_device(&Device::Cpu)?;
+            return self
+                .add_bias(cpu::cpu_indexed_moe_forward(&self.w, &x_cpu, &indices_cpu)?)?
+                .to_device(x.device());
+        } else {
+            cpu::cpu_indexed_moe_forward(&self.w, x, indices)?
+        };
 
         if let Some(ref b) = self.b {
             res.broadcast_add(b)
@@ -160,6 +198,10 @@ impl QuantMethod for GgufMatMul {
             candle_core::quantized::QMatMul::QTensor(qt) => Some(qt),
             _ => None,
         }
+    }
+
+    fn gguf_qmatmul_and_bias(&self) -> Option<(&QMatMul, Option<&Tensor>)> {
+        Some((&self.w, self.b.as_ref()))
     }
 
     fn quantized_act_type(&self) -> Option<DType> {

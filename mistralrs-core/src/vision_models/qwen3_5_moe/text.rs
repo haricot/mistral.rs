@@ -2,7 +2,10 @@
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
 
 use candle_core::{DType, Device, Module, Result, Tensor, D};
@@ -26,7 +29,7 @@ use crate::{
     pipeline::{
         extract_logits,
         text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
-        EitherCache, IsqModel, KvCache, NormalLoadingMetadata,
+        EitherCache, IsqModel, KvCache, NormalLoadingMetadata, ISQ_CPU_DEVICE_SENTINEL,
     },
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
@@ -275,6 +278,12 @@ impl FullAttention {
 
 // ====================== MoE ======================
 
+fn cpu_moe_enabled() -> bool {
+    crate::topology::cpu_moe_enabled()
+}
+
+static LOG_CPU_MOE: AtomicBool = AtomicBool::new(false);
+
 #[derive(Clone)]
 struct Mlp {
     gate_proj: Arc<dyn QuantMethod>,
@@ -375,10 +384,22 @@ impl SparseMoeBlock {
             moe_intermediate_size: cfg.moe_intermediate_size,
         };
 
+        let experts_device = if cpu_moe_enabled() {
+            if !layer_device.is_cpu() && !LOG_CPU_MOE.swap(true, Ordering::Relaxed) {
+                tracing::info!(
+                    "Using CPU-MoE mode: routed experts stay on CPU while hot layer weights stay on {:?}",
+                    layer_device
+                );
+            }
+            Device::Cpu
+        } else {
+            layer_device.clone()
+        };
+
         let experts = MoEExperts::new(
             &moe_cfg,
             vb.clone(),
-            layer_device.clone(),
+            experts_device,
             comm,
             loading_isq,
             &cfg.quantization_config,
@@ -446,9 +467,19 @@ impl SparseMoeBlock {
         y + shared_out
     }
 
-    fn get_isq_layers(&mut self) -> Vec<&mut Arc<dyn QuantMethod>> {
-        let mut layers = self.experts.get_isq_layers();
-        layers.extend(self.shared_expert.get_isq_layers());
+    fn get_isq_layers(&mut self) -> Vec<(&mut Arc<dyn QuantMethod>, bool)> {
+        let mut layers = self
+            .experts
+            .get_isq_layers()
+            .into_iter()
+            .map(|layer| (layer, true))
+            .collect::<Vec<_>>();
+        layers.extend(
+            self.shared_expert
+                .get_isq_layers()
+                .into_iter()
+                .map(|layer| (layer, false)),
+        );
         layers
     }
 }
@@ -952,8 +983,13 @@ impl IsqModel for Qwen3_5MoeTextModel {
                     tensors.push((&mut gdn.out_proj, Some(i)));
                 }
             }
-            for l in layer.moe.get_isq_layers() {
-                tensors.push((l, Some(i)));
+            for (l, is_routed_expert) in layer.moe.get_isq_layers() {
+                let layer_num = if is_routed_expert && cpu_moe_enabled() {
+                    ISQ_CPU_DEVICE_SENTINEL
+                } else {
+                    i
+                };
+                tensors.push((l, Some(layer_num)));
             }
         }
         (tensors, &*self.mapper)

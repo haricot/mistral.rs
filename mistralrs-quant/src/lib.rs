@@ -1125,6 +1125,12 @@ pub trait QuantMethod: Send + Sync + Debug + QuantizedSerde {
     /// Weight dtype and device
     fn dtype_and_device(&self) -> (DType, Device);
 
+    /// If this quantization method is backed by a GGUF QMatMul, expose it for
+    /// fused kernels that can consume the quantized blocks directly.
+    fn gguf_qmatmul_and_bias(&self) -> Option<(&QMatMul, Option<&Tensor>)> {
+        None
+    }
+
     /// Add a delta weight from LoRA to the weights. This should be prescaled with alpha.
     fn add_delta_w(&self, delta: &Tensor) -> Result<Arc<dyn QuantMethod>>;
 
@@ -1159,6 +1165,31 @@ pub trait QuantMethod: Send + Sync + Debug + QuantizedSerde {
     fn dummy_info(&self) -> Option<&DummyLayerInfo> {
         None
     }
+}
+
+pub fn gguf_cpu_fused_moe_q4k_forward<F>(
+    gate: &dyn QuantMethod,
+    up: &dyn QuantMethod,
+    down: &dyn QuantMethod,
+    xs: &Tensor,
+    topk_weights: &Tensor,
+    topk_ids: &Tensor,
+    act: F,
+) -> Result<Option<Tensor>>
+where
+    F: Fn(f32) -> f32 + Copy + Send + Sync,
+{
+    let Some((gate, None)) = gate.gguf_qmatmul_and_bias() else {
+        return Ok(None);
+    };
+    let Some((up, None)) = up.gguf_qmatmul_and_bias() else {
+        return Ok(None);
+    };
+    let Some((down, None)) = down.gguf_qmatmul_and_bias() else {
+        return Ok(None);
+    };
+
+    gguf::cpu_fused_moe_q4k_forward(gate, up, down, xs, topk_weights, topk_ids, act)
 }
 
 impl Module for dyn QuantMethod {

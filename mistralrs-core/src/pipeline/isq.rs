@@ -8,6 +8,9 @@ use std::{
     sync::{atomic::AtomicUsize, Arc},
     time::Instant,
 };
+
+pub(crate) const ISQ_CPU_DEVICE_SENTINEL: usize = usize::MAX;
+
 /// Wrapper around a `Cow<'a, [u8]>` buffer that implements
 /// `safetensors::tensor::View`.
 ///
@@ -616,7 +619,10 @@ pub trait IsqModel {
 
                 let mut devices_and_dtypes = Vec::new();
                 for (_, layer_num) in &tensors {
-                    let device = if let Some(ref layers) = layers {
+                    let force_cpu = layer_num.is_some_and(|layer| layer == ISQ_CPU_DEVICE_SENTINEL);
+                    let device = if force_cpu {
+                        Device::Cpu
+                    } else if let Some(ref layers) = layers {
                         if let Some(layer) = layer_num {
                             layers
                                 .get(*layer)
@@ -636,7 +642,9 @@ pub trait IsqModel {
                         device.clone()
                     };
                     let dtype = if let Some(ref layers) = layers {
-                        if let Some(layer) = layer_num {
+                        if force_cpu {
+                            dtype
+                        } else if let Some(layer) = layer_num {
                             layers.get(*layer).cloned().map(|x| x.0).unwrap_or(dtype)
                         } else {
                             dtype
@@ -1067,7 +1075,10 @@ pub trait IsqModel {
         let mut devices = Vec::new();
         let mut comms = Vec::new();
         for (_, layer_num) in &tensors {
-            let device = if let Some(ref layers) = layers {
+            let force_cpu = layer_num.is_some_and(|layer| layer == ISQ_CPU_DEVICE_SENTINEL);
+            let device = if force_cpu {
+                Device::Cpu
+            } else if let Some(ref layers) = layers {
                 if let Some(layer) = layer_num {
                     layers
                         .get(*layer)
@@ -1087,7 +1098,8 @@ pub trait IsqModel {
                 device.clone()
             };
             devices.push(device);
-            comms.push(mapper.get_comm_for(layer_num.unwrap_or(0))?)
+            let comm_layer = if force_cpu { 0 } else { layer_num.unwrap_or(0) };
+            comms.push(mapper.get_comm_for(comm_layer)?)
         }
 
         let artifacts = unsafe { candle_core::safetensors::MmapedSafetensors::multi(artifacts)? };

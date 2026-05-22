@@ -6927,6 +6927,7 @@ impl DeviceMappedModelLoader for Qwen3_5MoeLoader {
         let cfg: Qwen3_5MoeConfig = serde_json::from_str(config)?;
         let text_cfg = &cfg.text_config;
         let layer_types = text_cfg.layer_types();
+        let cpu_moe = crate::topology::cpu_moe_enabled();
 
         let mut layer_sizes = Vec::with_capacity(text_cfg.num_hidden_layers);
 
@@ -6989,13 +6990,23 @@ impl DeviceMappedModelLoader for Qwen3_5MoeLoader {
                     gate_proj + up_proj + down_proj
                 };
                 let shared_expert_gate = text_cfg.hidden_size;
-                gate + per_expert * text_cfg.num_experts + shared_expert + shared_expert_gate
+                let routed_experts = if cpu_moe {
+                    0
+                } else {
+                    per_expert * text_cfg.num_experts
+                };
+                gate + routed_experts + shared_expert + shared_expert_gate
             };
 
             let per_layer_elems =
                 input_layernorm + post_attention_layernorm + attn_elems + moe_elems;
 
-            layer_sizes.push(per_layer_elems * dtype.size_in_bytes());
+            let mut per_layer_bytes = per_layer_elems * dtype.size_in_bytes();
+            if weight_pack_factor > 1 {
+                // UQFF/ISQ artifacts need temporary and allocator headroom while loading.
+                per_layer_bytes = per_layer_bytes.saturating_mul(5) / 4;
+            }
+            layer_sizes.push(per_layer_bytes);
         }
 
         Ok(layer_sizes)
