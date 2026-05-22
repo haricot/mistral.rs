@@ -184,6 +184,8 @@ pub struct Llama4ModelSpecificArgs {
     pub image_hashes: Vec<u64>,
 }
 
+impl crate::speculative::SpeculativeTargetMixin for Llama4Model {}
+
 impl NormalModel for Llama4Model {
     fn forward(
         &self,

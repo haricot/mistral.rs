@@ -1153,6 +1153,8 @@ impl IsqModel for DeepSeekV3 {
     }
 }
 
+impl crate::speculative::SpeculativeTargetMixin for DeepSeekV3 {}
+
 impl NormalModel for DeepSeekV3 {
     fn forward(
         &self,

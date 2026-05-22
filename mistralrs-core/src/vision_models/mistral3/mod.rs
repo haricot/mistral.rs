@@ -349,6 +349,8 @@ pub struct Mistral3SpecificArgs {
     pub image_hashes: Vec<u64>,
 }
 
+impl crate::speculative::SpeculativeTargetMixin for Mistral3Model {}
+
 impl MultimodalModel for Mistral3Model {
     fn forward(
         &self,

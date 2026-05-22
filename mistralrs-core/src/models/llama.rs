@@ -608,6 +608,8 @@ impl IsqModel for Llama {
     }
 }
 
+impl crate::speculative::SpeculativeTargetMixin for Llama {}
+
 impl NormalModel for Llama {
     fn forward(
         &self,

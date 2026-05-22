@@ -9,6 +9,17 @@ use crate::pipeline::KvCache;
 // https://github.com/huggingface/transformers/blob/main/src/transformers/modeling_attn_mask_utils.py
 pub struct CausalMasker;
 
+/// Configuration for [`CausalMasker::make_causal_mask`].
+#[derive(Default)]
+pub struct CausalMaskConfig {
+    /// Sliding window size. `None` = full causal attention.
+    pub sliding_window: Option<usize>,
+    /// Force `AttentionMask::Custom` even when flash attention is available.
+    /// Set to `true` when you need the real mask tensor (e.g. bidirectional
+    /// vision overrides, head_dim > 256 eager fallback).
+    pub force_custom: bool,
+}
+
 // https://github.com/mokeyish/candle-ext/blob/main/src/masked_fill.rs
 /// xs are on false (0), value is on true (1)
 pub fn masked_fill<D: WithDType>(xs: &Tensor, mask: &Tensor, value: D) -> Result<Tensor> {
@@ -117,7 +128,12 @@ impl CausalMasker {
             .flat_map(|i| {
                 let q_pos = past_kv_len + i;
                 (0..total_kv_len).map(move |j| {
-                    if j > q_pos || j + sliding_window < q_pos {
+                    // HF's sliding causal mask uses an exclusive lower bound
+                    // (`kv_idx > q_idx - sliding_window`), so the current
+                    // token plus its visible history total exactly
+                    // `sliding_window` positions.
+                    let too_old = q_pos >= sliding_window && j <= q_pos - sliding_window;
+                    if j > q_pos || too_old {
                         f32::NEG_INFINITY
                     } else {
                         0.
@@ -163,102 +179,46 @@ impl CausalMasker {
         Ok(k_cache_1.dims()[2])
     }
 
-    pub fn make_causal_mask_matrix(
+    /// Build a causal attention mask.
+    ///
+    /// - Returns `AttentionMask::None` for single-token decode.
+    /// - Returns `AttentionMask::CausalFlash` on CUDA+flash when
+    ///   `force_custom` is false (flash handles causality internally).
+    /// - Returns `AttentionMask::Custom` with a real mask tensor otherwise.
+    pub fn make_causal_mask(
         &self,
         input_ids: &Tensor,
         cache: &dyn PastKvLenCache,
         dtype: DType,
-        _n_attn_heads: usize,
-    ) -> Result<Option<Tensor>> {
+        cfg: &CausalMaskConfig,
+    ) -> Result<crate::attention::AttentionMask> {
         let past_kv_len = cache.get_past_kv_len()?;
         let (_b_sz, tgt_len) = input_ids.dims2()?;
         if tgt_len == 1 {
-            return Ok(None);
+            return Ok(crate::attention::AttentionMask::None);
         }
 
-        // Avoid materializing large sliding-window masks when flash-attn on CUDA.
-        if crate::using_flash_attn() && input_ids.device().is_cuda() {
-            return Ok(Some(Tensor::zeros((1, 1), dtype, input_ids.device())?));
+        if !cfg.force_custom && crate::using_flash_attn() && input_ids.device().is_cuda() {
+            return Ok(crate::attention::AttentionMask::CausalFlash);
         }
 
-        let mut causal_mask = self
-            .make_mask(tgt_len, past_kv_len, input_ids.device())?
-            .to_dtype(DType::U8)?;
-
-        let zero = Tensor::new(0.0f32, input_ids.device())?;
-        causal_mask = {
-            let mut mask =
-                causal_mask.broadcast_as((causal_mask.dims()[0], causal_mask.dims()[1]))?;
-            // Mask: 1 means use from x (add 0.0), 0 means mask out (add -inf)
-            mask = masked_fill(
-                &zero.to_dtype(dtype)?.broadcast_as(mask.shape())?,
-                &mask,
-                f32::NEG_INFINITY,
-            )?;
-            mask
-        };
-
-        Ok(Some(causal_mask))
-    }
-
-    /// Like `make_causal_mask_matrix` but always constructs a real mask (never returns
-    /// the flash-attn dummy tensor). Use when flash attention is being bypassed.
-    pub fn make_causal_mask_as_attn_bias(
-        &self,
-        input_ids: &Tensor,
-        cache: &dyn PastKvLenCache,
-        dtype: DType,
-    ) -> Result<Option<Tensor>> {
-        let past_kv_len = cache.get_past_kv_len()?;
-        let (_b_sz, tgt_len) = input_ids.dims2()?;
-        if tgt_len == 1 {
-            return Ok(None);
-        }
-
-        let mut causal_mask = self
-            .make_mask(tgt_len, past_kv_len, input_ids.device())?
-            .to_dtype(DType::U8)?;
-
-        let zero = Tensor::new(0.0f32, input_ids.device())?;
-        causal_mask = {
-            let mask = causal_mask.broadcast_as((causal_mask.dims()[0], causal_mask.dims()[1]))?;
+        let mask = if let Some(sw) = cfg.sliding_window {
+            self.make_swa_mask(tgt_len, past_kv_len, sw, input_ids.device(), dtype)?
+        } else {
+            let causal = self
+                .make_mask(tgt_len, past_kv_len, input_ids.device())?
+                .to_dtype(DType::U8)?;
+            let zero = Tensor::new(0.0f32, input_ids.device())?;
             masked_fill(
-                &zero.to_dtype(dtype)?.broadcast_as(mask.shape())?,
-                &mask,
+                &zero
+                    .to_dtype(dtype)?
+                    .broadcast_as((causal.dims()[0], causal.dims()[1]))?,
+                &causal,
                 f32::NEG_INFINITY,
             )?
         };
 
-        Ok(Some(causal_mask))
-    }
-
-    /// Like `make_sliding_window_causal_mask_matrix` but always constructs a real mask
-    /// (never returns the flash-attn dummy tensor). Use when flash attention is being bypassed.
-    pub fn make_sliding_window_causal_mask_as_attn_bias(
-        &self,
-        input_ids: &Tensor,
-        cache: &dyn PastKvLenCache,
-        sliding_window: Option<usize>,
-        dtype: DType,
-    ) -> Result<Option<Tensor>> {
-        if sliding_window.is_none() {
-            return self.make_causal_mask_as_attn_bias(input_ids, cache, dtype);
-        }
-        let (_b_sz, tgt_len) = input_ids.dims2()?;
-        let sliding_window = sliding_window.unwrap();
-
-        let past_kv_len = cache.get_past_kv_len()?;
-        if tgt_len == 1 {
-            return Ok(None);
-        }
-
-        Ok(Some(self.make_swa_mask(
-            tgt_len,
-            past_kv_len,
-            sliding_window,
-            input_ids.device(),
-            dtype,
-        )?))
+        Ok(crate::attention::AttentionMask::Custom(mask))
     }
 
     pub fn make_chunked_mask_matrix(
@@ -293,41 +253,6 @@ impl CausalMasker {
         };
 
         Ok(Some(causal_mask))
-    }
-
-    pub fn make_sliding_window_causal_mask_matrix(
-        &self,
-        input_ids: &Tensor,
-        cache: &dyn PastKvLenCache,
-        sliding_window: Option<usize>,
-        dtype: DType,
-        n_attn_heads: usize,
-    ) -> Result<Option<Tensor>> {
-        if sliding_window.is_none() {
-            return self.make_causal_mask_matrix(input_ids, cache, dtype, n_attn_heads);
-        }
-        let (_b_sz, tgt_len) = input_ids.dims2()?;
-        let sliding_window = sliding_window.unwrap();
-
-        // Avoid materializing large sliding-window masks when flash-attn on CUDA.
-        if tgt_len > 1 && crate::using_flash_attn() && input_ids.device().is_cuda() {
-            return Ok(Some(Tensor::zeros((1, 1), dtype, input_ids.device())?));
-        }
-
-        // Compare the past KV len to the sliding window size. If the past kv len is 0 (no prefix cache), then this will be 0.
-        // Otherwise, this will be the number required such that the mask fits the size of the k/v seqlen (usually sliding window)
-        let past_kv_len = cache.get_past_kv_len()?;
-        if tgt_len == 1 {
-            return Ok(None);
-        }
-
-        Ok(Some(self.make_swa_mask(
-            tgt_len,
-            past_kv_len,
-            sliding_window,
-            input_ids.device(),
-            dtype,
-        )?))
     }
 
     pub fn apply_mask_one_and_zero(
@@ -382,12 +307,7 @@ impl BidirectionalMasker {
     pub fn make_mask(&self, input_ids: &Tensor, dtype: DType) -> Result<Tensor> {
         let (_b_sz, tgt_len) = input_ids.dims2()?;
 
-        // Avoid materializing large sliding-window masks when flash-attn on CUDA.
-        if crate::using_flash_attn() && input_ids.device().is_cuda() {
-            return Tensor::zeros((1, 1), dtype, input_ids.device());
-        }
-
-        // Do not make any -inf
+        // Do not make any -inf, bidirectional (all-zeros) mask
         let mask = Tensor::zeros((tgt_len, tgt_len), dtype, input_ids.device())?;
 
         Ok(mask)
@@ -400,13 +320,35 @@ impl BidirectionalMasker {
     ) -> Result<Tensor> {
         let (_b_sz, tgt_len) = input_ids.dims2()?;
 
-        // Avoid materializing large sliding-window masks when flash-attn on CUDA.
-        if crate::using_flash_attn() && input_ids.device().is_cuda() {
-            return Tensor::zeros((1, 1), dtype, input_ids.device());
-        }
-
         let mask = self.make_swa_mask(tgt_len, sliding_window, input_ids.device(), dtype)?;
 
         Ok(mask)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn finite_rows(mask: &Tensor) -> Result<Vec<Vec<bool>>> {
+        Ok(mask
+            .to_vec2::<f32>()?
+            .into_iter()
+            .map(|row| row.into_iter().map(f32::is_finite).collect())
+            .collect())
+    }
+
+    #[test]
+    fn causal_sliding_mask_keeps_exact_window_width() -> Result<()> {
+        let mask = CausalMasker.make_swa_mask(2, 3, 2, &Device::Cpu, DType::F32)?;
+
+        assert_eq!(
+            finite_rows(&mask)?,
+            vec![
+                vec![false, false, true, true, false],
+                vec![false, false, false, true, true],
+            ]
+        );
+        Ok(())
     }
 }

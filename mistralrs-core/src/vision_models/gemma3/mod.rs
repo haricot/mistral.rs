@@ -206,6 +206,8 @@ pub struct Gemma3SpecificArgs {
     pub image_hashes: Vec<u64>,
 }
 
+impl crate::speculative::SpeculativeTargetMixin for Gemma3Model {}
+
 impl MultimodalModel for Gemma3Model {
     fn forward(
         &self,
