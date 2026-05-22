@@ -1,7 +1,7 @@
 //! Server command implementation
 
 use anyhow::{Context, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tracing::info;
 
 use mistralrs_core::{
@@ -16,7 +16,7 @@ use mistralrs_server_core::{
 use crate::args::{
     AdapterOptions, AgentCliOptions, CodeExecPermissionArg, DeviceOptions, FormatOptions,
     GlobalOptions, MatformerSelection, ModelFormat, ModelSourceOptions, ModelType,
-    QuantizationOptions, RuntimeOptions, SandboxMode, SandboxOptions, ServerOptions,
+    QuantizationOptions, RuntimeOptions, SandboxMode, SandboxOptions, ServerConfig, ServerOptions,
 };
 use crate::ui::build_ui_router;
 
@@ -24,12 +24,15 @@ use crate::ui::build_ui_router;
 #[allow(clippy::too_many_arguments)]
 pub async fn run_server(
     mut model_type: ModelType,
-    server: ServerOptions,
+    mut server: ServerOptions,
+    srv_config: Option<PathBuf>,
     mut runtime: RuntimeOptions,
     agent_options: AgentCliOptions,
     sandbox: SandboxOptions,
     global: GlobalOptions,
 ) -> Result<()> {
+    apply_server_config(&mut server, srv_config)?;
+
     initialize_logging();
 
     agent_options.apply_to(&mut runtime);
@@ -119,14 +122,21 @@ pub async fn run_server(
     let mistralrs_for_ui = mistralrs.clone();
 
     // Build and run the server
-    let mut app = MistralRsServerRouterBuilder::new()
+    let mut router_builder = MistralRsServerRouterBuilder::new()
         .with_mistralrs(mistralrs)
         .with_max_tool_rounds_optional(server.max_tool_rounds)
         .with_tool_dispatch_url_optional(server.tool_dispatch_url.clone())
+        .with_allowed_origins_optional(server.cors_origins.clone())
+        .with_max_body_limit_optional(server.max_body_limit)
         .with_agent_permission(runtime.code_exec_permission.into())
-        .with_approval_broker(approval_broker.clone())
-        .build()
-        .await?;
+        .with_approval_broker(approval_broker.clone());
+
+    router_builder = router_builder.with_include_swagger_routes(server.include_swagger_routes);
+    if let Some(base_path) = server.base_path.as_deref() {
+        router_builder = router_builder.with_base_path(base_path);
+    }
+
+    let mut app = router_builder.build().await?;
 
     if !server.no_ui {
         let enable_code_execution = {
@@ -157,6 +167,51 @@ pub async fn run_server(
     info!("Server listening on http://{}:{}", server.host, server.port);
 
     axum::serve(listener, app).await?;
+
+    Ok(())
+}
+
+fn apply_server_config(server: &mut ServerOptions, srv_config: Option<PathBuf>) -> Result<()> {
+    let Some(srv_config) = srv_config else {
+        return Ok(());
+    };
+
+    let content = std::fs::read_to_string(&srv_config)
+        .with_context(|| format!("Failed to read server config {}", srv_config.display()))?;
+    let config: ServerConfig = toml::from_str(&content)
+        .with_context(|| format!("Failed to parse server config {}", srv_config.display()))?;
+
+    let Some(server_config) = config.server else {
+        return Ok(());
+    };
+
+    if let Some(port) = server_config.port {
+        server.port = port;
+    }
+    if let Some(host) = server_config.host {
+        server.host = host;
+    }
+    if let Some(no_ui) = server_config.no_ui {
+        server.no_ui = no_ui;
+    }
+    if let Some(max_tool_rounds) = server_config.max_tool_rounds {
+        server.max_tool_rounds = Some(max_tool_rounds);
+    }
+    if let Some(tool_dispatch_url) = server_config.tool_dispatch_url {
+        server.tool_dispatch_url = Some(tool_dispatch_url);
+    }
+    if let Some(cors_origins) = server_config.cors_origins {
+        server.cors_origins = Some(cors_origins);
+    }
+    if let Some(base_path) = server_config.base_path {
+        server.base_path = Some(base_path);
+    }
+    if let Some(include_swagger_routes) = server_config.include_swagger_routes {
+        server.include_swagger_routes = include_swagger_routes;
+    }
+    if let Some(max_body_limit) = server_config.max_body_limit {
+        server.max_body_limit = Some(max_body_limit);
+    }
 
     Ok(())
 }

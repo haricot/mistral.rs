@@ -48,6 +48,10 @@ pub enum Command {
         #[command(flatten)]
         server: ServerOptions,
 
+        /// Path to a server configuration file (.toml).
+        #[arg(long)]
+        srv_config: Option<PathBuf>,
+
         #[command(flatten)]
         runtime: RuntimeOptions,
 
