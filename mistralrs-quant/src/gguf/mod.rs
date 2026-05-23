@@ -214,6 +214,10 @@ impl QuantMethod for GgufMatMul {
         Some(DType::F32)
     }
 
+    fn has_bias(&self) -> bool {
+        self.b.is_some()
+    }
+
     fn add_delta_w(&self, delta: &Tensor) -> Result<Arc<dyn QuantMethod>> {
         match self {
             Self {

@@ -10,6 +10,7 @@ use std::{
 use candle_core::{DType, Device, IndexOp, Result, Tensor};
 use mistralrs_quant::{NonZeroOp, QuantMethod, ShardedVarBuilder};
 use text::Qwen3_5TextModel;
+use tracing::info;
 
 use crate::{
     amoe::AnyMoeBaseModelMixin,
@@ -36,7 +37,7 @@ pub(crate) use crate::vision_models::qwen3_vl::Qwen3VLProcessor as Qwen3_5Proces
 
 pub struct Qwen3_5Model {
     text: Qwen3_5TextModel,
-    vision: Qwen3VLVisionModel,
+    vision: Option<Qwen3VLVisionModel>,
     spatial_merge_size: usize,
     image_token_id: u32,
     video_token_id: u32,
@@ -53,16 +54,21 @@ impl Qwen3_5Model {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Self> {
-        // Support both original HuggingFace naming (model.visual.*) and MLX naming (vision_tower.*)
-        let vision_vb = if vb.contains_tensor("vision_tower.patch_embed.proj.weight") {
-            vb.pp("vision_tower")
+        let vision = if normal_loading_metadata.text_only {
+            info!("Qwen3.5 text-only mode enabled; skipping vision submodel load.");
+            None
         } else {
-            vb.pp("model").pp("visual")
+            // Support both original HuggingFace naming (model.visual.*) and MLX naming (vision_tower.*)
+            let vision_vb = if vb.contains_tensor("vision_tower.patch_embed.proj.weight") {
+                vb.pp("vision_tower")
+            } else {
+                vb.pp("model").pp("visual")
+            };
+            Some(Qwen3VLVisionModel::new(
+                &cfg.vision_config,
+                vision_vb.set_device(normal_loading_metadata.real_device.clone()),
+            )?)
         };
-        let vision = Qwen3VLVisionModel::new(
-            &cfg.vision_config,
-            vision_vb.set_device(normal_loading_metadata.real_device.clone()),
-        )?;
         // Use top-level quantization_config if present, otherwise fall back to text_config's
         let mut text_config = cfg.text_config.clone();
         if cfg.quantization_config.is_some() {
@@ -139,6 +145,11 @@ impl Qwen3_5Model {
             let Some(image_grid_thw_ref) = image_grid_thw.as_ref() else {
                 candle_core::bail!("pixel_values require image_grid_thw");
             };
+            let Some(vision) = self.vision.as_ref() else {
+                candle_core::bail!(
+                    "image inputs are unavailable because the model was loaded with text-only mode"
+                );
+            };
             let mut pixel_values = pixel_values.clone();
             let ndim = pixel_values.dims().len();
             if ndim > 2 {
@@ -207,8 +218,7 @@ impl Qwen3_5Model {
                     let miss_pixels = Tensor::cat(&miss_pixel_slices, 0)?;
                     let miss_grid = Tensor::stack(&miss_grid_rows, 0)?;
 
-                    let (encoded_main, encoded_ds) =
-                        self.vision.forward(&miss_pixels, &miss_grid)?;
+                    let (encoded_main, encoded_ds) = vision.forward(&miss_pixels, &miss_grid)?;
 
                     let miss_output_tokens: Vec<usize> = miss_indices
                         .iter()
@@ -256,7 +266,7 @@ impl Qwen3_5Model {
                     (image_embeds, deepstack_layers)
                 }
             } else {
-                self.vision.forward(&pixel_values, image_grid_thw_ref)?
+                vision.forward(&pixel_values, image_grid_thw_ref)?
             };
 
             let image_embeds = image_embeds.to_device(&device)?.to_dtype(self.text.dtype)?;
@@ -301,6 +311,11 @@ impl Qwen3_5Model {
             let Some(video_grid_thw_ref) = video_grid_thw.as_ref() else {
                 candle_core::bail!("pixel_values_videos require video_grid_thw");
             };
+            let Some(vision) = self.vision.as_ref() else {
+                candle_core::bail!(
+                    "video inputs are unavailable because the model was loaded with text-only mode"
+                );
+            };
             let mut pixel_values = pixel_values_videos.clone();
             let ndim = pixel_values.dims().len();
             if ndim > 2 {
@@ -308,7 +323,7 @@ impl Qwen3_5Model {
                 pixel_values = pixel_values.reshape(((), last_dim))?;
             }
             let (video_embeds, deepstack_video_embeds) =
-                self.vision.forward(&pixel_values, video_grid_thw_ref)?;
+                vision.forward(&pixel_values, video_grid_thw_ref)?;
             let video_embeds = video_embeds.to_device(&device)?.to_dtype(self.text.dtype)?;
             let deepstack_video_embeds = deepstack_video_embeds
                 .into_iter()
@@ -574,7 +589,9 @@ impl IsqModel for Qwen3_5Model {
     }
     fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let mut tensors = self.text.residual_tensors();
-        tensors.extend(self.vision.residual_tensors());
+        if let Some(vision) = &self.vision {
+            tensors.extend(vision.residual_tensors());
+        }
         tensors
     }
 }
