@@ -316,6 +316,9 @@ impl Loader for EmbeddingLoader {
                                 }
                                 QuantizedSerdeType::F8Q8 => IsqType::F8Q8.pack_factor(dtype),
                                 QuantizedSerdeType::Mxfp4 => IsqType::MXFP4.pack_factor(dtype),
+                                QuantizedSerdeType::Vocab => {
+                                    anyhow::bail!("Vocab artifact type is not supported in embedding pipeline packing")
+                                }
                             };
                             total_pack_factors += pack_factor;
                         }
@@ -449,7 +452,8 @@ impl Loader for EmbeddingLoader {
             .as_ref()
             .is_some_and(|topology| topology.requires_post_quantization());
 
-        let allow_immediate_cli = in_situ_quant.is_some();
+        let writing_uqff = self.config.write_uqff.is_some();
+        let allow_immediate_cli = !writing_uqff && in_situ_quant.is_some();
 
         let mut immediate_ty = None;
         let mut immediate_predicates = Vec::new();
@@ -460,9 +464,13 @@ impl Loader for EmbeddingLoader {
             if immediate_predicates.is_empty() {
                 warn!("No predicates for this model and ISQ setting detected. ISQ will not be applied to any weights!");
             }
+        } else if writing_uqff && in_situ_quant.is_some() {
+            info!(
+                "Deferring ISQ until after model load for UQFF generation to reduce peak memory."
+            );
         }
 
-        let use_immediate = allow_immediate_cli || has_override_isq;
+        let use_immediate = !writing_uqff && (allow_immediate_cli || has_override_isq);
         if use_immediate {
             let (pool, num_threads) = mistralrs_quant::create_isq_thread_pool(immediate_ty);
             info!("Applying immediate ISQ in parallel on {num_threads} threads.");
@@ -633,6 +641,7 @@ impl Loader for EmbeddingLoader {
                     template_filename: paths.get_template_filename(),
                     generation_config: paths.get_gen_conf_filename(),
                     config: config.clone(),
+                    config_filename: "config.json",
                     processor_filename: paths.get_processor_config(),
                     preprocessor_filename: paths.get_preprocessor_config(),
                     modules: Some(&modules_ser),
@@ -726,6 +735,7 @@ impl IsqPipelineMixin for EmbeddingPipeline {
                     template_filename: &None,
                     generation_config: None,
                     config: self.config.clone(),
+                    config_filename: "config.json",
                     processor_filename: &None,
                     preprocessor_filename: &None,
                     modules: Some(&self.modules_ser),

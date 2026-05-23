@@ -6,22 +6,18 @@ use candle_core::{DType, Device, Result, Tensor, D};
 use config::Gemma4Config;
 use mistralrs_quant::{NonZeroOp, QuantMethod, ShardedVarBuilder};
 use text::TextModel;
-use tracing::info;
 
 use crate::{
     amoe::AnyMoeBaseModelMixin,
     device_map::DeviceMapper,
+    layers::VocabStore,
     paged_attention::{
         encoder_cache::{CacheModality, EncoderCacheManager},
         AttentionImplementation, ModelConfigLike, ModelConfigMetadata,
     },
     pipeline::{
         text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
-        EitherCache, IsqModel, MultimodalModel, NormalLoadingMetadata,
-    },
-    speculative::{
-        SpeculativeAttachInfo, SpeculativeConfig, SpeculativeProposalBatch,
-        SpeculativeProposeBatchCtx, SpeculativeProposer,
+        DisabledModalities, EitherCache, IsqModel, MultimodalModel, NormalLoadingMetadata,
     },
     utils::unvarbuilder::UnVarBuilder,
 };
@@ -30,7 +26,6 @@ pub(crate) mod audio;
 pub(crate) mod audio_processing;
 pub mod config;
 pub(crate) mod inputs_processor;
-mod mtp;
 mod multimodal_embedding;
 pub(crate) mod text;
 pub mod vision;
@@ -61,7 +56,6 @@ pub struct Gemma4Model {
     cfg: Gemma4Config,
     vision_dtype: DType,
     encoder_cache: Arc<Mutex<EncoderCacheManager>>,
-    mtp: Mutex<Option<mtp::Gemma4MtpRuntime>>,
 }
 
 impl Gemma4Model {
@@ -80,6 +74,7 @@ impl Gemma4Model {
         cfg: &Gemma4Config,
         vb: ShardedVarBuilder,
         is_gptx: bool,
+        disabled_modalities: DisabledModalities,
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Self> {
@@ -91,60 +86,56 @@ impl Gemma4Model {
             vb.dtype()
         };
         let audio_dtype = DType::F32;
-
         let text_hidden = cfg.text_config.hidden_size;
-        let load_multimodal = !normal_loading_metadata.text_only;
 
-        let (vision_tower, embed_vision) = if load_multimodal {
-            let tower = vision::VisionTower::new(
-                &cfg.vision_config,
+        let (vision_tower, embed_vision) = if disabled_modalities.vision {
+            (None, None)
+        } else if let Some(ref vision_cfg) = cfg.vision_config {
+            let vision_tower = vision::VisionTower::new(
+                vision_cfg,
                 normal_loading_metadata
                     .mapper
                     .set_nm_device(vb.pp("vision_tower"), false)
                     .set_dtype(vision_dtype),
             )?;
-            let embed = multimodal_embedding::Gemma4MultimodalEmbedder::new(
-                cfg.vision_config.hidden_size,
+
+            let vis_hidden = vision_cfg.hidden_size;
+            let embed_vision = multimodal_embedding::Gemma4MultimodalEmbedder::new(
+                vis_hidden,
                 text_hidden,
-                cfg.vision_config.rms_norm_eps,
+                vision_cfg.rms_norm_eps,
                 normal_loading_metadata
                     .mapper
                     .set_nm_device(vb.pp("embed_vision"), false)
                     .set_dtype(vision_dtype),
             )?;
-            (Some(tower), Some(embed))
+            (Some(vision_tower), Some(embed_vision))
         } else {
-            info!("Gemma4 text-only mode enabled; skipping vision submodel load.");
             (None, None)
         };
 
-        let (audio_tower, embed_audio) = if load_multimodal {
-            if let Some(ref audio_cfg) = cfg.audio_config {
-                let tower = audio::AudioModel::new(
-                    audio_cfg,
-                    normal_loading_metadata
-                        .mapper
-                        .set_nm_device(vb.pp("audio_tower"), false)
-                        .set_dtype(audio_dtype),
-                )?;
-                let audio_hidden = audio_cfg.output_proj_dims.unwrap_or(audio_cfg.hidden_size);
-                let embed = multimodal_embedding::Gemma4MultimodalEmbedder::new(
-                    audio_hidden,
-                    text_hidden,
-                    audio_cfg.rms_norm_eps,
-                    normal_loading_metadata
-                        .mapper
-                        .set_nm_device(vb.pp("embed_audio"), false)
-                        .set_dtype(audio_dtype),
-                )?;
-                (Some(tower), Some(embed))
-            } else {
-                (None, None)
-            }
+        let (audio_tower, embed_audio) = if disabled_modalities.audio {
+            (None, None)
+        } else if let Some(ref audio_cfg) = cfg.audio_config {
+            let tower = audio::AudioModel::new(
+                audio_cfg,
+                normal_loading_metadata
+                    .mapper
+                    .set_nm_device(vb.pp("audio_tower"), false)
+                    .set_dtype(audio_dtype),
+            )?;
+            let audio_hidden = audio_cfg.output_proj_dims.unwrap_or(audio_cfg.hidden_size);
+            let embed = multimodal_embedding::Gemma4MultimodalEmbedder::new(
+                audio_hidden,
+                text_hidden,
+                audio_cfg.rms_norm_eps,
+                normal_loading_metadata
+                    .mapper
+                    .set_nm_device(vb.pp("embed_audio"), false)
+                    .set_dtype(audio_dtype),
+            )?;
+            (Some(tower), Some(embed))
         } else {
-            if cfg.audio_config.is_some() {
-                info!("Gemma4 text-only mode enabled; skipping audio submodel load.");
-            }
             (None, None)
         };
 
@@ -167,8 +158,21 @@ impl Gemma4Model {
             cfg: cfg.clone(),
             vision_dtype,
             encoder_cache: Arc::new(Mutex::new(EncoderCacheManager::new(32))),
-            mtp: Mutex::new(None),
         })
+    }
+
+    fn vision_modules(
+        &self,
+    ) -> Result<(
+        &vision::VisionTower,
+        &multimodal_embedding::Gemma4MultimodalEmbedder,
+    )> {
+        match (&self.vision_tower, &self.embed_vision) {
+            (Some(vision_tower), Some(embed_vision)) => Ok((vision_tower, embed_vision)),
+            _ => candle_core::bail!(
+                "Gemma 4 was loaded with vision disabled. Remove image/video inputs or omit `--disable-vision`/`--text-only`."
+            ),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -195,14 +199,7 @@ impl Gemma4Model {
         let mut input_embeds = self.language_model.embed_tokens(input_ids)?;
 
         if let Some(ref pixel_values) = pixel_values {
-            let (vision_tower, embed_vision) = match (&self.vision_tower, &self.embed_vision) {
-                (Some(vision_tower), Some(embed_vision)) => (vision_tower, embed_vision),
-                _ => {
-                    candle_core::bail!(
-                        "Gemma4 received image input, but the vision submodel was not loaded."
-                    )
-                }
-            };
+            let (vision_tower, embed_vision) = self.vision_modules()?;
             let image_mask = input_ids
                 .to_dtype(DType::F32)?
                 .eq(self.cfg.image_token_id as f64)?;
@@ -300,15 +297,25 @@ impl Gemma4Model {
             }
         }
 
-        if let (Some(audio_mel), Some(audio_mel_mask)) = (audio_mel, audio_mel_mask) {
-            let (audio_tower, embed_audio) = match (&self.audio_tower, &self.embed_audio) {
-                (Some(audio_tower), Some(embed_audio)) => (audio_tower, embed_audio),
-                _ => {
-                    candle_core::bail!(
-                        "Gemma4 received audio input, but the audio submodel was not loaded."
-                    )
-                }
-            };
+        if (audio_mel.is_some() || audio_mel_mask.is_some())
+            && (self.audio_tower.is_none() || self.embed_audio.is_none())
+        {
+            candle_core::bail!(
+                "Gemma 4 was loaded with audio disabled. Remove audio inputs or omit `--disable-audio`/`--text-only`."
+            );
+        }
+
+        if let (
+            Some(audio_mel),
+            Some(audio_mel_mask),
+            Some(ref audio_tower),
+            Some(ref embed_audio),
+        ) = (
+            audio_mel,
+            audio_mel_mask,
+            &self.audio_tower,
+            &self.embed_audio,
+        ) {
             let audio_mask = input_ids
                 .to_dtype(DType::F32)?
                 .eq(self.cfg.audio_token_id as f64)?;
@@ -407,14 +414,7 @@ impl Gemma4Model {
 
         // ── Video embedding (same vision tower as images) ──────────────
         if let Some(vid_pixel_values) = video_pixel_values {
-            let (vision_tower, embed_vision) = match (&self.vision_tower, &self.embed_vision) {
-                (Some(vision_tower), Some(embed_vision)) => (vision_tower, embed_vision),
-                _ => {
-                    candle_core::bail!(
-                        "Gemma4 received video input, but the vision submodel was not loaded."
-                    )
-                }
-            };
+            let (vision_tower, embed_vision) = self.vision_modules()?;
             let video_mask = input_ids
                 .to_dtype(DType::F32)?
                 .eq(self.cfg.video_token_id as f64)?;
@@ -540,6 +540,7 @@ impl Gemma4Model {
     }
 }
 
+// Marker: IsqModel implementation
 impl IsqModel for Gemma4Model {
     fn get_layers(
         &mut self,
@@ -547,7 +548,19 @@ impl IsqModel for Gemma4Model {
         Vec<(&mut Arc<dyn QuantMethod>, Option<usize>)>,
         &dyn DeviceMapper,
     ) {
-        let (tensors, mapper) = self.language_model.get_layers();
+        let (mut tensors, mapper) = self.language_model.get_layers();
+        if let Some(ref mut vision_tower) = self.vision_tower {
+            tensors.extend(vision_tower.get_isq_layers());
+        }
+        if let Some(ref mut audio_tower) = self.audio_tower {
+            tensors.extend(audio_tower.get_isq_layers());
+        }
+        if let Some(ref mut embed_vision) = self.embed_vision {
+            tensors.extend(embed_vision.get_isq_layers());
+        }
+        if let Some(ref mut embed_audio) = self.embed_audio {
+            tensors.extend(embed_audio.get_isq_layers());
+        }
         (tensors, mapper)
     }
 
@@ -558,14 +571,14 @@ impl IsqModel for Gemma4Model {
         let uvb_language = uvb_model.pp("language_model");
         uvb_language.extend(self.language_model.residual_tensors());
 
-        if let Some(ref vision) = self.vision_tower {
+        if let Some(ref vision_tower) = self.vision_tower {
             let uvb_vision = uvb_model.pp("vision_tower");
-            uvb_vision.extend(vision.residual_tensors());
+            uvb_vision.extend(vision_tower.residual_tensors());
         }
 
-        if let Some(ref audio) = self.audio_tower {
+        if let Some(ref audio_tower) = self.audio_tower {
             let uvb_audio = uvb_model.pp("audio_tower");
-            uvb_audio.extend(audio.residual_tensors());
+            uvb_audio.extend(audio_tower.residual_tensors());
         }
 
         if let Some(ref embed_vision) = self.embed_vision {
@@ -581,7 +594,11 @@ impl IsqModel for Gemma4Model {
         uvb.to_safetensors()
     }
 
-    fn imatrix_names(&self) -> candle_core::Result<Vec<Option<String>>> {
+    fn get_isq_vocab(&mut self) -> Vec<(&mut Box<dyn VocabStore>, Option<usize>)> {
+        self.language_model.get_isq_vocab()
+    }
+
+    fn imatrix_names(&self) -> Result<Vec<Option<String>>> {
         self.language_model.imatrix_names()
     }
 }
@@ -663,103 +680,6 @@ impl MultimodalModel for Gemma4Model {
                 .expect("encoder cache poisoned")
                 .counters(),
         )
-    }
-}
-
-impl crate::speculative::SpeculativeTargetMixin for Gemma4Model {
-    fn attach_speculative(
-        &mut self,
-        config: SpeculativeConfig,
-    ) -> candle_core::Result<Option<SpeculativeAttachInfo>> {
-        let SpeculativeConfig::Mtp(config) = config else {
-            *self.mtp.lock().expect("MTP mutex poisoned") = None;
-            return Ok(None);
-        };
-        let assistant = config.model.clone();
-        let runtime = mtp::Gemma4MtpRuntime::load(
-            config,
-            &self.cfg.text_config,
-            self.language_model.device(),
-            self.language_model.device_mapper(),
-            false,
-        )?;
-        let attach_info = SpeculativeAttachInfo::mtp(assistant, runtime.proposal_len());
-        *self.mtp.lock().expect("MTP mutex poisoned") = Some(runtime);
-        Ok(Some(attach_info))
-    }
-
-    fn has_speculative_proposer(&self) -> bool {
-        self.mtp.lock().is_ok_and(|mtp| mtp.is_some())
-    }
-
-    fn speculative_proposal_len(&self) -> Option<usize> {
-        self.mtp
-            .lock()
-            .ok()
-            .and_then(|mtp| mtp.as_ref().map(SpeculativeProposer::proposal_len))
-    }
-
-    fn speculative_propose(
-        &mut self,
-        ctx: SpeculativeProposeBatchCtx<'_>,
-    ) -> candle_core::Result<Option<SpeculativeProposalBatch>> {
-        let embedder = |token: &Tensor| self.language_model.embed_tokens(token);
-        let mut guard = self.mtp.lock().expect("MTP mutex poisoned");
-        let Some(runtime) = guard.as_mut() else {
-            return Ok(None);
-        };
-        runtime.propose(ctx, Some(&embedder)).map(Some)
-    }
-
-    fn speculative_target_hiddens(
-        &self,
-        rows: &[(usize, usize)],
-    ) -> candle_core::Result<Option<Tensor>> {
-        let hidden = self.language_model.last_spec_hidden().ok_or_else(|| {
-            candle_core::Error::Msg(
-                "MTP target hidden state was not captured before proposal.".to_string(),
-            )
-        })?;
-        if rows.is_empty() {
-            return Ok(None);
-        }
-        match hidden.dims() {
-            [batch, row_count, _] => {
-                let mut gathered = Vec::with_capacity(rows.len());
-                for &(batch_idx, row) in rows {
-                    if batch_idx >= *batch {
-                        candle_core::bail!(
-                            "MTP hidden batch {batch_idx} is out of range for {batch}"
-                        );
-                    }
-                    if row >= *row_count {
-                        candle_core::bail!(
-                            "MTP hidden row {row} is out of range for {row_count} rows"
-                        );
-                    }
-                    gathered.push(hidden.narrow(0, batch_idx, 1)?.narrow(1, row, 1)?);
-                }
-                Tensor::cat(&gathered, 0).map(Some)
-            }
-            [row_count, _] => {
-                let mut gathered = Vec::with_capacity(rows.len());
-                for &(batch_idx, row) in rows {
-                    if batch_idx != 0 {
-                        candle_core::bail!(
-                            "MTP hidden batch {batch_idx} is out of range for single-batch hidden state"
-                        );
-                    }
-                    if row >= *row_count {
-                        candle_core::bail!(
-                            "MTP hidden row {row} is out of range for {row_count} rows"
-                        );
-                    }
-                    gathered.push(hidden.narrow(0, row, 1)?.unsqueeze(0)?);
-                }
-                Tensor::cat(&gathered, 0).map(Some)
-            }
-            shape => candle_core::bail!("MTP hidden state has unsupported shape {shape:?}"),
-        }
     }
 }
 

@@ -27,7 +27,7 @@ use crate::pipeline::isq::{UqffFullSer, WeightLoadingMode, WeightLoadingState};
 use crate::pipeline::loaders::auto_device_map;
 use crate::pipeline::loaders::QuantizationConfigShim;
 use crate::pipeline::sampling::sample_and_add_toks;
-use crate::pipeline::text_models_inputs_processor::{make_prompt_chunk, InputMetadata};
+use crate::pipeline::text_models_inputs_processor::make_prompt_chunk;
 use crate::pipeline::{get_chat_template, Modalities, SupportedModality};
 use crate::pipeline::{ChatTemplate, LocalModelPaths};
 use crate::prefix_cacher::PrefixCacheManagerV2;
@@ -396,6 +396,9 @@ impl Loader for NormalLoader {
                                 }
                                 QuantizedSerdeType::F8Q8 => IsqType::F8Q8.pack_factor(dtype),
                                 QuantizedSerdeType::Mxfp4 => IsqType::MXFP4.pack_factor(dtype),
+                                QuantizedSerdeType::Vocab => {
+                                    anyhow::bail!("Vocab artifact type is not supported in normal pipeline packing")
+                                }
                             };
                             total_pack_factors += pack_factor;
                         }
@@ -537,7 +540,9 @@ impl Loader for NormalLoader {
             .as_ref()
             .is_some_and(|topology| topology.requires_post_quantization());
 
-        let allow_immediate_cli = self.config.imatrix.is_none()
+        let writing_uqff = self.config.write_uqff.is_some();
+        let allow_immediate_cli = !writing_uqff
+            && self.config.imatrix.is_none()
             && self.config.calibration_file.is_none()
             && in_situ_quant.is_some();
 
@@ -555,9 +560,13 @@ impl Loader for NormalLoader {
             if immediate_predicates.is_empty() {
                 warn!("No predicates for this model and ISQ setting detected. ISQ will not be applied to any weights!");
             }
+        } else if writing_uqff && in_situ_quant.is_some() {
+            info!(
+                "Deferring ISQ until after model load for UQFF generation to reduce peak memory."
+            );
         }
 
-        let use_immediate = allow_immediate_cli || has_override_isq;
+        let use_immediate = !writing_uqff && (allow_immediate_cli || has_override_isq);
         if use_immediate {
             let (pool, num_threads) = mistralrs_quant::create_isq_thread_pool(immediate_ty);
             info!("Applying immediate ISQ in parallel on {num_threads} threads.");
@@ -918,6 +927,7 @@ impl Loader for NormalLoader {
                     template_filename: paths.get_template_filename(),
                     generation_config: paths.get_gen_conf_filename(),
                     config: config.clone(),
+                    config_filename: "config.json",
                     processor_filename: &None,
                     preprocessor_filename: &None,
                     modules: None,
@@ -1076,6 +1086,7 @@ impl IsqPipelineMixin for NormalPipeline {
                 template_filename: &self.template_filename,
                 generation_config: self.generation_config.as_ref(),
                 config: self.config.clone(),
+                config_filename: "config.json",
                 processor_filename: &None,
                 preprocessor_filename: &None,
                 modules: None,
@@ -1162,47 +1173,6 @@ impl MetadataMixin for NormalPipeline {
     }
 }
 
-impl crate::speculative::driver::SpeculativePipelineExt for NormalPipeline {
-    fn has_speculative_proposer(&self) -> bool {
-        self.model.has_speculative_proposer()
-    }
-
-    fn speculative_proposal_len(&self) -> Option<usize> {
-        self.model.speculative_proposal_len()
-    }
-
-    fn speculative_target_hiddens(
-        &self,
-        rows: &[(usize, usize)],
-    ) -> candle_core::Result<Option<Tensor>> {
-        self.model.speculative_target_hiddens(rows)
-    }
-
-    fn speculative_propose(
-        &mut self,
-        ctx: crate::speculative::SpeculativeProposeBatchCtx<'_>,
-    ) -> candle_core::Result<Option<crate::speculative::SpeculativeProposalBatch>> {
-        self.model.speculative_propose(ctx)
-    }
-
-    fn build_speculative_verify_inputs(
-        &self,
-        input_meta: InputMetadata,
-    ) -> candle_core::Result<Box<dyn Any>> {
-        Ok(Box::new(ModelInputs {
-            input_ids: input_meta.input,
-            input_ids_full: None,
-            seqlen_offsets: input_meta.positions,
-            seqlen_offsets_full: None,
-            context_lens: input_meta.context_lens,
-            position_ids: input_meta.position_ids,
-            paged_attn_meta: input_meta.paged_attn_meta,
-            flash_meta: input_meta.flash_meta,
-            flash_meta_full: None,
-        }))
-    }
-}
-
 #[async_trait::async_trait]
 impl Pipeline for NormalPipeline {
     fn forward_inputs(
@@ -1268,64 +1238,6 @@ impl Pipeline for NormalPipeline {
             Ok(ForwardInputsResult::CausalGeneration { logits })
         }
     }
-    fn attach_speculative(
-        &mut self,
-        config: crate::speculative::SpeculativeConfig,
-    ) -> candle_core::Result<()> {
-        if matches!(config, crate::speculative::SpeculativeConfig::Mtp(_))
-            && self.get_metadata().cache_engine.is_none()
-        {
-            candle_core::bail!(
-                "MTP speculative decoding currently requires PagedAttention for this pipeline."
-            );
-        }
-        if let Some(info) = self.model.attach_speculative(config)? {
-            self.model.log_speculative_attach(&info);
-        }
-        Ok(())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn try_sample_speculative_causal_gen(
-        &mut self,
-        seqs: &mut [&mut Sequence],
-        logits: &[Tensor],
-        prefix_cacher: &mut PrefixCacheManagerV2,
-        disable_eos_stop: bool,
-        rng: Arc<std::sync::Mutex<Isaac64Rng>>,
-        metadata: Option<crate::pipeline::text_models_inputs_processor::PagedAttentionMeta>,
-    ) -> candle_core::Result<bool> {
-        if !self.model.has_speculative_proposer() {
-            crate::speculative::driver::clear_staged_speculative_tokens(seqs);
-            return Ok(false);
-        }
-
-        let general_metadata = self.get_metadata();
-        if let Some(cache_engine) = general_metadata.cache_engine.as_ref() {
-            let Some(metadata) = metadata else {
-                crate::speculative::driver::clear_staged_speculative_tokens(seqs);
-                return Ok(false);
-            };
-            let cache = crate::speculative::cache::PagedSpeculativeCacheAccess::new(
-                &metadata,
-                cache_engine,
-            );
-            return crate::speculative::driver::try_sample_speculative_causal_gen(
-                self,
-                seqs,
-                logits,
-                prefix_cacher,
-                disable_eos_stop,
-                rng,
-                &cache,
-            )
-            .await;
-        }
-
-        crate::speculative::driver::clear_staged_speculative_tokens(seqs);
-        Ok(false)
-    }
-
     async fn sample_causal_gen(
         &self,
         seqs: &mut [&mut Sequence],

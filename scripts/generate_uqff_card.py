@@ -43,7 +43,7 @@ print(
     " NOTE: If multiple quantizations were used: enter the quantization names, and then in the next prompt, the topology file used."
 )
 
-output += "\n## Examples\n"
+output += f"\n## Examples\n"
 
 output += "|Quantization type(s)|Example|\n|--|--|\n"
 

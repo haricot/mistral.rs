@@ -205,12 +205,14 @@ mistralrs-sandbox = { path = "mistralrs-sandbox", version = "0.8.1" }
 cudaforge = { git = "https://github.com/guoqingbao/cudaforge", rev = "64a7f7a7926cc0c1a9b896ab853dedbcb74617a6" }
 
 [patch."https://github.com/huggingface/candle.git"]
-candle-core = { git = "https://github.com/haricot/candle", branch = "bf16_candle" }
-candle-nn = { git = "https://github.com/haricot/candle", branch = "bf16_candle" }
-candle-flash-attn-v3 = { git = "https://github.com/haricot/candle", branch = "bf16_candle" }
-candle-flash-attn = { git = "https://github.com/haricot/candle", branch = "bf16_candle" }
-candle-metal-kernels = { git = "https://github.com/haricot/candle", branch = "bf16_candle" }
-candle-kernels = { git = "https://github.com/haricot/candle", branch = "bf16_candle" }
+candle-core = { git = "https://github.com/haricot/candle.git", rev = "e1f418a" }
+candle-nn = { git = "https://github.com/haricot/candle.git", rev = "e1f418a" }
+candle-flash-attn-v3 = { git = "https://github.com/haricot/candle.git", rev = "e1f418a" }
+candle-flash-attn = { git = "https://github.com/haricot/candle.git", rev = "e1f418a" }
+candle-metal-kernels = { git = "https://github.com/haricot/candle.git", rev = "e1f418a" }
+
+[patch."https://github.com/haricot/candle.git"]
+candle-kernels = { path = "vendor/candle-kernels" }
 
 [profile.release-with-debug]
 inherits = "release"
@@ -225,5 +227,3 @@ debug = true
 [profile.dev]
 debug = true
 opt-level = 3
-
-

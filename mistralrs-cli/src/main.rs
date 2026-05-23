@@ -46,7 +46,6 @@ async fn main() -> Result<()> {
             model_type,
             default_model,
             server,
-            srv_config,
             runtime,
             agent_options,
             sandbox,
@@ -55,7 +54,6 @@ async fn main() -> Result<()> {
             run_server(
                 model_type,
                 server,
-                srv_config,
                 runtime,
                 agent_options,
                 sandbox,

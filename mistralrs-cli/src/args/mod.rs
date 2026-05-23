@@ -48,10 +48,6 @@ pub enum Command {
         #[command(flatten)]
         server: ServerOptions,
 
-        /// Path to a server configuration file (.toml).
-        #[arg(long)]
-        srv_config: Option<PathBuf>,
-
         #[command(flatten)]
         runtime: RuntimeOptions,
 
@@ -476,16 +472,6 @@ pub struct RuntimeOptions {
     #[serde(default)]
     pub matformer_slice_name: Option<String>,
 
-    /// MTP assistant model id or path.
-    #[arg(long)]
-    #[serde(default)]
-    pub mtp_model: Option<String>,
-
-    /// Number of MTP draft tokens to propose per target step.
-    #[arg(long)]
-    #[serde(default)]
-    pub mtp_n_predict: Option<usize>,
-
     /// Path to an MCP client configuration JSON. Also reads `MCP_CONFIG_PATH` if unset.
     #[arg(long)]
     #[serde(default)]
@@ -600,14 +586,6 @@ pub struct BenchRuntimeOptions {
     /// MatFormer slice to load (must match a slice name in the config file).
     #[arg(long, requires = "matformer_config_path")]
     pub matformer_slice_name: Option<String>,
-
-    /// MTP assistant model id or path.
-    #[arg(long)]
-    pub mtp_model: Option<String>,
-
-    /// Number of MTP draft tokens to propose per target step.
-    #[arg(long)]
-    pub mtp_n_predict: Option<usize>,
 }
 
 impl BenchRuntimeOptions {
@@ -616,15 +594,6 @@ impl BenchRuntimeOptions {
             config_path: self.matformer_config_path.clone(),
             slice_name: self.matformer_slice_name.clone(),
         }
-    }
-
-    pub fn mtp_config(&self) -> Option<mistralrs_core::MtpConfig> {
-        self.mtp_model
-            .clone()
-            .map(|model| mistralrs_core::MtpConfig {
-                model,
-                n_predict: self.mtp_n_predict,
-            })
     }
 }
 
@@ -666,15 +635,6 @@ impl RuntimeOptions {
             config_path: self.matformer_config_path.clone(),
             slice_name: self.matformer_slice_name.clone(),
         }
-    }
-
-    pub fn mtp_config(&self) -> Option<mistralrs_core::MtpConfig> {
-        self.mtp_model
-            .clone()
-            .map(|model| mistralrs_core::MtpConfig {
-                model,
-                n_predict: self.mtp_n_predict,
-            })
     }
 }
 
@@ -739,8 +699,6 @@ impl Default for RuntimeOptions {
             jinja_explicit: None,
             matformer_config_path: None,
             matformer_slice_name: None,
-            mtp_model: None,
-            mtp_n_predict: None,
             mcp_config: None,
             agent: false,
             enable_search: false,

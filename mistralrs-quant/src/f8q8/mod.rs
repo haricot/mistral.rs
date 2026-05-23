@@ -223,6 +223,10 @@ impl QuantMethod for F8Q8Linear {
         (DType::F32, Device::Cpu)
     }
 
+    fn unquant_weight_bias(&self) -> Option<(Tensor, Option<Tensor>)> {
+        Some((self.dequantize_w().ok()?, self.bias.clone()))
+    }
+
     fn add_delta_w(&self, delta: &Tensor) -> Result<Arc<dyn QuantMethod>> {
         let dequant = self.dequantize(delta.dtype())?;
         let new_w = (dequant + delta)?;
@@ -497,5 +501,27 @@ mod tests {
     fn test_f8q8_block_size() {
         assert_eq!(std::mem::size_of::<BlockF8Q8>(), 33);
         assert_eq!(std::mem::size_of::<BlockQ8_0>(), 34);
+    }
+
+    #[test]
+    fn gather_forward_uses_dequant_fallback() -> Result<()> {
+        let weight = Tensor::from_vec(
+            vec![1f32, 0., 0., 0., 1., 0., 0., 0., 1., 1., 1., 1.],
+            (2, 2, 3),
+            &Device::Cpu,
+        )?;
+        let input = Tensor::from_vec(vec![1f32, 2., 3., 4., 5., 6.], (2, 1, 3), &Device::Cpu)?;
+        let indices = Tensor::from_vec(vec![0u32, 1, 1, 0], (2, 2), &Device::Cpu)?;
+        let linear = F8Q8Linear::from_weight(&weight, None)?;
+
+        let output = linear.gather_forward(&input, &indices)?;
+
+        assert_eq!(output.dims(), &[2, 2, 2]);
+        let output = output.flatten_all()?.to_vec1::<f32>()?;
+        let expected = [1., 2., 3., 6., 6., 15., 4., 5.];
+        for (&output, &expected) in output.iter().zip(expected.iter()) {
+            assert!((output - expected).abs() < 0.2);
+        }
+        Ok(())
     }
 }

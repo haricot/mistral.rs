@@ -707,8 +707,6 @@ impl IsqModel for XLoraLlama {
     }
 }
 
-impl crate::speculative::SpeculativeTargetMixin for XLoraLlama {}
-
 impl NormalModel for XLoraLlama {
     fn forward(
         &self,

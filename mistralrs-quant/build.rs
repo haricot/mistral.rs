@@ -59,24 +59,10 @@ fn main() -> Result<(), String> {
 
         println!("cargo:rerun-if-changed=build.rs");
         println!("cargo:rerun-if-env-changed=ALLOW_LEGACY");
-        for header in [
-            "kernels/mmq_gguf/mmq_common.cuh",
-            "kernels/mmq_gguf/mmq_gguf.cuh",
-            "kernels/mmq_gguf/mmq_mma.cuh",
-            "kernels/mmq_gguf/mmq_vecdotq.cuh",
-        ] {
-            println!("cargo:rerun-if-changed={header}");
-        }
         let build_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
 
         let mut builder = cudaforge::KernelBuilder::new()
             .source_glob("kernels/*/*.cu")
-            .watch([
-                "kernels/mmq_gguf/mmq_common.cuh",
-                "kernels/mmq_gguf/mmq_gguf.cuh",
-                "kernels/mmq_gguf/mmq_mma.cuh",
-                "kernels/mmq_gguf/mmq_vecdotq.cuh",
-            ])
             .out_dir(build_dir.clone())
             .arg("-std=c++17")
             .arg("-O3")

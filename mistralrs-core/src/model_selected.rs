@@ -99,6 +99,17 @@ pub enum ModelSelected {
         #[arg(short = 'e', long)]
         max_edge: Option<u32>,
 
+        /// Disable vision loading for supported multimodal models.
+        /// On Gemma 4 this also disables video, which shares the vision tower.
+        #[arg(long)]
+        #[serde(default)]
+        disable_vision: bool,
+
+        /// Disable audio loading for supported multimodal models.
+        #[arg(long)]
+        #[serde(default)]
+        disable_audio: bool,
+
         /// Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.
         #[arg(long, default_value_t = AutoDeviceMapParams::DEFAULT_MAX_SEQ_LEN)]
         max_seq_len: usize,
@@ -117,11 +128,6 @@ pub enum ModelSelected {
         /// Only supported on specific multimodal models.
         #[arg(long)]
         max_image_length: Option<usize>,
-
-        /// Load only the text path for supported multimodal models.
-        #[arg(long)]
-        #[serde(default)]
-        text_only: bool,
 
         /// Cache path for Hugging Face models downloaded locally.
         #[arg(long)]
@@ -163,7 +169,7 @@ pub enum ModelSelected {
         topology: Option<String>,
 
         #[allow(rustdoc::bare_urls)]
-        /// ISQ organization: `default` or `moqe` (Mixture of Quantized Experts: <https://arxiv.org/abs/2310.02410>).
+        /// ISQ organization: `default` or `moqe` (Mixture of Quantized Experts: https://arxiv.org/abs/2310.02410).
         #[arg(short, long)]
         #[serde(default)]
         organization: Option<IsqOrganization>,
@@ -621,6 +627,17 @@ pub enum ModelSelected {
         #[arg(short = 'e', long)]
         max_edge: Option<u32>,
 
+        /// Disable vision loading for supported multimodal models.
+        /// On Gemma 4 this also disables video, which shares the vision tower.
+        #[arg(long)]
+        #[serde(default)]
+        disable_vision: bool,
+
+        /// Disable audio loading for supported multimodal models.
+        #[arg(long)]
+        #[serde(default)]
+        disable_audio: bool,
+
         /// Generate and utilize an imatrix to enhance GGUF quantizations.
         #[arg(short, long)]
         calibration_file: Option<PathBuf>,
@@ -658,7 +675,7 @@ pub enum ModelSelected {
         #[arg(long)]
         matformer_slice_name: Option<String>,
 
-        /// ISQ organization: `default` or `moqe` (Mixture of Quantized Experts: <https://arxiv.org/abs/2310.02410>).
+        /// ISQ organization: `default` or `moqe` (Mixture of Quantized Experts: https://arxiv.org/abs/2310.02410).
         #[arg(long)]
         organization: Option<IsqOrganization>,
     },

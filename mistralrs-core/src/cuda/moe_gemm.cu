@@ -502,8 +502,8 @@ extern "C" void mistralrs_moe_gemm_transposed(
 #ifndef NO_BF16_KERNEL
   else if (dtype == 1) {
 #if defined(ALLOW_LEGACY_BF16)
-    moe_gemm_transposed_kernel<nv_bfloat16, nv_bfloat162, float2,
-                               BLOCK_N_TILE, BLOCK_K_TILE, BLOCK_K_THREADS>
+    moe_gemm_transposed_kernel<nv_bfloat16, nv_bfloat162, float2, BLOCK_N_TILE,
+                               BLOCK_K_TILE, BLOCK_K_THREADS>
         <<<grids, blocks, 0, stream>>>(
             reinterpret_cast<const nv_bfloat16 *>(input),
             reinterpret_cast<const nv_bfloat16 *>(weights), sorted_token_ids,

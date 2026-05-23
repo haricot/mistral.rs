@@ -126,10 +126,8 @@ __global__ void moe_gemv_kernel(
         half2 prod = __hmul2(in_v2[i], w_v2[i]);
         sum += __low2float(prod) + __high2float(prod);
       } else {
-        // For BF16, convert each element to float and accumulate
-        // Note: __hmul2 doesn't work with bfloat162 on older CUDA versions
-        sum += vllm::to_float(in_v2[i].x) * vllm::to_float(w_v2[i].x);
-        sum += vllm::to_float(in_v2[i].y) * vllm::to_float(w_v2[i].y);
+        sum += __bfloat162float(in_v2[i].x) * __bfloat162float(w_v2[i].x);
+        sum += __bfloat162float(in_v2[i].y) * __bfloat162float(w_v2[i].y);
       }
     }
   }

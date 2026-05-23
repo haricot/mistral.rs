@@ -10,7 +10,7 @@ mod ffi;
 
 use std::{
     borrow::Cow,
-    io::{Cursor, Read},
+    io::Cursor,
     sync::{atomic::AtomicUsize, Arc},
 };
 
@@ -185,11 +185,7 @@ impl QuantMethod for GgufMatMul {
             cpu::cpu_indexed_moe_forward(&self.w, x, indices)?
         };
 
-        if let Some(ref b) = self.b {
-            res.broadcast_add(b)
-        } else {
-            Ok(res)
-        }
+        self.add_bias(res)
     }
 
     #[cfg(feature = "cuda")]
@@ -198,10 +194,6 @@ impl QuantMethod for GgufMatMul {
             candle_core::quantized::QMatMul::QTensor(qt) => Some(qt),
             _ => None,
         }
-    }
-
-    fn gguf_qmatmul_and_bias(&self) -> Option<(&QMatMul, Option<&Tensor>)> {
-        Some((&self.w, self.b.as_ref()))
     }
 
     fn quantized_act_type(&self) -> Option<DType> {
@@ -248,6 +240,10 @@ impl QuantMethod for GgufMatMul {
             QMatMul::QTensor(q) => (DType::F32, q.device()),
             QMatMul::Tensor(t) | QMatMul::TensorF16(t) => (t.dtype(), t.device().clone()),
         }
+    }
+
+    fn gguf_qmatmul_and_bias(&self) -> Option<(&QMatMul, Option<&Tensor>)> {
+        Some((&self.w, self.b.as_ref()))
     }
 
     fn apply_isq(
@@ -459,10 +455,18 @@ impl QuantizedSerde for GgufMatMul {
             dims.push(buffer.read_u32::<LittleEndian>()? as usize)
         }
 
-        let mut tensor_data = vec![0; data_len];
-        buffer.read_exact(&mut tensor_data)?;
-
         let _acquired_load_guard = guard.acquire(device);
+        let tensor_start = buffer.position() as usize;
+        let tensor_end = tensor_start + data_len;
+        if tensor_end > buffer.get_ref().as_ref().len() {
+            candle_core::bail!("UQFF GGUF tensor data exceeds artifact length");
+        }
+        let w = {
+            let backing = buffer.get_ref().as_ref();
+            qtensor_from_ggml(dtype, &backing[tensor_start..tensor_end], dims, device)?
+        };
+        buffer.set_position(tensor_end as u64);
+
         // If we have bias
         let b = if has_bias {
             Some(deserialize_tensor(&mut buffer, device)?)
@@ -470,7 +474,6 @@ impl QuantizedSerde for GgufMatMul {
             None
         };
 
-        let w = qtensor_from_ggml(dtype, &tensor_data, dims, device)?;
         Ok(Arc::new(Self {
             w: QMatMul::QTensor(w.into()),
             b,
@@ -529,10 +532,18 @@ impl QuantizedSerde for GgufMatMul {
             dims.push(buffer.read_u32::<LittleEndian>()? as usize)
         }
 
-        let mut tensor_data = vec![0; data_len];
-        buffer.read_exact(&mut tensor_data)?;
-
         let _acquired_load_guard = guard.acquire(device);
+        let tensor_start = buffer.position() as usize;
+        let tensor_end = tensor_start + data_len;
+        if tensor_end > buffer.get_ref().as_ref().len() {
+            candle_core::bail!("UQFF GGUF tensor data exceeds artifact length");
+        }
+        let w = {
+            let backing = buffer.get_ref().as_ref();
+            qtensor_from_ggml(dtype, &backing[tensor_start..tensor_end], dims, device)?
+        };
+        buffer.set_position(tensor_end as u64);
+
         // If we have bias
         let b = if has_bias {
             Some(deserialize_tensor(&mut buffer, device)?)
@@ -540,7 +551,6 @@ impl QuantizedSerde for GgufMatMul {
             None
         };
 
-        let w = qtensor_from_ggml(dtype, &tensor_data, dims, device)?;
         Ok((
             Arc::new(Self {
                 w: QMatMul::QTensor(w.into()),

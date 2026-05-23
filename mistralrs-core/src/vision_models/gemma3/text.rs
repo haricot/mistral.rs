@@ -11,8 +11,8 @@ use crate::{
     device_map::{DeviceMappedMask, DeviceMapper},
     get_delta_from_lora_ab,
     layers::{
-        embedding, CausalMaskConfig, CausalMasker, Gemma3RotaryEmbedding, GemmaRmsNorm, MatMul,
-        Mlp, RotaryEmbedding, ScaledEmbedding, Sdpa,
+        vocab_embedding, CausalMaskConfig, CausalMasker, Gemma3RotaryEmbedding, GemmaRmsNorm,
+        MatMul, Mlp, RotaryEmbedding, Sdpa, VocabEmbedding,
     },
     layers_masker::PastKvLenCache,
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
@@ -370,7 +370,7 @@ impl DecoderLayer {
 }
 
 pub struct TextModel {
-    embed_tokens: ScaledEmbedding,
+    embed_tokens: VocabEmbedding,
     layers: Vec<DecoderLayer>,
     norm: GemmaRmsNorm,
     lm_head: Arc<dyn QuantMethod>,
@@ -403,15 +403,13 @@ impl TextModel {
         let mapper = normal_loading_metadata.mapper;
 
         let vb_m = vb.pp("model");
-        let embed_tokens = ScaledEmbedding::new(
+        let embed_tokens = vocab_embedding(
             (cfg.hidden_size as f64).sqrt(),
-            embedding(
-                cfg.vocab_size,
-                cfg.hidden_size,
-                mapper.set_nm_device(vb_m.pp("embed_tokens"), false),
-                &cfg.quantization_config,
-            )?,
-        );
+            cfg.vocab_size,
+            cfg.hidden_size,
+            mapper.set_nm_device(vb_m.pp("embed_tokens"), false),
+            &cfg.quantization_config,
+        )?;
 
         let mut global_ropes = HashMap::new();
         for layer_idx in 0..cfg.num_hidden_layers {
@@ -501,7 +499,7 @@ impl TextModel {
         } else {
             ReplicatedLayer::from_linear(candle_nn::Linear::new(
                 mapper.cast_nm_device(
-                    embed_tokens.embeddings(),
+                    embed_tokens.embeddings()?,
                     normal_loading_metadata.loading_isq,
                 )?,
                 None,
@@ -864,8 +862,6 @@ impl IsqModel for TextModel {
         Ok(names)
     }
 }
-
-impl crate::speculative::SpeculativeTargetMixin for TextModel {}
 
 impl MultimodalModel for TextModel {
     fn forward(

@@ -802,8 +802,6 @@ impl IsqModel for TextModel {
     }
 }
 
-impl crate::speculative::SpeculativeTargetMixin for TextModel {}
-
 impl NormalModel for TextModel {
     fn forward(
         &self,

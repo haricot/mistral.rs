@@ -1,7 +1,7 @@
 //! Server command implementation
 
 use anyhow::{Context, Result};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tracing::info;
 
 use mistralrs_core::{
@@ -16,7 +16,7 @@ use mistralrs_server_core::{
 use crate::args::{
     AdapterOptions, AgentCliOptions, CodeExecPermissionArg, DeviceOptions, FormatOptions,
     GlobalOptions, MatformerSelection, ModelFormat, ModelSourceOptions, ModelType,
-    QuantizationOptions, RuntimeOptions, SandboxMode, SandboxOptions, ServerConfig, ServerOptions,
+    QuantizationOptions, RuntimeOptions, SandboxMode, SandboxOptions, ServerOptions,
 };
 use crate::ui::build_ui_router;
 
@@ -24,15 +24,12 @@ use crate::ui::build_ui_router;
 #[allow(clippy::too_many_arguments)]
 pub async fn run_server(
     mut model_type: ModelType,
-    mut server: ServerOptions,
-    srv_config: Option<PathBuf>,
+    server: ServerOptions,
     mut runtime: RuntimeOptions,
     agent_options: AgentCliOptions,
     sandbox: SandboxOptions,
     global: GlobalOptions,
 ) -> Result<()> {
-    apply_server_config(&mut server, srv_config)?;
-
     initialize_logging();
 
     agent_options.apply_to(&mut runtime);
@@ -59,7 +56,7 @@ pub async fn run_server(
     ) = extract_paged_attn_settings(&model_type);
 
     // Extract device settings
-    let (cpu, device_layers) = extract_device_settings(&model_type);
+    let (cpu, device_layers, active_layers_on_vram) = extract_device_settings(&model_type);
 
     // Extract quantization settings
     let isq = extract_isq_setting(&model_type);
@@ -90,13 +87,13 @@ pub async fn run_server(
                 .map(|p| p.to_string_lossy().to_string()),
         )
         .with_num_device_layers_optional(device_layers)
+        .with_dummy_run(!active_layers_on_vram)
         .with_in_situ_quant_optional(isq)
         .with_model_id_override_optional(api_id_override)
         .with_paged_attn_gpu_mem_optional(paged_attn_gpu_mem)
         .with_paged_attn_gpu_mem_usage_optional(paged_attn_gpu_mem_usage)
         .with_paged_ctxt_len_optional(paged_ctxt_len)
         .with_paged_attn_block_size_optional(paged_attn_block_size)
-        .with_mtp_config_optional(runtime.mtp_config())
         .with_paged_attn_cache_type(paged_cache_type);
 
     if let Some(model) = runtime.search_embedding_model {
@@ -122,21 +119,14 @@ pub async fn run_server(
     let mistralrs_for_ui = mistralrs.clone();
 
     // Build and run the server
-    let mut router_builder = MistralRsServerRouterBuilder::new()
+    let mut app = MistralRsServerRouterBuilder::new()
         .with_mistralrs(mistralrs)
         .with_max_tool_rounds_optional(server.max_tool_rounds)
         .with_tool_dispatch_url_optional(server.tool_dispatch_url.clone())
-        .with_allowed_origins_optional(server.cors_origins.clone())
-        .with_max_body_limit_optional(server.max_body_limit)
         .with_agent_permission(runtime.code_exec_permission.into())
-        .with_approval_broker(approval_broker.clone());
-
-    router_builder = router_builder.with_include_swagger_routes(server.include_swagger_routes);
-    if let Some(base_path) = server.base_path.as_deref() {
-        router_builder = router_builder.with_base_path(base_path);
-    }
-
-    let mut app = router_builder.build().await?;
+        .with_approval_broker(approval_broker.clone())
+        .build()
+        .await?;
 
     if !server.no_ui {
         let enable_code_execution = {
@@ -167,51 +157,6 @@ pub async fn run_server(
     info!("Server listening on http://{}:{}", server.host, server.port);
 
     axum::serve(listener, app).await?;
-
-    Ok(())
-}
-
-fn apply_server_config(server: &mut ServerOptions, srv_config: Option<PathBuf>) -> Result<()> {
-    let Some(srv_config) = srv_config else {
-        return Ok(());
-    };
-
-    let content = std::fs::read_to_string(&srv_config)
-        .with_context(|| format!("Failed to read server config {}", srv_config.display()))?;
-    let config: ServerConfig = toml::from_str(&content)
-        .with_context(|| format!("Failed to parse server config {}", srv_config.display()))?;
-
-    let Some(server_config) = config.server else {
-        return Ok(());
-    };
-
-    if let Some(port) = server_config.port {
-        server.port = port;
-    }
-    if let Some(host) = server_config.host {
-        server.host = host;
-    }
-    if let Some(no_ui) = server_config.no_ui {
-        server.no_ui = no_ui;
-    }
-    if let Some(max_tool_rounds) = server_config.max_tool_rounds {
-        server.max_tool_rounds = Some(max_tool_rounds);
-    }
-    if let Some(tool_dispatch_url) = server_config.tool_dispatch_url {
-        server.tool_dispatch_url = Some(tool_dispatch_url);
-    }
-    if let Some(cors_origins) = server_config.cors_origins {
-        server.cors_origins = Some(cors_origins);
-    }
-    if let Some(base_path) = server_config.base_path {
-        server.base_path = Some(base_path);
-    }
-    if let Some(include_swagger_routes) = server_config.include_swagger_routes {
-        server.include_swagger_routes = include_swagger_routes;
-    }
-    if let Some(max_body_limit) = server_config.max_body_limit {
-        server.max_body_limit = Some(max_body_limit);
-    }
 
     Ok(())
 }
@@ -278,6 +223,8 @@ pub(crate) fn convert_to_model_selected(
                 }
             }
 
+            let disable_vision = multimodal.text_only || multimodal.disable_vision;
+            let disable_audio = multimodal.text_only || multimodal.disable_audio;
             // Use Run (auto-loader) for auto mode without explicit quantized format
             Ok(ModelSelected::Run {
                 model_id: model.model_id.clone(),
@@ -296,11 +243,12 @@ pub(crate) fn convert_to_model_selected(
                 imatrix: quantization.imatrix.clone(),
                 calibration_file: quantization.calibration_file.clone(),
                 max_edge: multimodal.max_edge,
+                disable_vision,
+                disable_audio,
                 max_seq_len: device.max_seq_len,
                 max_batch_size: device.max_batch_size,
                 max_num_images: multimodal.max_num_images,
                 max_image_length: multimodal.max_image_length,
-                text_only: multimodal.text_only,
                 hf_cache_path: device.hf_cache.clone(),
                 matformer_config_path: matformer.config_path.clone(),
                 matformer_slice_name: matformer.slice_name.clone(),
@@ -324,32 +272,38 @@ pub(crate) fn convert_to_model_selected(
             device,
             cache: _,
             multimodal,
-        } => Ok(ModelSelected::MultimodalPlain {
-            model_id: model.model_id.clone(),
-            tokenizer_json: model
-                .tokenizer
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string()),
-            arch: None,
-            dtype: model.dtype,
-            topology: device
-                .topology
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string()),
-            write_uqff: None,
-            from_uqff: quantization.from_uqff.clone(),
-            max_edge: multimodal.max_edge,
-            calibration_file: quantization.calibration_file.clone(),
-            imatrix: quantization.imatrix.clone(),
-            max_seq_len: device.max_seq_len,
-            max_batch_size: device.max_batch_size,
-            max_num_images: multimodal.max_num_images.unwrap_or(1),
-            max_image_length: multimodal.max_image_length.unwrap_or(1024),
-            hf_cache_path: device.hf_cache.clone(),
-            matformer_config_path: matformer.config_path.clone(),
-            matformer_slice_name: matformer.slice_name.clone(),
-            organization: quantization.isq_organization,
-        }),
+        } => {
+            let disable_vision = multimodal.text_only || multimodal.disable_vision;
+            let disable_audio = multimodal.text_only || multimodal.disable_audio;
+            Ok(ModelSelected::MultimodalPlain {
+                model_id: model.model_id.clone(),
+                tokenizer_json: model
+                    .tokenizer
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string()),
+                arch: None,
+                dtype: model.dtype,
+                topology: device
+                    .topology
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string()),
+                write_uqff: None,
+                from_uqff: quantization.from_uqff.clone(),
+                max_edge: multimodal.max_edge,
+                disable_vision,
+                disable_audio,
+                calibration_file: quantization.calibration_file.clone(),
+                imatrix: quantization.imatrix.clone(),
+                max_seq_len: device.max_seq_len,
+                max_batch_size: device.max_batch_size,
+                max_num_images: multimodal.max_num_images.unwrap_or(1),
+                max_image_length: multimodal.max_image_length.unwrap_or(1024),
+                hf_cache_path: device.hf_cache.clone(),
+                matformer_config_path: matformer.config_path.clone(),
+                matformer_slice_name: matformer.slice_name.clone(),
+                organization: quantization.isq_organization,
+            })
+        }
 
         ModelType::Diffusion { model, device: _ } => Ok(ModelSelected::DiffusionPlain {
             model_id: model.model_id.clone(),
@@ -644,7 +598,7 @@ pub(crate) fn extract_paged_attn_settings(
     cache.paged_attn.clone().into_builder_flags()
 }
 
-pub(crate) fn extract_device_settings(model_type: &ModelType) -> (bool, Option<Vec<String>>) {
+pub(crate) fn extract_device_settings(model_type: &ModelType) -> (bool, Option<Vec<String>>, bool) {
     let device = match model_type {
         ModelType::Auto { device, .. } => device,
         ModelType::Text { device, .. } => device,
@@ -654,7 +608,11 @@ pub(crate) fn extract_device_settings(model_type: &ModelType) -> (bool, Option<V
         ModelType::Embedding { device, .. } => device,
     };
 
-    (device.cpu, device.device_layers.clone())
+    (
+        device.cpu,
+        device.device_layers.clone(),
+        device.active_layers_on_vram,
+    )
 }
 
 pub(crate) fn extract_isq_setting(model_type: &ModelType) -> Option<String> {

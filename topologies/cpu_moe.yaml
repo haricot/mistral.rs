@@ -1,9 +1,0 @@
-runtime:
-  cpu_moe: true
-  cpu_profile: true
-  gguf_cpu_moe_q4k_expert_cache: 2048
-  gguf_cpu_moe_parallel_topk: true
-
-layers:
-  0-40:
-    device: cuda[0]

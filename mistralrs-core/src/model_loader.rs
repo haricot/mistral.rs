@@ -9,9 +9,9 @@ use mistralrs_quant::MULTI_LORA_DELIMITER;
 use crate::{
     get_toml_selected_model_dtype,
     pipeline::{
-        AutoLoaderBuilder, DiffusionLoaderBuilder, GGMLLoaderBuilder, GGMLSpecificConfig,
-        GGUFLoaderBuilder, GGUFSpecificConfig, MultimodalLoaderBuilder, MultimodalSpecificConfig,
-        NormalLoaderBuilder, NormalSpecificConfig,
+        AutoLoaderBuilder, DiffusionLoaderBuilder, DisabledModalities, GGMLLoaderBuilder,
+        GGMLSpecificConfig, GGUFLoaderBuilder, GGUFSpecificConfig, MultimodalLoaderBuilder,
+        MultimodalSpecificConfig, NormalLoaderBuilder, NormalSpecificConfig,
     },
     toml_selector::get_toml_selected_model_device_map_params,
     AutoDeviceMapParams, EmbeddingLoaderBuilder, EmbeddingSpecificConfig, Loader, ModelDType,
@@ -171,15 +171,9 @@ pub fn get_auto_device_map_params(model: &ModelSelected) -> anyhow::Result<AutoD
             max_batch_size,
             max_image_length,
             max_num_images,
-            text_only,
             ..
         } => {
-            if *text_only {
-                Ok(AutoDeviceMapParams::Text {
-                    max_seq_len: *max_seq_len,
-                    max_batch_size: *max_batch_size,
-                })
-            } else if max_num_images.is_some() || max_image_length.is_some() {
+            if max_num_images.is_some() || max_image_length.is_some() {
                 let max_image_length =
                     max_image_length.unwrap_or(AutoDeviceMapParams::DEFAULT_MAX_IMAGE_LENGTH);
                 Ok(AutoDeviceMapParams::Multimodal {
@@ -289,11 +283,12 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
             imatrix,
             calibration_file,
             max_edge,
+            disable_vision,
+            disable_audio,
             max_seq_len: _,
             max_batch_size: _,
             max_num_images: _,
             max_image_length: _,
-            text_only,
             hf_cache_path,
             matformer_config_path,
             matformer_slice_name,
@@ -317,7 +312,6 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
                 },
                 MultimodalSpecificConfig {
                     topology: Topology::from_option_path(topology.clone())?,
-                    text_only,
                     write_uqff: write_uqff.clone(),
                     from_uqff: from_uqff.clone().map(|x| {
                         x.split(UQFF_MULTI_FILE_DELIMITER)
@@ -326,6 +320,7 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
                             .collect::<Vec<_>>()
                     }),
                     max_edge,
+                    disabled_modalities: DisabledModalities::new(disable_vision, disable_audio),
                     calibration_file,
                     imatrix,
                     hf_cache_path: hf_cache_path.clone(),
@@ -366,6 +361,8 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
             write_uqff,
             from_uqff,
             max_edge,
+            disable_vision,
+            disable_audio,
             calibration_file,
             max_seq_len: _,
             max_batch_size: _,
@@ -379,7 +376,6 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
         } => MultimodalLoaderBuilder::new(
             MultimodalSpecificConfig {
                 topology: Topology::from_option_path(topology)?,
-                text_only: false,
                 write_uqff,
                 from_uqff: from_uqff.map(|x| {
                     x.split(UQFF_MULTI_FILE_DELIMITER)
@@ -388,6 +384,7 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
                         .collect::<Vec<_>>()
                 }),
                 max_edge,
+                disabled_modalities: DisabledModalities::new(disable_vision, disable_audio),
                 calibration_file,
                 imatrix,
                 hf_cache_path,

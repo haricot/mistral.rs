@@ -19,7 +19,7 @@ pub async fn run_tune(
     emit_config: Option<PathBuf>,
 ) -> Result<()> {
     let model_selected = convert_to_model_selected(&model_type, &MatformerSelection::default())?;
-    let (cpu, _device_layers) = extract_device_settings(&model_type);
+    let (cpu, _device_layers, _active_layers_on_vram) = extract_device_settings(&model_type);
     let requested = match extract_quant_flag(&model_type) {
         Some(v) if v.trim().eq_ignore_ascii_case("auto") => {
             anyhow::bail!("`--quant auto` is meaningless for `tune`; tune is the recommender")
