@@ -408,6 +408,9 @@ __global__ void gptoss_swiglu_kernel_vec4(const T4 *__restrict__ gate,
 extern "C" void gptoss_swiglu_f16(const __half *gate, const __half *up,
                                   __half *output, uint32_t N, float alpha,
                                   float limit, cudaStream_t stream) {
+  if (N == 0) {
+    return;
+  }
   // Use vectorized kernel when N is divisible by 4
   if (N % 4 == 0) {
     const int N4 = N / 4;
@@ -431,6 +434,9 @@ extern "C" void gptoss_swiglu_bf16(const __nv_bfloat16 *gate,
                                    __nv_bfloat16 *output, uint32_t N,
                                    float alpha, float limit,
                                    cudaStream_t stream) {
+  if (N == 0) {
+    return;
+  }
   // Use vectorized kernel when N is divisible by 4
   if (N % 4 == 0) {
     const int N4 = N / 4;
@@ -452,6 +458,9 @@ extern "C" void gptoss_swiglu_bf16(const __nv_bfloat16 *gate,
 extern "C" void gptoss_swiglu_f32(const float *gate, const float *up,
                                   float *output, uint32_t N, float alpha,
                                   float limit, cudaStream_t stream) {
+  if (N == 0) {
+    return;
+  }
   // Use vectorized kernel when N is divisible by 4
   if (N % 4 == 0) {
     const int N4 = N / 4;
@@ -517,6 +526,9 @@ extern "C" void gptoss_swiglu_interleaved_f16(const __half *gate_up,
                                               float alpha, float limit,
                                               cudaStream_t stream) {
   const uint32_t total = N * intermediate_size;
+  if (total == 0) {
+    return;
+  }
   const int nthreads = 256;
   const int nblocks = (total + nthreads - 1) / nthreads;
   gptoss_swiglu_interleaved_kernel<<<nblocks, nthreads, 0, stream>>>(
@@ -528,6 +540,9 @@ extern "C" void gptoss_swiglu_interleaved_bf16(
     const __nv_bfloat16 *gate_up, __nv_bfloat16 *output, uint32_t N,
     uint32_t intermediate_size, float alpha, float limit, cudaStream_t stream) {
   const uint32_t total = N * intermediate_size;
+  if (total == 0) {
+    return;
+  }
   const int nthreads = 256;
   const int nblocks = (total + nthreads - 1) / nthreads;
   gptoss_swiglu_interleaved_kernel<<<nblocks, nthreads, 0, stream>>>(
@@ -541,6 +556,9 @@ extern "C" void gptoss_swiglu_interleaved_f32(const float *gate_up,
                                               float alpha, float limit,
                                               cudaStream_t stream) {
   const uint32_t total = N * intermediate_size;
+  if (total == 0) {
+    return;
+  }
   const int nthreads = 256;
   const int nblocks = (total + nthreads - 1) / nthreads;
   gptoss_swiglu_interleaved_kernel<<<nblocks, nthreads, 0, stream>>>(
@@ -720,6 +738,9 @@ extern "C" void softmax_with_sinks_f16(const __half *logits,
                                        int num_heads, int q_len, int k_len,
                                        float scale, cudaStream_t stream) {
   const int total_rows = batch_size * num_heads * q_len;
+  if (total_rows == 0) {
+    return;
+  }
   // Choose block size based on k_len
   int block_size = 256;
   if (k_len <= 64)
@@ -745,6 +766,9 @@ extern "C" void softmax_with_sinks_bf16(const __nv_bfloat16 *logits,
                                         __nv_bfloat16 *output, int batch_size,
                                         int num_heads, int q_len, int k_len,
                                         float scale, cudaStream_t stream) {
+  if (batch_size * num_heads * q_len == 0) {
+    return;
+  }
   const int total_rows = batch_size * num_heads * q_len;
   int block_size = 256;
   if (k_len <= 64)
@@ -769,6 +793,9 @@ extern "C" void softmax_with_sinks_f32(const float *logits, const float *sinks,
                                        int batch_size, int num_heads, int q_len,
                                        int k_len, float scale,
                                        cudaStream_t stream) {
+  if (batch_size * num_heads * q_len == 0) {
+    return;
+  }
   const int total_rows = batch_size * num_heads * q_len;
   int block_size = 256;
   if (k_len <= 64)

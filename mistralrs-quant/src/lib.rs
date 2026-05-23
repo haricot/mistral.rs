@@ -3,8 +3,7 @@ use std::{
     fmt::Debug,
     num::NonZeroUsize,
     sync::{
-        atomic::{AtomicU8, AtomicUsize, Ordering},
-        Arc, Condvar, Mutex, MutexGuard,
+        atomic::AtomicU8, atomic::AtomicUsize, atomic::Ordering, Arc, Condvar, Mutex, MutexGuard,
     },
 };
 
@@ -72,7 +71,7 @@ pub use gguf::cuda::{
     quantize_input_q8_1, ACT_GELU_PYTORCH_TANH, ACT_SILU,
 };
 pub use gguf::GgufMatMul;
-pub use gptq::{gptq_moe_linear, GptqLayer};
+pub use gptq::GptqLayer;
 pub use hqq::{HqqAxis, HqqBits, HqqConfig, HqqLayer};
 pub use imatrix::{CollectedImatrixData, ImatrixLayerStats};
 pub use lora::{
@@ -92,13 +91,8 @@ pub use utils::gptoss_swiglu_interleaved;
 pub use utils::isq::apply_immediate_isq;
 pub use utils::softmax_with_sinks;
 pub use utils::{fused_glu, GluActivationType};
-pub use utils::{
-    log, BitWiseOp, CumSumOp, LeftshiftOp, NonZeroOp, SortOp, UQFF_QUANT_TYPE_OFFSET, UQFF_VERSION,
-};
+pub use utils::{log, BitWiseOp, CumSumOp, LeftshiftOp, NonZeroOp, SortOp, UQFF_QUANT_TYPE_OFFSET};
 pub use vector_fp8::{fp8_vector_dequantize, fp8_vector_quantize};
-
-use candle_nn::{Conv1d, Conv2d, Linear, Module};
-use serde::{Deserialize, Deserializer, Serialize};
 
 const RUNTIME_UNSET_BOOL: u8 = 0;
 const RUNTIME_FALSE_BOOL: u8 = 1;
@@ -200,6 +194,9 @@ pub(crate) fn gguf_cpu_q4k_matmul_cache_override() -> Option<usize> {
 pub(crate) fn gguf_cpu_q4k_matmul_max_rows_override() -> Option<usize> {
     load_optional_usize(&GGUF_CPU_Q4K_MATMUL_MAX_ROWS)
 }
+
+use candle_nn::{Conv1d, Conv2d, Linear, Module};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// Limits outstanding async ISQ jobs to prevent unbounded memory growth.
 ///
@@ -957,7 +954,6 @@ pub enum QuantizedSerdeType {
     Afq = 4,
     F8Q8 = 5,
     Mxfp4 = 6,
-    Vocab = 7,
 }
 
 impl TryFrom<usize> for QuantizedSerdeType {
@@ -971,7 +967,6 @@ impl TryFrom<usize> for QuantizedSerdeType {
             4 => Ok(Self::Afq),
             5 => Ok(Self::F8Q8),
             6 => Ok(Self::Mxfp4),
-            7 => Ok(Self::Vocab),
             other => candle_core::bail!("QuantizedSerdeType {other} is invalid."),
         }
     }
@@ -1099,43 +1094,22 @@ pub trait QuantMethod: Send + Sync + Debug + QuantizedSerde {
     /// If `a` is (n_tokens, n_experts, cols), `self` weights are (n_experts, rows, cols),
     /// then the indices are (n_tokens, n_experts).
     fn gather_forward(&self, a: &Tensor, indices: &Tensor) -> Result<Tensor> {
-        let original_ty = a.dtype();
-        let original_device = a.device().clone();
-        let (_, weight_device) = self.dtype_and_device();
-        let a = if let Some(t) = self.quantized_act_type() {
-            a.to_dtype(t)?
+        if let Some(t) = self.quantized_act_type() {
+            let original_ty = a.dtype();
+            self.gather_forward_raw(&a.to_dtype(t)?, indices)?
+                .to_dtype(original_ty)
         } else {
-            a.clone()
-        };
-        let a = if a.device().same_device(&weight_device) {
-            a
-        } else {
-            a.to_device(&weight_device)?
-        };
-        let indices = if indices.device().same_device(&weight_device) {
-            indices.clone()
-        } else {
-            indices.to_device(&weight_device)?
-        };
-        let result = self
-            .gather_forward_raw(&a, &indices)?
-            .to_dtype(original_ty)?;
-        if result.device().same_device(&original_device) {
-            Ok(result)
-        } else {
-            result.to_device(&original_device)
+            self.gather_forward_raw(a, indices)
         }
     }
 
     /// Raw gather matmul without dtype casting. Implementors override this.
     /// Callers should use `gather_forward` instead.
-    fn gather_forward_raw(&self, a: &Tensor, indices: &Tensor) -> Result<Tensor> {
-        let (weight, bias) = if let Some(weight_bias) = self.unquant_weight_bias() {
-            weight_bias
-        } else {
-            (self.dequantize_w()?, None)
-        };
-        gather_forward_dequantized(self.name(), weight, bias, a, indices)
+    fn gather_forward_raw(&self, _a: &Tensor, _indices: &Tensor) -> Result<Tensor> {
+        candle_core::bail!(
+            "{} does not support `gather_forward`. Please raise an issue.",
+            self.name()
+        )
     }
 
     /// Get the underlying QTensor if this is a GGUF quantized layer.
@@ -1191,33 +1165,6 @@ pub trait QuantMethod: Send + Sync + Debug + QuantizedSerde {
     fn dummy_info(&self) -> Option<&DummyLayerInfo> {
         None
     }
-}
-
-pub(crate) fn gather_forward_dequantized(
-    name: &str,
-    weight: Tensor,
-    bias: Option<Tensor>,
-    a: &Tensor,
-    indices: &Tensor,
-) -> Result<Tensor> {
-    let weight = if weight.device().same_device(a.device()) {
-        weight
-    } else {
-        weight.to_device(a.device())?
-    };
-    let bias = bias
-        .map(|bias| {
-            if bias.device().same_device(a.device()) {
-                Ok(bias)
-            } else {
-                bias.to_device(a.device())
-            }
-        })
-        .transpose()?;
-    let unquant = UnquantLinear::new(QuantMethodConfig::Unquantized(Linear::new(weight, bias)))?;
-    unquant
-        .gather_forward_raw(a, indices)
-        .map_err(|err| err.with_path(name))
 }
 
 pub fn gguf_cpu_fused_moe_q4k_forward<F>(

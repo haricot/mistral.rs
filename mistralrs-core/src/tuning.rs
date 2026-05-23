@@ -16,9 +16,7 @@ use crate::pipeline::{
     TokenSource,
 };
 use crate::utils::tokens::get_token;
-use crate::{
-    paged_attn_supported, IsqType, ModelDType, ModelSelected, TryIntoDType, GLOBAL_HF_CACHE,
-};
+use crate::{paged_attn_supported, IsqType, ModelSelected, TryIntoDType, GLOBAL_HF_CACHE};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -125,66 +123,6 @@ enum TuneKind {
     Normal,
     Multimodal,
     Embedding,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct LegacyMode {
-    value: Option<String>,
-    allow_bf16: bool,
-    allow_fp8: bool,
-}
-
-fn parse_allow_legacy(value: Option<&str>) -> LegacyMode {
-    let Some(value) = value else {
-        return LegacyMode::default();
-    };
-
-    let tokens = value
-        .split(',')
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .collect::<Vec<_>>();
-
-    let has_all = tokens.contains(&"all");
-    let allow_bf16 = has_all || tokens.contains(&"bf16");
-    let allow_fp8 = has_all || tokens.contains(&"fp8");
-
-    let value = if has_all {
-        Some("all".to_string())
-    } else {
-        let mut normalized = Vec::new();
-        if allow_bf16 {
-            normalized.push("bf16");
-        }
-        if allow_fp8 {
-            normalized.push("fp8");
-        }
-        (!normalized.is_empty()).then(|| normalized.join(","))
-    };
-
-    LegacyMode {
-        value,
-        allow_bf16,
-        allow_fp8,
-    }
-}
-
-fn legacy_prefix(backend: TuneBackend, dtype: ModelDType, legacy: &LegacyMode) -> String {
-    if backend == TuneBackend::Cuda && matches!(dtype, ModelDType::BF16) && legacy.allow_bf16 {
-        if let Some(value) = &legacy.value {
-            return format!("ALLOW_LEGACY=\"{value}\" ");
-        }
-    }
-
-    String::new()
-}
-
-fn recommended_dtype_flag(dtype: ModelDType) -> String {
-    if matches!(dtype, ModelDType::Auto) {
-        String::new()
-    } else {
-        format!(" --dtype {dtype}")
-    }
 }
 
 fn backend_from_devices(devices: &[Device]) -> TuneBackend {
@@ -537,7 +475,6 @@ fn map_for_candidate(
 )]
 pub fn auto_tune(req: AutoTuneRequest) -> Result<AutoTuneResult> {
     let model_id = model_id_from_selected(&req.model);
-    let legacy = parse_allow_legacy(std::env::var("ALLOW_LEGACY").ok().as_deref());
     match &req.model {
         ModelSelected::GGUF { .. }
         | ModelSelected::GGML { .. }
@@ -575,14 +512,14 @@ pub fn auto_tune(req: AutoTuneRequest) -> Result<AutoTuneResult> {
     let devices = select_devices(req.force_cpu)?;
     let backend = backend_from_devices(&devices);
 
-    let model_dtype = get_model_dtype(&req.model)?;
     let dtype = {
+        let model_dtype = get_model_dtype(&req.model)?;
         let refs = devices.iter().collect::<Vec<_>>();
         model_dtype.try_into_dtype(&refs)?
     };
 
     let loader_normal = AutoNormalLoader;
-    let loader_multimodal = AutoMultimodalLoader::default();
+    let loader_multimodal = AutoMultimodalLoader;
     let loader_embedding = AutoEmbeddingLoader;
     let loader: &dyn DeviceMappedModelLoader = match kind {
         TuneKind::Normal => &loader_normal,
@@ -607,14 +544,6 @@ pub fn auto_tune(req: AutoTuneRequest) -> Result<AutoTuneResult> {
     }
     if matches!(kind, TuneKind::Multimodal) {
         notes.push("Detected multimodal model configuration.".to_string());
-    }
-    if backend == TuneBackend::Cuda && matches!(model_dtype, ModelDType::BF16) && legacy.allow_bf16
-    {
-        if let Some(value) = &legacy.value {
-            notes.push(format!(
-                "ALLOW_LEGACY=\"{value}\" is active; recommended commands preserve it for BF16 tuning on legacy CUDA GPUs."
-            ));
-        }
     }
 
     // Get total VRAM for calculations
@@ -708,23 +637,14 @@ pub fn auto_tune(req: AutoTuneRequest) -> Result<AutoTuneResult> {
     let (recommended_isq, device_layers, device_layers_cli, recommended_command) =
         if let Some(idx) = recommended_idx {
             let rec = &tune_candidates[idx];
-            let legacy_prefix = legacy_prefix(backend, model_dtype, &legacy);
-            let dtype_flag = recommended_dtype_flag(model_dtype);
             let isq_flag = rec
                 .isq
                 .map(|i| format!(" --isq {:?}", i).to_lowercase())
                 .unwrap_or_default();
-            let cmd = format!("{legacy_prefix}mistralrs serve -m {model_id}{dtype_flag}{isq_flag}");
+            let cmd = format!("mistralrs serve -m {model_id}{isq_flag}");
             (rec.isq, None, rec.device_layers_cli.clone(), cmd)
         } else {
-            let legacy_prefix = legacy_prefix(backend, model_dtype, &legacy);
-            let dtype_flag = recommended_dtype_flag(model_dtype);
-            (
-                None,
-                None,
-                None,
-                format!("{legacy_prefix}mistralrs serve -m {model_id}{dtype_flag}"),
-            )
+            (None, None, None, format!("mistralrs serve -m {model_id}"))
         };
 
     let paged_attn_mode = if backend != TuneBackend::Cpu && paged_attn_supported() {
@@ -764,59 +684,4 @@ pub fn auto_tune(req: AutoTuneRequest) -> Result<AutoTuneResult> {
         warnings,
         notes,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        legacy_prefix, parse_allow_legacy, recommended_dtype_flag, LegacyMode, TuneBackend,
-    };
-    use crate::ModelDType;
-
-    #[test]
-    fn parse_allow_legacy_normalizes_known_values() {
-        let parsed = parse_allow_legacy(Some(" fp8 , bf16 "));
-        assert_eq!(
-            parsed,
-            LegacyMode {
-                value: Some("bf16,fp8".to_string()),
-                allow_bf16: true,
-                allow_fp8: true,
-            }
-        );
-    }
-
-    #[test]
-    fn parse_allow_legacy_prefers_all() {
-        let parsed = parse_allow_legacy(Some("bf16,all"));
-        assert_eq!(
-            parsed,
-            LegacyMode {
-                value: Some("all".to_string()),
-                allow_bf16: true,
-                allow_fp8: true,
-            }
-        );
-    }
-
-    #[test]
-    fn legacy_prefix_is_only_added_for_cuda_bf16() {
-        let legacy = LegacyMode {
-            value: Some("bf16,fp8".to_string()),
-            allow_bf16: true,
-            allow_fp8: true,
-        };
-        assert_eq!(
-            legacy_prefix(TuneBackend::Cuda, ModelDType::BF16, &legacy),
-            "ALLOW_LEGACY=\"bf16,fp8\" "
-        );
-        assert!(legacy_prefix(TuneBackend::Cuda, ModelDType::F16, &legacy).is_empty());
-        assert!(legacy_prefix(TuneBackend::Metal, ModelDType::BF16, &legacy).is_empty());
-    }
-
-    #[test]
-    fn recommended_dtype_flag_omits_auto() {
-        assert!(recommended_dtype_flag(ModelDType::Auto).is_empty());
-        assert_eq!(recommended_dtype_flag(ModelDType::BF16), " --dtype bf16");
-    }
 }

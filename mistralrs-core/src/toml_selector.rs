@@ -5,12 +5,12 @@ use serde::Deserialize;
 
 use crate::{
     amoe::AnyMoeConfig,
-    pipeline::{DisabledModalities, EmbeddingLoaderType, IsqOrganization},
+    pipeline::{EmbeddingLoaderType, IsqOrganization},
     AnyMoeLoader, AutoDeviceMapParams, EmbeddingLoaderBuilder, EmbeddingSpecificConfig,
     GGMLLoaderBuilder, GGMLSpecificConfig, GGUFLoaderBuilder, GGUFSpecificConfig, Loader,
     ModelDType, MultimodalLoaderBuilder, MultimodalLoaderType, MultimodalSpecificConfig,
-    NormalLoaderBuilder, NormalLoaderType, NormalSpecificConfig, SpeculativeConfig,
-    SpeculativeLoader, Topology, GGUF_MULTI_FILE_DELIMITER, UQFF_MULTI_FILE_DELIMITER,
+    NormalLoaderBuilder, NormalLoaderType, NormalSpecificConfig, Topology,
+    GGUF_MULTI_FILE_DELIMITER, UQFF_MULTI_FILE_DELIMITER,
 };
 
 fn default_one() -> usize {
@@ -481,15 +481,6 @@ pub enum TomlModelSelected {
 }
 
 #[derive(Deserialize)]
-pub struct SpeculativeTomlModelSelected {
-    /// Gamma value for the model
-    gamma: usize,
-
-    /// Base model
-    draft_model: TomlModelSelected,
-}
-
-#[derive(Deserialize)]
 pub struct AnyMoeTomlModelSelected {
     /// Config
     config: AnyMoeConfig,
@@ -519,8 +510,10 @@ pub struct TomlSelector {
     /// Selected model
     model: TomlModelSelected,
 
-    /// Speculative model selector
-    speculative: Option<SpeculativeTomlModelSelected>,
+    /// Legacy target/draft speculative decoding was removed. Keep this field
+    /// only to reject old configs explicitly instead of silently ignoring them.
+    #[serde(default)]
+    speculative: Option<serde::de::IgnoredAny>,
 
     /// AnyMoE config
     anymoe: Option<AnyMoeTomlModelSelected>,
@@ -950,6 +943,7 @@ fn loader_from_selected(
         } => MultimodalLoaderBuilder::new(
             MultimodalSpecificConfig {
                 topology: Topology::from_option_path(topology)?,
+                text_only: false,
                 write_uqff,
                 from_uqff: from_uqff.map(|x| {
                     x.split(UQFF_MULTI_FILE_DELIMITER)
@@ -958,7 +952,6 @@ fn loader_from_selected(
                         .collect::<Vec<_>>()
                 }),
                 max_edge,
-                disabled_modalities: DisabledModalities::default(),
                 calibration_file,
                 imatrix,
                 hf_cache_path,
@@ -1011,19 +1004,12 @@ impl TryInto<Box<dyn Loader>> for (TomlSelector, TomlLoaderArgs) {
             tokenizer_json: selector.tokenizer_json,
             jinja_explicit: args.jinja_explicit,
         };
+        if selector.speculative.is_some() {
+            anyhow::bail!(
+                "legacy target/draft speculative decoding in TOML configs was removed; use MTP through --mtp-model or the MTP API instead"
+            );
+        }
         let loader = loader_from_selected(args.clone(), selector.model)?;
-        let loader = if let Some(speculative) = selector.speculative {
-            let draft_loader = loader_from_selected(args, speculative.draft_model)?;
-            Box::new(SpeculativeLoader {
-                target: loader,
-                draft: draft_loader,
-                config: SpeculativeConfig {
-                    gamma: speculative.gamma,
-                },
-            })
-        } else {
-            loader
-        };
         let loader = if let Some(AnyMoeTomlModelSelected {
             config,
             dataset_json,

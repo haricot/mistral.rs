@@ -523,9 +523,9 @@ dependencies = [
 
 [[package]]
 name = "built"
-version = "0.8.0"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f4ad8f11f288f48ca24471bbd51ac257aaeaaa07adae295591266b792902ae64"
+checksum = "5c0e531d93d39c34eef561e929e8a7f86d77a5af08aac4f6d6e39976c51858e9"
 
 [[package]]
 name = "bumpalo"
@@ -607,7 +607,7 @@ checksum = "ade8366b8bd5ba243f0a58f036cc0ca8a2f069cff1a2351ef1cac6b083e16fc0"
 [[package]]
 name = "candle-core"
 version = "0.10.2"
-source = "git+https://github.com/haricot/candle.git?rev=e1f418a#e1f418a32dd568277e44d31af8d3bc09d4d1414f"
+source = "git+https://github.com/haricot/candle?branch=bf16_candle#ad332f0d6c25f8cecfcd97e778f3a0e5cb410c07"
 dependencies = [
  "accelerate-src",
  "byteorder",
@@ -639,7 +639,7 @@ dependencies = [
 [[package]]
 name = "candle-flash-attn"
 version = "0.10.2"
-source = "git+https://github.com/haricot/candle.git?rev=e1f418a#e1f418a32dd568277e44d31af8d3bc09d4d1414f"
+source = "git+https://github.com/haricot/candle?branch=bf16_candle#ad332f0d6c25f8cecfcd97e778f3a0e5cb410c07"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -650,7 +650,7 @@ dependencies = [
 [[package]]
 name = "candle-flash-attn-v3"
 version = "0.10.2"
-source = "git+https://github.com/haricot/candle.git?rev=e1f418a#e1f418a32dd568277e44d31af8d3bc09d4d1414f"
+source = "git+https://github.com/haricot/candle?branch=bf16_candle#ad332f0d6c25f8cecfcd97e778f3a0e5cb410c07"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -663,6 +663,7 @@ dependencies = [
 [[package]]
 name = "candle-kernels"
 version = "0.10.2"
+source = "git+https://github.com/haricot/candle?branch=bf16_candle#ad332f0d6c25f8cecfcd97e778f3a0e5cb410c07"
 dependencies = [
  "cudaforge",
 ]
@@ -670,7 +671,7 @@ dependencies = [
 [[package]]
 name = "candle-metal-kernels"
 version = "0.10.2"
-source = "git+https://github.com/haricot/candle.git?rev=e1f418a#e1f418a32dd568277e44d31af8d3bc09d4d1414f"
+source = "git+https://github.com/haricot/candle?branch=bf16_candle#ad332f0d6c25f8cecfcd97e778f3a0e5cb410c07"
 dependencies = [
  "half",
  "objc2",
@@ -684,7 +685,7 @@ dependencies = [
 [[package]]
 name = "candle-nn"
 version = "0.10.2"
-source = "git+https://github.com/haricot/candle.git?rev=e1f418a#e1f418a32dd568277e44d31af8d3bc09d4d1414f"
+source = "git+https://github.com/haricot/candle?branch=bf16_candle#ad332f0d6c25f8cecfcd97e778f3a0e5cb410c07"
 dependencies = [
  "accelerate-src",
  "candle-core",
@@ -703,7 +704,7 @@ dependencies = [
 [[package]]
 name = "candle-ug"
 version = "0.10.2"
-source = "git+https://github.com/haricot/candle.git?rev=e1f418a#e1f418a32dd568277e44d31af8d3bc09d4d1414f"
+source = "git+https://github.com/haricot/candle?branch=bf16_candle#ad332f0d6c25f8cecfcd97e778f3a0e5cb410c07"
 dependencies = [
  "ug",
  "ug-cuda",
@@ -1588,9 +1589,9 @@ checksum = "b2972feb8dffe7bc8c5463b1dacda1b0dfbed3710e50f977d965429692d74cd8"
 
 [[package]]
 name = "either"
-version = "1.15.0"
+version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
+checksum = "91622ff5e7162018101f2fea40d6ebf4a78bbe5a49736a2020649edf9693679e"
 dependencies = [
  "serde",
 ]
@@ -3335,9 +3336,9 @@ dependencies = [
 
 [[package]]
 name = "minijinja"
-version = "2.19.0"
+version = "2.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "805bfd7352166bae857ee569628b52bcd85a1cecf7810861ebceb1686b72b75d"
+checksum = "2929e494b2280e1e18959bb2e121da03347ae896896fdfaceaab43c88a02803f"
 dependencies = [
  "memo-map",
  "serde",
@@ -3346,9 +3347,9 @@ dependencies = [
 
 [[package]]
 name = "minijinja-contrib"
-version = "2.19.0"
+version = "2.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45092d80391870622fcf3bd82f5d2af18f99533ea60debb4bc9db0c76f0e809a"
+checksum = "99df5123c54391e2a228014c1dbbd85a3dab08a25e776c810526f2f47542b3de"
 dependencies = [
  "minijinja",
  "serde",
@@ -5680,9 +5681,9 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.149"
+version = "1.0.150"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83fc039473c5595ace860d8c4fafa220ff474b3fc6bfdb4293327f1a37e94d86"
+checksum = "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9"
 dependencies = [
  "indexmap 2.14.0",
  "itoa",

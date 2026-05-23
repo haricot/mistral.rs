@@ -148,11 +148,6 @@ impl QuantMethod for FP8Linear {
         (DType::F8E4M3, self.lin.weight().device().clone())
     }
 
-    fn unquant_weight_bias(&self) -> Option<(Tensor, Option<Tensor>)> {
-        let dequant = self.dequantize(DType::F32).ok()?;
-        Some((dequant.weight().clone(), dequant.bias().cloned()))
-    }
-
     fn apply_isq(
         self: Arc<Self>,
         dtype: Option<IsqType>,

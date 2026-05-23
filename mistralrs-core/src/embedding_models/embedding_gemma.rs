@@ -10,8 +10,7 @@ use crate::{
     attention::{AttentionMask, SdpaParams},
     device_map::DeviceMapper,
     layers::{
-        vocab_embedding, Gemma3RotaryEmbedding, GemmaRmsNorm, MatMul, Mlp, RotaryEmbedding, Sdpa,
-        VocabEmbedding,
+        embedding, Gemma3RotaryEmbedding, GemmaRmsNorm, Mlp, RotaryEmbedding, ScaledEmbedding, Sdpa,
     },
     layers_masker::BidirectionalMasker,
     paged_attention::AttentionImplementation,
@@ -350,7 +349,7 @@ impl DecoderLayer {
 }
 
 pub struct EmbeddingGemma {
-    embed_tokens: VocabEmbedding,
+    embed_tokens: ScaledEmbedding,
     layers: Vec<DecoderLayer>,
     norm: GemmaRmsNorm,
     device: Device,
@@ -381,13 +380,15 @@ impl EmbeddingGemma {
 
         let mapper = normal_loading_metadata.mapper;
 
-        let embed_tokens = vocab_embedding(
+        let embed_tokens = ScaledEmbedding::new(
             (cfg.hidden_size as f64).sqrt(),
-            cfg.vocab_size,
-            cfg.hidden_size,
-            mapper.set_nm_device(vb.pp("embed_tokens"), false),
-            &cfg.quantization_config,
-        )?;
+            embedding(
+                cfg.vocab_size,
+                cfg.hidden_size,
+                mapper.set_nm_device(vb.pp("embed_tokens"), false),
+                &cfg.quantization_config,
+            )?,
+        );
 
         let mut global_ropes = HashMap::new();
         for layer_idx in 0..cfg.num_hidden_layers {

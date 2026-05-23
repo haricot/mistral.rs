@@ -122,8 +122,6 @@ pub struct DeviceOptionsToml {
     pub max_seq_len: Option<usize>,
     #[serde(default)]
     pub max_batch_size: Option<usize>,
-    #[serde(default)]
-    pub active_layers_on_vram: Option<bool>,
 }
 
 pub fn load_cli_config(path: &Path) -> Result<CliConfig> {
@@ -211,9 +209,6 @@ impl DeviceOptionsToml {
             hf_cache: self.hf_cache.clone(),
             max_seq_len: self.max_seq_len.unwrap_or(defaults.max_seq_len),
             max_batch_size: self.max_batch_size.unwrap_or(defaults.max_batch_size),
-            active_layers_on_vram: self
-                .active_layers_on_vram
-                .unwrap_or(defaults.active_layers_on_vram),
         }
     }
 }

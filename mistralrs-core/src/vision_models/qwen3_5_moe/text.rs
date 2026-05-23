@@ -6,7 +6,6 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
-    time::Instant,
 };
 
 use candle_core::{DType, Device, Module, Result, Tensor, D};
@@ -193,26 +192,17 @@ impl FullAttention {
             let v = v
                 .reshape((b_sz, seq_len, self.num_kv_heads, self.head_dim))?
                 .transpose(1, 2)?;
-            (q.contiguous()?, k.contiguous()?, v.contiguous()?)
+            (q, k, v)
         } else {
             let q = q.reshape((b_sz, self.num_heads, seq_len, self.head_dim))?;
             let k = k.reshape((b_sz, self.num_kv_heads, seq_len, self.head_dim))?;
             let v = v.reshape((b_sz, self.num_kv_heads, seq_len, self.head_dim))?;
-            (q.contiguous()?, k.contiguous()?, v.contiguous()?)
+            (q, k, v)
         };
 
         // Apply QK norm
         q = q.apply(&self.q_norm)?;
         k = k.apply(&self.k_norm)?;
-
-        let cos_sin = if cos_sin.0.device().location() != q.device().location() {
-            (
-                cos_sin.0.to_device(q.device())?,
-                cos_sin.1.to_device(q.device())?,
-            )
-        } else {
-            (cos_sin.0.clone(), cos_sin.1.clone())
-        };
 
         // Apply partial MRoPE: split into rotated and pass-through portions
         if self.rot_dim < self.head_dim {
@@ -221,20 +211,20 @@ impl FullAttention {
             let mut k_rot = k.narrow(D::Minus1, 0, self.rot_dim)?;
             let k_pass = k.narrow(D::Minus1, self.rot_dim, self.head_dim - self.rot_dim)?;
 
-            self.rotary_emb.forward(&cos_sin, &mut q_rot, &mut k_rot)?;
+            self.rotary_emb.forward(cos_sin, &mut q_rot, &mut k_rot)?;
             q = Tensor::cat(&[q_rot, q_pass], D::Minus1)?;
             k = Tensor::cat(&[k_rot, k_pass], D::Minus1)?;
         } else {
-            self.rotary_emb.forward(&cos_sin, &mut q, &mut k)?;
+            self.rotary_emb.forward(cos_sin, &mut q, &mut k)?;
         }
 
         // Standard attention
         let mut y = match &self.paged_attn {
             Some(paged_attn) => match metadata {
                 Some(((key_cache, value_cache), input_metadata)) => paged_attn.forward(
-                    &q.contiguous()?,
-                    &k.contiguous()?,
-                    &v.contiguous()?,
+                    &q,
+                    &k,
+                    &v,
                     attention_mask,
                     Some(key_cache),
                     Some(value_cache),
@@ -261,9 +251,9 @@ impl FullAttention {
             None => {
                 let (cache_k, cache_v) = kv_cache.append(&k, &v)?;
                 Sdpa.run_attention(
-                    &q.contiguous()?,
-                    &cache_k.contiguous()?,
-                    &cache_v.contiguous()?,
+                    &q,
+                    &cache_k,
+                    &cache_v,
                     attention_mask,
                     Some(flash_params),
                     &self.sdpa_params,
@@ -287,10 +277,6 @@ impl FullAttention {
 }
 
 // ====================== MoE ======================
-
-fn profile_enabled() -> bool {
-    crate::topology::profile_enabled()
-}
 
 fn cpu_moe_enabled() -> bool {
     crate::topology::cpu_moe_enabled()
@@ -448,12 +434,9 @@ impl SparseMoeBlock {
     }
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let profile = profile_enabled();
-        let t_total = profile.then(Instant::now);
         let (b_size, seq_len, hidden_dim) = xs.dims3()?;
         let xs_flat = xs.reshape(((), hidden_dim))?;
 
-        let t_router = profile.then(Instant::now);
         let router_logits = self.gate.forward(&xs_flat)?;
         let routing_weights =
             candle_nn::ops::softmax_last_dim(&router_logits.to_dtype(DType::F32)?)?;
@@ -468,14 +451,10 @@ impl SparseMoeBlock {
         if self.norm_topk_prob {
             topk_weights = topk_weights.broadcast_div(&topk_weights.sum_keepdim(D::Minus1)?)?;
         }
-        let router_ms = t_router.map(|t| t.elapsed().as_secs_f64() * 1000.0);
 
-        let t_experts = profile.then(Instant::now);
         let mut y = self.experts.forward(xs, topk_weights, &topk_ids)?;
         y = y.reshape((b_size, seq_len, hidden_dim))?;
-        let experts_ms = t_experts.map(|t| t.elapsed().as_secs_f64() * 1000.0);
 
-        let t_shared = profile.then(Instant::now);
         let shared_out = self.shared_expert.forward(xs)?;
         let shared_gate = candle_nn::ops::sigmoid(
             &self
@@ -484,18 +463,6 @@ impl SparseMoeBlock {
         )?;
         let shared_gate = shared_gate.reshape((b_size, seq_len, 1))?;
         let shared_out = shared_out.broadcast_mul(&shared_gate)?;
-        let shared_ms = t_shared.map(|t| t.elapsed().as_secs_f64() * 1000.0);
-
-        if profile {
-            tracing::info!(
-                target: "mistralrs_profile",
-                "qwen35_moe seq={seq_len} router_topk_ms={:.3} experts_ms={:.3} shared_ms={:.3} total_ms={:.3}",
-                router_ms.unwrap(),
-                experts_ms.unwrap(),
-                shared_ms.unwrap(),
-                t_total.unwrap().elapsed().as_secs_f64() * 1000.0,
-            );
-        }
 
         y + shared_out
     }
@@ -888,11 +855,7 @@ impl Qwen3_5MoeTextModel {
         };
 
         for (i, layer) in self.layers.iter().enumerate() {
-            let profile = profile_enabled();
-            let t_layer = profile.then(Instant::now);
-            let t_map = profile.then(Instant::now);
             xs = self.mapper.map(xs, i)?;
-            let map_ms = t_map.map(|t| t.elapsed().as_secs_f64() * 1000.0);
 
             match &self.layer_types[i] {
                 LayerType::FullAttention => {
@@ -938,17 +901,10 @@ impl Qwen3_5MoeTextModel {
                             seqlen_offset: first_offset,
                         };
 
-                        let pool_device = gdn_cache.recurrent_state.device().clone();
                         xs = layer.forward_linear(&xs, &mut gdn_cache)?;
 
-                        pool.scatter_conv_state(
-                            indices,
-                            &gdn_cache.conv_state.to_device(&pool_device)?,
-                        )?;
-                        pool.scatter_recurrent_state(
-                            indices,
-                            &gdn_cache.recurrent_state.to_device(&pool_device)?,
-                        )?;
+                        pool.scatter_conv_state(indices, &gdn_cache.conv_state)?;
+                        pool.scatter_recurrent_state(indices, &gdn_cache.recurrent_state)?;
 
                         let delta = gdn_cache.seqlen_offset.saturating_sub(first_offset);
                         for &idx in &indices_vec {
@@ -961,16 +917,6 @@ impl Qwen3_5MoeTextModel {
                         );
                     }
                 }
-            }
-            if profile {
-                tracing::info!(
-                    target: "mistralrs_profile",
-                    "qwen35_layer layer={i} kind={:?} device={:?} map_ms={:.3} total_ms={:.3}",
-                    self.layer_types[i],
-                    xs.device(),
-                    map_ms.unwrap(),
-                    t_layer.unwrap().elapsed().as_secs_f64() * 1000.0,
-                );
             }
 
             // Integrate DeepStack visual features when provided
@@ -1068,18 +1014,14 @@ impl IsqModel for Qwen3_5MoeTextModel {
                     uvb_l.pp("self_attn").pp("k_norm").add(&attn.k_norm);
                 }
                 LayerImpl::LinearAttention(gdn) => {
-                    uvb_l.pp("linear_attn").add_tensor(
-                        "in_proj_qkvz.weight",
-                        gdn.in_proj_qkvz
-                            .dequantize_w()
-                            .expect("failed to dequantize Qwen3.5 MoE GDN in_proj_qkvz"),
-                    );
-                    uvb_l.pp("linear_attn").add_tensor(
-                        "in_proj_ba.weight",
-                        gdn.in_proj_ba
-                            .dequantize_w()
-                            .expect("failed to dequantize Qwen3.5 MoE GDN in_proj_ba"),
-                    );
+                    uvb_l
+                        .pp("linear_attn")
+                        .pp("in_proj_qkvz")
+                        .add_tensor("weight", gdn.in_proj_qkvz.weight().clone());
+                    uvb_l
+                        .pp("linear_attn")
+                        .pp("in_proj_ba")
+                        .add_tensor("weight", gdn.in_proj_ba.weight().clone());
                     uvb_l
                         .pp("linear_attn")
                         .add_tensor("conv1d.weight", gdn.conv1d_weight.clone());
@@ -1107,30 +1049,5 @@ impl IsqModel for Qwen3_5MoeTextModel {
         }
 
         uvb.to_safetensors()
-    }
-
-    fn imatrix_names(&self) -> candle_core::Result<Vec<Option<String>>> {
-        let mut names = Vec::new();
-        names.push(None);
-        for (i, layer) in self.layers.iter().enumerate() {
-            match &layer.layer_impl {
-                LayerImpl::FullAttention(_) => {
-                    names.push(Some(format!("blk.{i}.attn_q.weight")));
-                    names.push(Some(format!("blk.{i}.attn_k.weight")));
-                    names.push(Some(format!("blk.{i}.attn_v.weight")));
-                    names.push(Some(format!("blk.{i}.attn_output.weight")));
-                }
-                LayerImpl::LinearAttention(_) => {
-                    names.push(None);
-                }
-            }
-            for _ in 0..layer.moe.experts.num_isq_layers() {
-                names.push(None);
-            }
-            names.push(Some(format!("blk.{i}.ffn_gate.weight")));
-            names.push(Some(format!("blk.{i}.ffn_up.weight")));
-            names.push(Some(format!("blk.{i}.ffn_down.weight")));
-        }
-        Ok(names)
     }
 }

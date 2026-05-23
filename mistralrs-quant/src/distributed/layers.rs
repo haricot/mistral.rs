@@ -6,7 +6,7 @@ use candle_nn::Linear;
 use crate::{
     blockwise_fp8::{blockwise_fp8_linear_b, blockwise_fp8_moe},
     distributed,
-    gptq::{gptq_linear, gptq_moe_linear},
+    gptq::gptq_linear,
     lora::merge_lora_weights,
     make_dummy_or_error,
     pertensor_fp8::pertensor_fp8_linear_b,
@@ -320,9 +320,6 @@ impl QuantizedSerde for RowParallelLayer {
             QuantizedSerdeType::Afq => AfqLayer::deserialize_ext_bias(data, device, guard)?,
             QuantizedSerdeType::F8Q8 => F8Q8Linear::deserialize_ext_bias(data, device, guard)?,
             QuantizedSerdeType::Mxfp4 => MXFP4Layer::deserialize_ext_bias(data, device, guard)?,
-            QuantizedSerdeType::Vocab => {
-                candle_core::bail!("Vocab artifact type is not supported for RowParallelLayer")
-            }
         };
         Ok(Arc::new(Self {
             weight,
@@ -652,9 +649,6 @@ impl QuantizedSerde for ColumnParallelLayer {
             QuantizedSerdeType::Afq => AfqLayer::deserialize_ext_bias(data, device, guard)?,
             QuantizedSerdeType::F8Q8 => F8Q8Linear::deserialize_ext_bias(data, device, guard)?,
             QuantizedSerdeType::Mxfp4 => MXFP4Layer::deserialize_ext_bias(data, device, guard)?,
-            QuantizedSerdeType::Vocab => {
-                candle_core::bail!("Vocab artifact type is not supported for ColumnParallelLayer")
-            }
         };
         Ok(Arc::new(Self { weight, bias }))
     }
@@ -984,9 +978,6 @@ impl QuantizedSerde for ReplicatedLayer {
             QuantizedSerdeType::Afq => AfqLayer::deserialize(data, device, comm, guard)?,
             QuantizedSerdeType::F8Q8 => F8Q8Linear::deserialize(data, device, comm, guard)?,
             QuantizedSerdeType::Mxfp4 => MXFP4Layer::deserialize(data, device, comm, guard)?,
-            QuantizedSerdeType::Vocab => {
-                candle_core::bail!("Vocab artifact type is not supported for ReplicatedLayer")
-            }
         };
         Ok(Arc::new(Self(deserialized)))
     }
@@ -1079,35 +1070,6 @@ impl PackedExperts {
                     down_proj = apply_immediate_isq(down_proj, base_vb.pp("down_proj"))?;
 
                     (vec![gate_proj], vec![up_proj], vec![down_proj])
-                }
-                QuantizedConfig::GptqAwq { .. } => {
-                    let mut gate_proj = Vec::with_capacity(num_local_experts);
-                    let mut up_proj = Vec::with_capacity(num_local_experts);
-                    let mut down_proj = Vec::with_capacity(num_local_experts);
-
-                    for i in 0..num_local_experts {
-                        let expert_vb = vb.pp(i);
-                        gate_proj.push(gptq_linear(
-                            hidden_size,
-                            intermediate_size,
-                            quant_conf,
-                            expert_vb.pp("gate_proj"),
-                        )?);
-                        up_proj.push(gptq_linear(
-                            hidden_size,
-                            intermediate_size,
-                            quant_conf,
-                            expert_vb.pp("up_proj"),
-                        )?);
-                        down_proj.push(gptq_linear(
-                            intermediate_size,
-                            hidden_size,
-                            quant_conf,
-                            expert_vb.pp("down_proj"),
-                        )?);
-                    }
-
-                    (gate_proj, up_proj, down_proj)
                 }
                 QuantizedConfig::Fp8 { weight_block_size } => {
                     // FP8 quantization for PackedExperts
@@ -1372,7 +1334,7 @@ impl PackedExperts {
                     (vec![gate_proj], vec![up_proj], vec![down_proj])
                 }
                 _ => candle_core::bail!(
-                    "PackedExperts with quantization config only allows AFQ, GPTQ/AWQ, FP8, or MXFP4 quantization"
+                    "PackedExperts with quantization config only allows AFQ, FP8, or MXFP4 quantization"
                 ),
             }
         } else if !vb.contains_tensor("gate_up_proj") {
@@ -1567,38 +1529,6 @@ impl FusedExperts {
                 quantization_config,
                 false,
                 vb.pp("switch_mlp.down_proj"),
-            )?;
-
-            (fused_gate_proj, fused_up_proj, fused_down_proj)
-        } else if matches!(&quantization_config, Some(QuantizedConfig::GptqAwq { .. })) {
-            let quantization_config = quantization_config.as_ref().unwrap();
-
-            let fused_gate_proj = gptq_moe_linear(
-                num_experts,
-                hidden_size,
-                moe_intermediate_size,
-                quantization_config,
-                false,
-                experts_vb.clone(),
-                "gate_proj",
-            )?;
-            let fused_up_proj = gptq_moe_linear(
-                num_experts,
-                hidden_size,
-                moe_intermediate_size,
-                quantization_config,
-                false,
-                experts_vb.clone(),
-                "up_proj",
-            )?;
-            let fused_down_proj = gptq_moe_linear(
-                num_experts,
-                moe_intermediate_size,
-                hidden_size,
-                quantization_config,
-                false,
-                experts_vb.clone(),
-                "down_proj",
             )?;
 
             (fused_gate_proj, fused_up_proj, fused_down_proj)

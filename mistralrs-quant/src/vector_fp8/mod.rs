@@ -74,10 +74,6 @@ impl QuantMethod for VectorFP8Linear {
         (DType::F8E4M3, self.weight.device().clone())
     }
 
-    fn unquant_weight_bias(&self) -> Option<(Tensor, Option<Tensor>)> {
-        Some((self.dequantize_w().ok()?, self.bias.clone()))
-    }
-
     fn apply_isq(
         self: Arc<Self>,
         dtype: Option<IsqType>,

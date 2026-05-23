@@ -20,8 +20,8 @@ const TOPOLOGY_BOOL_UNSET: u8 = 0;
 const TOPOLOGY_BOOL_FALSE: u8 = 1;
 const TOPOLOGY_BOOL_TRUE: u8 = 2;
 
-static CPU_MOE: AtomicU8 = AtomicU8::new(TOPOLOGY_BOOL_UNSET);
-static PROFILE: AtomicU8 = AtomicU8::new(TOPOLOGY_BOOL_UNSET);
+static QWEN35_CPU_MOE: AtomicU8 = AtomicU8::new(TOPOLOGY_BOOL_UNSET);
+static QWEN35_PROFILE: AtomicU8 = AtomicU8::new(TOPOLOGY_BOOL_UNSET);
 
 #[derive(Deserialize)]
 pub struct DeserLayerTopology {
@@ -33,18 +33,21 @@ pub struct DeserLayerTopology {
 #[serde(default)]
 pub struct TopologyRuntime {
     #[serde(
-        alias = "MISTRALRS_CPU_MOE",
         alias = "MISTRALRS_QWEN35_CPU_MOE",
+        alias = "MISTRALRS_CPU_MOE",
         alias = "cpu_moe",
-        alias = "cpu-moe",
-        alias = "qwen35-cpu-moe"
+        alias = "qwen35-cpu-moe",
+        alias = "cpu-moe"
     )]
     pub qwen35_cpu_moe: Option<bool>,
     #[serde(
-        alias = "MISTRALRS_PROFILE",
         alias = "MISTRALRS_QWEN35_PROFILE",
+        alias = "MISTRALRS_CPU_PROFILE",
+        alias = "MISTRALRS_PROFILE",
+        alias = "cpu_profile",
         alias = "profile",
-        alias = "qwen35-profile"
+        alias = "qwen35-profile",
+        alias = "cpu-profile"
     )]
     pub qwen35_profile: Option<bool>,
     #[serde(
@@ -356,8 +359,8 @@ impl TopologyRuntime {
             return;
         }
 
-        store_optional_bool(&CPU_MOE, self.qwen35_cpu_moe);
-        store_optional_bool(&PROFILE, self.qwen35_profile);
+        store_optional_bool(&QWEN35_CPU_MOE, self.qwen35_cpu_moe);
+        store_optional_bool(&QWEN35_PROFILE, self.qwen35_profile);
         mistralrs_quant::set_gguf_cpu_runtime_options(GgufCpuRuntimeOptions {
             cpu_moe_expert_cache: self.gguf_cpu_moe_expert_cache,
             cpu_moe_q4_1_expert_cache: self.gguf_cpu_moe_q4_1_expert_cache,
@@ -396,15 +399,17 @@ fn env_bool(name: &str) -> Option<bool> {
 }
 
 pub(crate) fn cpu_moe_enabled() -> bool {
-    load_optional_bool(&CPU_MOE)
+    load_optional_bool(&QWEN35_CPU_MOE)
         .or_else(|| env_bool("MISTRALRS_CPU_MOE"))
         .or_else(|| env_bool("MISTRALRS_QWEN35_CPU_MOE"))
         .unwrap_or(false)
 }
 
+#[allow(dead_code)]
 pub(crate) fn profile_enabled() -> bool {
-    load_optional_bool(&PROFILE)
+    load_optional_bool(&QWEN35_PROFILE)
         .or_else(|| env_bool("MISTRALRS_PROFILE"))
+        .or_else(|| env_bool("MISTRALRS_CPU_PROFILE"))
         .or_else(|| env_bool("MISTRALRS_QWEN35_PROFILE"))
         .unwrap_or(false)
 }
@@ -464,8 +469,8 @@ mod tests {
         let yaml = r#"
 runtime:
   cpu_moe: true
-  profile: true
-  gguf_cpu_moe_expert_cache: 2048
+  cpu_profile: true
+  gguf_cpu_moe_q4k_expert_cache: 2048
 layers:
   0-2:
     isq: Q4K
@@ -475,27 +480,12 @@ layers:
 
         assert_eq!(topology.runtime.qwen35_cpu_moe, Some(true));
         assert_eq!(topology.runtime.qwen35_profile, Some(true));
-        assert_eq!(topology.runtime.gguf_cpu_moe_expert_cache, Some(2048));
+        assert_eq!(topology.runtime.gguf_cpu_moe_q4k_expert_cache, Some(2048));
         assert_eq!(layer_isq(&topology, 0), Some(IsqType::Q4K));
         assert!(matches!(
             topology.layer_for(0).and_then(|lt| lt.device.as_ref()),
             Some(&Device::Cpu)
         ));
-    }
-
-    #[test]
-    fn legacy_runtime_aliases_parse() {
-        let yaml = r#"
-runtime:
-  qwen35_cpu_moe: true
-  qwen35_profile: true
-  gguf_cpu_moe_q4k_expert_cache: 2048
-"#;
-        let topology = Topology::from_str(yaml).expect("topology parses");
-
-        assert_eq!(topology.runtime.qwen35_cpu_moe, Some(true));
-        assert_eq!(topology.runtime.qwen35_profile, Some(true));
-        assert_eq!(topology.runtime.gguf_cpu_moe_q4k_expert_cache, Some(2048));
     }
 
     #[test]

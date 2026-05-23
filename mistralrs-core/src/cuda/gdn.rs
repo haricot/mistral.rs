@@ -477,31 +477,3 @@ pub fn fused_gdn_gating_cuda(
 ) -> Result<(Tensor, Tensor)> {
     candle_core::bail!("fused_gdn_gating_cuda requires the cuda feature")
 }
-
-#[cfg(all(test, feature = "cuda"))]
-mod tests {
-    use super::chunked_gated_delta_rule_recurrence_cuda;
-    use candle_core::{DType, Device, Result, Tensor};
-
-    #[test]
-    fn test_chunked_gdn_k128_runs_on_cuda() -> Result<()> {
-        let device = Device::new_cuda(0)?;
-        let bh = 1usize;
-        let seq_len = 64usize;
-        let k_dim = 128usize;
-        let v_dim = 64usize;
-
-        let q = Tensor::zeros((bh, seq_len, k_dim), DType::F32, &device)?;
-        let k = Tensor::zeros((bh, seq_len, k_dim), DType::F32, &device)?;
-        let v = Tensor::zeros((bh, seq_len, v_dim), DType::F32, &device)?;
-        let g = Tensor::zeros((bh, seq_len), DType::F32, &device)?;
-        let beta = Tensor::zeros((bh, seq_len), DType::F32, &device)?;
-        let mut state = Tensor::zeros((bh, k_dim, v_dim), DType::F32, &device)?;
-
-        let out = chunked_gated_delta_rule_recurrence_cuda(&q, &k, &v, &g, &beta, &mut state)?;
-        assert_eq!(out.dims(), &[bh, seq_len, v_dim]);
-        let _ = out.to_device(&Device::Cpu)?;
-
-        Ok(())
-    }
-}

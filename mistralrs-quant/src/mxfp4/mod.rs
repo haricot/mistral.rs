@@ -175,10 +175,6 @@ impl QuantMethod for MXFP4Layer {
         (DType::BF16, self.scales.device().clone())
     }
 
-    fn unquant_weight_bias(&self) -> Option<(Tensor, Option<Tensor>)> {
-        Some((self.dequantize_w().ok()?, self.bias.clone()))
-    }
-
     fn apply_isq(
         self: Arc<Self>,
         _dtype: Option<IsqType>,
@@ -206,7 +202,7 @@ impl MXFP4Layer {
     }
 
     /// Quantize an unquantized weight tensor to MXFP4 format.
-    /// weight shape: [N, K], bias shape: [N] (optional)
+    /// weight shape: `[N, K]`, bias shape: `[N]` (optional)
     pub fn quantize(
         weight: &Tensor,
         bias: Option<Tensor>,

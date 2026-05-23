@@ -23,7 +23,7 @@ use crate::pipeline::llg::build_llg_factory;
 use crate::pipeline::loaders::auto_device_map;
 use crate::pipeline::loaders::QuantizationConfigShim;
 use crate::pipeline::sampling::sample_and_add_toks;
-use crate::pipeline::text_models_inputs_processor::make_prompt_chunk;
+use crate::pipeline::text_models_inputs_processor::{make_prompt_chunk, InputMetadata};
 use crate::pipeline::{get_chat_template, ChatTemplate, IsqOrganization, LocalModelPaths};
 use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::sequence::Sequence;
@@ -63,9 +63,6 @@ use std::{env, fs};
 use tokenizers::Tokenizer;
 use tokio::sync::Mutex;
 use tracing::{debug, info, trace, warn};
-
-const UQFF_CONFIG_JSON: &str = "config.json";
-const UQFF_CONFIG_TEXT_JSON: &str = "config_text.json";
 
 pub struct MultimodalPipeline {
     model: Box<dyn MultimodalModel + Send + Sync>,
@@ -109,25 +106,6 @@ pub struct MultimodalLoader {
     lora_adapter_ids: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct DisabledModalities {
-    pub vision: bool,
-    pub audio: bool,
-}
-
-impl DisabledModalities {
-    pub fn new(disable_vision: bool, disable_audio: bool) -> Self {
-        Self {
-            vision: disable_vision,
-            audio: disable_audio,
-        }
-    }
-
-    pub fn any(self) -> bool {
-        self.vision || self.audio
-    }
-}
-
 #[derive(Default)]
 /// A builder for a loader for a multimodal (non-quantized) model.
 pub struct MultimodalLoaderBuilder {
@@ -145,10 +123,10 @@ pub struct MultimodalLoaderBuilder {
 /// Config specific to loading a multimodal model.
 pub struct MultimodalSpecificConfig {
     pub topology: Option<Topology>,
+    pub text_only: bool,
     pub write_uqff: Option<PathBuf>,
     pub from_uqff: Option<Vec<PathBuf>>,
     pub max_edge: Option<u32>,
-    pub disabled_modalities: DisabledModalities,
     pub imatrix: Option<PathBuf>,
     pub calibration_file: Option<PathBuf>,
     pub hf_cache_path: Option<PathBuf>,
@@ -191,7 +169,6 @@ impl MultimodalLoaderBuilder {
     }
 
     pub fn build(self, loader: Option<MultimodalLoaderType>) -> Box<dyn Loader> {
-        let disabled_modalities = self.config.disabled_modalities;
         let loader: Box<dyn MultimodalModelLoader> = match loader {
             Some(MultimodalLoaderType::Phi3V) => Box::new(Phi3VLoader),
             Some(MultimodalLoaderType::Idefics2) => Box::new(Idefics2Loader),
@@ -209,15 +186,11 @@ impl MultimodalLoaderBuilder {
             Some(MultimodalLoaderType::Gemma3n) => Box::new(Gemma3nLoader),
             Some(MultimodalLoaderType::Qwen3VL) => Box::new(Qwen3VLLoader),
             Some(MultimodalLoaderType::Qwen3VLMoE) => Box::new(Qwen3VLMoELoader),
-            Some(MultimodalLoaderType::Qwen3_5) => {
-                Box::new(Qwen3_5Loader::new(disabled_modalities))
-            }
-            Some(MultimodalLoaderType::Qwen3_5Moe) => {
-                Box::new(Qwen3_5MoeLoader::new(disabled_modalities))
-            }
+            Some(MultimodalLoaderType::Qwen3_5) => Box::new(Qwen3_5Loader),
+            Some(MultimodalLoaderType::Qwen3_5Moe) => Box::new(Qwen3_5MoeLoader),
             Some(MultimodalLoaderType::Voxtral) => Box::new(VoxtralLoader),
-            Some(MultimodalLoaderType::Gemma4) => Box::new(Gemma4Loader::new(disabled_modalities)),
-            None => Box::new(AutoMultimodalLoader::new(disabled_modalities)),
+            Some(MultimodalLoaderType::Gemma4) => Box::new(Gemma4Loader),
+            None => Box::new(AutoMultimodalLoader),
         };
         Box::new(MultimodalLoader {
             inner: loader,
@@ -353,6 +326,11 @@ impl Loader for MultimodalLoader {
         } else {
             None
         };
+        let load_text_only =
+            self.config.text_only && self.inner.supports_text_only_loading(&config);
+        if self.config.text_only && !load_text_only {
+            warn!("Text-only loading was requested, but this multimodal loader does not support skipping non-text submodels.");
+        }
 
         // If auto, convert to Map if not using nccl
         let mut max_kv_tokens: Option<usize> = None;
@@ -361,8 +339,10 @@ impl Loader for MultimodalLoader {
                 nm_device: available_devices[0].clone(),
             };
         } else if let DeviceMapSetting::Auto(mut params) = mapper.clone() {
-            // We can promote to multimodal params if we get text params
-            params = params.maybe_promote_to_multimodal();
+            if !load_text_only {
+                // We can promote to multimodal params if we get text params
+                params = params.maybe_promote_to_multimodal();
+            }
             max_kv_tokens = Some(params.max_seq_len() * params.max_batch_size());
 
             // Initial dtype
@@ -400,9 +380,6 @@ impl Loader for MultimodalLoader {
                                 }
                                 QuantizedSerdeType::F8Q8 => IsqType::F8Q8.pack_factor(dtype),
                                 QuantizedSerdeType::Mxfp4 => IsqType::MXFP4.pack_factor(dtype),
-                                QuantizedSerdeType::Vocab => {
-                                    anyhow::bail!("Vocab artifact type is not supported in multimodal pipeline packing")
-                                }
                             };
                             total_pack_factors += pack_factor;
                         }
@@ -416,12 +393,16 @@ impl Loader for MultimodalLoader {
                         weight_pack_factor,
                         matformer_slicing_config.as_ref(),
                     )?;
-                    let non_mapped_size_in_bytes = self.inner.non_mapped_size_in_bytes(
-                        &config,
-                        dtype,
-                        weight_pack_factor,
-                        matformer_slicing_config.as_ref(),
-                    )?;
+                    let non_mapped_size_in_bytes = if load_text_only {
+                        0
+                    } else {
+                        self.inner.non_mapped_size_in_bytes(
+                            &config,
+                            dtype,
+                            weight_pack_factor,
+                            matformer_slicing_config.as_ref(),
+                        )?
+                    };
                     let layer_sizes_sum = layer_sizes_in_bytes.iter().sum::<usize>();
                     (
                         layer_sizes_in_bytes,
@@ -436,12 +417,16 @@ impl Loader for MultimodalLoader {
                         weight_pack_factor,
                         matformer_slicing_config.as_ref(),
                     )?;
-                    let non_mapped_size_in_bytes = self.inner.non_mapped_size_in_bytes(
-                        &config,
-                        dtype,
-                        weight_pack_factor,
-                        matformer_slicing_config.as_ref(),
-                    )?;
+                    let non_mapped_size_in_bytes = if load_text_only {
+                        0
+                    } else {
+                        self.inner.non_mapped_size_in_bytes(
+                            &config,
+                            dtype,
+                            weight_pack_factor,
+                            matformer_slicing_config.as_ref(),
+                        )?
+                    };
                     let layer_sizes_sum = layer_sizes_in_bytes.iter().sum::<usize>();
                     (
                         layer_sizes_in_bytes,
@@ -458,12 +443,16 @@ impl Loader for MultimodalLoader {
                         weight_pack_factor,
                         matformer_slicing_config.as_ref(),
                     )?;
-                    let non_mapped_size_in_bytes = self.inner.non_mapped_size_in_bytes(
-                        &config,
-                        dtype,
-                        weight_pack_factor,
-                        matformer_slicing_config.as_ref(),
-                    )?;
+                    let non_mapped_size_in_bytes = if load_text_only {
+                        0
+                    } else {
+                        self.inner.non_mapped_size_in_bytes(
+                            &config,
+                            dtype,
+                            weight_pack_factor,
+                            matformer_slicing_config.as_ref(),
+                        )?
+                    };
                     let layer_sizes_sum = layer_sizes_in_bytes.iter().sum::<usize>();
                     (
                         layer_sizes_in_bytes,
@@ -544,9 +533,7 @@ impl Loader for MultimodalLoader {
             .as_ref()
             .is_some_and(|topology| topology.requires_post_quantization());
 
-        let writing_uqff = self.config.write_uqff.is_some();
-        let allow_immediate_cli = !writing_uqff
-            && self.config.imatrix.is_none()
+        let allow_immediate_cli = self.config.imatrix.is_none()
             && self.config.calibration_file.is_none()
             && in_situ_quant.is_some();
 
@@ -564,13 +551,9 @@ impl Loader for MultimodalLoader {
             if immediate_predicates.is_empty() {
                 warn!("No predicates for this model and ISQ setting detected. ISQ will not be applied to any weights!");
             }
-        } else if writing_uqff && in_situ_quant.is_some() {
-            info!(
-                "Deferring ISQ until after model load for UQFF generation to reduce peak memory."
-            );
         }
 
-        let use_immediate = !writing_uqff && (allow_immediate_cli || has_override_isq);
+        let use_immediate = allow_immediate_cli || has_override_isq;
         if use_immediate {
             let (pool, num_threads) = mistralrs_quant::create_isq_thread_pool(immediate_ty);
             info!("Applying immediate ISQ in parallel on {num_threads} threads.");
@@ -660,6 +643,7 @@ impl Loader for MultimodalLoader {
                     device.clone(),
                     attention_mechanism,
                     multi_progress.clone(),
+                    load_text_only,
                     matformer_slicing_config.clone(),
                 ),
                 _ => unreachable!(),
@@ -681,6 +665,7 @@ impl Loader for MultimodalLoader {
                     attention_mechanism,
                     matches!(self.config.organization, IsqOrganization::MoeExpertsOnly),
                     multi_progress,
+                    load_text_only,
                     matformer_slicing_config.clone(),
                 ),
                 _ => unreachable!(),
@@ -872,28 +857,6 @@ impl Loader for MultimodalLoader {
             } else {
                 debug!("Serializing existing ISQ tensors without additional quantization.");
             }
-            let mut uqff_config = config.clone();
-            if self.config.disabled_modalities.vision || self.config.disabled_modalities.audio {
-                if let Ok(mut cfg_json) = serde_json::from_str::<serde_json::Value>(&uqff_config) {
-                    if let Some(obj) = cfg_json.as_object_mut() {
-                        if self.config.disabled_modalities.vision {
-                            obj.remove("vision_config");
-                        }
-                        if self.config.disabled_modalities.audio {
-                            obj.remove("audio_config");
-                        }
-                        if let Ok(new_cfg) = serde_json::to_string(&cfg_json) {
-                            uqff_config = new_cfg;
-                        }
-                    }
-                }
-            }
-            let uqff_config_filename = if self.config.disabled_modalities.any() {
-                UQFF_CONFIG_TEXT_JSON
-            } else {
-                UQFF_CONFIG_JSON
-            };
-
             model.quantize(
                 in_situ_quant,
                 device.clone(),
@@ -907,8 +870,7 @@ impl Loader for MultimodalLoader {
                     tokenizer: &tokenizer,
                     template_filename: paths.get_template_filename(),
                     generation_config: paths.get_gen_conf_filename(),
-                    config: uqff_config,
-                    config_filename: uqff_config_filename,
+                    config: config.clone(),
                     processor_filename: paths.get_processor_config(),
                     preprocessor_filename: paths.get_preprocessor_config(),
                     modules: None,
@@ -1044,7 +1006,6 @@ impl IsqPipelineMixin for MultimodalPipeline {
                     template_filename: &self.template_filename,
                     generation_config: self.generation_config.as_ref(),
                     config: self.config.clone(),
-                    config_filename: "config.json",
                     processor_filename: &self.processor_filename,
                     preprocessor_filename: &self.preprocessor_filename,
                     modules: None,
@@ -1134,6 +1095,47 @@ impl MetadataMixin for MultimodalPipeline {
     }
 }
 
+impl crate::speculative::driver::SpeculativePipelineExt for MultimodalPipeline {
+    fn has_speculative_proposer(&self) -> bool {
+        self.model.has_speculative_proposer()
+    }
+
+    fn speculative_proposal_len(&self) -> Option<usize> {
+        self.model.speculative_proposal_len()
+    }
+
+    fn speculative_target_hiddens(
+        &self,
+        rows: &[(usize, usize)],
+    ) -> candle_core::Result<Option<Tensor>> {
+        self.model.speculative_target_hiddens(rows)
+    }
+
+    fn speculative_propose(
+        &mut self,
+        ctx: crate::speculative::SpeculativeProposeBatchCtx<'_>,
+    ) -> candle_core::Result<Option<crate::speculative::SpeculativeProposalBatch>> {
+        self.model.speculative_propose(ctx)
+    }
+
+    fn build_speculative_verify_inputs(
+        &self,
+        input_meta: InputMetadata,
+    ) -> candle_core::Result<Box<dyn Any>> {
+        let model_specific_args = self.model.default_model_specific_args(&input_meta.input);
+        Ok(Box::new(ModelInputs {
+            input_ids: input_meta.input,
+            seqlen_offsets: input_meta.positions,
+            context_lens: input_meta.context_lens,
+            position_ids: input_meta.position_ids,
+            pixel_values: None,
+            model_specific_args,
+            paged_attn_meta: input_meta.paged_attn_meta,
+            flash_meta: input_meta.flash_meta,
+        }))
+    }
+}
+
 #[async_trait::async_trait]
 impl Pipeline for MultimodalPipeline {
     fn forward_inputs(
@@ -1180,6 +1182,65 @@ impl Pipeline for MultimodalPipeline {
             Ok(ForwardInputsResult::CausalGeneration { logits })
         }
     }
+
+    fn attach_speculative(
+        &mut self,
+        config: crate::speculative::SpeculativeConfig,
+    ) -> candle_core::Result<()> {
+        if matches!(config, crate::speculative::SpeculativeConfig::Mtp(_))
+            && self.get_metadata().cache_engine.is_none()
+        {
+            candle_core::bail!(
+                "MTP speculative decoding currently requires PagedAttention for this pipeline."
+            );
+        }
+        if let Some(info) = self.model.attach_speculative(config)? {
+            self.model.log_speculative_attach(&info);
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn try_sample_speculative_causal_gen(
+        &mut self,
+        seqs: &mut [&mut Sequence],
+        logits: &[Tensor],
+        prefix_cacher: &mut PrefixCacheManagerV2,
+        disable_eos_stop: bool,
+        rng: Arc<std::sync::Mutex<Isaac64Rng>>,
+        metadata: Option<crate::pipeline::text_models_inputs_processor::PagedAttentionMeta>,
+    ) -> candle_core::Result<bool> {
+        if !self.model.has_speculative_proposer() {
+            crate::speculative::driver::clear_staged_speculative_tokens(seqs);
+            return Ok(false);
+        }
+
+        let general_metadata = self.get_metadata();
+        if let Some(cache_engine) = general_metadata.cache_engine.as_ref() {
+            let Some(metadata) = metadata else {
+                crate::speculative::driver::clear_staged_speculative_tokens(seqs);
+                return Ok(false);
+            };
+            let cache = crate::speculative::cache::PagedSpeculativeCacheAccess::new(
+                &metadata,
+                cache_engine,
+            );
+            return crate::speculative::driver::try_sample_speculative_causal_gen(
+                self,
+                seqs,
+                logits,
+                prefix_cacher,
+                disable_eos_stop,
+                rng,
+                &cache,
+            )
+            .await;
+        }
+
+        crate::speculative::driver::clear_staged_speculative_tokens(seqs);
+        Ok(false)
+    }
+
     async fn sample_causal_gen(
         &self,
         seqs: &mut [&mut Sequence],

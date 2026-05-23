@@ -209,7 +209,6 @@ struct ClippableLinear {
     input_max: Option<f64>,
     output_min: Option<f64>,
     output_max: Option<f64>,
-    #[allow(dead_code)]
     has_linear_prefix: bool,
 }
 
@@ -244,7 +243,7 @@ impl ClippableLinear {
             input_max,
             output_min,
             output_max,
-            has_linear_prefix: has_linear_prefix,
+            has_linear_prefix,
         })
     }
 
@@ -268,9 +267,13 @@ impl ClippableLinear {
         Ok(out)
     }
 
-    #[allow(dead_code)]
     fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let uvb = UnVarBuilder::new();
+        if self.has_linear_prefix {
+            uvb.pp("linear").add(&self.inner);
+        } else {
+            uvb.add(&self.inner);
+        }
         if let Some(v) = self.input_min {
             uvb.add_tensor(
                 "input_min",
@@ -1127,6 +1130,9 @@ impl AudioModel {
         uvb_l1
             .pp("norm")
             .add(&self.subsample_conv_projection.conv_1.norm);
+        uvb_sscp
+            .pp("input_proj_linear")
+            .add(&self.subsample_conv_projection.input_proj_linear);
 
         // Conformer blocks
         let uvb_layers = uvb.pp("layers");
@@ -1136,12 +1142,21 @@ impl AudioModel {
             // Attention
             let uvb_attn = uvb_block.pp("self_attn");
             uvb_attn
-                .pp("attn")
-                .add_tensor("per_dim_scale", block.attention.attn._per_dim_scale.clone());
+                .pp("q_proj")
+                .extend(block.attention.attn.q_proj.residual_tensors());
             uvb_attn
-                .pp("attn")
+                .pp("k_proj")
+                .extend(block.attention.attn.k_proj.residual_tensors());
+            uvb_attn
+                .pp("v_proj")
+                .extend(block.attention.attn.v_proj.residual_tensors());
+            uvb_attn.add_tensor("per_dim_scale", block.attention.attn._per_dim_scale.clone());
+            uvb_attn
                 .pp("relative_k_proj")
                 .add(&block.attention.attn.relative_position_embedding.pos_proj);
+            uvb_attn
+                .pp("post")
+                .extend(block.attention.post.residual_tensors());
 
             // Attention norms
             uvb_block
@@ -1157,6 +1172,12 @@ impl AudioModel {
                 .pp("pre_layer_norm")
                 .add(&block.ffw_layer_start.pre_layer_norm);
             uvb_ff1
+                .pp("ffw_layer_1")
+                .extend(block.ffw_layer_start.ffw_layer_1.residual_tensors());
+            uvb_ff1
+                .pp("ffw_layer_2")
+                .extend(block.ffw_layer_start.ffw_layer_2.residual_tensors());
+            uvb_ff1
                 .pp("post_layer_norm")
                 .add(&block.ffw_layer_start.post_layer_norm);
 
@@ -1166,15 +1187,27 @@ impl AudioModel {
                 .pp("pre_layer_norm")
                 .add(&block.lconv1d.pre_layer_norm);
             uvb_lconv
+                .pp("linear_start")
+                .extend(block.lconv1d.linear_start.residual_tensors());
+            uvb_lconv
                 .pp("depthwise_conv1d")
                 .add(&block.lconv1d.depthwise_conv1d);
             uvb_lconv.pp("conv_norm").add(&block.lconv1d.conv_norm);
+            uvb_lconv
+                .pp("linear_end")
+                .extend(block.lconv1d.linear_end.residual_tensors());
 
             // Feed-forward 2
             let uvb_ff2 = uvb_block.pp("feed_forward2");
             uvb_ff2
                 .pp("pre_layer_norm")
                 .add(&block.ffw_layer_end.pre_layer_norm);
+            uvb_ff2
+                .pp("ffw_layer_1")
+                .extend(block.ffw_layer_end.ffw_layer_1.residual_tensors());
+            uvb_ff2
+                .pp("ffw_layer_2")
+                .extend(block.ffw_layer_end.ffw_layer_2.residual_tensors());
             uvb_ff2
                 .pp("post_layer_norm")
                 .add(&block.ffw_layer_end.post_layer_norm);
@@ -1183,9 +1216,15 @@ impl AudioModel {
             uvb_block.pp("norm_out").add(&block.norm);
         }
 
+        // Output projection
+        if let Some(ref proj) = self.output_proj {
+            uvb.pp("output_proj").add(proj);
+        }
+
         uvb.to_safetensors()
     }
 
+    #[allow(dead_code)]
     pub fn get_isq_layers(&mut self) -> Vec<(&mut Arc<dyn QuantMethod>, Option<usize>)> {
         let mut tensors = Vec::new();
         for block in &mut self.conformer {

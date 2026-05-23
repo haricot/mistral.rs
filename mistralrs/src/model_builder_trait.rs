@@ -379,6 +379,12 @@ pub(crate) async fn build_pipeline_from_text_loader(
         isq_type,
         builder.paged_attn_cfg,
     )?;
+    if let Some(mtp_config) = builder.mtp_config.clone() {
+        pipeline
+            .lock()
+            .await
+            .attach_speculative(SpeculativeConfig::Mtp(mtp_config))?;
+    }
 
     let scheduler_config =
         scheduler_config_from_pipeline(&pipeline, paged_attn_requested, builder.max_num_seqs)
@@ -530,6 +536,12 @@ pub async fn build_text_pipeline(
         isq_type,
         builder.paged_attn_cfg,
     )?;
+    if let Some(mtp_config) = builder.mtp_config.clone() {
+        pipeline
+            .lock()
+            .await
+            .attach_speculative(SpeculativeConfig::Mtp(mtp_config))?;
+    }
 
     let scheduler_config = scheduler_config_from_pipeline(
         &pipeline,
@@ -584,6 +596,7 @@ pub async fn build_text_pipeline(
         silent: !builder.with_logging,
         chat_template: builder.chat_template.clone(),
         jinja_explicit: builder.jinja_explicit.clone(),
+        mtp_config: builder.mtp_config.clone(),
     };
 
     let add_model_config = AddModelConfig {
@@ -605,10 +618,10 @@ pub async fn build_multimodal_pipeline(
 
     let config = MultimodalSpecificConfig {
         topology: builder.topology.clone(),
+        text_only: false,
         write_uqff: builder.write_uqff.clone(),
         from_uqff: builder.from_uqff.clone(),
         max_edge: builder.max_edge,
-        disabled_modalities: DisabledModalities::default(),
         calibration_file: builder.calibration_file.clone(),
         imatrix: builder.imatrix.clone(),
         hf_cache_path: builder.hf_cache_path.clone(),
@@ -646,6 +659,12 @@ pub async fn build_multimodal_pipeline(
         isq_type,
         builder.paged_attn_cfg,
     )?;
+    if let Some(mtp_config) = builder.mtp_config.clone() {
+        pipeline
+            .lock()
+            .await
+            .attach_speculative(SpeculativeConfig::Mtp(mtp_config))?;
+    }
 
     let scheduler_config = scheduler_config_from_pipeline(
         &pipeline,
@@ -684,8 +703,6 @@ pub async fn build_multimodal_pipeline(
             write_uqff: builder.write_uqff.clone(),
             from_uqff: from_uqff_str,
             max_edge: builder.max_edge,
-            disable_vision: false,
-            disable_audio: false,
             calibration_file: builder.calibration_file.clone(),
             imatrix: builder.imatrix.clone(),
             max_seq_len: AutoDeviceMapParams::DEFAULT_MAX_SEQ_LEN,
@@ -707,6 +724,7 @@ pub async fn build_multimodal_pipeline(
         silent: !builder.with_logging,
         chat_template: builder.chat_template.clone(),
         jinja_explicit: builder.jinja_explicit.clone(),
+        mtp_config: builder.mtp_config.clone(),
     };
 
     let add_model_config = AddModelConfig {
@@ -800,6 +818,7 @@ pub async fn build_gguf_pipeline(
         silent: !builder.with_logging,
         chat_template: builder.chat_template.clone(),
         jinja_explicit: builder.jinja_explicit.clone(),
+        mtp_config: None,
     };
 
     let add_model_config = AddModelConfig {
@@ -858,6 +877,7 @@ pub async fn build_diffusion_pipeline(
         silent: !builder.with_logging,
         chat_template: None,
         jinja_explicit: None,
+        mtp_config: None,
     };
 
     let add_model_config = AddModelConfig {
@@ -920,6 +940,7 @@ pub async fn build_speech_pipeline(
         silent: !builder.with_logging,
         chat_template: None,
         jinja_explicit: None,
+        mtp_config: None,
     };
 
     let add_model_config = AddModelConfig {
@@ -1009,6 +1030,7 @@ pub async fn build_embedding_pipeline(
         silent: !builder.with_logging,
         chat_template: None,
         jinja_explicit: None,
+        mtp_config: None,
     };
 
     let add_model_config = AddModelConfig {
@@ -1043,10 +1065,10 @@ pub async fn build_auto_pipeline(
 
     let vision_config = MultimodalSpecificConfig {
         topology: builder.topology.clone(),
+        text_only: false,
         write_uqff: builder.write_uqff.clone(),
         from_uqff: builder.from_uqff.clone(),
         max_edge: builder.max_edge,
-        disabled_modalities: DisabledModalities::default(),
         calibration_file: builder.calibration_file.clone(),
         imatrix: builder.imatrix.clone(),
         hf_cache_path: builder.hf_cache_path.clone(),
@@ -1097,6 +1119,12 @@ pub async fn build_auto_pipeline(
         isq_type,
         builder.paged_attn_cfg,
     )?;
+    if let Some(mtp_config) = builder.mtp_config.clone() {
+        pipeline
+            .lock()
+            .await
+            .attach_speculative(SpeculativeConfig::Mtp(mtp_config))?;
+    }
 
     let scheduler_config = scheduler_config_from_pipeline(
         &pipeline,
@@ -1135,12 +1163,11 @@ pub async fn build_auto_pipeline(
             imatrix: builder.imatrix.clone(),
             calibration_file: builder.calibration_file.clone(),
             max_edge: builder.max_edge,
-            disable_vision: false,
-            disable_audio: false,
             max_seq_len: AutoDeviceMapParams::DEFAULT_MAX_SEQ_LEN,
             max_batch_size: AutoDeviceMapParams::DEFAULT_MAX_BATCH_SIZE,
             max_num_images: None,
             max_image_length: None,
+            text_only: false,
             hf_cache_path: builder.hf_cache_path.clone(),
             matformer_config_path: builder.matformer_config_path.clone(),
             matformer_slice_name: builder.matformer_slice_name.clone(),
@@ -1155,6 +1182,7 @@ pub async fn build_auto_pipeline(
         silent: !builder.with_logging,
         chat_template: builder.chat_template.clone(),
         jinja_explicit: builder.jinja_explicit.clone(),
+        mtp_config: builder.mtp_config.clone(),
     };
 
     let add_model_config = AddModelConfig {

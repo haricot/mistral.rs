@@ -188,7 +188,7 @@ impl FullAttention {
             let v = v
                 .reshape((b_sz, seq_len, self.num_kv_heads, self.head_dim))?
                 .transpose(1, 2)?;
-            (q.contiguous()?, k.contiguous()?, v.contiguous()?)
+            (q, k, v)
         } else {
             let q = q.reshape((b_sz, self.num_heads, seq_len, self.head_dim))?;
             let k = k.reshape((b_sz, self.num_kv_heads, seq_len, self.head_dim))?;
@@ -200,15 +200,6 @@ impl FullAttention {
         q = q.apply(&self.q_norm)?;
         k = k.apply(&self.k_norm)?;
 
-        let cos_sin = if cos_sin.0.device().location() != q.device().location() {
-            (
-                cos_sin.0.to_device(q.device())?,
-                cos_sin.1.to_device(q.device())?,
-            )
-        } else {
-            (cos_sin.0.clone(), cos_sin.1.clone())
-        };
-
         // Apply partial MRoPE: split into rotated and pass-through portions
         if self.rot_dim < self.head_dim {
             let mut q_rot = q.narrow(D::Minus1, 0, self.rot_dim)?;
@@ -216,20 +207,20 @@ impl FullAttention {
             let mut k_rot = k.narrow(D::Minus1, 0, self.rot_dim)?;
             let k_pass = k.narrow(D::Minus1, self.rot_dim, self.head_dim - self.rot_dim)?;
 
-            self.rotary_emb.forward(&cos_sin, &mut q_rot, &mut k_rot)?;
+            self.rotary_emb.forward(cos_sin, &mut q_rot, &mut k_rot)?;
             q = Tensor::cat(&[q_rot, q_pass], D::Minus1)?;
             k = Tensor::cat(&[k_rot, k_pass], D::Minus1)?;
         } else {
-            self.rotary_emb.forward(&cos_sin, &mut q, &mut k)?;
+            self.rotary_emb.forward(cos_sin, &mut q, &mut k)?;
         }
 
         // Standard attention
         let mut y = match &self.paged_attn {
             Some(paged_attn) => match metadata {
                 Some(((key_cache, value_cache), input_metadata)) => paged_attn.forward(
-                    &q.contiguous()?,
-                    &k.contiguous()?,
-                    &v.contiguous()?,
+                    &q,
+                    &k,
+                    &v,
                     attention_mask,
                     Some(key_cache),
                     Some(value_cache),
@@ -256,9 +247,9 @@ impl FullAttention {
             None => {
                 let (cache_k, cache_v) = kv_cache.append(&k, &v)?;
                 Sdpa.run_attention(
-                    &q.contiguous()?,
-                    &cache_k.contiguous()?,
-                    &cache_v.contiguous()?,
+                    &q,
+                    &cache_k,
+                    &cache_v,
                     attention_mask,
                     Some(flash_params),
                     &self.sdpa_params,
@@ -755,17 +746,10 @@ impl Qwen3_5TextModel {
                             seqlen_offset: first_offset,
                         };
 
-                        let pool_device = gdn_cache.recurrent_state.device().clone();
                         xs = layer.forward_linear(&xs, &mut gdn_cache)?;
 
-                        pool.scatter_conv_state(
-                            indices,
-                            &gdn_cache.conv_state.to_device(&pool_device)?,
-                        )?;
-                        pool.scatter_recurrent_state(
-                            indices,
-                            &gdn_cache.recurrent_state.to_device(&pool_device)?,
-                        )?;
+                        pool.scatter_conv_state(indices, &gdn_cache.conv_state)?;
+                        pool.scatter_recurrent_state(indices, &gdn_cache.recurrent_state)?;
 
                         let delta = gdn_cache.seqlen_offset.saturating_sub(first_offset);
                         for &idx in &indices_vec {
@@ -870,18 +854,14 @@ impl IsqModel for Qwen3_5TextModel {
                     uvb_l.pp("self_attn").pp("k_norm").add(&attn.k_norm);
                 }
                 LayerImpl::LinearAttention(gdn) => {
-                    uvb_l.pp("linear_attn").add_tensor(
-                        "in_proj_qkvz.weight",
-                        gdn.in_proj_qkvz
-                            .dequantize_w()
-                            .expect("failed to dequantize Qwen3.5 GDN in_proj_qkvz"),
-                    );
-                    uvb_l.pp("linear_attn").add_tensor(
-                        "in_proj_ba.weight",
-                        gdn.in_proj_ba
-                            .dequantize_w()
-                            .expect("failed to dequantize Qwen3.5 GDN in_proj_ba"),
-                    );
+                    uvb_l
+                        .pp("linear_attn")
+                        .pp("in_proj_qkvz")
+                        .add_tensor("weight", gdn.in_proj_qkvz.weight().clone());
+                    uvb_l
+                        .pp("linear_attn")
+                        .pp("in_proj_ba")
+                        .add_tensor("weight", gdn.in_proj_ba.weight().clone());
                     uvb_l
                         .pp("linear_attn")
                         .add_tensor("conv1d.weight", gdn.conv1d_weight.clone());
@@ -900,27 +880,5 @@ impl IsqModel for Qwen3_5TextModel {
         }
 
         uvb.to_safetensors()
-    }
-
-    fn imatrix_names(&self) -> candle_core::Result<Vec<Option<String>>> {
-        let mut names = Vec::new();
-        names.push(None);
-        for (i, layer) in self.layers.iter().enumerate() {
-            match &layer.layer_impl {
-                LayerImpl::FullAttention(_) => {
-                    names.push(Some(format!("blk.{i}.attn_q.weight")));
-                    names.push(Some(format!("blk.{i}.attn_k.weight")));
-                    names.push(Some(format!("blk.{i}.attn_v.weight")));
-                    names.push(Some(format!("blk.{i}.attn_output.weight")));
-                }
-                LayerImpl::LinearAttention(_) => {
-                    names.push(None);
-                }
-            }
-            names.push(Some(format!("blk.{i}.ffn_gate.weight")));
-            names.push(Some(format!("blk.{i}.ffn_up.weight")));
-            names.push(Some(format!("blk.{i}.ffn_down.weight")));
-        }
-        Ok(names)
     }
 }

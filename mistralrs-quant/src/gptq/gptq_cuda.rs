@@ -22,7 +22,6 @@ use candle_core::{
 use half::f16;
 
 use crate::{
-    gptq::cpu_dequant::{self, GptqCpuParams},
     gptq::marlin_backend::{marlin_matmul, marlin_weight_repack},
     has_missing_required_tensors, make_dummy_or_error,
     utils::get_cuda_device,
@@ -313,7 +312,7 @@ impl QuantMethod for GptqLayer {
                 is_marlin,
                 is_awq,
             } => {
-                if workspace.is_none() && q_weight.device().is_cuda() && q_weight.rank() == 2 {
+                if workspace.is_none() {
                     let dev = get_cuda_device(&q_weight)?;
                     let len = (q_weight.dims()[0] * 32 / bits as usize) * q_weight.dims()[1];
                     // SAFETY: used in the kernel as a tmp space, just preallocating it here.
@@ -351,15 +350,12 @@ impl QuantMethod for GptqLayer {
     }
 
     fn dequantize_w(&self) -> Result<Tensor> {
-        cpu_dequant::dequantize_w(&self.cpu_params())
+        // TODO
+        candle_core::bail!("GptqLayer cannot be dequantized!");
     }
 
     fn forward_raw(&self, a: &Tensor) -> Result<Tensor> {
         // https://github.com/vllm-project/vllm/blob/ba991d5c84adbc0685075af88333c688ddb06011/vllm/model_executor/layers/quantization/gptq.py#L200
-        if !a.device().is_cuda() {
-            return cpu_dequant::forward(&self.cpu_params(), a);
-        }
-
         let out_shape = Shape::from_dims(
             &[
                 &a.dims()[..a.dims().len() - 1],
@@ -405,19 +401,6 @@ impl QuantMethod for GptqLayer {
         Some(DType::F16)
     }
 
-    fn gather_forward_raw(&self, a: &Tensor, indices: &Tensor) -> Result<Tensor> {
-        if !a.device().is_cuda() || !self.q_weight.device().is_cuda() {
-            return cpu_dequant::gather_forward(&self.cpu_params(), a, indices);
-        }
-        crate::gather_forward_dequantized(
-            self.name(),
-            self.dequantize_w()?,
-            self.bias.clone(),
-            a,
-            indices,
-        )
-    }
-
     fn add_delta_w(&self, _delta: &Tensor) -> Result<Arc<dyn QuantMethod>> {
         candle_core::bail!("GPTQ quantization does not support adding weight delta.")
     }
@@ -441,22 +424,6 @@ impl QuantMethod for GptqLayer {
 impl QuantizedSerde for GptqLayer {
     fn name(&self) -> &'static str {
         "gptq"
-    }
-}
-
-impl GptqLayer {
-    fn cpu_params(&self) -> GptqCpuParams<'_> {
-        GptqCpuParams {
-            q_weight: &self.q_weight,
-            qzeros: self.qzeros.as_ref(),
-            scales: &self.scales,
-            g_idx: self.g_idx.as_ref(),
-            bias: self.bias.as_ref(),
-            bits: self.bits,
-            is_marlin: self.is_marlin,
-            is_awq: self.is_awq,
-            name: self.name(),
-        }
     }
 }
 
@@ -491,14 +458,11 @@ pub fn gptq_linear(
         return make_dummy_or_error("gptq_awq_linear", &vb, &required);
     }
 
-    let marlin_compatible = (*bits == 4 || *bits == 8) && vb.device().is_cuda();
-    let requested_marlin_format = checkpoint_format
+    let marlin_compatible = *bits == 4 || *bits == 8;
+    let marlin_format = checkpoint_format
         .as_ref()
-        .is_some_and(|fmt| fmt == "marlin");
-    if requested_marlin_format && !vb.device().is_cuda() {
-        candle_core::bail!("Marlin GPTQ/AWQ checkpoints cannot run CPU-MoE yet.");
-    }
-    let marlin_format = requested_marlin_format && HAVE_MARLIN_KERNELS;
+        .is_some_and(|fmt| fmt == "marlin")
+        && HAVE_MARLIN_KERNELS;
 
     let qw_shape = if !is_awq {
         //quantized gptq (k/pack_factor, n) format

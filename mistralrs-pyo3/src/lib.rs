@@ -35,15 +35,15 @@ use mistralrs_core::{
     initialize_logging, paged_attn_supported, parse_isq_value, AgentToolApprovalHandler,
     AnyMoeLoader, AutoDeviceMapParams, ChatCompletionResponse, CompletionResponse, Constraint,
     DefaultSchedulerMethod, DetokenizationRequest, DeviceLayerMapMetadata, DeviceMapMetadata,
-    DeviceMapSetting, DiffusionGenerationParams, DiffusionLoaderBuilder, DisabledModalities,
-    DrySamplingParams, EmbeddingLoaderBuilder, EmbeddingSpecificConfig, GGMLLoaderBuilder,
-    GGMLSpecificConfig, GGUFLoaderBuilder, GGUFSpecificConfig, ImageGenerationResponse,
-    ImageGenerationResponseFormat, LlguidanceGrammar, Loader, MemoryGpuConfig, MistralRs,
-    MistralRsBuilder, MultimodalLoaderBuilder, MultimodalSpecificConfig, NormalLoaderBuilder,
-    NormalRequest, NormalSpecificConfig, PagedAttentionConfig, PagedCacheType, ReasoningEffort,
+    DeviceMapSetting, DiffusionGenerationParams, DiffusionLoaderBuilder, DrySamplingParams,
+    EmbeddingLoaderBuilder, EmbeddingSpecificConfig, GGMLLoaderBuilder, GGMLSpecificConfig,
+    GGUFLoaderBuilder, GGUFSpecificConfig, ImageGenerationResponse, ImageGenerationResponseFormat,
+    LlguidanceGrammar, Loader, MemoryGpuConfig, MistralRs, MistralRsBuilder,
+    MultimodalLoaderBuilder, MultimodalSpecificConfig, NormalLoaderBuilder, NormalRequest,
+    NormalSpecificConfig, PagedAttentionConfig, PagedCacheType, ReasoningEffort,
     Request as _Request, RequestMessage, Response, ResponseOk, SamplingParams, SchedulerConfig,
-    SearchEmbeddingModel, SpeculativeConfig, SpeculativeLoader, SpeechLoader, StopTokens,
-    TokenSource, TokenizationRequest, Tool, Topology,
+    SearchEmbeddingModel, SpeculativeConfig, SpeechLoader, StopTokens, TokenSource,
+    TokenizationRequest, Tool, Topology,
 };
 use mistralrs_core::{
     CalledFunction, SearchCallback, SearchFunctionParameters, SearchResult, ToolCallback,
@@ -521,6 +521,7 @@ fn parse_which(
         } => MultimodalLoaderBuilder::new(
             MultimodalSpecificConfig {
                 topology: Topology::from_option_path(topology)?,
+                text_only: false,
                 write_uqff,
                 from_uqff: from_uqff.map(|x| {
                     x.right_or_else(|l| vec![l])
@@ -529,7 +530,6 @@ fn parse_which(
                         .collect::<Vec<_>>()
                 }),
                 max_edge,
-                disabled_modalities: DisabledModalities::default(),
                 calibration_file,
                 imatrix,
                 hf_cache_path,
@@ -605,8 +605,8 @@ impl Runner {
         no_kv_cache = false,
         prefix_cache_n = 16,
         token_source = "cache",
-        speculative_gamma = 32,
-        which_draft = None,
+        mtp_model = None,
+        mtp_n_predict = None,
         chat_template = None,
         jinja_explicit = None,
         num_device_layers = None,
@@ -633,8 +633,8 @@ impl Runner {
         no_kv_cache: bool,
         prefix_cache_n: usize,
         token_source: &str,
-        speculative_gamma: usize,
-        which_draft: Option<Which>,
+        mtp_model: Option<String>,
+        mtp_n_predict: Option<usize>,
         chat_template: Option<String>,
         jinja_explicit: Option<String>,
         num_device_layers: Option<Vec<String>>,
@@ -758,18 +758,6 @@ impl Runner {
             chat_template.clone(),
             jinja_explicit.clone(),
         )?;
-        let loader = if let Some(draft_which) = which_draft {
-            let draft = parse_which(draft_which, no_kv_cache, chat_template, jinja_explicit)?;
-            Box::new(SpeculativeLoader {
-                target: loader,
-                draft,
-                config: SpeculativeConfig {
-                    gamma: speculative_gamma,
-                },
-            })
-        } else {
-            loader
-        };
         let loader = if let Some(amoe_conf) = anymoe_config {
             Box::new(AnyMoeLoader {
                 target: loader,
@@ -906,6 +894,16 @@ impl Runner {
                 cache_config,
             )
             .map_err(PyApiErr::from)?;
+
+        if let Some(mtp_model) = mtp_model {
+            pipeline
+                .blocking_lock()
+                .attach_speculative(SpeculativeConfig::Mtp(mistralrs_core::MtpConfig::new(
+                    mtp_model,
+                    mtp_n_predict,
+                )))
+                .map_err(|e| PyApiErr::from(&e))?;
+        }
 
         let scheduler_config = if cache_config.is_some() {
             // Handle case where we may have device mapping

@@ -55,7 +55,7 @@ pub async fn run_interactive(
         paged_attn_block_size,
         paged_cache_type,
     ) = extract_paged_attn_settings(&model_type);
-    let (cpu, device_layers, active_layers_on_vram) = extract_device_settings(&model_type);
+    let (cpu, device_layers) = extract_device_settings(&model_type);
     let isq = extract_isq_setting(&model_type);
 
     // Build the MistralRs instance
@@ -84,12 +84,12 @@ pub async fn run_interactive(
                 .map(|p| p.to_string_lossy().to_string()),
         )
         .with_num_device_layers_optional(device_layers)
-        .with_dummy_run(!active_layers_on_vram)
         .with_in_situ_quant_optional(isq)
         .with_paged_attn_gpu_mem_optional(paged_attn_gpu_mem)
         .with_paged_attn_gpu_mem_usage_optional(paged_attn_gpu_mem_usage)
         .with_paged_ctxt_len_optional(paged_ctxt_len)
         .with_paged_attn_block_size_optional(paged_attn_block_size)
+        .with_mtp_config_optional(runtime.mtp_config())
         .with_paged_attn_cache_type(paged_cache_type);
 
     if let Some(model) = runtime.search_embedding_model {

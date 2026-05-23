@@ -135,7 +135,6 @@ pub async fn run_quantize(model_type: QuantizeModelType, global: GlobalOptions) 
             .with_cpu(cpu)
             .with_num_device_layers_optional(device_layers)
             .with_in_situ_quant(isq.to_string())
-            .with_dummy_run(false)
             .build()
             .await?;
 
@@ -371,8 +370,6 @@ fn convert_to_model_selected(
             multimodal,
             ..
         } => {
-            let disable_vision = multimodal.text_only || multimodal.disable_vision;
-            let disable_audio = multimodal.text_only || multimodal.disable_audio;
             let model_selected = ModelSelected::Run {
                 model_id: model.model_id.clone(),
                 tokenizer_json: model
@@ -390,12 +387,11 @@ fn convert_to_model_selected(
                 imatrix: quantization.imatrix.clone(),
                 calibration_file: quantization.calibration_file.clone(),
                 max_edge: multimodal.max_edge,
-                disable_vision,
-                disable_audio,
                 max_seq_len: device.max_seq_len,
                 max_batch_size: device.max_batch_size,
                 max_num_images: multimodal.max_num_images,
                 max_image_length: multimodal.max_image_length,
+                text_only: false,
                 hf_cache_path: device.hf_cache.clone(),
                 matformer_config_path: None,
                 matformer_slice_name: None,
@@ -443,8 +439,6 @@ fn convert_to_model_selected(
             multimodal,
             ..
         } => {
-            let disable_vision = multimodal.text_only || multimodal.disable_vision;
-            let disable_audio = multimodal.text_only || multimodal.disable_audio;
             let model_selected = ModelSelected::MultimodalPlain {
                 model_id: model.model_id.clone(),
                 tokenizer_json: model
@@ -460,8 +454,6 @@ fn convert_to_model_selected(
                 write_uqff: Some(output_path),
                 from_uqff: None,
                 max_edge: multimodal.max_edge,
-                disable_vision,
-                disable_audio,
                 calibration_file: quantization.calibration_file.clone(),
                 imatrix: quantization.imatrix.clone(),
                 max_seq_len: device.max_seq_len,

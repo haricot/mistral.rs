@@ -78,6 +78,7 @@ mod response;
 mod sampler;
 mod scheduler;
 mod sequence;
+pub mod speculative;
 mod speech_models;
 mod toml_selector;
 mod tools;
@@ -276,15 +277,14 @@ pub use pipeline::{
     chat_template::ChatTemplate, expand_isq_value, parse_isq_value, parse_uqff_shard,
     resolve_uqff_shorthand, AdapterPaths, AnyMoeLoader, AnyMoePipeline, AutoDeviceMapParams,
     AutoLoader, AutoLoaderBuilder, DiffusionGenerationParams, DiffusionLoader,
-    DiffusionLoaderBuilder, DiffusionLoaderType, DisabledModalities, EmbeddingLoader,
-    EmbeddingLoaderBuilder, EmbeddingLoaderType, EmbeddingModelPaths, EmbeddingSpecificConfig,
-    GGMLLoader, GGMLLoaderBuilder, GGMLSpecificConfig, GGUFLoader, GGUFLoaderBuilder,
-    GGUFSpecificConfig, GemmaLoader, Idefics2Loader, IsqOrganization, LLaVALoader, LLaVANextLoader,
-    LlamaLoader, Loader, LocalModelPaths, LoraAdapterPaths, MistralLoader, MixtralLoader,
-    Modalities, ModelKind, ModelPaths, MultimodalLoader, MultimodalLoaderBuilder,
-    MultimodalLoaderType, MultimodalPromptPrefixer, MultimodalSpecificConfig, NormalLoader,
-    NormalLoaderBuilder, NormalLoaderType, NormalSpecificConfig, Phi2Loader, Phi3Loader,
-    Phi3VLoader, Qwen2Loader, SpeculativeConfig, SpeculativeLoader, SpeculativePipeline,
+    DiffusionLoaderBuilder, DiffusionLoaderType, EmbeddingLoader, EmbeddingLoaderBuilder,
+    EmbeddingLoaderType, EmbeddingModelPaths, EmbeddingSpecificConfig, GGMLLoader,
+    GGMLLoaderBuilder, GGMLSpecificConfig, GGUFLoader, GGUFLoaderBuilder, GGUFSpecificConfig,
+    GemmaLoader, Idefics2Loader, IsqOrganization, LLaVALoader, LLaVANextLoader, LlamaLoader,
+    Loader, LocalModelPaths, LoraAdapterPaths, MistralLoader, MixtralLoader, Modalities, ModelKind,
+    ModelPaths, MultimodalLoader, MultimodalLoaderBuilder, MultimodalLoaderType,
+    MultimodalPromptPrefixer, MultimodalSpecificConfig, NormalLoader, NormalLoaderBuilder,
+    NormalLoaderType, NormalSpecificConfig, Phi2Loader, Phi3Loader, Phi3VLoader, Qwen2Loader,
     SpeechLoader, SpeechPipeline, Starcoder2Loader, SupportedModality, TokenSource,
     UQFF_MULTI_FILE_DELIMITER,
 };
@@ -301,11 +301,12 @@ pub use sampler::{
 pub use scheduler::{DefaultSchedulerMethod, SchedulerConfig};
 pub use search::{SearchCallback, SearchFunctionParameters, SearchResult};
 use serde::Serialize;
+pub use speculative::{MtpConfig, SpeculativeConfig};
 pub use speech_models::{utils as speech_utils, SpeechGenerationConfig, SpeechLoaderType};
 use tokio::runtime::Runtime;
 use toml_selector::{TomlLoaderArgs, TomlSelector};
 pub use tools::{ToolCallResponse, ToolCallType, ToolCallbacks, ToolChoice};
-pub use topology::{LayerTopology, Topology, TopologyRuntime};
+pub use topology::{LayerTopology, Topology};
 pub use utils::debug::initialize_logging;
 pub use utils::memory_usage::MemoryUsage;
 pub use utils::normal::{ModelDType, TryIntoDType};
@@ -421,6 +422,8 @@ pub struct ModelLoaderConfig {
     pub chat_template: Option<String>,
     /// Explicit Jinja template path
     pub jinja_explicit: Option<String>,
+    /// Optional speculative decoding attachment to recreate after reload.
+    pub mtp_config: Option<MtpConfig>,
 }
 
 /// State preserved when a model is unloaded.
@@ -574,7 +577,6 @@ pub struct MistralRsBuilder {
     tool_callbacks: tools::ToolCallbacksWithTools,
     mcp_client_config: Option<McpClientConfig>,
     loader_config: Option<ModelLoaderConfig>,
-    dummy_run: bool,
     code_exec_config: Option<CodeExecutionConfig>,
 }
 
@@ -603,7 +605,6 @@ impl MistralRsBuilder {
             tool_callbacks: HashMap::new(),
             mcp_client_config: None,
             loader_config: None,
-            dummy_run: true,
             code_exec_config: None,
         }
     }
@@ -709,12 +710,6 @@ impl MistralRsBuilder {
     /// Configure MCP client to connect to external MCP servers.
     pub fn with_mcp_client(mut self, config: McpClientConfig) -> Self {
         self.mcp_client_config = Some(config);
-        self
-    }
-
-    /// Enable or disable the post-load dummy prompt used to warm up the engine.
-    pub fn with_dummy_run(mut self, dummy_run: bool) -> Self {
-        self.dummy_run = dummy_run;
         self
     }
 
@@ -1039,7 +1034,6 @@ impl MistralRs {
             loader_config,
             #[cfg_attr(not(feature = "code-execution"), allow(unused_variables))]
             code_exec_config,
-            dummy_run,
         } = config;
 
         mistralrs_quant::cublaslt::maybe_init_cublas_lt_wrapper(
@@ -1122,7 +1116,6 @@ impl MistralRs {
 
         // Do a dummy run
         if !distributed::is_daemon()
-            && dummy_run
             && is_multi_threaded
             && matches!(
                 engine_instance.category,
@@ -2176,6 +2169,17 @@ impl MistralRs {
                 loader_config.paged_attn_config,
             )
             .map_err(|e| MistralRsError::ReloadFailed(format!("Failed to load model: {e}")))?;
+
+        if let Some(mtp_config) = loader_config.mtp_config.clone() {
+            pipeline
+                .blocking_lock()
+                .attach_speculative(SpeculativeConfig::Mtp(mtp_config))
+                .map_err(|e| {
+                    MistralRsError::ReloadFailed(format!(
+                        "Failed to attach MTP speculative decoding: {e}"
+                    ))
+                })?;
+        }
 
         // Create the reboot state
         let reboot_state = RebootState {

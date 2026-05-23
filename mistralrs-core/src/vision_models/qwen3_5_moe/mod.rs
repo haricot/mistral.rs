@@ -22,7 +22,7 @@ use crate::{
     },
     pipeline::{
         text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
-        DisabledModalities, EitherCache, IsqModel, MultimodalModel, NormalLoadingMetadata,
+        EitherCache, IsqModel, MultimodalModel, NormalLoadingMetadata,
     },
     vision_models::qwen3_vl::{vision::Qwen3VLVisionModel, Qwen3VLVisionSpecificArgs},
 };
@@ -36,7 +36,7 @@ pub(crate) use crate::vision_models::qwen3_vl::Qwen3VLProcessor as Qwen3_5MoePro
 
 pub struct Qwen3_5MoeModel {
     text: Qwen3_5MoeTextModel,
-    vision: Option<Qwen3VLVisionModel>,
+    vision: Qwen3VLVisionModel,
     spatial_merge_size: usize,
     image_token_id: u32,
     video_token_id: u32,
@@ -50,26 +50,19 @@ impl Qwen3_5MoeModel {
         cfg: &Config,
         vb: ShardedVarBuilder,
         _is_gptx: bool,
-        disabled_modalities: DisabledModalities,
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Self> {
-        let vision = if disabled_modalities.vision {
-            None
-        } else if let Some(vision_config) = cfg.vision_config.as_ref() {
-            // Support both original HuggingFace naming (model.visual.*) and MLX naming (vision_tower.*)
-            let vision_vb = if vb.contains_tensor("vision_tower.patch_embed.proj.weight") {
-                vb.pp("vision_tower")
-            } else {
-                vb.pp("model").pp("visual")
-            };
-            Some(Qwen3VLVisionModel::new(
-                vision_config,
-                vision_vb.set_device(normal_loading_metadata.real_device.clone()),
-            )?)
+        // Support both original HuggingFace naming (model.visual.*) and MLX naming (vision_tower.*)
+        let vision_vb = if vb.contains_tensor("vision_tower.patch_embed.proj.weight") {
+            vb.pp("vision_tower")
         } else {
-            None
+            vb.pp("model").pp("visual")
         };
+        let vision = Qwen3VLVisionModel::new(
+            &cfg.vision_config,
+            vision_vb.set_device(normal_loading_metadata.real_device.clone()),
+        )?;
         // Use top-level quantization_config if present, otherwise fall back to text_config's
         let mut text_config = cfg.text_config.clone();
         if cfg.quantization_config.is_some() {
@@ -85,11 +78,7 @@ impl Qwen3_5MoeModel {
         Ok(Self {
             text,
             vision,
-            spatial_merge_size: cfg
-                .vision_config
-                .as_ref()
-                .map(|cfg| cfg.spatial_merge_size)
-                .unwrap_or(1),
+            spatial_merge_size: cfg.vision_config.spatial_merge_size,
             image_token_id: cfg.image_token_id,
             video_token_id: cfg.video_token_id,
             vision_start_token_id: cfg.vision_start_token_id,
@@ -147,11 +136,6 @@ impl Qwen3_5MoeModel {
         let mut deepstack_video_opt: Option<Vec<Tensor>> = None;
 
         if let Some(pixel_values) = &pixel_values {
-            let Some(vision) = self.vision.as_ref() else {
-                candle_core::bail!(
-                    "Qwen3.5 MoE was loaded with vision disabled. Remove image/video inputs or omit `--disable-vision`/`--text-only`."
-                );
-            };
             let Some(image_grid_thw_ref) = image_grid_thw.as_ref() else {
                 candle_core::bail!("pixel_values require image_grid_thw");
             };
@@ -223,7 +207,8 @@ impl Qwen3_5MoeModel {
                     let miss_pixels = Tensor::cat(&miss_pixel_slices, 0)?;
                     let miss_grid = Tensor::stack(&miss_grid_rows, 0)?;
 
-                    let (encoded_main, encoded_ds) = vision.forward(&miss_pixels, &miss_grid)?;
+                    let (encoded_main, encoded_ds) =
+                        self.vision.forward(&miss_pixels, &miss_grid)?;
 
                     let miss_output_tokens: Vec<usize> = miss_indices
                         .iter()
@@ -271,7 +256,7 @@ impl Qwen3_5MoeModel {
                     (image_embeds, deepstack_layers)
                 }
             } else {
-                vision.forward(&pixel_values, image_grid_thw_ref)?
+                self.vision.forward(&pixel_values, image_grid_thw_ref)?
             };
 
             let image_embeds = image_embeds.to_device(&device)?.to_dtype(self.text.dtype)?;
@@ -313,11 +298,6 @@ impl Qwen3_5MoeModel {
         }
 
         if let Some(pixel_values_videos) = &pixel_values_videos {
-            let Some(vision) = self.vision.as_ref() else {
-                candle_core::bail!(
-                    "Qwen3.5 MoE was loaded with vision disabled. Remove image/video inputs or omit `--disable-vision`/`--text-only`."
-                );
-            };
             let Some(video_grid_thw_ref) = video_grid_thw.as_ref() else {
                 candle_core::bail!("pixel_values_videos require video_grid_thw");
             };
@@ -328,7 +308,7 @@ impl Qwen3_5MoeModel {
                 pixel_values = pixel_values.reshape(((), last_dim))?;
             }
             let (video_embeds, deepstack_video_embeds) =
-                vision.forward(&pixel_values, video_grid_thw_ref)?;
+                self.vision.forward(&pixel_values, video_grid_thw_ref)?;
             let video_embeds = video_embeds.to_device(&device)?.to_dtype(self.text.dtype)?;
             let deepstack_video_embeds = deepstack_video_embeds
                 .into_iter()
@@ -483,6 +463,8 @@ impl Qwen3_5MoeModel {
     }
 }
 
+impl crate::speculative::SpeculativeTargetMixin for Qwen3_5MoeModel {}
+
 impl MultimodalModel for Qwen3_5MoeModel {
     fn forward(
         &self,
@@ -592,14 +574,8 @@ impl IsqModel for Qwen3_5MoeModel {
     }
     fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let mut tensors = self.text.residual_tensors();
-        if let Some(vision) = self.vision.as_ref() {
-            tensors.extend(vision.residual_tensors());
-        }
+        tensors.extend(self.vision.residual_tensors());
         tensors
-    }
-
-    fn imatrix_names(&self) -> candle_core::Result<Vec<Option<String>>> {
-        self.text.imatrix_names()
     }
 }
 
