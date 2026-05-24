@@ -1041,6 +1041,84 @@ pub fn cuda_apply_sparse_penalties_f32(
     )))
 }
 
+#[cfg(feature = "metal")]
+pub fn metal_apply_sparse_penalties(
+    input: &Tensor,
+    token_ids: &Tensor,
+    counts: &Tensor,
+    frequency_penalty: f32,
+    presence_penalty: f32,
+    repetition_penalty: f32,
+) -> Result<Tensor> {
+    use candle_core::{backend::BackendStorage, MetalStorage, Shape, Storage};
+
+    if !matches!(input.dtype(), DType::F32 | DType::F16 | DType::BF16) {
+        candle_core::bail!("metal_apply_sparse_penalties requires F32/F16/BF16 logits");
+    }
+    if token_ids.dtype() != DType::U32 || counts.dtype() != DType::F32 {
+        candle_core::bail!("metal_apply_sparse_penalties token_ids must be u32, counts f32");
+    }
+    let dtype = input.dtype();
+    let n = input.elem_count();
+    let n_tokens = token_ids.elem_count();
+    if counts.elem_count() != n_tokens {
+        candle_core::bail!("token_ids and counts length mismatch");
+    }
+
+    let input = input.contiguous()?;
+    let token_ids = token_ids.contiguous()?;
+    let counts = counts.contiguous()?;
+
+    let (input_s, input_l) = input.storage_and_layout();
+    let (tok_s, tok_l) = token_ids.storage_and_layout();
+    let (cnt_s, cnt_l) = counts.storage_and_layout();
+    let (Storage::Metal(input_s), Storage::Metal(tok_s), Storage::Metal(cnt_s)) =
+        (&*input_s, &*tok_s, &*cnt_s)
+    else {
+        candle_core::bail!("metal_apply_sparse_penalties requires Metal tensors");
+    };
+    let device = input_s.device().clone();
+
+    let out_buf = device.new_buffer(n, dtype, "penalties-out")?;
+    let encoder = device.command_encoder()?;
+    encoder.set_label("penalties-copy");
+    {
+        use mistralrs_quant::metal_kernels::Kernels;
+        mistralrs_quant::metal_kernels::call_copy_logits(
+            device.device(),
+            &encoder,
+            &Kernels::new(),
+            dtype,
+            input_s.buffer(),
+            input_l.start_offset() * input.dtype().size_in_bytes(),
+            &out_buf,
+            n,
+        )
+        .map_err(|e| candle_core::Error::Msg(format!("metal copy: {e}")))?;
+    }
+    encoder.set_label("penalties-apply");
+    mistralrs_quant::metal_kernels::call_apply_sparse_penalties(
+        device.device(),
+        &encoder,
+        &mistralrs_quant::metal_kernels::Kernels::new(),
+        dtype,
+        &out_buf,
+        tok_s.buffer(),
+        cnt_s.buffer(),
+        n,
+        n_tokens,
+        frequency_penalty,
+        presence_penalty,
+        repetition_penalty,
+    )
+    .map_err(|e| candle_core::Error::Msg(format!("metal penalties: {e}")))?;
+    let _ = (tok_l, cnt_l);
+    Ok(Tensor::from((
+        Storage::Metal(MetalStorage::new(out_buf, device.clone(), n, dtype)),
+        Shape::from(input.dims()),
+    )))
+}
+
 #[cfg(feature = "cuda")]
 pub fn cuda_rms_norm_residual(
     input: &Tensor,
@@ -1223,6 +1301,503 @@ pub fn cuda_rms_norm_residual(
         DType::F16 => launch!(F16, half::f16, rms_norm_residual_f16),
         DType::F32 => launch!(F32, f32, rms_norm_residual_f32),
         dtype => candle_core::bail!("cuda_rms_norm_residual unsupported dtype {dtype:?}"),
+    }
+}
+
+#[cfg(feature = "metal")]
+pub fn metal_rms_norm_residual(
+    input: &Tensor,
+    residual: &Tensor,
+    weight: &Tensor,
+    scale: Option<&Tensor>,
+    eps: f32,
+) -> Result<Option<Tensor>> {
+    use candle_core::{backend::BackendStorage, MetalStorage, Shape, Storage};
+
+    if input.shape() != residual.shape() {
+        return Ok(None);
+    }
+    let n_cols = input.dim(D::Minus1)?;
+    if weight.dims1()? != n_cols {
+        return Ok(None);
+    }
+    let n_rows = input.elem_count() / n_cols;
+    if n_rows == 0 {
+        return Ok(None);
+    }
+    if let Some(scale) = scale {
+        if scale.elem_count() != 1 {
+            return Ok(None);
+        }
+    }
+
+    let input = input.contiguous()?;
+    let residual = residual.contiguous()?;
+    let weight = weight.contiguous()?;
+    let scale_t = scale.map(Tensor::contiguous).transpose()?;
+
+    let (input_storage, input_layout) = input.storage_and_layout();
+    let Storage::Metal(input_storage) = &*input_storage else {
+        return Ok(None);
+    };
+    let (residual_storage, residual_layout) = residual.storage_and_layout();
+    let Storage::Metal(residual_storage) = &*residual_storage else {
+        return Ok(None);
+    };
+    let (weight_storage, weight_layout) = weight.storage_and_layout();
+    let Storage::Metal(weight_storage) = &*weight_storage else {
+        return Ok(None);
+    };
+    let scale_storage_and_layout = scale_t.as_ref().map(|s| s.storage_and_layout());
+    let scale_metal = match scale_storage_and_layout.as_ref() {
+        Some((s, l)) => {
+            let Storage::Metal(s) = &**s else {
+                return Ok(None);
+            };
+            Some((s, l))
+        }
+        None => None,
+    };
+
+    let device = input_storage.device().clone();
+    let dtype = input.dtype();
+    let out_buf = device.new_buffer(input.elem_count(), dtype, "rmsnorm-residual-out")?;
+
+    let encoder = device.command_encoder()?;
+    encoder.set_label("rmsnorm-residual");
+
+    let x_offset = input_layout.start_offset() * dtype.size_in_bytes();
+    let res_offset = residual_layout.start_offset() * dtype.size_in_bytes();
+    let w_offset = weight_layout.start_offset() * dtype.size_in_bytes();
+    let scale_arg = scale_metal
+        .as_ref()
+        .map(|(s, l)| (s.buffer(), l.start_offset() * dtype.size_in_bytes()));
+
+    mistralrs_quant::metal_kernels::call_rmsnorm_residual(
+        device.device(),
+        &encoder,
+        &mistralrs_quant::metal_kernels::Kernels::new(),
+        dtype,
+        (input_storage.buffer(), x_offset),
+        (residual_storage.buffer(), res_offset),
+        (weight_storage.buffer(), w_offset),
+        scale_arg,
+        &out_buf,
+        n_cols,
+        n_rows,
+        eps,
+    )
+    .map_err(candle_core::Error::wrap)?;
+
+    let out = Tensor::from((
+        Storage::Metal(MetalStorage::new(
+            out_buf,
+            device.clone(),
+            input.elem_count(),
+            dtype,
+        )),
+        Shape::from(input.dims()),
+    ));
+    Ok(Some(out))
+}
+
+#[cfg(feature = "metal")]
+#[allow(clippy::cast_possible_truncation)]
+pub fn metal_topk_logits_packed(
+    input: &Tensor,
+    k: usize,
+    temperature: f64,
+) -> Result<TopKLogitsPackedOutput> {
+    use candle_core::{backend::BackendStorage, MetalStorage, Shape, Storage};
+
+    const MAX_K: usize = 128;
+    const CHUNK_SIZE: usize = 2048;
+
+    if temperature <= 0.0 || !temperature.is_finite() {
+        candle_core::bail!("metal_topk_logits_packed requires a positive finite temperature");
+    }
+    let input = input.contiguous()?;
+    if !matches!(input.dtype(), DType::F32 | DType::F16 | DType::BF16) {
+        candle_core::bail!("metal_topk_logits_packed requires F32/F16/BF16 logits");
+    }
+    let dtype = input.dtype();
+    let ncols = input.elem_count();
+    if ncols == 0 {
+        candle_core::bail!("metal_topk_logits_packed got empty logits");
+    }
+    let k = k.min(ncols);
+    if k == 0 || k > MAX_K {
+        candle_core::bail!("metal_topk_logits_packed k={k} must be in [1, {MAX_K}]");
+    }
+    let nblocks = ncols.div_ceil(CHUNK_SIZE);
+
+    let (input_s, input_l) = input.storage_and_layout();
+    let Storage::Metal(input_s) = &*input_s else {
+        candle_core::bail!("metal_topk_logits_packed requires Metal tensor");
+    };
+    let device = input_s.device().clone();
+
+    let block_values_buf = device.new_buffer(nblocks * k, DType::F32, "topk-block-values")?;
+    let block_indices_buf = device.new_buffer(nblocks * k, DType::U32, "topk-block-indices")?;
+    let block_maxes_buf = device.new_buffer(nblocks, DType::F32, "topk-block-maxes")?;
+    let block_sums_buf = device.new_buffer(nblocks, DType::F32, "topk-block-sums")?;
+    let packed_buf = device.new_buffer(2 * k + 2, DType::F32, "topk-packed")?;
+
+    let encoder = device.command_encoder()?;
+    encoder.set_label("topk-logits-packed");
+
+    let inv_temp = (1.0_f64 / temperature) as f32;
+    let input_offset = input_l.start_offset() * input.dtype().size_in_bytes();
+
+    mistralrs_quant::metal_kernels::call_topk_logits_packed(
+        device.device(),
+        &encoder,
+        &mistralrs_quant::metal_kernels::Kernels::new(),
+        dtype,
+        input_s.buffer(),
+        &block_values_buf,
+        &block_indices_buf,
+        &block_maxes_buf,
+        &block_sums_buf,
+        &packed_buf,
+        ncols,
+        k,
+        CHUNK_SIZE,
+        inv_temp,
+    )
+    .map_err(|e| candle_core::Error::Msg(format!("metal_topk_logits_packed kernel error: {e}")))?;
+    let _ = (
+        input_offset,
+        &block_values_buf,
+        &block_indices_buf,
+        &block_maxes_buf,
+        &block_sums_buf,
+    );
+
+    let packed = Tensor::from((
+        Storage::Metal(MetalStorage::new(
+            packed_buf,
+            device.clone(),
+            2 * k + 2,
+            DType::F32,
+        )),
+        Shape::from(vec![2 * k + 2]),
+    ));
+    Ok(TopKLogitsPackedOutput {
+        packed,
+        k,
+        _workspace: vec![],
+    })
+}
+
+#[cfg(feature = "cuda")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn try_cuda_qk_rms_norm_rope(
+    q: &Tensor,
+    k: Option<&Tensor>,
+    q_weight: &Tensor,
+    k_weight: Option<&Tensor>,
+    q_eps: f32,
+    k_eps: f32,
+    cos: &Tensor,
+    sin: &Tensor,
+    is_neox: bool,
+) -> Result<Option<(Tensor, Option<Tensor>)>> {
+    use candle_core::backend::BackendStorage;
+    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use candle_core::cuda_backend::{CudaStorage, CudaStorageSlice};
+    use std::ffi::c_void;
+
+    if !q.device().is_cuda() {
+        return Ok(None);
+    }
+
+    let dtype = q.dtype();
+    if !matches!(dtype, DType::BF16 | DType::F16 | DType::F32)
+        || q_weight.dtype() != dtype
+        || k_weight.is_some_and(|weight| weight.dtype() != dtype)
+        || cos.dtype() != dtype
+        || sin.dtype() != dtype
+    {
+        return Ok(None);
+    }
+
+    if !q_weight.device().same_device(q.device())
+        || !cos.device().same_device(q.device())
+        || !sin.device().same_device(q.device())
+        || k.is_some_and(|k| !k.device().same_device(q.device()) || k.dtype() != dtype)
+        || k_weight.is_some_and(|weight| !weight.device().same_device(q.device()))
+    {
+        return Ok(None);
+    }
+
+    let (batch, q_heads, seq_len, head_dim) = q.dims4()?;
+    // The fused kernel is intended for prompt/multi-token attention prep.
+    // Decode rows are already cheap in the existing kernels, and this row-wise
+    // reduction launch is slower for seq_len == 1 on current CUDA targets.
+    if seq_len == 1 {
+        return Ok(None);
+    }
+
+    let (k_heads, k_elem_count) = if let Some(k) = k {
+        let (k_batch, k_heads, k_seq_len, k_head_dim) = k.dims4()?;
+        if (k_batch, k_seq_len, k_head_dim) != (batch, seq_len, head_dim) {
+            candle_core::bail!(
+                "q/k shape mismatch for fused qk norm rope: {:?} vs {:?}",
+                q.shape(),
+                k.shape()
+            );
+        }
+        let Some(k_weight) = k_weight else {
+            candle_core::bail!("missing k norm weight for fused qk norm rope");
+        };
+        if k_weight.dims1()? != head_dim {
+            candle_core::bail!(
+                "k norm weight size {} does not match head dim {head_dim}",
+                k_weight.dims1()?
+            );
+        }
+        (k_heads, k.elem_count())
+    } else {
+        (0, 0)
+    };
+
+    if q_weight.dims1()? != head_dim {
+        candle_core::bail!(
+            "q norm weight size {} does not match head dim {head_dim}",
+            q_weight.dims1()?
+        );
+    }
+
+    let (cos_rows, rot_dim) = cos.dims2()?;
+    if sin.dims2()? != (cos_rows, rot_dim) {
+        candle_core::bail!(
+            "cos/sin shape mismatch for fused qk norm rope: {:?} vs {:?}",
+            cos.shape(),
+            sin.shape()
+        );
+    }
+    if rot_dim == 0 || rot_dim * 2 > head_dim {
+        return Ok(None);
+    }
+
+    let cos_batch_stride = if cos_rows == seq_len {
+        0
+    } else if cos_rows == batch * seq_len {
+        seq_len
+    } else {
+        candle_core::bail!(
+            "cos/sin rows {cos_rows} do not match seq_len {seq_len} or batch*seq_len {}",
+            batch * seq_len
+        );
+    };
+
+    for (name, value) in [
+        ("batch", batch),
+        ("q_heads", q_heads),
+        ("k_heads", k_heads),
+        ("seq_len", seq_len),
+        ("head_dim", head_dim),
+        ("rot_dim", rot_dim),
+        ("cos_batch_stride", cos_batch_stride),
+    ] {
+        if value > i32::MAX as usize {
+            candle_core::bail!("fused qk norm rope {name} is too large: {value}");
+        }
+    }
+    let batch_i32 = i32::try_from(batch).map_err(candle_core::Error::wrap)?;
+    let q_heads_i32 = i32::try_from(q_heads).map_err(candle_core::Error::wrap)?;
+    let k_heads_i32 = i32::try_from(k_heads).map_err(candle_core::Error::wrap)?;
+    let seq_len_i32 = i32::try_from(seq_len).map_err(candle_core::Error::wrap)?;
+    let head_dim_i32 = i32::try_from(head_dim).map_err(candle_core::Error::wrap)?;
+    let rot_dim_i32 = i32::try_from(rot_dim).map_err(candle_core::Error::wrap)?;
+    let cos_batch_stride_i32 = i32::try_from(cos_batch_stride).map_err(candle_core::Error::wrap)?;
+
+    let cos = cos.contiguous()?;
+    let sin = sin.contiguous()?;
+    let q_weight = q_weight.contiguous()?;
+    let k_weight = k_weight.map(Tensor::contiguous).transpose()?;
+
+    let (q_storage, q_layout) = q.storage_and_layout();
+    let q_storage = match &*q_storage {
+        candle_core::Storage::Cuda(s) => s,
+        _ => return Ok(None),
+    };
+    let k_storage_and_layout = k.map(Tensor::storage_and_layout);
+    let (q_weight_storage, q_weight_layout) = q_weight.storage_and_layout();
+    let q_weight_storage = match &*q_weight_storage {
+        candle_core::Storage::Cuda(s) => s,
+        _ => return Ok(None),
+    };
+    let k_weight_storage_and_layout = k_weight.as_ref().map(Tensor::storage_and_layout);
+    let (cos_storage, cos_layout) = cos.storage_and_layout();
+    let cos_storage = match &*cos_storage {
+        candle_core::Storage::Cuda(s) => s,
+        _ => return Ok(None),
+    };
+    let (sin_storage, sin_layout) = sin.storage_and_layout();
+    let sin_storage = match &*sin_storage {
+        candle_core::Storage::Cuda(s) => s,
+        _ => return Ok(None),
+    };
+
+    let dev = q_storage.device();
+    let stream = dev.cuda_stream().cu_stream() as i64;
+    let q_shape = Shape::from_dims(&[batch, q_heads, seq_len, head_dim]);
+    let k_shape = Shape::from_dims(&[batch, k_heads, seq_len, head_dim]);
+    let q_elem_count = q.elem_count();
+
+    let q_stride = q_layout.stride();
+    let k_stride = k_storage_and_layout
+        .as_ref()
+        .map(|(_, layout)| layout.stride())
+        .unwrap_or(&[0, 0, 0, 0]);
+
+    macro_rules! launch {
+        ($variant:ident, $ty:ty, $dtype_id:expr) => {{
+            let CudaStorageSlice::$variant(q_src) = &q_storage.slice else {
+                candle_core::bail!("fused qk norm rope q dtype mismatch");
+            };
+            let CudaStorageSlice::$variant(q_weight_src) = &q_weight_storage.slice else {
+                candle_core::bail!("fused qk norm rope q weight dtype mismatch");
+            };
+            let CudaStorageSlice::$variant(cos_src) = &cos_storage.slice else {
+                candle_core::bail!("fused qk norm rope cos dtype mismatch");
+            };
+            let CudaStorageSlice::$variant(sin_src) = &sin_storage.slice else {
+                candle_core::bail!("fused qk norm rope sin dtype mismatch");
+            };
+
+            let q_out_buf = unsafe { dev.alloc::<$ty>(q_elem_count) }?;
+            let k_out_buf = if k_elem_count == 0 {
+                None
+            } else {
+                Some(unsafe { dev.alloc::<$ty>(k_elem_count) }?)
+            };
+
+            let (q_ptr, q_guard) = q_src.device_ptr(q_src.stream());
+            let q_ptr = unsafe { (q_ptr as *const $ty).add(q_layout.start_offset()) };
+            let (q_weight_ptr, q_weight_guard) = q_weight_src.device_ptr(q_weight_src.stream());
+            let q_weight_ptr =
+                unsafe { (q_weight_ptr as *const $ty).add(q_weight_layout.start_offset()) };
+            let (cos_ptr, cos_guard) = cos_src.device_ptr(cos_src.stream());
+            let cos_ptr = unsafe { (cos_ptr as *const $ty).add(cos_layout.start_offset()) };
+            let (sin_ptr, sin_guard) = sin_src.device_ptr(sin_src.stream());
+            let sin_ptr = unsafe { (sin_ptr as *const $ty).add(sin_layout.start_offset()) };
+
+            let mut k_guard = None;
+            let k_ptr = if let Some((k_storage, k_layout)) = &k_storage_and_layout {
+                let k_storage = match &**k_storage {
+                    candle_core::Storage::Cuda(s) => s,
+                    _ => return Ok(None),
+                };
+                let CudaStorageSlice::$variant(k_src) = &k_storage.slice else {
+                    candle_core::bail!("fused qk norm rope k dtype mismatch");
+                };
+                let (ptr, guard) = k_src.device_ptr(k_src.stream());
+                k_guard = Some(guard);
+                unsafe { (ptr as *const $ty).add(k_layout.start_offset()) }
+            } else {
+                std::ptr::null()
+            };
+
+            let mut k_weight_guard = None;
+            let k_weight_ptr =
+                if let Some((k_weight_storage, k_weight_layout)) = &k_weight_storage_and_layout {
+                    let k_weight_storage = match &**k_weight_storage {
+                        candle_core::Storage::Cuda(s) => s,
+                        _ => return Ok(None),
+                    };
+                    let CudaStorageSlice::$variant(k_weight_src) = &k_weight_storage.slice else {
+                        candle_core::bail!("fused qk norm rope k weight dtype mismatch");
+                    };
+                    let (ptr, guard) = k_weight_src.device_ptr(k_weight_src.stream());
+                    k_weight_guard = Some(guard);
+                    unsafe { (ptr as *const $ty).add(k_weight_layout.start_offset()) }
+                } else {
+                    q_weight_ptr
+                };
+
+            let (q_out_ptr, q_out_guard) = q_out_buf.device_ptr(q_out_buf.stream());
+            let mut k_out_guard = None;
+            let k_out_ptr = if let Some(k_out_buf) = &k_out_buf {
+                let (ptr, guard) = k_out_buf.device_ptr(k_out_buf.stream());
+                k_out_guard = Some(guard);
+                ptr as *mut $ty
+            } else {
+                std::ptr::null_mut()
+            };
+
+            unsafe {
+                ffi::qk_rms_norm_rope(
+                    q_ptr as *const c_void,
+                    k_ptr as *const c_void,
+                    q_weight_ptr as *const c_void,
+                    k_weight_ptr as *const c_void,
+                    cos_ptr as *const c_void,
+                    sin_ptr as *const c_void,
+                    q_out_ptr as *mut c_void,
+                    k_out_ptr as *mut c_void,
+                    q_stride[0] as i64,
+                    q_stride[1] as i64,
+                    q_stride[2] as i64,
+                    q_stride[3] as i64,
+                    k_stride[0] as i64,
+                    k_stride[1] as i64,
+                    k_stride[2] as i64,
+                    k_stride[3] as i64,
+                    batch_i32,
+                    q_heads_i32,
+                    k_heads_i32,
+                    seq_len_i32,
+                    head_dim_i32,
+                    rot_dim_i32,
+                    cos_batch_stride_i32,
+                    q_eps,
+                    k_eps,
+                    i32::from(is_neox),
+                    $dtype_id,
+                    stream,
+                );
+            }
+
+            drop(q_guard);
+            drop(q_weight_guard);
+            drop(cos_guard);
+            drop(sin_guard);
+            drop(k_guard);
+            drop(k_weight_guard);
+            drop(q_out_guard);
+            drop(k_out_guard);
+
+            let q_storage = CudaStorage {
+                slice: CudaStorageSlice::$variant(q_out_buf),
+                device: dev.clone(),
+            };
+            let q_tensor = Tensor::from((candle_core::Storage::Cuda(q_storage), q_shape));
+
+            let k_tensor = if let Some(k_out_buf) = k_out_buf {
+                let k_storage = CudaStorage {
+                    slice: CudaStorageSlice::$variant(k_out_buf),
+                    device: dev.clone(),
+                };
+                Some(Tensor::from((
+                    candle_core::Storage::Cuda(k_storage),
+                    k_shape,
+                )))
+            } else {
+                None
+            };
+
+            Ok(Some((q_tensor, k_tensor)))
+        }};
+    }
+
+    match dtype {
+        DType::BF16 => launch!(BF16, half::bf16, 1),
+        DType::F16 => launch!(F16, half::f16, 0),
+        DType::F32 => launch!(F32, f32, 2),
+        _ => Ok(None),
     }
 }
 
@@ -1580,6 +2155,15 @@ pub(crate) fn quantized_ffn(
         }
     }
 
+    #[cfg(feature = "metal")]
+    if let Some(activation_type) = glu_activation_type(act) {
+        if let Some(inter) =
+            mistralrs_quant::try_fused_gate_up_metal(xs, gate, up, activation_type)?
+        {
+            return down.forward(&inter);
+        }
+    }
+
     let lhs = gate.forward(xs)?;
     let rhs = up.forward(xs)?;
     let inter = mul_and_act(&lhs, &rhs, act)?;
@@ -1594,6 +2178,11 @@ pub(crate) fn qkv_projections(
 ) -> Result<(Tensor, Tensor, Tensor)> {
     #[cfg(feature = "cuda")]
     if let Some(qkv) = mistralrs_quant::try_fused_quantized_qkv(xs, q_proj, k_proj, v_proj)? {
+        return Ok(qkv);
+    }
+
+    #[cfg(feature = "metal")]
+    if let Some(qkv) = mistralrs_quant::try_fused_qkv_metal(xs, q_proj, k_proj, v_proj)? {
         return Ok(qkv);
     }
 
