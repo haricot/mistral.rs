@@ -159,9 +159,25 @@ impl MistralRsServerRouterBuilder {
         self
     }
 
+    /// Sets the CORS allowed origins if provided.
+    pub fn with_allowed_origins_optional(mut self, origins: Option<Vec<String>>) -> Self {
+        if let Some(origins) = origins {
+            self.allowed_origins = Some(origins);
+        }
+        self
+    }
+
     /// Sets the axum default request body limit.
     pub fn with_max_body_limit(mut self, max_body_limit: usize) -> Self {
         self.max_body_limit = Some(max_body_limit);
+        self
+    }
+
+    /// Sets the axum default request body limit if provided.
+    pub fn with_max_body_limit_optional(mut self, max_body_limit: Option<usize>) -> Self {
+        if let Some(limit) = max_body_limit {
+            self.max_body_limit = Some(limit);
+        }
         self
     }
 
@@ -270,12 +286,12 @@ fn init_router(
         AllowOrigin::any()
     };
 
-    let router_max_body_limit = max_body_limit.unwrap_or(DEFAULT_MAX_BODY_LIMIT);
-
     let cors_layer = CorsLayer::new()
         .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
         .allow_headers([http::header::CONTENT_TYPE, http::header::AUTHORIZATION])
         .allow_origin(allow_origin);
+
+    let router_max_body_limit = max_body_limit.unwrap_or(DEFAULT_MAX_BODY_LIMIT);
 
     let router = Router::new()
         .route("/v1/chat/completions", post(chatcompletions))

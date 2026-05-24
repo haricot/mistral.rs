@@ -7,7 +7,7 @@ mod model;
 mod paged_attn;
 mod quantize;
 mod sandbox;
-mod server;
+pub mod server;
 
 pub use model::*;
 pub use paged_attn::*;
@@ -47,6 +47,10 @@ pub enum Command {
 
         #[command(flatten)]
         server: ServerOptions,
+
+        /// Path to a server configuration file (.toml). Overrides CLI server options.
+        #[arg(long)]
+        srv_config: Option<PathBuf>,
 
         #[command(flatten)]
         runtime: RuntimeOptions,

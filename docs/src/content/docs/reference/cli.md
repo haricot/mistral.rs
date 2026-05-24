@@ -155,8 +155,9 @@ OS-level isolation applied to the code-execution subprocess. See [sandbox refere
 | `--mcp-port <port>` | not set | Enable MCP server on a separate port. |
 | `--max-tool-rounds <n>` | not set | Cap on agentic tool loop rounds. |
 | `--tool-dispatch-url <url>` | not set | External URL for tool execution. |
+| `--srv-config <path>` | not set | Path to a server configuration file (.toml). |
 
-CORS allowed origins and the request body limit (default 50 MB) are not exposed as CLI flags. They can be configured programmatically through `MistralRsServerRouterBuilder` in `mistralrs-server-core`.
+The request body limit (default 50 MB) and CORS can be configured via `--srv-config` or programmatically through `MistralRsServerRouterBuilder` in `mistralrs-server-core`.
 
 ## `mistralrs run` flags
 

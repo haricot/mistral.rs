@@ -32,6 +32,44 @@ pub struct ServerOptions {
     #[arg(long)]
     #[serde(default)]
     pub tool_dispatch_url: Option<String>,
+
+    /// CORS allowed origins. Permissive by default.
+    #[arg(skip)]
+    #[serde(default)]
+    pub cors_origins: Option<Vec<String>>,
+
+    /// Base path prefix for Swagger UI routes.
+    #[arg(skip)]
+    #[serde(default)]
+    pub base_path: Option<String>,
+
+    /// Whether to include Swagger/OpenAPI documentation routes.
+    #[arg(skip)]
+    #[serde(default = "default_true")]
+    pub include_swagger_routes: bool,
+
+    /// Maximum request body limit in bytes.
+    #[arg(skip)]
+    #[serde(default)]
+    pub max_body_limit: Option<usize>,
+}
+
+#[derive(Deserialize, Default)]
+pub struct ServerOptionsToml {
+    pub port: Option<u16>,
+    pub host: Option<String>,
+    pub no_ui: Option<bool>,
+    pub max_tool_rounds: Option<usize>,
+    pub tool_dispatch_url: Option<String>,
+    pub cors_origins: Option<Vec<String>>,
+    pub base_path: Option<String>,
+    pub include_swagger_routes: Option<bool>,
+    pub max_body_limit: Option<usize>,
+}
+
+#[derive(Deserialize, Default)]
+pub struct ServerConfig {
+    pub server: Option<ServerOptionsToml>,
 }
 
 impl Default for ServerOptions {
@@ -42,6 +80,10 @@ impl Default for ServerOptions {
             no_ui: false,
             max_tool_rounds: None,
             tool_dispatch_url: None,
+            cors_origins: None,
+            base_path: None,
+            include_swagger_routes: true,
+            max_body_limit: None,
         }
     }
 }
@@ -52,4 +94,8 @@ fn default_port() -> u16 {
 
 fn default_host() -> String {
     "0.0.0.0".to_string()
+}
+
+fn default_true() -> bool {
+    true
 }

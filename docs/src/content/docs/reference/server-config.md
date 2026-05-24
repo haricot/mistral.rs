@@ -13,12 +13,15 @@ For the full TOML schema, see the [CLI TOML config reference](/mistral.rs/refere
 |---|---|---|---|
 | `--host` | `server.host` | `0.0.0.0` | Bind interface. |
 | `-p`, `--port` | `server.port` | `1234` | TCP port. |
+| `--srv-config` | not set | not set | Path to server configuration file (.toml). |
 
 ## Web UI
 
 | CLI flag | TOML key | Default | Meaning |
 |---|---|---|---|
 | `--no-ui` | `server.no_ui` | false | Disable the built-in web UI (mounted at `/ui` by default). |
+| not set | `server.base_path` | not set | Base path prefix for Swagger UI. |
+| not set | `server.include_swagger_routes` | true | Whether to include OpenAPI/Swagger routes. |
 
 ## MCP
 
@@ -53,9 +56,9 @@ For the full TOML schema, see the [CLI TOML config reference](/mistral.rs/refere
 | `--pa-block-size` | `paged_attn.block_size` | not set | Tokens per block. |
 | `--pa-cache-type` | `paged_attn.cache_type` | `auto` | KV cache quantization type. |
 
-## Not exposed via CLI
+## Configuration file only
 
-CORS allowed origins and the request body limit (default 50 MB) are configurable only programmatically through `MistralRsServerRouterBuilder` in `mistralrs-server-core`.
+The request body limit (default 50 MB) and CORS are configurable via `--srv-config` (`server.max_body_limit` and `server.cors_origins`) or programmatically through `MistralRsServerRouterBuilder` in `mistralrs-server-core`.
 
 ## Environment variables
 
