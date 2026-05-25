@@ -32,8 +32,9 @@ pub(crate) fn naive_sdpa(
 
     // Use chunked attention with a closure that captures the necessary parameters
     chunked_attention(q, k, v, mask, |q_chunk, k, v, mask_chunk| {
-        let mut att =
-            MatMul.matmul_affine_mul(q_chunk, &k.t()?, sdpa_params.softmax_scale.into())?;
+        let q_chunk = q_chunk.contiguous()?;
+        let kt = k.t()?.contiguous()?;
+        let mut att = MatMul.matmul_affine_mul(&q_chunk, &kt, sdpa_params.softmax_scale.into())?;
 
         if let Some(softcap) = sdpa_params.softcap {
             att = (att / softcap as f64)?;
@@ -54,6 +55,6 @@ pub(crate) fn naive_sdpa(
         if att.dtype() != att_dtype {
             att = att.to_dtype(att_dtype)?;
         }
-        MatMul.matmul(&att, v)
+        MatMul.matmul(&att.contiguous()?, &v.contiguous()?)
     })
 }

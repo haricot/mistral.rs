@@ -48,6 +48,7 @@ static LOG_Q4_1_CPU_MOE: AtomicBool = AtomicBool::new(false);
 static LOG_Q4K_CPU_MOE: AtomicBool = AtomicBool::new(false);
 static LOG_Q4K_FUSED_CPU_MOE: AtomicBool = AtomicBool::new(false);
 static LOG_Q4K_CPU_MATMUL: AtomicBool = AtomicBool::new(false);
+static LOG_Q4K_OUTPUT_SANITIZED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Default)]
 struct Q4_1ExpertCache {
@@ -276,6 +277,37 @@ fn q4k_matmul_max_rows() -> usize {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(64)
+}
+
+fn sanitize_output_for_dtype(output: &mut [f32], dtype: DType) {
+    let limit = match dtype {
+        DType::F16 => 65_504.0,
+        _ => f32::INFINITY,
+    };
+    let mut changed = false;
+
+    for value in output {
+        if value.is_nan() {
+            *value = 0.0;
+            changed = true;
+        } else if !value.is_finite() {
+            *value = if limit.is_finite() {
+                value.signum() * limit
+            } else {
+                0.0
+            };
+            changed = true;
+        } else if value.abs() > limit {
+            *value = value.signum() * limit;
+            changed = true;
+        }
+    }
+
+    if changed && !LOG_Q4K_OUTPUT_SANITIZED.swap(true, Ordering::Relaxed) {
+        tracing::warn!(
+            "GGUF CPU Q4K output contained values outside the target dtype range; clamped before casting to avoid non-finite activations."
+        );
+    }
 }
 
 fn cached_q4k_matmul(
@@ -720,6 +752,7 @@ where
         }
     }
 
+    sanitize_output_for_dtype(&mut output, xs.dtype());
     Tensor::from_vec(output, (num_tokens, hidden), xs.device())?
         .to_dtype(xs.dtype())
         .map(Some)

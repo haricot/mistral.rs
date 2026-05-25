@@ -105,24 +105,74 @@ where
         Ok(mut stream) => {
             let mut assistant_reply = String::new();
             while let Some(chunk) = stream.next().await {
-                if let mistralrs::Response::Chunk(resp) = chunk {
-                    if let Some(choice) = resp.choices.first() {
-                        if let Some(token) = &choice.delta.content {
-                            if socket
-                                .send(Message::Text(token.clone().into()))
-                                .await
-                                .is_err()
-                            {
-                                break;
+                match chunk {
+                    mistralrs::Response::Chunk(resp) => {
+                        if let Some(choice) = resp.choices.first() {
+                            if let Some(token) = &choice.delta.content {
+                                if let Err(err) = socket
+                                    .send(Message::Text(token.clone().into()))
+                                    .await
+                                {
+                                    tracing::warn!(%err, "websocket closed while streaming token");
+                                    break;
+                                }
+                                assistant_reply.push_str(token);
                             }
-                            assistant_reply.push_str(token);
                         }
+                    }
+                    mistralrs::Response::Done(_) => break,
+                    mistralrs::Response::InternalError(e) => {
+                        let msg = format!("Internal error: {e}");
+                        tracing::error!(%msg, "websocket chat stream failed");
+                        let _ = socket
+                            .send(Message::Text(format!("Error: {msg}").into()))
+                            .await;
+                        return Err(anyhow::anyhow!(msg));
+                    }
+                    mistralrs::Response::ValidationError(e) => {
+                        let msg = format!("Validation error: {e}");
+                        tracing::error!(%msg, "websocket chat stream failed");
+                        let _ = socket
+                            .send(Message::Text(format!("Error: {msg}").into()))
+                            .await;
+                        return Err(anyhow::anyhow!(msg));
+                    }
+                    mistralrs::Response::ModelError(msg, _) => {
+                        tracing::error!(%msg, "websocket chat stream failed");
+                        let _ = socket
+                            .send(Message::Text(format!("Error: {msg}").into()))
+                            .await;
+                        return Err(anyhow::anyhow!(msg));
+                    }
+                    mistralrs::Response::AgenticToolCallProgress { .. }
+                    | mistralrs::Response::AgenticToolApprovalRequired { .. }
+                    | mistralrs::Response::File(_) => {}
+                    mistralrs::Response::CompletionModelError(msg, _) => {
+                        tracing::error!(%msg, "websocket chat stream failed");
+                        let _ = socket
+                            .send(Message::Text(format!("Error: {msg}").into()))
+                            .await;
+                        return Err(anyhow::anyhow!(msg));
+                    }
+                    mistralrs::Response::CompletionDone(_)
+                    | mistralrs::Response::CompletionChunk(_)
+                    | mistralrs::Response::ImageGeneration(_)
+                    | mistralrs::Response::Speech { .. }
+                    | mistralrs::Response::Raw { .. }
+                    | mistralrs::Response::Embeddings { .. } => {
+                        let msg = "Unexpected response type for chat stream".to_string();
+                        tracing::error!(%msg, "websocket chat stream failed");
+                        let _ = socket
+                            .send(Message::Text(format!("Error: {msg}").into()))
+                            .await;
+                        return Err(anyhow::anyhow!(msg));
                     }
                 }
             }
             Ok(assistant_reply)
         }
         Err(e) => {
+            tracing::error!(error = %e, "failed to start websocket chat stream");
             let _ = socket
                 .send(Message::Text(format!("Error: {e}").into()))
                 .await;

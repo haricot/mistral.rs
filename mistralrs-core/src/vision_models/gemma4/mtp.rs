@@ -27,6 +27,7 @@ use crate::{
     },
     utils::varbuilder_utils::{from_mmaped_safetensors, DeviceForLoadTensor},
 };
+use tracing::info;
 
 use super::{
     config::Gemma4TextConfig,
@@ -134,6 +135,10 @@ impl Gemma4MtpRuntime {
         }
 
         let dtype = dtype_from_config(assistant_cfg.dtype.as_deref());
+        // use global dtype override for now since the pre/post projections and layer scalars
+
+        let dtype = DType::F16;
+        info!("Loading MTP model config   {:?}.", config);
         let vb = from_mmaped_safetensors(
             weight_paths,
             Vec::new(),
@@ -472,7 +477,6 @@ impl Gemma4MtpModel {
     ) -> Result<(Tensor, Tensor, Tensor)> {
         let mut hidden_states = Tensor::cat(&[input_embed, target_hidden], D::Minus1)?;
         hidden_states = hidden_states.apply(&self.pre_projection)?;
-
         // Each MTP step is a single query over the target donor KV cache, not
         // a causal prefill over newly produced draft tokens.
         let flash = FlashParams::empty(false);

@@ -110,6 +110,11 @@ extern "C" void reshape_and_cache(
     uint32_t dtype,       // 0 => f16; 1 => bf16; 2 => f32
     uint32_t cache_dtype, // 0 => f16; 1 => bf16; 2 => f32; 3 => fp8_e4m3
     float *k_scale, float *v_scale) {
+  // Keep the post-launch check below scoped to this kernel. Some legacy CUDA
+  // fast paths can leave a benign error pending, which otherwise gets reported
+  // here and makes reshape_and_cache look like the failing operation.
+  (void)cudaGetLastError();
+
   dim3 grid(num_tokens);
   dim3 block(std::min(num_heads * head_size, 512));
 

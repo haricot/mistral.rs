@@ -177,13 +177,17 @@ macro_rules! handle_pipeline_forward_error {
                             session_id: None,
                         };
 
-                        seq.responder()
+                        if seq
+                            .responder()
                             .send(Response::ModelError(
                                 e.to_string(),
                                 partial_completion_response
                             ))
                             .await
-                            .unwrap();
+                            .is_err()
+                        {
+                            tracing::warn!("Receiver disconnected");
+                        }
                     } else {
                         let partial_completion_response = CompletionResponse {
                             id: seq.id().to_string(),
@@ -195,13 +199,17 @@ macro_rules! handle_pipeline_forward_error {
                             usage: group.get_usage(),
                         };
 
-                        seq.responder()
+                        if seq
+                            .responder()
                             .send(Response::CompletionModelError(
                                 e.to_string(),
                                 partial_completion_response
                             ))
                             .await
-                            .unwrap();
+                            .is_err()
+                        {
+                            tracing::warn!("Receiver disconnected");
+                        }
                     }
                 }
                 for seq in $seq_slice.iter_mut() {
@@ -255,6 +263,37 @@ pub const fn paged_attn_supported() -> bool {
 /// `true` if built with CUDA (requires Unix) /Metal
 #[cfg(not(any(all(feature = "cuda", target_family = "unix"), feature = "metal")))]
 pub const fn paged_attn_supported() -> bool {
+    false
+}
+
+#[cfg(feature = "cuda")]
+pub fn is_legacy_cuda_device(device: &candle_core::Device) -> bool {
+    let candle_core::Device::Cuda(dev) = device else {
+        return false;
+    };
+
+    use candle_core::cuda::cudarc::driver::{result, sys};
+    let cu_device = dev.cuda_stream().context().cu_device();
+    let major = unsafe {
+        result::device::get_attribute(
+            cu_device,
+            sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR,
+        )
+    }
+    .unwrap_or(0);
+    let minor = unsafe {
+        result::device::get_attribute(
+            cu_device,
+            sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR,
+        )
+    }
+    .unwrap_or(0);
+
+    major * 100 + minor * 10 < 700
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn is_legacy_cuda_device(_device: &candle_core::Device) -> bool {
     false
 }
 
