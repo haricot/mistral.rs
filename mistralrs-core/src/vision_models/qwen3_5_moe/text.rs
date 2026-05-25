@@ -270,6 +270,65 @@ fn cpu_moe_enabled() -> bool {
 }
 
 static LOG_CPU_MOE: AtomicBool = AtomicBool::new(false);
+static LOG_SANITIZED_FINAL_HIDDEN: AtomicBool = AtomicBool::new(false);
+static LOG_CLAMPED_FINAL_NORM_INPUT: AtomicBool = AtomicBool::new(false);
+const LEGACY_CUDA_QWEN35_HIDDEN_CLAMP: f64 = 100.0;
+
+fn clamp_final_norm_input_for_legacy_cuda(xs: Tensor) -> Result<Tensor> {
+    if !matches!(xs.dtype(), DType::F16 | DType::BF16)
+        || !crate::utils::is_legacy_cuda_device(xs.device())
+    {
+        return Ok(xs);
+    }
+
+    if !LOG_CLAMPED_FINAL_NORM_INPUT.swap(true, Ordering::Relaxed) {
+        tracing::warn!(
+            "Clamping Qwen3.5-MoE hidden state before final RMSNorm on legacy CUDA for reduced-precision stability."
+        );
+    }
+
+    xs.clamp(
+        -LEGACY_CUDA_QWEN35_HIDDEN_CLAMP,
+        LEGACY_CUDA_QWEN35_HIDDEN_CLAMP,
+    )
+}
+
+fn sanitize_final_hidden_for_legacy_cuda(xs: Tensor) -> Result<Tensor> {
+    if !matches!(xs.dtype(), DType::F16 | DType::BF16)
+        || !crate::utils::is_legacy_cuda_device(xs.device())
+    {
+        return Ok(xs);
+    }
+
+    let device = xs.device().clone();
+    let shape = xs.shape().clone();
+    let mut values = xs
+        .to_dtype(DType::F32)?
+        .to_device(&Device::Cpu)?
+        .flatten_all()?
+        .to_vec1::<f32>()?;
+    let mut changed = false;
+    for value in values.iter_mut() {
+        if value.is_nan() {
+            *value = 0.0;
+            changed = true;
+        } else if !value.is_finite() {
+            *value = value.signum() * LEGACY_CUDA_QWEN35_HIDDEN_CLAMP as f32;
+            changed = true;
+        } else if value.abs() > LEGACY_CUDA_QWEN35_HIDDEN_CLAMP as f32 {
+            *value = value.signum() * LEGACY_CUDA_QWEN35_HIDDEN_CLAMP as f32;
+            changed = true;
+        }
+    }
+
+    if changed && !LOG_SANITIZED_FINAL_HIDDEN.swap(true, Ordering::Relaxed) {
+        tracing::warn!(
+            "Qwen3.5-MoE final hidden state contained non-finite or oversized values on legacy CUDA; sanitized before lm_head."
+        );
+    }
+
+    Tensor::from_vec(values, shape, &device)
+}
 
 #[derive(Clone)]
 struct Mlp {
@@ -916,8 +975,10 @@ impl Qwen3_5MoeTextModel {
             }
         }
         let xs = xs.to_device(&self.device)?;
+        let xs = clamp_final_norm_input_for_legacy_cuda(xs)?;
         let xs = xs.apply(&self.norm)?;
         let xs = extract_logits(&xs, context_lens)?;
+        let xs = sanitize_final_hidden_for_legacy_cuda(xs)?;
         self.lm_head.forward(&xs)
     }
 

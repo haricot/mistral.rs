@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::ui::chat::append_chat_message;
+use crate::ui::handlers::api::MessageStats;
 use crate::ui::types::{AppState, GenerationParams};
 use crate::ui::utils::get_cache_dir;
 
@@ -109,9 +110,8 @@ where
                     mistralrs::Response::Chunk(resp) => {
                         if let Some(choice) = resp.choices.first() {
                             if let Some(token) = &choice.delta.content {
-                                if let Err(err) = socket
-                                    .send(Message::Text(token.clone().into()))
-                                    .await
+                                if let Err(err) =
+                                    socket.send(Message::Text(token.clone().into())).await
                                 {
                                     tracing::warn!(%err, "websocket closed while streaming token");
                                     break;
@@ -448,7 +448,20 @@ pub async fn handle_socket(mut socket: WebSocket, app: Arc<AppState>) {
         };
         if (!content.is_empty() || images_for_chat.is_some()) && active_chat_id.is_some() {
             if let Some(id) = &active_chat_id {
-                let _ = append_chat_message(&app, id, "user", &content, images_for_chat).await;
+                let _ = append_chat_message(
+                    &app,
+                    id,
+                    None,
+                    None,
+                    "user",
+                    &content,
+                    images_for_chat,
+                    None,
+                    None,
+                    None,
+                    MessageStats::default(),
+                )
+                .await;
             }
         }
 
@@ -500,7 +513,20 @@ pub async fn handle_socket(mut socket: WebSocket, app: Arc<AppState>) {
                         let cur = mem::take(&mut multimodal_msgs);
                         multimodal_msgs = cur.add_message(TextMessageRole::Assistant, &text);
                         if let Some(id) = &active_chat_id {
-                            let _ = append_chat_message(&app, id, "assistant", &text, None).await;
+                            let _ = append_chat_message(
+                                &app,
+                                id,
+                                None,
+                                None,
+                                "assistant",
+                                &text,
+                                None,
+                                None,
+                                None,
+                                None,
+                                MessageStats::default(),
+                            )
+                            .await;
                         }
                     }
                 }
@@ -526,7 +552,20 @@ pub async fn handle_socket(mut socket: WebSocket, app: Arc<AppState>) {
                         let cur = mem::take(&mut text_msgs);
                         text_msgs = cur.add_message(TextMessageRole::Assistant, &text);
                         if let Some(id) = &active_chat_id {
-                            let _ = append_chat_message(&app, id, "assistant", &text, None).await;
+                            let _ = append_chat_message(
+                                &app,
+                                id,
+                                None,
+                                None,
+                                "assistant",
+                                &text,
+                                None,
+                                None,
+                                None,
+                                None,
+                                MessageStats::default(),
+                            )
+                            .await;
                         }
                     }
                 }

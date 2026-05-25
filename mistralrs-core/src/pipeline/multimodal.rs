@@ -24,7 +24,10 @@ use crate::pipeline::loaders::auto_device_map;
 use crate::pipeline::loaders::QuantizationConfigShim;
 use crate::pipeline::sampling::sample_and_add_toks;
 use crate::pipeline::text_models_inputs_processor::{make_prompt_chunk, InputMetadata};
-use crate::pipeline::{get_chat_template, ChatTemplate, IsqOrganization, LocalModelPaths};
+use crate::pipeline::{
+    get_chat_template, ChatTemplate, IsqOrganization, LocalModelPaths, Modalities,
+    SupportedModality,
+};
 use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::sequence::Sequence;
 use crate::utils::tokenizer::get_tokenizer;
@@ -918,6 +921,14 @@ impl Loader for MultimodalLoader {
         };
 
         let max_seq_len = model.max_seq_len();
+        let modalities = if load_text_only {
+            Modalities {
+                input: vec![SupportedModality::Text],
+                output: vec![SupportedModality::Text],
+            }
+        } else {
+            self.inner.modalities(&config)?
+        };
         let llg_factory = build_llg_factory(tokenizer.clone())?;
         let num_hidden_layers = match model.cache() {
             EitherCache::Full(full) => full.lock().len(),
@@ -948,7 +959,7 @@ impl Loader for MultimodalLoader {
                 cache_config,
                 cache_engine,
                 model_metadata: Some(model_metadata),
-                modalities: self.inner.modalities(&config)?,
+                modalities,
             }),
             processor,
             prefixer: self.inner.prefixer(&config),

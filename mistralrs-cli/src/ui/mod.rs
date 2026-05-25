@@ -14,6 +14,7 @@ use tokio::fs;
 use tower_http::services::ServeDir;
 
 use crate::ui::handlers::api::*;
+use crate::ui::handlers::websocket::ws_handler;
 use crate::ui::types::{AppState, GenerationParams, UiModelInfo};
 use crate::ui::utils::get_cache_dir;
 
@@ -68,7 +69,7 @@ fn build_model_list(mistralrs: &Arc<MistralRs>) -> IndexMap<String, UiModelInfo>
     if let Ok(list) = mistralrs.list_models() {
         for model_id in list {
             if let Ok(category) = mistralrs.get_model_category(Some(&model_id)) {
-                let kind = match category {
+                let category_kind = match category {
                     ModelCategory::Text => "text",
                     ModelCategory::Multimodal { .. } => "multimodal",
                     ModelCategory::Speech => "speech",
@@ -76,19 +77,26 @@ fn build_model_list(mistralrs: &Arc<MistralRs>) -> IndexMap<String, UiModelInfo>
                     ModelCategory::Embedding => "embedding",
                     ModelCategory::Diffusion => "diffusion",
                 };
+                let cfg = mistralrs.config(Some(&model_id)).ok();
+                let generation_defaults = cfg.as_ref().and_then(|c| c.generation_defaults.clone());
+                let (input_modalities, output_modalities): (Vec<String>, Vec<String>) = cfg
+                    .as_ref()
+                    .map(|c| {
+                        (
+                            c.modalities.input.iter().map(modality_label).collect(),
+                            c.modalities.output.iter().map(modality_label).collect(),
+                        )
+                    })
+                    .unwrap_or_default();
+                let text_only_effective = matches!(input_modalities.as_slice(), [m] if m == "text")
+                    && matches!(output_modalities.as_slice(), [m] if m == "text")
+                    && category_kind == "multimodal";
+                let kind = if text_only_effective {
+                    "text"
+                } else {
+                    category_kind
+                };
                 if matches!(kind, "text" | "multimodal" | "speech") {
-                    let cfg = mistralrs.config(Some(&model_id)).ok();
-                    let generation_defaults =
-                        cfg.as_ref().and_then(|c| c.generation_defaults.clone());
-                    let (input_modalities, output_modalities) = cfg
-                        .as_ref()
-                        .map(|c| {
-                            (
-                                c.modalities.input.iter().map(modality_label).collect(),
-                                c.modalities.output.iter().map(modality_label).collect(),
-                            )
-                        })
-                        .unwrap_or_default();
                     models.insert(
                         model_id.clone(),
                         UiModelInfo {
@@ -185,6 +193,7 @@ pub async fn build_ui_router(
         .route("/api/capabilities", get(get_capabilities))
         .route("/api/mcp_tools", get(list_mcp_tools))
         .route("/api/generate_speech", post(generate_speech))
+        .route("/ws", get(ws_handler))
         .nest_service("/speech", get_service(ServeDir::new(speech_dir.clone())))
         .nest_service("/uploads", get_service(ServeDir::new(uploads_dir.clone())))
         .route("/", get(static_handler))

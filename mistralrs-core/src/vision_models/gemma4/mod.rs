@@ -679,6 +679,7 @@ impl crate::speculative::SpeculativeTargetMixin for Gemma4Model {
         let runtime = mtp::Gemma4MtpRuntime::load(
             config,
             &self.cfg.text_config,
+            self.language_model.dtype(),
             self.language_model.device(),
             self.language_model.device_mapper(),
             false,

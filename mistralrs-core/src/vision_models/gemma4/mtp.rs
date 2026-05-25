@@ -74,6 +74,7 @@ impl Gemma4MtpRuntime {
     pub fn load(
         config: MtpConfig,
         target_cfg: &Gemma4TextConfig,
+        target_dtype: DType,
         device: &Device,
         mapper: &dyn DeviceMapper,
         silent: bool,
@@ -134,10 +135,14 @@ impl Gemma4MtpRuntime {
             );
         }
 
-        let dtype = dtype_from_config(assistant_cfg.dtype.as_deref());
-        // use global dtype override for now since the pre/post projections and layer scalars
-
-        let dtype = DType::F16;
+        let assistant_dtype = dtype_from_config(assistant_cfg.dtype.as_deref());
+        let dtype = target_dtype;
+        if assistant_dtype != dtype {
+            info!(
+                "MTP assistant config dtype {:?} overridden by target runtime dtype {:?}.",
+                assistant_dtype, dtype
+            );
+        }
         info!("Loading MTP model config   {:?}.", config);
         let vb = from_mmaped_safetensors(
             weight_paths,

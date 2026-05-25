@@ -47,8 +47,9 @@ static LOG_GGUF_CPU_MOE_FALLBACK: AtomicBool = AtomicBool::new(false);
 static LOG_Q4_1_CPU_MOE: AtomicBool = AtomicBool::new(false);
 static LOG_Q4K_CPU_MOE: AtomicBool = AtomicBool::new(false);
 static LOG_Q4K_FUSED_CPU_MOE: AtomicBool = AtomicBool::new(false);
+static LOG_Q4K_FUSED_CPU_MOE_PREFILL_FALLBACK: AtomicBool = AtomicBool::new(false);
 static LOG_Q4K_CPU_MATMUL: AtomicBool = AtomicBool::new(false);
-static LOG_Q4K_OUTPUT_SANITIZED: AtomicBool = AtomicBool::new(false);
+static LOG_Q4K_OUTPUT_FALLBACK: AtomicBool = AtomicBool::new(false);
 
 #[derive(Default)]
 struct Q4_1ExpertCache {
@@ -269,6 +270,43 @@ fn q4k_fused_moe_parallel_topk_enabled() -> bool {
         .unwrap_or(true)
 }
 
+fn q4k_fused_moe_max_prefill_tokens() -> usize {
+    std::env::var("MISTRALRS_GGUF_CPU_MOE_Q4K_FUSED_MAX_PREFILL_TOKENS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(512)
+}
+
+static LOG_Q4K_FUSED_CPU_MOE_INTERMEDIATE_CLAMP: AtomicBool = AtomicBool::new(false);
+const Q4K_FUSED_CPU_MOE_REDUCED_PRECISION_CLAMP: f32 = 100.0;
+
+fn clamp_q4k_fused_moe_intermediate(value: f32, dtype: DType) -> f32 {
+    if !matches!(dtype, DType::F16 | DType::BF16) {
+        return value;
+    }
+
+    if value.is_finite() && value.abs() <= Q4K_FUSED_CPU_MOE_REDUCED_PRECISION_CLAMP {
+        return value;
+    }
+
+    if !LOG_Q4K_FUSED_CPU_MOE_INTERMEDIATE_CLAMP.swap(true, Ordering::Relaxed) {
+        tracing::warn!(
+            "Clamping GGUF CPU Q4K fused MoE intermediate before down projection for reduced-precision stability."
+        );
+    }
+
+    if value.is_nan() {
+        0.0
+    } else if !value.is_finite() {
+        value.signum() * Q4K_FUSED_CPU_MOE_REDUCED_PRECISION_CLAMP
+    } else {
+        value.clamp(
+            -Q4K_FUSED_CPU_MOE_REDUCED_PRECISION_CLAMP,
+            Q4K_FUSED_CPU_MOE_REDUCED_PRECISION_CLAMP,
+        )
+    }
+}
+
 fn q4k_matmul_max_rows() -> usize {
     if let Some(max_rows) = crate::gguf_cpu_q4k_matmul_max_rows_override() {
         return max_rows;
@@ -279,35 +317,41 @@ fn q4k_matmul_max_rows() -> usize {
         .unwrap_or(64)
 }
 
-fn sanitize_output_for_dtype(output: &mut [f32], dtype: DType) {
+fn output_safe_for_dtype(output: &[f32], dtype: DType) -> bool {
     let limit = match dtype {
         DType::F16 => 65_504.0,
         _ => f32::INFINITY,
     };
-    let mut changed = false;
 
     for value in output {
-        if value.is_nan() {
-            *value = 0.0;
-            changed = true;
-        } else if !value.is_finite() {
-            *value = if limit.is_finite() {
-                value.signum() * limit
-            } else {
-                0.0
-            };
-            changed = true;
-        } else if value.abs() > limit {
-            *value = value.signum() * limit;
-            changed = true;
+        if !value.is_finite() || value.abs() > limit {
+            if !LOG_Q4K_OUTPUT_FALLBACK.swap(true, Ordering::Relaxed) {
+                tracing::warn!(
+                    "GGUF CPU Q4K fused MoE output exceeded the target dtype range; falling back to the generic CPU MoE path."
+                );
+            }
+            return false;
         }
     }
 
-    if changed && !LOG_Q4K_OUTPUT_SANITIZED.swap(true, Ordering::Relaxed) {
-        tracing::warn!(
-            "GGUF CPU Q4K output contained values outside the target dtype range; clamped before casting to avoid non-finite activations."
-        );
+    true
+}
+
+fn should_fallback_large_q4k_fused_moe_prefill(num_tokens: usize, dtype: DType) -> bool {
+    if !matches!(dtype, DType::F16 | DType::BF16) {
+        return false;
     }
+    let max_tokens = q4k_fused_moe_max_prefill_tokens();
+    if max_tokens != 0 && num_tokens > max_tokens {
+        if !LOG_Q4K_FUSED_CPU_MOE_PREFILL_FALLBACK.swap(true, Ordering::Relaxed) {
+            tracing::warn!(
+                "GGUF CPU Q4K fused MoE prefill has {num_tokens} tokens; falling back to the generic CPU MoE path for reduced-precision stability."
+            );
+        }
+        return true;
+    }
+
+    false
 }
 
 fn cached_q4k_matmul(
@@ -617,6 +661,10 @@ where
         candle_core::bail!("GGUF CPU fused MoE input hidden {xs_hidden} != weight hidden {hidden}");
     }
     let num_tokens = b_size * seq_len;
+    if should_fallback_large_q4k_fused_moe_prefill(num_tokens, xs.dtype()) {
+        return Ok(None);
+    }
+
     let (ids_tokens, topk) = topk_ids.dims2()?;
     if ids_tokens != num_tokens {
         candle_core::bail!(
@@ -632,6 +680,7 @@ where
     }
 
     let parallel_topk = q4k_fused_moe_parallel_topk_enabled() && topk > 1;
+    let reduced_precision_dtype = xs.dtype();
     if !LOG_Q4K_FUSED_CPU_MOE.swap(true, Ordering::Relaxed) {
         tracing::info!(
             "Using fused GGUF CPU MoE Q4K/Q8K path (experts={num_experts}, topk={topk}, hidden={hidden}, inter={inter}, parallel_topk={parallel_topk})"
@@ -708,7 +757,10 @@ where
                         let end = start + blocks_per_hidden_row;
                         let gate_v = q4k_q8k_dot(&route.gate[start..end], &x_q8, hidden);
                         let up_v = q4k_q8k_dot(&route.up[start..end], &x_q8, hidden);
-                        *out = up_v * act(gate_v);
+                        *out = clamp_q4k_fused_moe_intermediate(
+                            up_v * act(gate_v),
+                            reduced_precision_dtype,
+                        );
                     }
 
                     let inter_q8 = q8k_from_slice(&hidden_inter, inter)?;
@@ -738,7 +790,8 @@ where
                 let end = start + blocks_per_hidden_row;
                 let gate_v = q4k_q8k_dot(&route.gate[start..end], &x_q8, hidden);
                 let up_v = q4k_q8k_dot(&route.up[start..end], &x_q8, hidden);
-                *out = up_v * act(gate_v);
+                *out =
+                    clamp_q4k_fused_moe_intermediate(up_v * act(gate_v), reduced_precision_dtype);
             }
 
             let inter_q8 = q8k_from_slice(&hidden_inter, inter)?;
@@ -752,10 +805,10 @@ where
         }
     }
 
-    sanitize_output_for_dtype(&mut output, xs.dtype());
-    Tensor::from_vec(output, (num_tokens, hidden), xs.device())?
-        .to_dtype(xs.dtype())
-        .map(Some)
+    if !output_safe_for_dtype(&output, xs.dtype()) {
+        return Ok(None);
+    }
+    Tensor::from_vec(output, (num_tokens, hidden), xs.device()).map(Some)
 }
 
 fn q4_1_q8_1_dot(xs: &[RawQ4_1Block], ys: &[RawQ8_1Block]) -> f32 {

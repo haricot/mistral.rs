@@ -7,9 +7,15 @@
 use candle_core::{DType, Device, IndexOp, Module, Result, Tensor, D};
 use candle_nn::Linear;
 use mistralrs_quant::{QuantMethod, QuantizedConfig, RowParallelLayer, ShardedVarBuilder};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use crate::device_map::DeviceMapper;
+
+#[cfg(feature = "cuda")]
+static LOG_LEGACY_CUDA_GDN_SEQUENTIAL: AtomicBool = AtomicBool::new(false);
 
 // ====================== GDN Config Trait ======================
 
@@ -605,7 +611,18 @@ impl GatedDeltaNet {
             .contiguous()?;
 
         const CHUNK_THRESHOLD: usize = 64;
-        let out_bh = if seq_len >= CHUNK_THRESHOLD {
+        let use_sequential_for_legacy_reduced_precision = matches!(dtype, DType::F16 | DType::BF16)
+            && crate::utils::is_legacy_cuda_device(q.device());
+        if use_sequential_for_legacy_reduced_precision
+            && seq_len >= CHUNK_THRESHOLD
+            && !LOG_LEGACY_CUDA_GDN_SEQUENTIAL.swap(true, Ordering::Relaxed)
+        {
+            tracing::warn!(
+                "Using sequential GDN recurrence on legacy CUDA for reduced-precision long-context stability."
+            );
+        }
+
+        let out_bh = if seq_len >= CHUNK_THRESHOLD && !use_sequential_for_legacy_reduced_precision {
             crate::cuda::gdn::chunked_gated_delta_rule_recurrence_cuda(
                 &q_bh,
                 &k_bh,

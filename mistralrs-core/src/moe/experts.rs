@@ -13,11 +13,52 @@ use mistralrs_quant::{
     QuantMethod, QuantMethodConfig, QuantizedConfig, ShardedVarBuilder, SumAllReduce,
     UnquantLinear,
 };
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use crate::cuda::moe;
 use crate::layers::Activation;
 use crate::moe::shard;
+
+static LOG_REDUCED_PRECISION_MOE_CLAMP: AtomicBool = AtomicBool::new(false);
+static LOG_REDUCED_PRECISION_MOE_INTERMEDIATE_CLAMP: AtomicBool = AtomicBool::new(false);
+const REDUCED_PRECISION_MOE_CLAMP: f64 = 100.0;
+
+fn clamp_reduced_precision_moe_tensor(
+    tensor: Tensor,
+    dtype: DType,
+    intermediate: bool,
+) -> Result<Tensor> {
+    match dtype {
+        DType::F16 | DType::BF16 => {
+            let logged = if intermediate {
+                LOG_REDUCED_PRECISION_MOE_INTERMEDIATE_CLAMP.swap(true, Ordering::Relaxed)
+            } else {
+                LOG_REDUCED_PRECISION_MOE_CLAMP.swap(true, Ordering::Relaxed)
+            };
+            if !logged {
+                if intermediate {
+                    tracing::warn!(
+                        "Clamping reduced-precision MoE intermediate before down projection to avoid non-finite activations on long contexts."
+                    );
+                } else {
+                    tracing::warn!(
+                        "Clamping reduced-precision MoE output before casting to avoid non-finite activations on long contexts."
+                    );
+                }
+            }
+            tensor.clamp(-REDUCED_PRECISION_MOE_CLAMP, REDUCED_PRECISION_MOE_CLAMP)
+        }
+        _ => Ok(tensor),
+    }
+}
+
+fn cast_moe_output(output: Tensor, dtype: DType) -> Result<Tensor> {
+    let output = clamp_reduced_precision_moe_tensor(output, dtype, false)?;
+    output.to_dtype(dtype)
+}
 
 /// Configuration for MoEExperts
 pub struct MoEExpertsConfig {
@@ -897,24 +938,31 @@ impl MoEExperts {
                     topk_ids,
                     act,
                 )? {
-                    return ys.to_dtype(original_dtype);
+                    return cast_moe_output(ys, original_dtype);
                 }
             }
 
             // CPU path: use QuantMethod::gather_forward so GGUF can dequantize
             // only the selected experts rather than the full fused tensor.
             let xs = xs_flat.reshape((num_tokens, 1, hidden_dim))?;
-            let gate = weights.fused_gate_proj.gather_forward(&xs, topk_ids)?;
-            let up = weights.fused_up_proj.gather_forward(&xs, topk_ids)?;
+            let xs = xs.to_dtype(DType::F32)?;
+            let gate = weights.fused_gate_proj.gather_forward_raw(&xs, topk_ids)?;
+            let up = weights.fused_up_proj.gather_forward_raw(&xs, topk_ids)?;
+            let hidden = clamp_reduced_precision_moe_tensor(
+                (up * gate.apply(&self.act)?)?,
+                original_dtype,
+                true,
+            )?;
             weights
                 .fused_down_proj
-                .gather_forward(&(up * gate.apply(&self.act)?)?, topk_ids)?
+                .gather_forward_raw(&hidden, topk_ids)?
         };
 
-        ys.to_dtype(DType::F32)?
+        let ys = ys
+            .to_dtype(DType::F32)?
             .broadcast_mul(&topk_weights.unsqueeze(D::Minus1)?)?
-            .sum(D::Minus2)?
-            .to_dtype(original_dtype)
+            .sum(D::Minus2)?;
+        cast_moe_output(ys, original_dtype)
     }
 
     /// Fused MoE decode path for CUDA.

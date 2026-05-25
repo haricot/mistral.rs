@@ -4,7 +4,10 @@ use crate::layers_masker::CausalMaskConfig;
 use std::{
     borrow::Cow,
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
 
 use candle_core::{
@@ -100,6 +103,57 @@ fn q8_tied_output_projection(
         q_weight,
         b: None,
     })?) as Arc<dyn QuantMethod>))
+}
+
+static LOG_GEMMA4_LEGACY_TIED_LM_HEAD_Q8: AtomicBool = AtomicBool::new(false);
+static LOG_GEMMA4_LEGACY_FINAL_HIDDEN_SANITIZED: AtomicBool = AtomicBool::new(false);
+const GEMMA4_LEGACY_FINAL_HIDDEN_CLAMP: f32 = 100.0;
+
+fn sanitize_final_hidden_for_legacy_cuda(xs: Tensor, output_dtype: DType) -> Result<Tensor> {
+    if !matches!(xs.dtype(), DType::F16 | DType::BF16)
+        || !crate::utils::is_legacy_cuda_device(xs.device())
+    {
+        return if xs.dtype() == output_dtype {
+            Ok(xs)
+        } else {
+            xs.to_dtype(output_dtype)
+        };
+    }
+
+    let device = xs.device().clone();
+    let shape = xs.shape().clone();
+    let mut values = xs
+        .to_dtype(DType::F32)?
+        .to_device(&Device::Cpu)?
+        .flatten_all()?
+        .to_vec1::<f32>()?;
+    let mut changed = false;
+
+    for value in values.iter_mut() {
+        if value.is_nan() {
+            *value = 0.0;
+            changed = true;
+        } else if !value.is_finite() {
+            *value = value.signum() * GEMMA4_LEGACY_FINAL_HIDDEN_CLAMP;
+            changed = true;
+        } else if value.abs() > GEMMA4_LEGACY_FINAL_HIDDEN_CLAMP {
+            *value = value.signum() * GEMMA4_LEGACY_FINAL_HIDDEN_CLAMP;
+            changed = true;
+        }
+    }
+
+    if changed && !LOG_GEMMA4_LEGACY_FINAL_HIDDEN_SANITIZED.swap(true, Ordering::Relaxed) {
+        tracing::warn!(
+            "Gemma4 final hidden state contained non-finite or oversized values on legacy CUDA; sanitized before lm_head."
+        );
+    }
+
+    let xs = Tensor::from_vec(values, shape, &device)?;
+    if output_dtype == DType::F32 {
+        Ok(xs)
+    } else {
+        xs.to_dtype(output_dtype)
+    }
 }
 
 /// Proportional RoPE for Gemma4 full-attention layers.
@@ -1175,6 +1229,7 @@ pub struct TextModel {
     per_layer_projection_scalar: f64,
     // Standard
     device: Device,
+    dtype: DType,
     cache: EitherCache,
     max_seq_len: usize,
     mapper: Box<dyn DeviceMapper + Send + Sync>,
@@ -1380,14 +1435,31 @@ impl TextModel {
             // Prefer the Q8 GGUF fast path, but avoid quantizing the tied vocab
             // during UQFF placeholder loading. On small GPUs that path creates
             // transient vocab copies before the quantized artifacts are loaded.
-            let tied_output_projection = if normal_loading_metadata.loading_isq {
-                None
-            } else {
+            //
+            // Legacy CUDA can benefit from a Q8 tied output projection, but
+            // building that projection for very large UQFF vocabularies can be
+            // memory-heavy. Keep the old default and make the experiment opt-in.
+            let legacy_cuda_loading_isq = normal_loading_metadata.loading_isq
+                && crate::utils::is_legacy_cuda_device(&normal_loading_metadata.real_device);
+            let force_legacy_uqff_q8 = std::env::var("MISTRALRS_GEMMA4_UQFF_Q8_TIED_LM_HEAD")
+                .map(|value| value != "0")
+                .unwrap_or(false);
+            let tied_output_projection = if !normal_loading_metadata.loading_isq
+                || (legacy_cuda_loading_isq && force_legacy_uqff_q8)
+            {
                 q8_tied_output_projection(
                     embed_tokens.embeddings(),
                     &normal_loading_metadata.real_device,
                 )?
+            } else {
+                None
             };
+            if legacy_cuda_loading_isq
+                && tied_output_projection.is_some()
+                && !LOG_GEMMA4_LEGACY_TIED_LM_HEAD_Q8.swap(true, Ordering::Relaxed)
+            {
+                tracing::info!("Using Q8 tied lm_head projection for Gemma4 UQFF on legacy CUDA.");
+            }
             if let Some(tied_output_projection) = tied_output_projection {
                 tied_output_projection
             } else {
@@ -1537,6 +1609,7 @@ impl TextModel {
             per_layer_input_scale: 2f64.powf(-0.5),
             per_layer_projection_scalar: (cfg.hidden_size as f64).powf(-0.5),
             device: normal_loading_metadata.real_device,
+            dtype: vb_m.dtype(),
             cache: EitherCache::Normal(NormalCache::from_types(cache_types)),
             max_seq_len: cfg.max_position_embeddings,
             sliding_window: cfg.effective_sliding_window(),
@@ -1568,6 +1641,10 @@ impl TextModel {
 
     pub fn device_mapper(&self) -> &dyn DeviceMapper {
         &*self.mapper
+    }
+
+    pub fn dtype(&self) -> DType {
+        self.dtype
     }
 
     /// Compute PLE per-layer inputs from both token embeddings and hidden state projection.
@@ -1913,10 +1990,27 @@ impl TextModel {
         let xs = xs.to_device(&self.device)?;
         let xs = xs.apply(&self.norm)?;
         let spec_hidden = extract_logits(&xs, context_lens.clone())?;
+        let spec_hidden = if self.lm_head_is_tied {
+            let spec_dtype = spec_hidden.dtype();
+            sanitize_final_hidden_for_legacy_cuda(spec_hidden, spec_dtype)?
+        } else {
+            spec_hidden
+        };
         let xs = extract_logits(&xs, context_lens)?;
         if let Ok(mut hidden) = self.last_spec_hidden.lock() {
             *hidden = Some(spec_hidden);
         }
+        let xs = if self.lm_head_is_tied {
+            let (lm_head_dtype, _) = self.lm_head.dtype_and_device();
+            let output_dtype = if lm_head_dtype == DType::F32 {
+                DType::F32
+            } else {
+                xs.dtype()
+            };
+            sanitize_final_hidden_for_legacy_cuda(xs, output_dtype)?
+        } else {
+            xs
+        };
         let mut xs = self.lm_head.forward(&xs)?;
 
         if let Some(final_logit_softcapping) = self.final_logit_softcapping {
