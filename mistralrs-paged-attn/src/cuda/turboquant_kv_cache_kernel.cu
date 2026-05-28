@@ -34,16 +34,6 @@ __device__ __forceinline__ uint32_t read_bits(const uint8_t *data,
   return value;
 }
 
-__device__ __forceinline__ void write_bits(uint8_t *data, int bit_offset,
-                                           uint32_t value, int bits) {
-  for (int bit = 0; bit < bits; ++bit) {
-    if (((value >> bit) & 1u) != 0u) {
-      const int pos = bit_offset + bit;
-      data[pos / 8] |= static_cast<uint8_t>(1u << (pos % 8));
-    }
-  }
-}
-
 __device__ __forceinline__ void write_f32(uint8_t *dst, float value) {
   union {
     float f;
@@ -82,19 +72,12 @@ __device__ __forceinline__ float dequantize_scalar(uint32_t index, int bits) {
                         (2.0f * TQ_CLIP);
 }
 
-__device__ __forceinline__ float deterministic_sign(uint64_t index) {
-  uint64_t x = index;
-  x += 0x9E3779B97F4A7C15ULL;
-  x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
-  x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
-  return ((x ^ (x >> 31)) & 1ULL) == 0ULL ? 1.0f : -1.0f;
-}
-
-__device__ __forceinline__ float qjl_projection_sign(int row, int col) {
-  const uint64_t index =
-      static_cast<uint64_t>(row) * 0x9E3779B1ULL +
-      static_cast<uint64_t>(col) * 0x85EBCA77ULL;
-  return deterministic_sign(index);
+__device__ __forceinline__ float deterministic_sign(uint32_t index) {
+  uint32_t x = index;
+  x += 0x9E3779B9U;
+  x = (x ^ (x >> 15)) * 0x85EBCA6BU;
+  x = (x ^ (x >> 13)) * 0xC2B2AE35U;
+  return ((x ^ (x >> 16)) & 1U) == 0U ? 1.0f : -1.0f;
 }
 
 template <typename in_t>
@@ -209,9 +192,10 @@ __global__ void turboquant_reshape_and_cache_kernel(
   float *original = shared;
   float *values = shared + max_head_dim;
   float *scratch = shared + 2 * max_head_dim;
+  uint8_t *shared_row = reinterpret_cast<uint8_t *>(shared + 2 * max_head_dim + blockDim.x);
 
   for (int byte = threadIdx.x; byte < row_bytes; byte += blockDim.x) {
-    row[byte] = 0;
+    shared_row[byte] = 0;
   }
   __syncthreads();
 
@@ -226,30 +210,47 @@ __global__ void turboquant_reshape_and_cache_kernel(
   }
   const float norm = sqrtf(block_sum(local_norm, scratch));
   if (threadIdx.x == 0) {
-    write_f32(row, norm);
+    write_f32(shared_row, norm);
   }
   __syncthreads();
 
   if (norm == 0.0f || !isfinite(norm)) {
+    for (int i = threadIdx.x; i < row_bytes; i += blockDim.x) {
+      row[i] = shared_row[i];
+    }
     return;
   }
 
   for (int d = threadIdx.x; d < head_dim; d += blockDim.x) {
-    values[d] = deterministic_sign(static_cast<uint64_t>(d)) * original[d] /
+    values[d] = deterministic_sign(static_cast<uint32_t>(d)) * original[d] /
                 norm;
   }
   __syncthreads();
   fwht_shared(values, head_dim);
 
   const int32_t mse_bytes = (head_dim * TQ_MSE_BITS + 7) / 8;
-  uint8_t *mse_bits = row + 2 * TQ_NORM_BYTES;
-  uint8_t *qjl_bits = mse_bits + mse_bytes;
-  if (threadIdx.x == 0) {
-    for (int d = 0; d < head_dim; ++d) {
-      const uint32_t quantized = quantize_scalar(values[d], TQ_MSE_BITS);
-      write_bits(mse_bits, d * TQ_MSE_BITS, quantized, TQ_MSE_BITS);
-      values[d] = dequantize_scalar(quantized, TQ_MSE_BITS);
+  uint8_t *mse_bits = shared_row + 2 * TQ_NORM_BYTES;
+  uint32_t *quantized_shared = reinterpret_cast<uint32_t *>(scratch);
+
+  for (int d = threadIdx.x; d < head_dim; d += blockDim.x) {
+    const uint32_t quantized = quantize_scalar(values[d], TQ_MSE_BITS);
+    quantized_shared[d] = quantized;
+    values[d] = dequantize_scalar(quantized, TQ_MSE_BITS);
+  }
+  __syncthreads();
+
+  for (int byte_idx = threadIdx.x; byte_idx < mse_bytes; byte_idx += blockDim.x) {
+    uint32_t byte_val = 0;
+    for (int bit = 0; bit < 8; ++bit) {
+      int pos = byte_idx * 8 + bit;
+      if (pos < head_dim * TQ_MSE_BITS) {
+        int d = pos / TQ_MSE_BITS;
+        int bit_idx = pos % TQ_MSE_BITS;
+        uint32_t val = quantized_shared[d];
+        byte_val |= ((val >> bit_idx) & 1u) << bit;
+      }
     }
+    mse_bits[byte_idx] = byte_val;
   }
   __syncthreads();
 
@@ -258,7 +259,7 @@ __global__ void turboquant_reshape_and_cache_kernel(
   float local_residual_norm = 0.0f;
   for (int d = threadIdx.x; d < head_dim; d += blockDim.x) {
     const float reconstructed =
-        deterministic_sign(static_cast<uint64_t>(d)) * values[d] * inv_dim *
+        deterministic_sign(static_cast<uint32_t>(d)) * values[d] * inv_dim *
         norm;
     const float residual = original[d] - reconstructed;
     original[d] = residual;
@@ -266,29 +267,49 @@ __global__ void turboquant_reshape_and_cache_kernel(
   }
   const float residual_norm = sqrtf(block_sum(local_residual_norm, scratch));
   if (threadIdx.x == 0) {
-    write_f32(row + TQ_NORM_BYTES, residual_norm);
+    write_f32(shared_row + TQ_NORM_BYTES, residual_norm);
   }
   __syncthreads();
 
   if (residual_norm == 0.0f || !isfinite(residual_norm)) {
+    for (int i = threadIdx.x; i < row_bytes; i += blockDim.x) {
+      row[i] = shared_row[i];
+    }
     return;
   }
 
+  for (int d = threadIdx.x; d < head_dim; d += blockDim.x) {
+    values[d] = deterministic_sign(static_cast<uint32_t>(d)) * original[d];
+  }
+  __syncthreads();
+  fwht_shared(values, head_dim);
+
   for (int projection_row = threadIdx.x; projection_row < head_dim;
        projection_row += blockDim.x) {
-    float projected = 0.0f;
-    for (int col = 0; col < head_dim; ++col) {
-      projected += qjl_projection_sign(projection_row, col) * original[col];
-    }
-    values[projection_row] = projected >= 0.0f ? 1.0f : 0.0f;
+    const float projected =
+        deterministic_sign(static_cast<uint32_t>(projection_row)) *
+        values[projection_row];
+    quantized_shared[projection_row] = projected >= 0.0f ? 1u : 0u;
   }
   __syncthreads();
 
-  if (threadIdx.x == 0) {
-    for (int projection_row = 0; projection_row < head_dim; ++projection_row) {
-      write_bits(qjl_bits, projection_row,
-                 values[projection_row] > 0.0f ? 1u : 0u, 1);
+  uint8_t *qjl_bits = mse_bits + mse_bytes;
+  const int32_t qjl_bytes = (head_dim + 7) / 8;
+  for (int byte_idx = threadIdx.x; byte_idx < qjl_bytes; byte_idx += blockDim.x) {
+    uint32_t byte_val = 0;
+    for (int bit = 0; bit < 8; ++bit) {
+      int pos = byte_idx * 8 + bit;
+      if (pos < head_dim) {
+        uint32_t val = quantized_shared[pos];
+        byte_val |= (val & 1u) << bit;
+      }
     }
+    qjl_bits[byte_idx] = byte_val;
+  }
+  __syncthreads();
+
+  for (int i = threadIdx.x; i < row_bytes; i += blockDim.x) {
+    row[i] = shared_row[i];
   }
 }
 
@@ -353,14 +374,21 @@ __global__ void turboquant_gather_kv_cache_kernel(
       row_bytes;
   const uint8_t *row = cache + row_index;
 
+  const int32_t max_head_dim = k_head_dim > v_head_dim ? k_head_dim : v_head_dim;
   extern __shared__ float shared[];
   float *values = shared;
-  float *qjl_signs = shared + (k_head_dim > v_head_dim ? k_head_dim : v_head_dim);
+  float *qjl_signs = shared + max_head_dim;
+  uint8_t *shared_row = reinterpret_cast<uint8_t *>(shared + 2 * max_head_dim);
 
-  const float norm = read_f32(row);
-  const float residual_norm = read_f32(row + TQ_NORM_BYTES);
+  for (int i = threadIdx.x; i < row_bytes; i += blockDim.x) {
+    shared_row[i] = row[i];
+  }
+  __syncthreads();
+
+  const float norm = read_f32(shared_row);
+  const float residual_norm = read_f32(shared_row + TQ_NORM_BYTES);
   const int32_t mse_bytes = (head_dim * TQ_MSE_BITS + 7) / 8;
-  const uint8_t *mse_bits = row + 2 * TQ_NORM_BYTES;
+  const uint8_t *mse_bits = shared_row + 2 * TQ_NORM_BYTES;
   const uint8_t *qjl_bits = mse_bits + mse_bytes;
 
   if (norm == 0.0f || !isfinite(norm)) {
@@ -383,24 +411,24 @@ __global__ void turboquant_gather_kv_cache_kernel(
 
   const float inv_dim = 1.0f / static_cast<float>(head_dim);
   for (int d = threadIdx.x; d < head_dim; d += blockDim.x) {
-    values[d] = deterministic_sign(static_cast<uint64_t>(d)) * values[d] *
+    values[d] = deterministic_sign(static_cast<uint32_t>(d)) * values[d] *
                 inv_dim * norm;
   }
   __syncthreads();
 
   if (residual_norm != 0.0f && isfinite(residual_norm)) {
     for (int r = threadIdx.x; r < head_dim; r += blockDim.x) {
-      qjl_signs[r] = read_bits(qjl_bits, r, 1) == 1 ? 1.0f : -1.0f;
+      const float sign = read_bits(qjl_bits, r, 1) == 1 ? 1.0f : -1.0f;
+      qjl_signs[r] = sign * deterministic_sign(static_cast<uint32_t>(r));
     }
     __syncthreads();
+    fwht_shared(qjl_signs, head_dim);
 
     const float residual_scale =
         sqrtf(CUDART_PI_F * 0.5f) / static_cast<float>(head_dim);
     for (int col = threadIdx.x; col < head_dim; col += blockDim.x) {
-      float projected = 0.0f;
-      for (int row_idx = 0; row_idx < head_dim; ++row_idx) {
-        projected += qjl_signs[row_idx] * qjl_projection_sign(row_idx, col);
-      }
+      const float projected =
+          deterministic_sign(static_cast<uint32_t>(col)) * qjl_signs[col];
       values[col] += residual_norm * residual_scale * projected;
     }
     __syncthreads();
@@ -451,7 +479,8 @@ extern "C" void turboquant_reshape_and_cache(
   dim3 grid(num_tokens, num_heads, 2);
   dim3 block(std::min(max_head_dim, 512));
   const size_t shared_mem_bytes =
-      (2 * max_head_dim + static_cast<int32_t>(block.x)) * sizeof(float);
+      (2 * max_head_dim + static_cast<int32_t>(block.x)) * sizeof(float) +
+      std::max(k_row_bytes, v_row_bytes);
 
   if (dtype == 0) {
     CALL_TURBOQUANT_RESHAPE(uint16_t);
@@ -498,7 +527,8 @@ extern "C" void turboquant_gather_kv_cache(
   const int32_t max_head_dim = std::max(k_head_dim, v_head_dim);
   dim3 grid(num_tokens, num_kv_heads, 2);
   dim3 block(std::min(max_head_dim, 512));
-  const size_t shared_mem_bytes = 2 * max_head_dim * sizeof(float);
+  const size_t shared_mem_bytes =
+      2 * max_head_dim * sizeof(float) + std::max(k_row_bytes, v_row_bytes);
 
   if (out_dtype == 0) {
     CALL_TURBOQUANT_GATHER(uint16_t);

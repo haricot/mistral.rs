@@ -2,7 +2,7 @@ use crate::cuda::backend::slice_ptr;
 use crate::cuda::ffi::turboquant_gather_kv_cache as ffi_turboquant_gather_kv_cache;
 use crate::cuda::ffi::turboquant_reshape_and_cache as ffi_turboquant_reshape_and_cache;
 use candle_core::backend::BackendStorage;
-use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DeviceRepr};
+use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DeviceRepr, DeviceSlice};
 use candle_core::cuda_backend::CudaDType;
 use candle_core::{DType, IndexOp, Result, Storage, Tensor};
 use std::ffi::c_int;
@@ -18,20 +18,12 @@ pub fn turboquant_reshape_and_cache(
     slot_mapping: &Tensor,
 ) -> Result<()> {
     match key.dtype() {
-        DType::F16 => update_turboquant_cache::<half::f16>(
-            key,
-            value,
-            key_cache,
-            value_cache,
-            slot_mapping,
-        ),
-        DType::BF16 => update_turboquant_cache::<half::bf16>(
-            key,
-            value,
-            key_cache,
-            value_cache,
-            slot_mapping,
-        ),
+        DType::F16 => {
+            update_turboquant_cache::<half::f16>(key, value, key_cache, value_cache, slot_mapping)
+        }
+        DType::BF16 => {
+            update_turboquant_cache::<half::bf16>(key, value, key_cache, value_cache, slot_mapping)
+        }
         DType::F32 => {
             update_turboquant_cache::<f32>(key, value, key_cache, value_cache, slot_mapping)
         }

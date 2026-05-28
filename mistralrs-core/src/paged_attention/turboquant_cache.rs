@@ -301,13 +301,15 @@ fn pack_vector(vector: &[f32]) -> Result<Vec<u8>> {
     if residual_norm != 0.0 && residual_norm.is_finite() {
         let mut qjl_bit_offset = 0usize;
         let qjl_bits = &mut row[qjl_start..];
+        let mut projected = residual
+            .iter()
+            .enumerate()
+            .map(|(col, value)| deterministic_sign(col) * *value)
+            .collect::<Vec<_>>();
+        fwht(&mut projected);
         for projection_row in 0..dim {
-            let projected = residual
-                .iter()
-                .enumerate()
-                .map(|(col, value)| qjl_projection_sign(projection_row, col) * *value)
-                .sum::<f32>();
-            let sign_bit = u32::from(projected >= 0.0);
+            let sign_bit =
+                u32::from(deterministic_sign(projection_row) * projected[projection_row] >= 0.0);
             push_bits(qjl_bits, &mut qjl_bit_offset, sign_bit, 1);
         }
     }
@@ -343,21 +345,17 @@ fn unpack_vector(row: &[u8], dim: usize) -> Result<Vec<f32>> {
     }
     if residual_norm != 0.0 && residual_norm.is_finite() {
         let mut qjl_reader = BitReader::new(qjl_bits, 1);
-        let qjl_signs = (0..dim)
-            .map(|_| {
+        let mut qjl_signs = (0..dim)
+            .map(|row| {
                 qjl_reader
                     .next()
-                    .map(|bit| if bit == 1 { 1.0 } else { -1.0 })
+                    .map(|bit| if bit == 1 { 1.0 } else { -1.0 } * deterministic_sign(row))
             })
             .collect::<Result<Vec<_>>>()?;
+        fwht(&mut qjl_signs);
         let scale = (std::f32::consts::FRAC_PI_2).sqrt() / dim as f32;
         for col in 0..dim {
-            let projected = qjl_signs
-                .iter()
-                .enumerate()
-                .map(|(row, sign)| *sign * qjl_projection_sign(row, col))
-                .sum::<f32>();
-            transformed[col] += residual_norm * scale * projected;
+            transformed[col] += residual_norm * scale * deterministic_sign(col) * qjl_signs[col];
         }
     }
     Ok(transformed)
@@ -473,22 +471,15 @@ impl<'a> BitReader<'a> {
 }
 
 fn deterministic_sign(index: usize) -> f32 {
-    let mut x = index as u64;
-    x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    if ((x ^ (x >> 31)) & 1) == 0 {
+    let mut x = index as u32;
+    x = x.wrapping_add(0x9E3779B9);
+    x = (x ^ (x >> 15)).wrapping_mul(0x85EBCA6B);
+    x = (x ^ (x >> 13)).wrapping_mul(0xC2B2AE35);
+    if ((x ^ (x >> 16)) & 1) == 0 {
         1.0
     } else {
         -1.0
     }
-}
-
-fn qjl_projection_sign(row: usize, col: usize) -> f32 {
-    let index = row
-        .wrapping_mul(0x9E37_79B1usize)
-        .wrapping_add(col.wrapping_mul(0x85EB_CA77usize));
-    deterministic_sign(index)
 }
 
 fn fwht(values: &mut [f32]) {
