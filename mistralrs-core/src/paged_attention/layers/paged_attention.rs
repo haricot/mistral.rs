@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use crate::{
     attention::{AttentionMask, SdpaParams},
     layers::Sdpa,
-    paged_attention::_PAD_SLOT_ID,
+    paged_attention::{turboquant_cache, _PAD_SLOT_ID},
     pipeline::text_models_inputs_processor::{
         FlashKMeta, FlashParams, PagedAttentionInputMetadata,
     },
@@ -61,10 +61,11 @@ fn new_token_lens_from_slot_mapping(
 fn unpack_gathered_kv(
     packed: &Tensor,
     kv_lens: &[usize],
-    num_kv_heads: usize,
-    head_size: usize,
+    _num_kv_heads: usize,
+    _head_size: usize,
     device: &Device,
 ) -> Result<Tensor> {
+    let (_, num_kv_heads, head_size) = packed.dims3()?;
     let max_kv = kv_lens.iter().copied().max().unwrap_or(0);
     let mut start = 0;
     let mut unpacked = Vec::with_capacity(kv_lens.len());
@@ -102,6 +103,28 @@ fn adjust_kv_mask(mask: &Tensor, kv_seq_len: usize) -> Result<Tensor> {
 fn supports_packed_varlen_sdpa(query: &Tensor) -> bool {
     query.device().is_cpu()
         || (query.device().is_cuda() && crate::using_flash_attn() && query.dtype() != DType::F32)
+}
+
+fn context_lens_to_lengths(context_lens: &Tensor) -> Result<Vec<usize>> {
+    let context_lens = context_lens.to_device(&Device::Cpu)?;
+    match context_lens.dtype() {
+        DType::I32 => Ok(context_lens
+            .to_vec1::<i32>()?
+            .into_iter()
+            .map(|v| v.max(0) as usize)
+            .collect()),
+        DType::U32 => Ok(context_lens
+            .to_vec1::<u32>()?
+            .into_iter()
+            .map(|v| v as usize)
+            .collect()),
+        DType::I64 => Ok(context_lens
+            .to_vec1::<i64>()?
+            .into_iter()
+            .map(|v| v.max(0) as usize)
+            .collect()),
+        other => candle_core::bail!("context_lens expects i32/u32/i64, got {other:?}"),
+    }
 }
 
 pub struct PagedAttention {
@@ -199,6 +222,9 @@ impl PagedAttention {
         } else {
             None
         };
+        let uses_turboquant_cache = key_cache
+            .as_ref()
+            .is_some_and(turboquant_cache::is_turboquant_cache);
 
         // === Prefix cache / donor-gather prompt path ===
         // Entered when:
@@ -226,15 +252,25 @@ impl PagedAttention {
                 let v_flat = value
                     .transpose(1, 2)?
                     .reshape(((), key_value_heads, head_size))?;
-                reshape_and_cache(
-                    &k_flat,
-                    &v_flat,
-                    self.k_scale.as_ref(),
-                    self.v_scale.as_ref(),
-                    key_cache.as_mut().unwrap(),
-                    value_cache.as_mut().unwrap(),
-                    slot_mapping,
-                )?;
+                if uses_turboquant_cache {
+                    turboquant_cache::reshape_and_cache(
+                        &k_flat,
+                        &v_flat,
+                        key_cache.as_mut().unwrap(),
+                        value_cache.as_mut().unwrap(),
+                        slot_mapping,
+                    )?;
+                } else {
+                    reshape_and_cache(
+                        &k_flat,
+                        &v_flat,
+                        self.k_scale.as_ref(),
+                        self.v_scale.as_ref(),
+                        key_cache.as_mut().unwrap(),
+                        value_cache.as_mut().unwrap(),
+                        slot_mapping,
+                    )?;
+                }
             }
 
             assert!(
@@ -270,15 +306,25 @@ impl PagedAttention {
             };
 
             // Gather all K/V from paged cache into contiguous tensors.
-            let (k_gathered, v_gathered) = mistralrs_paged_attn::gather_kv_cache(
-                key_cache.as_ref().unwrap(),
-                value_cache.as_ref().unwrap(),
-                self.k_scale.as_ref(),
-                self.v_scale.as_ref(),
-                block_tables,
-                &cu_kv,
-                query.dtype(),
-            )?;
+            let (k_gathered, v_gathered) = if uses_turboquant_cache {
+                turboquant_cache::gather_kv_cache(
+                    key_cache.as_ref().unwrap(),
+                    value_cache.as_ref().unwrap(),
+                    block_tables,
+                    &cu_kv,
+                    query.dtype(),
+                )?
+            } else {
+                mistralrs_paged_attn::gather_kv_cache(
+                    key_cache.as_ref().unwrap(),
+                    value_cache.as_ref().unwrap(),
+                    self.k_scale.as_ref(),
+                    self.v_scale.as_ref(),
+                    block_tables,
+                    &cu_kv,
+                    query.dtype(),
+                )?
+            };
 
             if supports_packed_varlen_sdpa(query) {
                 let cu_q = if let Some(fp) = flash_params {
@@ -380,15 +426,25 @@ impl PagedAttention {
         };
 
         if write_cache && key_cache.as_ref().is_some_and(|_| value_cache.is_some()) {
-            reshape_and_cache(
-                &key,
-                &value,
-                self.k_scale.as_ref(),
-                self.v_scale.as_ref(),
-                key_cache.as_mut().unwrap(),
-                value_cache.as_mut().unwrap(),
-                slot_mapping,
-            )?;
+            if uses_turboquant_cache {
+                turboquant_cache::reshape_and_cache(
+                    &key,
+                    &value,
+                    key_cache.as_mut().unwrap(),
+                    value_cache.as_mut().unwrap(),
+                    slot_mapping,
+                )?;
+            } else {
+                reshape_and_cache(
+                    &key,
+                    &value,
+                    self.k_scale.as_ref(),
+                    self.v_scale.as_ref(),
+                    key_cache.as_mut().unwrap(),
+                    value_cache.as_mut().unwrap(),
+                    slot_mapping,
+                )?;
+            }
         }
 
         if let Some(att) = att {
@@ -399,6 +455,65 @@ impl PagedAttention {
         // === Decode path ===
         #[allow(clippy::cast_possible_truncation)]
         let dev = query.device().location();
+        if uses_turboquant_cache {
+            if alibi_slopes.is_some() {
+                candle_core::bail!("TurboQuant paged KV cache does not support alibi slopes yet.");
+            }
+
+            let block_tables = resolve_block_tables(&dev).unwrap();
+            let context_lens = resolve_context_lens(&dev).unwrap();
+            let kv_lens = context_lens_to_lengths(context_lens)?;
+            let cu_kv = cumulative_seqlens_from_lengths(&kv_lens, query.device())?;
+            let (k_gathered, v_gathered) = turboquant_cache::gather_kv_cache(
+                key_cache.as_ref().unwrap(),
+                value_cache.as_ref().unwrap(),
+                block_tables,
+                &cu_kv,
+                query.dtype(),
+            )?;
+            let k_batched = unpack_gathered_kv(
+                &k_gathered,
+                &kv_lens,
+                key_value_heads,
+                head_size,
+                query.device(),
+            )?;
+            let v_batched = unpack_gathered_kv(
+                &v_gathered,
+                &kv_lens,
+                key_value_heads,
+                head_size,
+                query.device(),
+            )?;
+            let num_query_rows = query.dim(0)?;
+            let query = if kv_lens.len() == num_query_rows {
+                query.unsqueeze(2)?
+            } else if kv_lens.len() == batch_size {
+                query
+                    .reshape((batch_size, seq_len, attention_heads, head_size))?
+                    .transpose(1, 2)?
+            } else {
+                candle_core::bail!(
+                    "TurboQuant decode metadata mismatch: {} KV rows for query shape {:?}",
+                    kv_lens.len(),
+                    query.shape()
+                );
+            };
+            let attn = Sdpa.run_attention(
+                &query,
+                &k_batched,
+                &v_batched,
+                &AttentionMask::None,
+                None,
+                sdpa_params,
+            )?;
+            return if kv_lens.len() == num_query_rows {
+                attn.reshape((num_query_rows, attention_heads, head_size))
+            } else {
+                attn.transpose(1, 2)?
+                    .reshape((num_query_rows, attention_heads, head_size))
+            };
+        }
         let res = paged_attention(
             &query,
             self.k_scale.as_ref(),

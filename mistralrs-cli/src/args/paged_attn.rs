@@ -41,7 +41,8 @@ pub struct PagedAttentionOptions {
     #[arg(long = "pa-block-size")]
     pub block_size: Option<usize>,
 
-    /// KV cache quantization type
+    /// KV cache quantization type: auto, f8e4m3, or turboquant.
+    /// turboquant uses a 4-bit packed Hadamard TurboQuant KV cache path.
     #[arg(long = "pa-cache-type", default_value = "auto", value_parser = parse_cache_type)]
     #[serde(default)]
     pub cache_type: PagedCacheType,

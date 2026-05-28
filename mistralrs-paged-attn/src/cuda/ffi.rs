@@ -104,6 +104,46 @@ extern "C" {
         cache_dtype: u32,
     );
 
+    pub fn turboquant_gather_kv_cache(
+        key_cache: *const c_void,
+        value_cache: *const c_void,
+        k_out: *const c_void,
+        v_out: *const c_void,
+        block_table: *const c_int,
+        cu_seq_lens: *const c_int,
+        num_tokens: c_int,
+        num_seqs: c_int,
+        block_size: c_int,
+        block_table_stride: c_int,
+        num_kv_heads: c_int,
+        k_head_dim: c_int,
+        v_head_dim: c_int,
+        k_row_bytes: c_int,
+        v_row_bytes: c_int,
+        stream: CUstream,
+        out_dtype: u32,
+    );
+
+    pub fn turboquant_reshape_and_cache(
+        key: *const c_void,
+        value: *const c_void,
+        key_cache: *const c_void,
+        value_cache: *const c_void,
+        slot_mapping: *const c_long,
+        num_tokens: c_int,
+        num_heads: c_int,
+        k_head_dim: c_int,
+        v_head_dim: c_int,
+        block_size: c_int,
+        num_blocks: c_int,
+        k_row_bytes: c_int,
+        v_row_bytes: c_int,
+        key_stride: c_int,
+        value_stride: c_int,
+        stream: CUstream,
+        dtype: u32,
+    );
+
     pub fn paged_attention_v1_f16(
         out: *const c_void,
         query: *const c_void,

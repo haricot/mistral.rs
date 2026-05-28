@@ -13,6 +13,7 @@ pub mod encoder_cache;
 pub mod kv_cache_manager;
 mod layers;
 mod scheduler;
+pub(crate) mod turboquant_cache;
 pub const _PAD_SLOT_ID: i64 = -1;
 
 pub use cache_engine::{CacheConfig, CacheEngine, PagedCacheType};
@@ -70,22 +71,6 @@ const SUPPORTED_BLOCK_SIZE: &[usize] = &[8, 16, 32];
 
 const SIZE_IN_MB: usize = 1024 * 1024;
 
-macro_rules! mb_to_blocks {
-    ($mb_size:expr, $dtype_size:expr, $block_size:expr, $config:expr) => {
-        $mb_size
-            / $dtype_size
-            / $block_size
-            / $config.num_layers()
-            / $config.kv_cache_elements_per_token()
-    };
-}
-
-macro_rules! ctxt_to_blocks {
-    ($context_len:expr, $dtype_size:expr, $block_size:expr, $config:expr) => {
-        $context_len * $dtype_size * $config.num_layers() * $config.kv_cache_elements_per_token()
-    };
-}
-
 /// Memory values are in MBs or a percentage in [0,1]. Specify block size or the default is 32.
 ///
 /// `model_weight_size_in_bytes`: total model weight footprint. When provided, the per-device
@@ -116,8 +101,9 @@ pub fn calculate_cache_config(
     if !SUPPORTED_BLOCK_SIZE.contains(&block_size) {
         anyhow::bail!("Block size must be in {SUPPORTED_BLOCK_SIZE:?}, got {block_size}");
     }
-    let dtype = cache_type.to_dtype(dtype);
-    let dtype_size = dtype.size_in_bytes();
+    let bytes_per_block_all_layers =
+        cache_type.bytes_per_block_all_layers(dtype, config, block_size)?;
+    let bytes_per_token_all_layers = bytes_per_block_all_layers / block_size;
 
     // For tensor parallelism, each device holds a fraction of the model weights. Approximate it like this.
     let num_devices = layer_devices.len().max(1);
@@ -144,7 +130,7 @@ pub fn calculate_cache_config(
             }
             MemoryGpuConfig::ContextSize(toks) => {
                 // ContextSize is demand-driven (bytes needed for N tokens), not a memory budget, so model weight does not apply here.
-                ctxt_to_blocks!(toks, dtype_size, block_size, config) / SIZE_IN_MB
+                (toks * bytes_per_token_all_layers).div_ceil(SIZE_IN_MB)
             }
         };
         min_mem_gpu = min_mem_gpu.min(mem_gpu);
@@ -158,8 +144,7 @@ pub fn calculate_cache_config(
     let mut mem_gpu = min_mem_gpu;
     if device.is_metal() {
         let max_tokens = max_num_tokens.unwrap_or(config.max_seq_len());
-        let mem_for_tokens =
-            ctxt_to_blocks!(max_tokens, dtype_size, block_size, config) / SIZE_IN_MB;
+        let mem_for_tokens = (max_tokens * bytes_per_token_all_layers).div_ceil(SIZE_IN_MB);
         if mem_for_tokens < mem_gpu {
             if !silent {
                 info!(
@@ -171,14 +156,24 @@ pub fn calculate_cache_config(
         }
     }
 
-    let num_gpu_blocks = mb_to_blocks!(mem_gpu * SIZE_IN_MB, dtype_size, block_size, config);
+    let num_gpu_blocks = (mem_gpu * SIZE_IN_MB) / bytes_per_block_all_layers;
     if num_gpu_blocks == 0 {
         anyhow::bail!("Num GPU blocks is 0. This means there is not enough memory. Either reduce the memory amount/utilization/context size or disable PagedAttention.");
     }
 
     if !silent {
         info!("Allocating {mem_gpu} MB for PagedAttention KV cache per GPU");
-        info!("PagedAttention KV cache type is {dtype:?}");
+        if cache_type.is_turboquant() {
+            info!(
+                "PagedAttention KV cache type is TurboQuant ({}-bit packed u8)",
+                turboquant_cache::TURBOQUANT_BITS
+            );
+        } else {
+            info!(
+                "PagedAttention KV cache type is {:?}",
+                cache_type.to_dtype(dtype)?
+            );
+        }
         info!("Using PagedAttention with block size {block_size} and {num_gpu_blocks} GPU blocks: available context length is {} tokens", num_gpu_blocks*block_size);
     }
     Ok(CacheConfig {
