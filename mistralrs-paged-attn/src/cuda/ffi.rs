@@ -520,4 +520,26 @@ extern "C" {
         stream: CUstream,
         dtype: u32,
     );
+
+// legacy_flash_attn TurboQuant-direct decode path.
+pub fn legacy_flash_attn_decode_turboquant(
+    query: *const c_void,
+    key_cache: *const c_void,
+    value_cache: *const c_void,
+    block_tables: *const c_int,
+    cu_seq_lens: *const c_int,
+    out: *mut c_void,
+    num_seqs: c_int,
+    block_size: c_int,
+    block_table_stride: c_int,
+    num_heads: c_int,
+    num_kv_heads: c_int,
+    head_dim: c_int,
+    k_row_bytes: c_int,
+    v_row_bytes: c_int,
+    scale: f32,
+    window_size: c_int,
+    stream: CUstream,
+    dtype: u32,
+);
 }

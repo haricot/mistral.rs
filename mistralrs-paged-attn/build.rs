@@ -37,6 +37,8 @@ fn main() -> Result<()> {
     println!("cargo:rerun-if-changed=src/cuda/flashinfer/attention/state.cuh");
     println!("cargo:rerun-if-changed=src/cuda/flashinfer/attention/variant_helper.cuh");
     println!("cargo:rerun-if-changed=src/cuda/flashinfer/attention/variants.cuh");
+    //legacy_flash_attn_turboquant_kernel.cu
+        println!("cargo:rerun-if-changed=src/cuda/legacy_flash_attn_turboquant_kernel.cu");
 
     let mut builder = cudaforge::KernelBuilder::new()
         .source_glob("src/cuda/*.cu")

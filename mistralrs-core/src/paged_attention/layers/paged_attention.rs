@@ -2,7 +2,10 @@ use std::collections::HashMap;
 
 use candle_core::{DType, Device, Result, Tensor};
 #[allow(unused_imports)]
-use mistralrs_paged_attn::{kv_scale_update, paged_attention, reshape_and_cache};
+use mistralrs_paged_attn::{kv_scale_update, paged_attention, reshape_and_cache,   legacy_flash_attn_decode_turboquant};
+
+ 
+
 
 const KV_SCALE_UPDATE_ITERATION: i32 = 128;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -452,6 +455,17 @@ impl PagedAttention {
             return Ok(att);
         }
 
+        if write_cache && key_cache.as_ref().is_some_and(|_| value_cache.is_some()) {
+            if uses_turboquant_cache {
+                turboquant_cache::reshape_and_cache(
+                    &key,
+                    &value,
+                    key_cache.as_mut().unwrap(),
+                    value_cache.as_mut().unwrap(),
+                    slot_mapping,
+                )?;
+            }
+}
         // === Decode path ===
         #[allow(clippy::cast_possible_truncation)]
         let dev = query.device().location();
@@ -464,6 +478,48 @@ impl PagedAttention {
             let context_lens = resolve_context_lens(&dev).unwrap();
             let kv_lens = context_lens_to_lengths(context_lens)?;
             let cu_kv = cumulative_seqlens_from_lengths(&kv_lens, query.device())?;
+
+            #[cfg(feature = "cuda")]
+{
+    let allow_legacy = std::env::var("ALLOW_LEGACY")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+
+    let can_try_legacy_turboquant =
+        allow_legacy
+            && query.device().is_cuda()
+            && seq_len == 1
+            && sdpa_params.softcap.is_none()
+            && sdpa_params.sinks.is_none()
+            && alibi_slopes.is_none();
+
+    if can_try_legacy_turboquant {
+        if std::env::var("MISTRALRS_LEGACY_FLASH_ATTN_TRACE")
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false)
+        {
+            eprintln!(
+                "[legacy_flash_attn_turboquant] decode query={:?} key_cache={:?} value_cache={:?}",
+                query.shape(),
+                key_cache.as_ref().unwrap().shape(),
+                value_cache.as_ref().unwrap().shape(),
+            );
+        }
+
+        return mistralrs_paged_attn::legacy_flash_attn_decode_turboquant(
+            &query,
+            key_cache.as_ref().unwrap(),
+            value_cache.as_ref().unwrap(),
+            block_tables,
+            &cu_kv,
+            sdpa_params.softmax_scale,
+            sdpa_params.sliding_window.unwrap_or(0),
+        );
+    }
+}
+
+
+
             let (k_gathered, v_gathered) = turboquant_cache::gather_kv_cache(
                 key_cache.as_ref().unwrap(),
                 value_cache.as_ref().unwrap(),
