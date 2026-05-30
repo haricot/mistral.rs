@@ -479,4 +479,45 @@ extern "C" {
         window_size: c_int,
         stream: CUstream,
     );
+
+ pub fn legacy_flash_attn_decode_dense(
+        q: *const c_void,
+        k: *const c_void,
+        v: *const c_void,
+        out: *mut c_void,
+        batch_size: c_int,
+        kv_len: c_int,
+        num_heads: c_int,
+        num_kv_heads: c_int,
+        head_dim: c_int,
+        scale: f32,
+        window_size: c_int,
+        stream: CUstream,
+        dtype: u32,
+    );
+
+    pub fn legacy_flash_attn_decode_paged(
+        query: *const c_void,
+        key_cache: *const c_void,
+        value_cache: *const c_void,
+        block_tables: *const c_int,
+        context_lens: *const c_int,
+        out: *mut c_void,
+        num_seqs: c_int,
+        max_context_len: c_int,
+        block_size: c_int,
+        max_num_blocks_per_seq: c_int,
+        num_heads: c_int,
+        num_kv_heads: c_int,
+        head_dim: c_int,
+        x: c_int,
+        k_block_stride: c_int,
+        k_head_stride: c_int,
+        v_block_stride: c_int,
+        v_head_stride: c_int,
+        scale: f32,
+        window_size: c_int,
+        stream: CUstream,
+        dtype: u32,
+    );
 }
