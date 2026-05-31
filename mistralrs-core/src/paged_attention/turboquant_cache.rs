@@ -1,4 +1,6 @@
 use candle_core::{DType, Device, IndexOp, Result, Tensor};
+use crate::paged_attention::cache_engine::DecodedKVCache;
+use std::collections::BTreeSet;
 
 pub const TURBOQUANT_BITS: usize = 4;
 const MSE_BITS: usize = TURBOQUANT_BITS - 1;
@@ -239,6 +241,325 @@ pub fn gather_kv_cache(
     .to_device(&device)?;
     Ok((k, v))
 }
+
+
+pub fn invalidate_decoded_blocks_from_slot_mapping(
+    decoded_cache: &mut DecodedKVCache,
+    slot_mapping: &Tensor,
+) -> Result<()> {
+    let slot_mapping = slot_mapping.to_device(&Device::Cpu)?.flatten_all()?;
+
+    let slots: Vec<i64> = match slot_mapping.dtype() {
+        DType::I64 => slot_mapping.to_vec1::<i64>()?,
+        DType::I32 => slot_mapping
+            .to_vec1::<i32>()?
+            .into_iter()
+            .map(i64::from)
+            .collect(),
+        DType::U32 => slot_mapping
+            .to_vec1::<u32>()?
+            .into_iter()
+            .map(|v| v as i64)
+            .collect(),
+        other => {
+            candle_core::bail!(
+                "invalidate_decoded_blocks_from_slot_mapping expects i64/i32/u32 slot_mapping, got {other:?}"
+            )
+        }
+    };
+
+    for slot in slots {
+        if slot < 0 {
+            continue;
+        }
+
+        let physical_block = (slot as usize / decoded_cache.block_size) as u32;
+
+        if let Some(decoded_slot) = decoded_cache.physical_to_slot.remove(&physical_block) {
+            if decoded_slot < decoded_cache.slot_to_physical.len() {
+                decoded_cache.slot_to_physical[decoded_slot] = None;
+                decoded_cache.lru_clock[decoded_slot] = 0;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+
+pub fn ensure_decoded_block_cache(
+    decoded_cache: &mut DecodedKVCache,
+    turboquant_key_cache: &Tensor,
+    turboquant_value_cache: &Tensor,
+    block_tables: &Tensor,
+    context_lens: &Tensor,
+    out_dtype: DType,
+) -> Result<Tensor> {
+    if decoded_cache.dtype != out_dtype {
+        candle_core::bail!(
+            "Decoded TurboQuant cache dtype mismatch: decoded cache is {:?}, requested output is {:?}",
+            decoded_cache.dtype,
+            out_dtype
+        );
+    }
+
+    if !is_turboquant_cache(turboquant_key_cache) || !is_turboquant_cache(turboquant_value_cache) {
+        candle_core::bail!("ensure_decoded_block_cache expects TurboQuant u8 rank-4 source cache.");
+    }
+
+    let (_, _, tq_block_size, _) = turboquant_key_cache.dims4()?;
+    if tq_block_size != decoded_cache.block_size {
+        candle_core::bail!(
+            "Decoded cache block_size mismatch: decoded={}, turboquant={}",
+            decoded_cache.block_size,
+            tq_block_size
+        );
+    }
+
+    let block_table_rows = block_table_to_vec2(block_tables)?;
+    let context_lens = context_lens_to_vec_for_decoded_cache(context_lens)?;
+
+    let mut required_blocks = BTreeSet::<u32>::new();
+
+    for (seq_idx, row) in block_table_rows.iter().enumerate() {
+        let context_len = context_lens.get(seq_idx).copied().unwrap_or(0);
+        let needed_blocks = context_len
+            .div_ceil(decoded_cache.block_size)
+            .min(row.len());
+
+        for &physical_block in row.iter().take(needed_blocks) {
+            required_blocks.insert(physical_block as u32);
+        }
+    }
+
+    if required_blocks.len() > decoded_cache.num_slots() {
+        candle_core::bail!(
+            "TurboQuant decoded cache too small: need {} blocks for current decode, but cache has {} slots. Increase turboquant_cached:<mb>.",
+            required_blocks.len(),
+            decoded_cache.num_slots()
+        );
+    }
+
+    for physical_block in required_blocks {
+        ensure_one_decoded_block(
+            decoded_cache,
+            turboquant_key_cache,
+            turboquant_value_cache,
+            physical_block,
+        )?;
+    }
+
+    let mut remapped_u32 = Vec::<u32>::new();
+    let mut remapped_i32 = Vec::<i32>::new();
+
+    let rows = block_table_rows.len();
+    let cols = block_table_rows.first().map(|r| r.len()).unwrap_or(0);
+
+    for (seq_idx, row) in block_table_rows.iter().enumerate() {
+        let context_len = context_lens.get(seq_idx).copied().unwrap_or(0);
+        let needed_blocks = context_len
+            .div_ceil(decoded_cache.block_size)
+            .min(row.len());
+
+        for (table_idx, &physical_block) in row.iter().enumerate() {
+            let decoded_slot = if table_idx < needed_blocks {
+                *decoded_cache
+                    .physical_to_slot
+                    .get(&(physical_block as u32))
+                    .ok_or_else(|| {
+                        candle_core::Error::Msg(format!(
+                            "decoded cache missing physical block {physical_block}"
+                        ))
+                    })?
+            } else {
+                0
+            };
+
+            remapped_u32.push(decoded_slot as u32);
+            remapped_i32.push(decoded_slot as i32);
+        }
+    }
+
+    match block_tables.dtype() {
+        DType::I32 => Tensor::from_vec(remapped_i32, (rows, cols), &Device::Cpu)?
+            .to_device(block_tables.device()),
+        DType::U32 => Tensor::from_vec(remapped_u32, (rows, cols), &Device::Cpu)?
+            .to_device(block_tables.device()),
+        other => {
+            candle_core::bail!("decoded block table expects original i32/u32 block table, got {other:?}")
+        }
+    }
+}
+
+
+fn context_lens_to_vec_for_decoded_cache(context_lens: &Tensor) -> Result<Vec<usize>> {
+    let context_lens = context_lens.to_device(&Device::Cpu)?;
+
+    match context_lens.dtype() {
+        DType::I32 => Ok(context_lens
+            .to_vec1::<i32>()?
+            .into_iter()
+            .map(|v| v.max(0) as usize)
+            .collect()),
+        DType::U32 => Ok(context_lens
+            .to_vec1::<u32>()?
+            .into_iter()
+            .map(|v| v as usize)
+            .collect()),
+        DType::I64 => Ok(context_lens
+            .to_vec1::<i64>()?
+            .into_iter()
+            .map(|v| v.max(0) as usize)
+            .collect()),
+        other => candle_core::bail!("context_lens expects i32/u32/i64, got {other:?}"),
+    }
+}
+
+fn ensure_one_decoded_block(
+    decoded_cache: &mut DecodedKVCache,
+    turboquant_key_cache: &Tensor,
+    turboquant_value_cache: &Tensor,
+    physical_block: u32,
+) -> Result<usize> {
+    if let Some(&slot) = decoded_cache.physical_to_slot.get(&physical_block) {
+        touch_decoded_slot(decoded_cache, slot);
+        return Ok(slot);
+    }
+
+    let slot = choose_decoded_slot(decoded_cache)?;
+
+    if let Some(old_physical) = decoded_cache.slot_to_physical[slot] {
+        decoded_cache.physical_to_slot.remove(&old_physical);
+    }
+
+    decode_turboquant_block_into_slot(
+        decoded_cache,
+        turboquant_key_cache,
+        turboquant_value_cache,
+        physical_block,
+        slot,
+    )?;
+
+    decoded_cache.physical_to_slot.insert(physical_block, slot);
+    decoded_cache.slot_to_physical[slot] = Some(physical_block);
+    touch_decoded_slot(decoded_cache, slot);
+
+    Ok(slot)
+}
+
+fn choose_decoded_slot(decoded_cache: &mut DecodedKVCache) -> Result<usize> {
+    if let Some(slot) = decoded_cache
+        .slot_to_physical
+        .iter()
+        .position(Option::is_none)
+    {
+        return Ok(slot);
+    }
+
+    decoded_cache
+        .lru_clock
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, clock)| *clock)
+        .map(|(slot, _)| slot)
+        .ok_or_else(|| candle_core::Error::Msg("decoded TurboQuant cache has zero slots".to_string()))
+}
+
+fn touch_decoded_slot(decoded_cache: &mut DecodedKVCache, slot: usize) {
+    decoded_cache.clock = decoded_cache.clock.wrapping_add(1);
+    if slot < decoded_cache.lru_clock.len() {
+        decoded_cache.lru_clock[slot] = decoded_cache.clock;
+    }
+}
+
+
+fn decode_turboquant_block_into_slot(
+    decoded_cache: &mut DecodedKVCache,
+    turboquant_key_cache: &Tensor,
+    turboquant_value_cache: &Tensor,
+    physical_block: u32,
+    decoded_slot: usize,
+) -> Result<()> {
+    let device = turboquant_key_cache.device();
+
+    let block_table = Tensor::from_vec(vec![physical_block], (1, 1), &Device::Cpu)?
+        .to_device(device)?;
+
+    let cu_seq_lens = Tensor::from_vec(
+        vec![0u32, decoded_cache.block_size as u32],
+        (2,),
+        &Device::Cpu,
+    )?
+    .to_device(device)?;
+
+    let (k_tmp, v_tmp) = gather_kv_cache(
+        turboquant_key_cache,
+        turboquant_value_cache,
+        &block_table,
+        &cu_seq_lens,
+        decoded_cache.dtype,
+    )?;
+
+    let (block_size, num_heads, k_head_dim) = k_tmp.dims3()?;
+    let (v_block_size, v_num_heads, v_head_dim) = v_tmp.dims3()?;
+
+    if block_size != decoded_cache.block_size
+        || v_block_size != decoded_cache.block_size
+        || num_heads != decoded_cache.num_kv_heads
+        || v_num_heads != decoded_cache.num_kv_heads
+        || k_head_dim != decoded_cache.k_head_dim
+        || v_head_dim != decoded_cache.v_head_dim
+    {
+        candle_core::bail!(
+            "decoded TurboQuant block shape mismatch: k={:?}, v={:?}, decoded_cache heads={} k_dim={} v_dim={}",
+            k_tmp.shape(),
+            v_tmp.shape(),
+            decoded_cache.num_kv_heads,
+            decoded_cache.k_head_dim,
+            decoded_cache.v_head_dim
+        );
+    }
+
+    let x = 16 / decoded_cache.dtype.size_in_bytes();
+
+    if decoded_cache.k_head_dim % x != 0 {
+        candle_core::bail!(
+            "decoded key head dim {} is not divisible by x={x}",
+            decoded_cache.k_head_dim
+        );
+    }
+
+    // k_tmp: [block_size, heads, dim]
+    // dense paged-attn K layout: [slot, heads, dim / x, block_size, x]
+    let k_block = k_tmp
+        .transpose(0, 1)? // [heads, block_size, dim]
+        .reshape((
+            decoded_cache.num_kv_heads,
+            decoded_cache.block_size,
+            decoded_cache.k_head_dim / x,
+            x,
+        ))?
+        .transpose(1, 2)? // [heads, dim / x, block_size, x]
+        .contiguous()?;
+
+    // v_tmp: [block_size, heads, dim]
+    // dense paged-attn V layout: [slot, heads, dim, block_size]
+    let v_block = v_tmp
+        .transpose(0, 1)? // [heads, block_size, dim]
+        .transpose(1, 2)? // [heads, dim, block_size]
+        .contiguous()?;
+
+    decoded_cache
+        .key_cache
+        .slice_set(&k_block.unsqueeze(0)?, 0, decoded_slot)?;
+
+    decoded_cache
+        .value_cache
+        .slice_set(&v_block.unsqueeze(0)?, 0, decoded_slot)?;
+
+    Ok(())
+}
+
 
 fn write_row(
     cache: &mut Tensor,

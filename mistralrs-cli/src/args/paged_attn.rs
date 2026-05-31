@@ -56,7 +56,7 @@ impl Default for PagedAttentionOptions {
             memory_mb: None,
             memory_fraction: None,
             block_size: None,
-            cache_type: PagedCacheType::Auto,
+            cache_type: PagedCacheType::Auto(),
         }
     }
 }

@@ -1,6 +1,9 @@
 // legacy_flash_attn_turboquant_kernel.cu
 //
 // Experimental SM61/Pascal-friendly decode-only attention over TurboQuant KV cache.
+// V4 adds a specialized HEAD_DIM=512 two-pass path for Gemma/OmniCoder-style heads.
+// The generic path is kept for <=256 and for fallback/debug. The 512 path uses 256
+// threads/block and materializes only scores [seq, heads, kv_len], not dense K/V.
 // This is NOT FlashAttention v2/v3. It is an online-softmax kernel that reads
 // TurboQuant rows directly and does not materialize dense K/V globally.
 //
@@ -114,6 +117,21 @@ __device__ __forceinline__ float warp_sum(float v) {
     v += __shfl_xor_sync(LEGACY_TQ_FULL_MASK, v, offset);
   }
   return v;
+}
+
+
+template <int BLOCK_SIZE>
+__device__ __forceinline__ float block_sum(float v) {
+  __shared__ float scratch[BLOCK_SIZE];
+  const int tid = threadIdx.x;
+  scratch[tid] = v;
+  __syncthreads();
+#pragma unroll
+  for (int stride = BLOCK_SIZE / 2; stride > 0; stride >>= 1) {
+    if (tid < stride) scratch[tid] += scratch[tid + stride];
+    __syncthreads();
+  }
+  return scratch[0];
 }
 
 __device__ __forceinline__ void fwht_shared(float *values, int head_dim) {
@@ -307,6 +325,233 @@ __global__ void legacy_flash_attn_decode_turboquant_kernel(
   }
 }
 
+
+
+template <typename scalar_t>
+__global__ void legacy_flash_attn_decode_tq512_qk_scores_kernel(
+    const scalar_t *__restrict__ Q,
+    const uint8_t *__restrict__ K_cache,
+    const int *__restrict__ block_tables,
+    const int *__restrict__ cu_seq_lens,
+    float *__restrict__ scores,
+    int num_seqs,
+    int max_seq_len,
+    int block_size,
+    int block_table_stride,
+    int num_heads,
+    int num_kv_heads,
+    int k_row_bytes,
+    float scale,
+    int window_size) {
+  constexpr int HEAD_DIM = 512;
+  constexpr int BLOCK = 256;
+  const int head_idx = blockIdx.x;
+  const int seq_idx = blockIdx.y;
+  const int tid = threadIdx.x;
+  if (head_idx >= num_heads || seq_idx >= num_seqs) return;
+
+  const int seq_start = cu_seq_lens[seq_idx];
+  const int seq_end = cu_seq_lens[seq_idx + 1];
+  const int seq_len = seq_end - seq_start;
+  if (seq_len <= 0) return;
+
+  int start = 0;
+  if (window_size > 0 && seq_len > window_size) start = seq_len - window_size;
+  const int active_len = seq_len - start;
+  if (active_len > max_seq_len) return;
+
+  const int gqa_ratio = num_heads / num_kv_heads;
+  const int kv_head_idx = head_idx / gqa_ratio;
+  const int q_base = (seq_idx * num_heads + head_idx) * HEAD_DIM;
+  const int scores_base = (seq_idx * num_heads + head_idx) * max_seq_len;
+
+  extern __shared__ unsigned char smem[];
+  float *values = reinterpret_cast<float *>(smem);
+  float *qjl_signs = values + HEAD_DIM;
+  uint8_t *shared_row = reinterpret_cast<uint8_t *>(qjl_signs + HEAD_DIM);
+
+  float q0 = 0.0f;
+  float q1 = 0.0f;
+  const int d0 = tid;
+  const int d1 = tid + BLOCK;
+  if (d0 < HEAD_DIM) q0 = to_float(Q[q_base + d0]);
+  if (d1 < HEAD_DIM) q1 = to_float(Q[q_base + d1]);
+
+  for (int local = 0; local < active_len; ++local) {
+    const int token_idx = start + local;
+    const int logical_block = token_idx / block_size;
+    const int block_offset = token_idx - logical_block * block_size;
+    const int physical_block = block_tables[seq_idx * block_table_stride + logical_block];
+    if (physical_block < 0) {
+      if (tid == 0) scores[scores_base + local] = -CUDART_INF_F;
+      continue;
+    }
+
+    const int64_t k_row_index =
+        ((static_cast<int64_t>(physical_block) * num_kv_heads + kv_head_idx) * block_size + block_offset) *
+        static_cast<int64_t>(k_row_bytes);
+    const uint8_t *k_row = K_cache + k_row_index;
+
+    decode_turboquant_row_to_shared(k_row, HEAD_DIM, k_row_bytes, values, qjl_signs, shared_row);
+
+    float dot_local = 0.0f;
+    dot_local += q0 * values[d0];
+    dot_local += q1 * values[d1];
+    const float dot = block_sum<BLOCK>(dot_local);
+    if (tid == 0) scores[scores_base + local] = dot * scale;
+    __syncthreads();
+  }
+}
+
+template <typename scalar_t>
+__global__ void legacy_flash_attn_decode_tq512_pv_kernel(
+    const uint8_t *__restrict__ V_cache,
+    const int *__restrict__ block_tables,
+    const int *__restrict__ cu_seq_lens,
+    const float *__restrict__ scores,
+    scalar_t *__restrict__ O,
+    int num_seqs,
+    int max_seq_len,
+    int block_size,
+    int block_table_stride,
+    int num_heads,
+    int num_kv_heads,
+    int v_row_bytes,
+    int window_size) {
+  constexpr int HEAD_DIM = 512;
+  constexpr int BLOCK = 256;
+  const int head_idx = blockIdx.x;
+  const int seq_idx = blockIdx.y;
+  const int tid = threadIdx.x;
+  if (head_idx >= num_heads || seq_idx >= num_seqs) return;
+
+  const int seq_start = cu_seq_lens[seq_idx];
+  const int seq_end = cu_seq_lens[seq_idx + 1];
+  const int seq_len = seq_end - seq_start;
+  const int out_base = (seq_idx * num_heads + head_idx) * HEAD_DIM;
+
+  if (seq_len <= 0) {
+    O[out_base + tid] = from_float<scalar_t>(0.0f);
+    O[out_base + tid + BLOCK] = from_float<scalar_t>(0.0f);
+    return;
+  }
+
+  int start = 0;
+  if (window_size > 0 && seq_len > window_size) start = seq_len - window_size;
+  const int active_len = seq_len - start;
+  if (active_len > max_seq_len) return;
+
+  const int gqa_ratio = num_heads / num_kv_heads;
+  const int kv_head_idx = head_idx / gqa_ratio;
+  const int scores_base = (seq_idx * num_heads + head_idx) * max_seq_len;
+
+  __shared__ float sm_m;
+  __shared__ float sm_inv_l;
+  if (tid == 0) {
+    float m = -FLT_MAX;
+    for (int local = 0; local < active_len; ++local) {
+      m = fmaxf(m, scores[scores_base + local]);
+    }
+    float l = 0.0f;
+    for (int local = 0; local < active_len; ++local) {
+      l += expf(scores[scores_base + local] - m);
+    }
+    sm_m = m;
+    sm_inv_l = (l > 0.0f && isfinite(l)) ? (1.0f / l) : 0.0f;
+  }
+  __syncthreads();
+
+  extern __shared__ unsigned char smem[];
+  float *values = reinterpret_cast<float *>(smem);
+  float *qjl_signs = values + HEAD_DIM;
+  uint8_t *shared_row = reinterpret_cast<uint8_t *>(qjl_signs + HEAD_DIM);
+
+  float acc0 = 0.0f;
+  float acc1 = 0.0f;
+  const int d0 = tid;
+  const int d1 = tid + BLOCK;
+
+  for (int local = 0; local < active_len; ++local) {
+    const float p = expf(scores[scores_base + local] - sm_m) * sm_inv_l;
+    const int token_idx = start + local;
+    const int logical_block = token_idx / block_size;
+    const int block_offset = token_idx - logical_block * block_size;
+    const int physical_block = block_tables[seq_idx * block_table_stride + logical_block];
+    if (physical_block < 0) continue;
+
+    const int64_t v_row_index =
+        ((static_cast<int64_t>(physical_block) * num_kv_heads + kv_head_idx) * block_size + block_offset) *
+        static_cast<int64_t>(v_row_bytes);
+    const uint8_t *v_row = V_cache + v_row_index;
+
+    decode_turboquant_row_to_shared(v_row, HEAD_DIM, v_row_bytes, values, qjl_signs, shared_row);
+    acc0 += p * values[d0];
+    acc1 += p * values[d1];
+  }
+
+  O[out_base + d0] = from_float<scalar_t>(acc0);
+  O[out_base + d1] = from_float<scalar_t>(acc1);
+}
+
+template <typename scalar_t>
+void legacy_flash_attn_decode_turboquant_head512_twopass_launch(
+    const void *Q,
+    const void *K_cache,
+    const void *V_cache,
+    const int *block_tables,
+    const int *cu_seq_lens,
+    float *scores,
+    void *O,
+    int num_seqs,
+    int max_seq_len,
+    int block_size,
+    int block_table_stride,
+    int num_heads,
+    int num_kv_heads,
+    int k_row_bytes,
+    int v_row_bytes,
+    float scale,
+    int window_size,
+    cudaStream_t stream) {
+  const dim3 grid(num_heads, num_seqs);
+  const dim3 block(256);
+  const int max_row_bytes = k_row_bytes > v_row_bytes ? k_row_bytes : v_row_bytes;
+  const size_t shared_mem_bytes = 2 * 512 * sizeof(float) + max_row_bytes;
+
+  legacy_flash_attn_decode_tq512_qk_scores_kernel<scalar_t><<<grid, block, shared_mem_bytes, stream>>>(
+      reinterpret_cast<const scalar_t *>(Q),
+      reinterpret_cast<const uint8_t *>(K_cache),
+      block_tables,
+      cu_seq_lens,
+      scores,
+      num_seqs,
+      max_seq_len,
+      block_size,
+      block_table_stride,
+      num_heads,
+      num_kv_heads,
+      k_row_bytes,
+      scale,
+      window_size);
+  LEGACY_TQ_CUDA_CHECK(cudaGetLastError());
+
+  legacy_flash_attn_decode_tq512_pv_kernel<scalar_t><<<grid, block, shared_mem_bytes, stream>>>(
+      reinterpret_cast<const uint8_t *>(V_cache),
+      block_tables,
+      cu_seq_lens,
+      scores,
+      reinterpret_cast<scalar_t *>(O),
+      num_seqs,
+      max_seq_len,
+      block_size,
+      block_table_stride,
+      num_heads,
+      num_kv_heads,
+      v_row_bytes,
+      window_size);
+  LEGACY_TQ_CUDA_CHECK(cudaGetLastError());
+}
+
 template <typename scalar_t>
 void legacy_flash_attn_decode_turboquant_launch(
     const void *Q,
@@ -350,6 +595,7 @@ void legacy_flash_attn_decode_turboquant_launch(
     case 160: LEGACY_TQ_LAUNCH(160); break;
     case 192: LEGACY_TQ_LAUNCH(192); break;
     case 256: LEGACY_TQ_LAUNCH(256); break;
+    case 512: LEGACY_TQ_LAUNCH(512); break;
     default:
       fprintf(stderr, "legacy_flash_attn_decode_turboquant: unsupported head_dim=%d\n", head_dim);
       break;
@@ -410,3 +656,57 @@ extern "C" void legacy_flash_attn_decode_turboquant(
       break;
   }
 }
+
+extern "C" void legacy_flash_attn_decode_turboquant_head512_twopass(
+    const void *Q,
+    const void *K_cache,
+    const void *V_cache,
+    const int *block_tables,
+    const int *cu_seq_lens,
+    float *scores,
+    void *O,
+    int num_seqs,
+    int max_seq_len,
+    int block_size,
+    int block_table_stride,
+    int num_heads,
+    int num_kv_heads,
+    int k_row_bytes,
+    int v_row_bytes,
+    float scale,
+    int window_size,
+    cudaStream_t stream,
+    uint32_t dtype) {
+  if (num_seqs <= 0) return;
+  if (max_seq_len <= 0) return;
+  if (num_heads <= 0 || num_kv_heads <= 0) return;
+  if ((num_heads % num_kv_heads) != 0) {
+    fprintf(stderr, "legacy_flash_attn_decode_turboquant_head512_twopass: num_heads must be divisible by num_kv_heads\n");
+    return;
+  }
+
+  switch (dtype) {
+    case 0:
+      legacy_tq_attn::legacy_flash_attn_decode_turboquant_head512_twopass_launch<__half>(
+          Q, K_cache, V_cache, block_tables, cu_seq_lens, scores, O, num_seqs,
+          max_seq_len, block_size, block_table_stride, num_heads, num_kv_heads,
+          k_row_bytes, v_row_bytes, scale, window_size, stream);
+      break;
+    case 1:
+      legacy_tq_attn::legacy_flash_attn_decode_turboquant_head512_twopass_launch<__nv_bfloat16>(
+          Q, K_cache, V_cache, block_tables, cu_seq_lens, scores, O, num_seqs,
+          max_seq_len, block_size, block_table_stride, num_heads, num_kv_heads,
+          k_row_bytes, v_row_bytes, scale, window_size, stream);
+      break;
+    case 2:
+      legacy_tq_attn::legacy_flash_attn_decode_turboquant_head512_twopass_launch<float>(
+          Q, K_cache, V_cache, block_tables, cu_seq_lens, scores, O, num_seqs,
+          max_seq_len, block_size, block_table_stride, num_heads, num_kv_heads,
+          k_row_bytes, v_row_bytes, scale, window_size, stream);
+      break;
+    default:
+      fprintf(stderr, "legacy_flash_attn_decode_turboquant_head512_twopass: unsupported dtype=%u\n", dtype);
+      break;
+  }
+}
+

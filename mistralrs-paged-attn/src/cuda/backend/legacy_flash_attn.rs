@@ -24,8 +24,7 @@ struct LegacyFlashAttnDecodeDense {
 
 impl LegacyFlashAttnDecodeDense {
     fn cuda_fwd_t<
-        T: candle::cuda_backend::CudaDType
-            + candle::cuda_backend::cudarc::driver::DeviceRepr,
+        T: candle::cuda_backend::CudaDType + candle::cuda_backend::cudarc::driver::DeviceRepr,
     >(
         &self,
         q: &CudaStorage,
@@ -60,7 +59,8 @@ impl LegacyFlashAttnDecodeDense {
             _ => candle::bail!("legacy_flash_attn_decode_dense: value must be CUDA"),
         };
         let (v_batch, v_kv_heads, v_len, v_head_dim) = v_l.shape().dims4()?;
-        if (v_batch, v_kv_heads, v_len, v_head_dim) != (batch_size, num_kv_heads, kv_len, head_dim) {
+        if (v_batch, v_kv_heads, v_len, v_head_dim) != (batch_size, num_kv_heads, kv_len, head_dim)
+        {
             candle::bail!(
                 "legacy_flash_attn_decode_dense: value shape mismatch, k={:?}, v={:?}",
                 k_l.shape(),
@@ -159,8 +159,7 @@ pub fn legacy_flash_attn_decode_dense(
 }
 
 fn legacy_flash_attn_decode_paged_t<
-    T: candle::cuda_backend::CudaDType
-        + candle::cuda_backend::cudarc::driver::DeviceRepr,
+    T: candle::cuda_backend::CudaDType + candle::cuda_backend::cudarc::driver::DeviceRepr,
 >(
     query: &Tensor,
     key_cache: &Tensor,
@@ -224,7 +223,11 @@ fn legacy_flash_attn_decode_paged_t<
         );
     }
 
-    let out = Tensor::zeros((num_seqs, num_heads, head_dim), query.dtype(), query.device())?;
+    let out = Tensor::zeros(
+        (num_seqs, num_heads, head_dim),
+        query.dtype(),
+        query.device(),
+    )?;
     let dtype_code = dtype_code(query.dtype())?;
 
     let (q_s, q_l) = query.storage_and_layout();
