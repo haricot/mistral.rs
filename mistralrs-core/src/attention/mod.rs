@@ -120,6 +120,20 @@ fn repeat_kv(x: Tensor, n_rep: usize) -> Result<Tensor> {
     }
 }
 
+#[cfg(feature = "tiled_attn")]
+fn tiled_attn_enabled() -> bool {
+    std::env::var("MISTRALRS_TILED_ATTN")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
+}
+
+#[cfg(feature = "tiled_attn")]
+fn tiled_attn_trace_enabled() -> bool {
+    std::env::var("MISTRALRS_TILED_ATTN_TRACE")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
+}
+
 pub struct SdpaParams {
     pub n_kv_groups: usize,
     pub softcap: Option<f32>,
@@ -321,6 +335,48 @@ impl Sdpa {
 
         let k = repeat_kv(k.clone(), sdpa_params.n_kv_groups)?;
         let v = repeat_kv(v.clone(), sdpa_params.n_kv_groups)?;
+
+        #[cfg(feature = "tiled_attn")]
+        if tiled_attn_enabled()
+            && mask.is_none()
+            && sdpa_params.softcap.is_none_or(|x| x == 1.0)
+            && q.device().is_cuda()
+            && !mistralrs_quant::distributed::use_nccl()
+            && q.dtype() == DType::F16
+            && k.dtype() == DType::F16
+            && v.dtype() == DType::F16
+            && seq_len == 1
+            && all_head_dims_match
+            && matches!(head_dim, 256 | 512)
+        {
+            if k.dim(2)? == 0 || v.dim(2)? == 0 {
+                return Tensor::zeros(q.shape(), q.dtype(), q.device());
+            }
+
+            match candle_tiled_attn::tiled_attn_decode(q, &k, &v, sdpa_params.softmax_scale) {
+                Ok(out) => {
+                    if tiled_attn_trace_enabled() {
+                        eprintln!(
+                            "[tiled_attn_decode] q={:?} k={:?} v={:?}",
+                            q.shape(),
+                            k.shape(),
+                            v.shape()
+                        );
+                    }
+                    return Ok(out);
+                }
+                Err(err) => {
+                    if tiled_attn_trace_enabled() {
+                        eprintln!(
+                            "[tiled_attn_decode_fallback] q={:?} k={:?} v={:?} err={err}",
+                            q.shape(),
+                            k.shape(),
+                            v.shape()
+                        );
+                    }
+                }
+            }
+        }
 
         if mask.is_some_and(|x| x.rank() == 2) || mistralrs_quant::distributed::use_nccl() {
             return naive_sdpa(

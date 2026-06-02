@@ -10,6 +10,7 @@ use mistralrs_quant::{
     ShardedVarBuilder, UnquantLinear,
 };
 
+
 use crate::{
     amoe::{AnyMoeBaseModelMixin, AnyMoeConfig, AnyMoeExpertType, MlpLayer, MoeMlp},
     attention::{AttentionMask, SdpaParams},
@@ -19,7 +20,9 @@ use crate::{
         embedding, Activation, CausalMasker, GemmaRmsNorm, MatMul, Mlp, RotaryEmbedding, Sdpa,
     },
     layers_masker::PastKvLenCache,
-    paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
+paged_attention::{
+    DecodedKVCache, AttentionImplementation, ModelConfigMetadata, PagedAttention,
+},
     pipeline::{
         extract_logits,
         text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
@@ -161,93 +164,226 @@ impl Attention {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn forward(
-        &self,
-        xs: &Tensor,
-        attention_mask: &AttentionMask,
-        seqlen_offsets: &[usize],
-        kv_cache: &mut KvCache,
-        metadata: Option<((Tensor, Tensor), &PagedAttentionInputMetadata)>,
-        flash_params: &FlashParams,
-    ) -> Result<Tensor> {
-        let (b_sz, q_len, _) = xs.dims3()?;
+fn forward(
+    &self,
+    xs: &Tensor,
+    attention_mask: &AttentionMask,
+    seqlen_offsets: &[usize],
+    kv_cache: &mut KvCache,
+    metadata: Option<((Tensor, Tensor), &PagedAttentionInputMetadata)>,
+    flash_params: &FlashParams,
+) -> Result<Tensor> {
+    self.forward_with_decoded_cache(
+        xs,
+        attention_mask,
+        seqlen_offsets,
+        kv_cache,
+        metadata,
+        None,
+        flash_params,
+    )
+}
 
-        let (q, k, v) =
-            crate::ops::qkv_projections(xs, &*self.q_proj, &*self.k_proj, &*self.v_proj)?;
-        let (q, k, v) = if q_len != 1 {
-            let q = q
-                .reshape((b_sz, q_len, self.num_heads, self.head_dim))?
-                .transpose(1, 2)?;
-            let k = k
-                .reshape((b_sz, q_len, self.num_kv_heads, self.head_dim))?
-                .transpose(1, 2)?;
-            let v = v
-                .reshape((b_sz, q_len, self.num_kv_heads, self.head_dim))?
-                .transpose(1, 2)?;
-            (q, k, v)
-        } else {
-            let q = q.reshape((b_sz, self.num_heads, q_len, self.head_dim))?;
-            let k = k.reshape((b_sz, self.num_kv_heads, q_len, self.head_dim))?;
-            let v = v.reshape((b_sz, self.num_kv_heads, q_len, self.head_dim))?;
-            (q, k, v)
-        };
+#[allow(clippy::too_many_arguments)]
+fn forward_with_decoded_cache(
+    &self,
+    xs: &Tensor,
+    attention_mask: &AttentionMask,
+    seqlen_offsets: &[usize],
+    kv_cache: &mut KvCache,
+    metadata: Option<((Tensor, Tensor), &PagedAttentionInputMetadata)>,
+    mut decoded_cache: Option<&mut DecodedKVCache>,
+    flash_params: &FlashParams,
+) -> Result<Tensor> {
+    let (b_sz, q_len, _) = xs.dims3()?;
 
-        let (q, k) = self.rotary_emb.forward(&q, &k, seqlen_offsets)?;
+    let (q, k, v) =
+        crate::ops::qkv_projections(xs, &*self.q_proj, &*self.k_proj, &*self.v_proj)?;
 
-        let mut attn_output = match &self.paged_attn {
-            Some(paged_attn) => match metadata {
-                Some(((key_cache, value_cache), input_metadata)) => paged_attn.forward(
-                    &q,
-                    &k,
-                    &v,
-                    attention_mask,
-                    Some(key_cache),
-                    Some(value_cache),
-                    input_metadata,
-                    &self.sdpa_params,
-                    Some(flash_params),
-                )?,
-                None => {
-                    // If we don't have metadata, we are most likely generating an imatrix so we don't want to populate that.
-                    // Generating the dummy metadata with the assumption that we are not generating text (only processing prompts).
-                    let input_metadata = PagedAttentionInputMetadata::dummy(q.device())?;
-                    // Sanity check.
-                    assert!(attention_mask.is_custom());
+    let (q, k, v) = if q_len != 1 {
+        let q = q
+            .reshape((b_sz, q_len, self.num_heads, self.head_dim))?
+            .transpose(1, 2)?;
+        let k = k
+            .reshape((b_sz, q_len, self.num_kv_heads, self.head_dim))?
+            .transpose(1, 2)?;
+        let v = v
+            .reshape((b_sz, q_len, self.num_kv_heads, self.head_dim))?
+            .transpose(1, 2)?;
+        (q, k, v)
+    } else {
+        let q = q.reshape((b_sz, self.num_heads, q_len, self.head_dim))?;
+        let k = k.reshape((b_sz, self.num_kv_heads, q_len, self.head_dim))?;
+        let v = v.reshape((b_sz, self.num_kv_heads, q_len, self.head_dim))?;
+        (q, k, v)
+    };
+
+    let (q, k) = self.rotary_emb.forward(&q, &k, seqlen_offsets)?;
+
+    let mut attn_output = match &self.paged_attn {
+        Some(paged_attn) => match metadata {
+            Some(((key_cache, value_cache), input_metadata)) => {
+                if let Some(decoded_cache) = decoded_cache.as_deref_mut() {
+                    paged_attn.forward_with_decoded_cache(
+                        &q,
+                        &k,
+                        &v,
+                        attention_mask,
+                        Some(key_cache),
+                        Some(value_cache),
+                        Some(decoded_cache),
+                        input_metadata,
+                        &self.sdpa_params,
+                        Some(flash_params),
+                    )?
+                } else {
                     paged_attn.forward(
                         &q,
                         &k,
                         &v,
                         attention_mask,
-                        None,
-                        None,
-                        &input_metadata,
+                        Some(key_cache),
+                        Some(value_cache),
+                        input_metadata,
                         &self.sdpa_params,
                         Some(flash_params),
                     )?
                 }
-            },
+            }
             None => {
-                let (k, v) = kv_cache.append(&k, &v)?;
+                // If we don't have metadata, we are most likely generating an imatrix,
+                // so we don't want to populate the paged cache.
+                let input_metadata = PagedAttentionInputMetadata::dummy(q.device())?;
 
-                Sdpa.run_attention(
+                assert!(attention_mask.is_custom());
+
+                paged_attn.forward(
                     &q,
                     &k,
                     &v,
                     attention_mask,
-                    Some(flash_params),
+                    None,
+                    None,
+                    &input_metadata,
                     &self.sdpa_params,
+                    Some(flash_params),
                 )?
             }
-        };
+        },
+        None => {
+            let (k, v) = kv_cache.append(&k, &v)?;
 
-        attn_output = if attention_mask.is_custom() {
-            attn_output.transpose(1, 2)?.reshape((b_sz, q_len, ()))?
-        } else {
-            attn_output.reshape((b_sz, q_len, ()))?
-        };
-        let res = self.o_proj.forward(&attn_output)?;
-        Ok(res)
-    }
+            Sdpa.run_attention(
+                &q,
+                &k,
+                &v,
+                attention_mask,
+                Some(flash_params),
+                &self.sdpa_params,
+            )?
+        }
+    };
+
+    attn_output = if attention_mask.is_custom() {
+        attn_output.transpose(1, 2)?.reshape((b_sz, q_len, ()))?
+    } else {
+        attn_output.reshape((b_sz, q_len, ()))?
+    };
+
+    self.o_proj.forward(&attn_output)
+}
+
+    // #[allow(clippy::too_many_arguments)]
+    // fn forward(
+    //     &self,
+    //     xs: &Tensor,
+    //     attention_mask: &AttentionMask,
+    //     seqlen_offsets: &[usize],
+    //     kv_cache: &mut KvCache,
+    //     metadata: Option<((Tensor, Tensor), &PagedAttentionInputMetadata)>,
+    //     flash_params: &FlashParams,
+    // ) -> Result<Tensor> {
+    //     let (b_sz, q_len, _) = xs.dims3()?;
+
+    //     let (q, k, v) =
+    //         crate::ops::qkv_projections(xs, &*self.q_proj, &*self.k_proj, &*self.v_proj)?;
+    //     let (q, k, v) = if q_len != 1 {
+    //         let q = q
+    //             .reshape((b_sz, q_len, self.num_heads, self.head_dim))?
+    //             .transpose(1, 2)?;
+    //         let k = k
+    //             .reshape((b_sz, q_len, self.num_kv_heads, self.head_dim))?
+    //             .transpose(1, 2)?;
+    //         let v = v
+    //             .reshape((b_sz, q_len, self.num_kv_heads, self.head_dim))?
+    //             .transpose(1, 2)?;
+    //         (q, k, v)
+    //     } else {
+    //         let q = q.reshape((b_sz, self.num_heads, q_len, self.head_dim))?;
+    //         let k = k.reshape((b_sz, self.num_kv_heads, q_len, self.head_dim))?;
+    //         let v = v.reshape((b_sz, self.num_kv_heads, q_len, self.head_dim))?;
+    //         (q, k, v)
+    //     };
+
+    //     let (q, k) = self.rotary_emb.forward(&q, &k, seqlen_offsets)?;
+
+    //     let mut attn_output = match &self.paged_attn {
+    //         Some(paged_attn) => match metadata {
+    //             Some(((key_cache, value_cache), input_metadata)) => paged_attn.forward(
+    //                 &q,
+    //                 &k,
+    //                 &v,
+    //                 attention_mask,
+    //                 Some(key_cache),
+    //                 Some(value_cache),
+    //                 input_metadata,
+    //                 &self.sdpa_params,
+    //                 Some(flash_params),
+    //             )?,
+    //             None => {
+    //                 // If we don't have metadata, we are most likely generating an imatrix so we don't want to populate that.
+    //                 // Generating the dummy metadata with the assumption that we are not generating text (only processing prompts).
+    //                 let input_metadata = PagedAttentionInputMetadata::dummy(q.device())?;
+    //                 // Sanity check.
+    //                 assert!(attention_mask.is_custom());
+
+                  
+
+    //                 paged_attn.forward(
+    //                     &q,
+    //                     &k,
+    //                     &v,
+    //                     attention_mask,
+    //                     None,
+    //                     None,
+    //                     &input_metadata,
+    //                     &self.sdpa_params,
+    //                     Some(flash_params),
+    //                 )?
+    //             }
+    //         },
+    //         None => {
+    //             let (k, v) = kv_cache.append(&k, &v)?;
+
+    //             Sdpa.run_attention(
+    //                 &q,
+    //                 &k,
+    //                 &v,
+    //                 attention_mask,
+    //                 Some(flash_params),
+    //                 &self.sdpa_params,
+    //             )?
+    //         }
+    //     };
+
+    //     attn_output = if attention_mask.is_custom() {
+    //         attn_output.transpose(1, 2)?.reshape((b_sz, q_len, ()))?
+    //     } else {
+    //         attn_output.reshape((b_sz, q_len, ()))?
+    //     };
+    //     let res = self.o_proj.forward(&attn_output)?;
+    //     Ok(res)
+    // }
 }
 
 struct DecoderLayer {
@@ -302,33 +438,90 @@ impl DecoderLayer {
         })
     }
 
+    // #[allow(clippy::too_many_arguments)]
+    // fn forward(
+    //     &self,
+    //     xs: &Tensor,
+    //     attention_mask: &AttentionMask,
+    //     seqlen_offsets: &[usize],
+    //     kv_cache: &mut KvCache,
+    //     metadata: Option<((Tensor, Tensor), &PagedAttentionInputMetadata)>,
+    //     flash_params: &FlashParams,
+    // ) -> Result<Tensor> {
+    //     let residual = xs;
+    //     let xs = self.input_layernorm.forward(xs)?;
+    //     let xs = self.self_attn.forward(
+    //         &xs,
+    //         attention_mask,
+    //         seqlen_offsets,
+    //         kv_cache,
+    //         metadata,
+    //         flash_params,
+    //     )?;
+    //     let xs = (xs + residual)?;
+    //     let residual = &xs;
+    //     let xs = self
+    //         .mlp
+    //         .forward(&xs.apply(&self.post_attention_layernorm)?)?;
+    //     residual + xs
+    // }
+
     #[allow(clippy::too_many_arguments)]
-    fn forward(
-        &self,
-        xs: &Tensor,
-        attention_mask: &AttentionMask,
-        seqlen_offsets: &[usize],
-        kv_cache: &mut KvCache,
-        metadata: Option<((Tensor, Tensor), &PagedAttentionInputMetadata)>,
-        flash_params: &FlashParams,
-    ) -> Result<Tensor> {
-        let residual = xs;
-        let xs = self.input_layernorm.forward(xs)?;
-        let xs = self.self_attn.forward(
-            &xs,
-            attention_mask,
-            seqlen_offsets,
-            kv_cache,
-            metadata,
-            flash_params,
-        )?;
-        let xs = (xs + residual)?;
-        let residual = &xs;
-        let xs = self
-            .mlp
-            .forward(&xs.apply(&self.post_attention_layernorm)?)?;
-        residual + xs
-    }
+fn forward(
+    &self,
+    xs: &Tensor,
+    attention_mask: &AttentionMask,
+    seqlen_offsets: &[usize],
+    kv_cache: &mut KvCache,
+    metadata: Option<((Tensor, Tensor), &PagedAttentionInputMetadata)>,
+    flash_params: &FlashParams,
+) -> Result<Tensor> {
+    self.forward_with_decoded_cache(
+        xs,
+        attention_mask,
+        seqlen_offsets,
+        kv_cache,
+        metadata,
+        None,
+        flash_params,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn forward_with_decoded_cache(
+    &self,
+    xs: &Tensor,
+    attention_mask: &AttentionMask,
+    seqlen_offsets: &[usize],
+    kv_cache: &mut KvCache,
+    metadata: Option<((Tensor, Tensor), &PagedAttentionInputMetadata)>,
+    decoded_cache: Option<&mut DecodedKVCache>,
+    flash_params: &FlashParams,
+) -> Result<Tensor> {
+    let residual = xs;
+    let xs = self.input_layernorm.forward(xs)?;
+
+    let xs = self.self_attn.forward_with_decoded_cache(
+        &xs,
+        attention_mask,
+        seqlen_offsets,
+        kv_cache,
+        metadata,
+        decoded_cache,
+        flash_params,
+    )?;
+
+    let xs = (xs + residual)?;
+    let residual = &xs;
+
+    let xs = self
+        .mlp
+        .forward(&xs.apply(&self.post_attention_layernorm)?)?;
+
+    residual + xs
+}
+
+
 }
 
 pub struct Model {
@@ -456,7 +649,7 @@ impl Model {
         })
     }
 
-    pub fn forward(
+      pub fn forward(
         &self,
         input_ids: &Tensor,
         seqlen_offsets: &[usize],
@@ -464,47 +657,132 @@ impl Model {
         metadata: Option<(Vec<(Tensor, Tensor)>, &PagedAttentionInputMetadata)>,
         flash_params: &FlashParams,
     ) -> Result<Tensor> {
-        let xs = self.embed_tokens.forward(input_ids)?;
-        let mut xs = (xs * (self.hidden_size as f64).sqrt())?;
-        let cache = &mut self.cache.normal().0;
-        let attention_mask = CausalMasker.make_causal_mask(
+        self.forward_with_decoded_cache(
             input_ids,
+            seqlen_offsets,
+            context_lens,
+            metadata,
+            None,
+            flash_params,
+        )
+
+       
+    }
+
+    // pub fn forward(
+    //     &self,
+    //     input_ids: &Tensor,
+    //     seqlen_offsets: &[usize],
+    //     context_lens: Vec<(usize, usize)>,
+    //     metadata: Option<(Vec<(Tensor, Tensor)>, &PagedAttentionInputMetadata)>,
+    //     flash_params: &FlashParams,
+    // ) -> Result<Tensor> {
+    //     let xs = self.embed_tokens.forward(input_ids)?;
+    //     let mut xs = (xs * (self.hidden_size as f64).sqrt())?;
+    //     let cache = &mut self.cache.normal().0;
+    //     let attention_mask = CausalMasker.make_causal_mask(
+    //         input_ids,
+    //         metadata
+    //             .as_ref()
+    //             .map(|(_, _)| &seqlen_offsets as &dyn PastKvLenCache)
+    //             .unwrap_or(cache as &dyn PastKvLenCache),
+    //         xs.dtype(),
+    //         &CausalMaskConfig::default(),
+    //     )?;
+    //     // PagedAttention prompt chunking
+    //     let attention_mask = if !metadata
+    //         .as_ref()
+    //         .map(|(_, meta)| meta.is_first_prompt_chunk)
+    //         .unwrap_or(true)
+    //     {
+    //         AttentionMask::None
+    //     } else {
+    //         attention_mask
+    //     };
+    //     let attention_mask = DeviceMappedMask::new(attention_mask, &*self.mapper)?;
+    //     for (i, layer) in self.layers.iter().enumerate() {
+    //         xs = self.mapper.map(xs, i)?;
+    //         xs = layer.forward(
+    //             &xs,
+    //             &attention_mask.get(xs.device()),
+    //             seqlen_offsets,
+    //             &mut cache[i],
+    //             metadata
+    //                 .as_ref()
+    //                 .map(|(kv_cache, metadata)| (kv_cache[i].clone(), *metadata)),
+    //             flash_params,
+    //         )?;
+    //     }
+    //     let xs = xs.to_device(&self.device)?;
+    //     let xs = xs.apply(&self.norm)?;
+    //     let xs = extract_logits(&xs, context_lens)?;
+    //     self.lm_head.forward(&xs)
+    // }
+
+#[allow(clippy::too_many_arguments)]
+pub fn forward_with_decoded_cache(
+    &self,
+    input_ids: &Tensor,
+    seqlen_offsets: &[usize],
+    context_lens: Vec<(usize, usize)>,
+    metadata: Option<(Vec<(Tensor, Tensor)>, &PagedAttentionInputMetadata)>,
+    mut decoded_caches: Option<&mut [DecodedKVCache]>,
+    flash_params: &FlashParams,
+) -> Result<Tensor> {
+    let xs = self.embed_tokens.forward(input_ids)?;
+    let mut xs = (xs * (self.hidden_size as f64).sqrt())?;
+
+    let cache = &mut self.cache.normal().0;
+
+    let attention_mask = CausalMasker.make_causal_mask(
+        input_ids,
+        metadata
+            .as_ref()
+            .map(|(_, _)| &seqlen_offsets as &dyn PastKvLenCache)
+            .unwrap_or(cache as &dyn PastKvLenCache),
+        xs.dtype(),
+        &CausalMaskConfig::default(),
+    )?;
+
+    let attention_mask = if !metadata
+        .as_ref()
+        .map(|(_, meta)| meta.is_first_prompt_chunk)
+        .unwrap_or(true)
+    {
+        AttentionMask::None
+    } else {
+        attention_mask
+    };
+
+    let attention_mask = DeviceMappedMask::new(attention_mask, &*self.mapper)?;
+
+    for (i, layer) in self.layers.iter().enumerate() {
+        xs = self.mapper.map(xs, i)?;
+
+        let decoded_cache = decoded_caches
+            .as_deref_mut()
+            .and_then(|decoded| decoded.get_mut(i));
+
+        xs = layer.forward_with_decoded_cache(
+            &xs,
+            &attention_mask.get(xs.device()),
+            seqlen_offsets,
+            &mut cache[i],
             metadata
                 .as_ref()
-                .map(|(_, _)| &seqlen_offsets as &dyn PastKvLenCache)
-                .unwrap_or(cache as &dyn PastKvLenCache),
-            xs.dtype(),
-            &CausalMaskConfig::default(),
+                .map(|(kv_cache, metadata)| (kv_cache[i].clone(), *metadata)),
+            decoded_cache,
+            flash_params,
         )?;
-        // PagedAttention prompt chunking
-        let attention_mask = if !metadata
-            .as_ref()
-            .map(|(_, meta)| meta.is_first_prompt_chunk)
-            .unwrap_or(true)
-        {
-            AttentionMask::None
-        } else {
-            attention_mask
-        };
-        let attention_mask = DeviceMappedMask::new(attention_mask, &*self.mapper)?;
-        for (i, layer) in self.layers.iter().enumerate() {
-            xs = self.mapper.map(xs, i)?;
-            xs = layer.forward(
-                &xs,
-                &attention_mask.get(xs.device()),
-                seqlen_offsets,
-                &mut cache[i],
-                metadata
-                    .as_ref()
-                    .map(|(kv_cache, metadata)| (kv_cache[i].clone(), *metadata)),
-                flash_params,
-            )?;
-        }
-        let xs = xs.to_device(&self.device)?;
-        let xs = xs.apply(&self.norm)?;
-        let xs = extract_logits(&xs, context_lens)?;
-        self.lm_head.forward(&xs)
     }
+
+    let xs = xs.to_device(&self.device)?;
+    let xs = xs.apply(&self.norm)?;
+    let xs = extract_logits(&xs, context_lens)?;
+
+    self.lm_head.forward(&xs)
+}
+
 }
 
 impl IsqModel for Model {

@@ -2,22 +2,19 @@ use std::collections::HashMap;
 
 use candle_core::{DType, Device, Result, Tensor};
 #[allow(unused_imports)]
-use mistralrs_paged_attn::{
-    kv_scale_update, paged_attention, reshape_and_cache,
-};
+use mistralrs_paged_attn::{kv_scale_update, paged_attention, reshape_and_cache};
 
 const KV_SCALE_UPDATE_ITERATION: i32 = 128;
 use std::sync::atomic::{AtomicI32, Ordering};
 
 use crate::{
-    attention::{AttentionMask, SdpaParams, },
+    attention::{AttentionMask, SdpaParams},
     layers::Sdpa,
-    paged_attention::{turboquant_cache, _PAD_SLOT_ID, cache_engine::DecodedKVCache},
+    paged_attention::{cache_engine::DecodedKVCache, turboquant_cache, _PAD_SLOT_ID},
     pipeline::text_models_inputs_processor::{
         FlashKMeta, FlashParams, PagedAttentionInputMetadata,
     },
 };
-
 
 
 fn resolve_tensor_for_device(
@@ -159,20 +156,20 @@ impl PagedAttention {
         clippy::cast_possible_truncation,
         unused_variables
     )]
-fn forward_impl(
-    &self,
-    query: &Tensor,
-    key: &Tensor,
-    value: &Tensor,
-    attention_mask: &AttentionMask,
-    mut key_cache: Option<Tensor>,
-    mut value_cache: Option<Tensor>,
-    mut decoded_cache: Option<&mut DecodedKVCache>,
-    input_metadata: &PagedAttentionInputMetadata,
-    sdpa_params: &SdpaParams,
-    flash_params: Option<&FlashParams>,
-    write_cache: bool,
-) -> Result<Tensor> {
+    fn forward_impl(
+        &self,
+        query: &Tensor,
+        key: &Tensor,
+        value: &Tensor,
+        attention_mask: &AttentionMask,
+        mut key_cache: Option<Tensor>,
+        mut value_cache: Option<Tensor>,
+        mut decoded_cache: Option<&mut DecodedKVCache>,
+        input_metadata: &PagedAttentionInputMetadata,
+        sdpa_params: &SdpaParams,
+        flash_params: Option<&FlashParams>,
+        write_cache: bool,
+    ) -> Result<Tensor> {
         if write_cache {
             if let (Some(k_scale), Some(v_scale), Some(key_cache)) =
                 (&self.k_scale, &self.v_scale, &key_cache)
@@ -456,23 +453,11 @@ fn forward_impl(
             // Return result in prefill or first prefix chunk
             return Ok(att);
         }
-
-        // if write_cache && key_cache.as_ref().is_some_and(|_| value_cache.is_some()) {
-        //     if uses_turboquant_cache {
-        //         turboquant_cache::reshape_and_cache(
-        //             &key,
-        //             &value,
-        //             key_cache.as_mut().unwrap(),
-        //             value_cache.as_mut().unwrap(),
-        //             slot_mapping,
-        //         )?;
-        //     }
-        // }
         // === Decode path ===
         #[allow(clippy::cast_possible_truncation)]
         let dev = query.device().location();
         if uses_turboquant_cache {
-    if alibi_slopes.is_some() {
+            if alibi_slopes.is_some() {
         candle_core::bail!("TurboQuant paged KV cache does not support alibi slopes yet.");
     }
 
@@ -578,109 +563,6 @@ fn forward_impl(
 }
 
 
-
-
-
-
-        // if uses_turboquant_cache {
-        //     if alibi_slopes.is_some() {
-        //         candle_core::bail!("TurboQuant paged KV cache does not support alibi slopes yet.");
-        //     }
-
-        //     let block_tables = resolve_block_tables(&dev).unwrap();
-        //     let context_lens = resolve_context_lens(&dev).unwrap();
-        //     let kv_lens = context_lens_to_lengths(context_lens)?;
-        //     let cu_kv = cumulative_seqlens_from_lengths(&kv_lens, query.device())?;
-
-        //     #[cfg(feature = "cuda")]
-        //     {
-        //         let allow_legacy = std::env::var("ALLOW_LEGACY")
-        //             .map(|v| !v.trim().is_empty())
-        //             .unwrap_or(false);
-
-        //         let can_try_legacy_turboquant = allow_legacy
-        //             && query.device().is_cuda()
-        //             && seq_len == 1
-        //             && sdpa_params.softcap.is_none()
-        //             && sdpa_params.sinks.is_none()
-        //             && alibi_slopes.is_none();
-
-        //         if can_try_legacy_turboquant {
-        //             if std::env::var("MISTRALRS_LEGACY_FLASH_ATTN_TRACE")
-        //                 .map(|v| !v.trim().is_empty())
-        //                 .unwrap_or(false)
-        //             {
-        //                 eprintln!(
-        //         "[legacy_flash_attn_turboquant] decode query={:?} key_cache={:?} value_cache={:?}",
-        //         query.shape(),
-        //         key_cache.as_ref().unwrap().shape(),
-        //         value_cache.as_ref().unwrap().shape(),
-        //     );
-        //             }
-
-        //             return mistralrs_paged_attn::legacy_flash_attn_decode_turboquant(
-        //                 &query,
-        //                 key_cache.as_ref().unwrap(),
-        //                 value_cache.as_ref().unwrap(),
-        //                 block_tables,
-        //                 &cu_kv,
-        //                 sdpa_params.softmax_scale,
-        //                 sdpa_params.sliding_window.unwrap_or(0),
-        //             );
-        //         }
-        //     }
-
-        //     let (k_gathered, v_gathered) = turboquant_cache::gather_kv_cache(
-        //         key_cache.as_ref().unwrap(),
-        //         value_cache.as_ref().unwrap(),
-        //         block_tables,
-        //         &cu_kv,
-        //         query.dtype(),
-        //     )?;
-        //     let k_batched = unpack_gathered_kv(
-        //         &k_gathered,
-        //         &kv_lens,
-        //         key_value_heads,
-        //         head_size,
-        //         query.device(),
-        //     )?;
-        //     let v_batched = unpack_gathered_kv(
-        //         &v_gathered,
-        //         &kv_lens,
-        //         key_value_heads,
-        //         head_size,
-        //         query.device(),
-        //     )?;
-        //     let num_query_rows = query.dim(0)?;
-        //     let query = if kv_lens.len() == num_query_rows {
-        //         query.unsqueeze(2)?
-        //     } else if kv_lens.len() == batch_size {
-        //         query
-        //             .reshape((batch_size, seq_len, attention_heads, head_size))?
-        //             .transpose(1, 2)?
-        //     } else {
-        //         candle_core::bail!(
-        //             "TurboQuant decode metadata mismatch: {} KV rows for query shape {:?}",
-        //             kv_lens.len(),
-        //             query.shape()
-        //         );
-        //     };
-        //     let attn = Sdpa.run_attention(
-        //         &query,
-        //         &k_batched,
-        //         &v_batched,
-        //         &AttentionMask::None,
-        //         None,
-        //         sdpa_params,
-        //     )?;
-        //     return if kv_lens.len() == num_query_rows {
-        //         attn.reshape((num_query_rows, attention_heads, head_size))
-        //     } else {
-        //         attn.transpose(1, 2)?
-        //             .reshape((num_query_rows, attention_heads, head_size))
-        //     };
-        // }
-
         let res = paged_attention(
             &query,
             self.k_scale.as_ref(),
@@ -704,49 +586,68 @@ fn forward_impl(
     }
 
 
-//     pub fn invalidate_decoded_blocks_from_slot_mapping(
-//     decoded_cache: &mut DecodedKVCache,
-//     slot_mapping: &Tensor,
-// ) -> Result<()>
-
-// pub fn ensure_decoded_block_cache(
-//     decoded_cache: &mut DecodedKVCache,
-//     turboquant_key_cache: &Tensor,
-//     turboquant_value_cache: &Tensor,
-//     block_tables: &Tensor,
-//     context_lens: &Tensor,
-//     out_dtype: DType,
-// ) -> Result<Tensor>
-
     /// Standard paged attention forward: writes key/value to cache, then
     /// runs attention (Sdpa for prompt, paged kernel for decode).
+    ///
+    /// Compatibility wrapper for existing model call-sites: no decoded
+    /// TurboQuant block cache is provided.
     #[allow(clippy::too_many_arguments)]
-pub fn forward(
-    &self,
-    query: &Tensor,
-    key: &Tensor,
-    value: &Tensor,
-    attention_mask: &AttentionMask,
-    key_cache: Option<Tensor>,
-    value_cache: Option<Tensor>,
-    decoded_cache: Option<&mut DecodedKVCache>,
-    input_metadata: &PagedAttentionInputMetadata,
-    sdpa_params: &SdpaParams,
-    flash_params: Option<&FlashParams>,
-) -> Result<Tensor> {
-self.forward_impl(
-    query,
-    key,
-    value,
-    attention_mask,
-    key_cache,
-    value_cache,
-    decoded_cache,
-    input_metadata,
-    sdpa_params,
-    flash_params,
-    true,
-)
+    pub fn forward(
+        &self,
+        query: &Tensor,
+        key: &Tensor,
+        value: &Tensor,
+        attention_mask: &AttentionMask,
+        key_cache: Option<Tensor>,
+        value_cache: Option<Tensor>,
+        input_metadata: &PagedAttentionInputMetadata,
+        sdpa_params: &SdpaParams,
+        flash_params: Option<&FlashParams>,
+    ) -> Result<Tensor> {
+        self.forward_impl(
+            query,
+            key,
+            value,
+            attention_mask,
+            key_cache,
+            value_cache,
+            None,
+            input_metadata,
+            sdpa_params,
+            flash_params,
+            true,
+        )
+    }
+
+    /// Same as [`forward`], but enables the optional decoded TurboQuant block
+    /// cache used by `turboquant_cached:<mb>` / `turboquant_legacy:<mb>`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_with_decoded_cache(
+        &self,
+        query: &Tensor,
+        key: &Tensor,
+        value: &Tensor,
+        attention_mask: &AttentionMask,
+        key_cache: Option<Tensor>,
+        value_cache: Option<Tensor>,
+        decoded_cache: Option<&mut DecodedKVCache>,
+        input_metadata: &PagedAttentionInputMetadata,
+        sdpa_params: &SdpaParams,
+        flash_params: Option<&FlashParams>,
+    ) -> Result<Tensor> {
+        self.forward_impl(
+            query,
+            key,
+            value,
+            attention_mask,
+            key_cache,
+            value_cache,
+            decoded_cache,
+            input_metadata,
+            sdpa_params,
+            flash_params,
+            true,
+        )
     }
 
     /// Read-only paged attention against a donor layer's cache. Identical to
@@ -767,18 +668,18 @@ self.forward_impl(
         // key/value are unused (donor's cache already has them), but
         // forward_impl needs tensors for shape queries. Reuse query as
         // a placeholder, reshape_and_cache is skipped so they're never read.
-self.forward_impl(
-    query,
-    query,
-    query,
-    attention_mask,
-    Some(key_cache.clone()),
-    Some(value_cache.clone()),
-    None,
-    input_metadata,
-    sdpa_params,
-    flash_params,
-    false,
-)
+        self.forward_impl(
+            query,
+            query,
+            query,
+            attention_mask,
+            Some(key_cache.clone()),
+            Some(value_cache.clone()),
+            None,
+            input_metadata,
+            sdpa_params,
+            flash_params,
+            false,
+        )
     }
 }

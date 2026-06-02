@@ -16,7 +16,7 @@ mod scheduler;
 pub(crate) mod turboquant_cache;
 pub const _PAD_SLOT_ID: i64 = -1;
 
-pub use cache_engine::{CacheConfig, CacheEngine, PagedCacheType};
+pub use cache_engine::{CacheConfig, CacheEngine, PagedCacheType, DecodedKVCache};
 use candle_core::{DType, Device};
 pub use config::{KvCacheLayout, ModelConfigLike, ModelConfigMetadata};
 pub use kv_cache_manager::KVCacheManager;

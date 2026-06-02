@@ -520,6 +520,14 @@ impl CacheEngine {
         device: &Device,
         layer_devices: Vec<Option<Device>>,
     ) -> Result<Option<Vec<DecodedKVCache>>> {
+
+if let Some(decoded_mb) = cache_config.cache_type.turboquant_cache_decoded_size() {
+    tracing::info!(
+        "TurboQuant decoded block cache enabled: {} MB",
+        decoded_mb
+    );
+}
+        
         let Some(decoded_cache_mb) = cache_config.cache_type.turboquant_cache_decoded_size() else {
             return Ok(None);
         };

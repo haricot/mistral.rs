@@ -696,6 +696,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "candle-tiled-attn"
+version = "0.10.2"
+dependencies = [
+ "candle-core",
+ "cudaforge",
+ "half",
+]
+
+[[package]]
 name = "candle-ug"
 version = "0.10.2"
 dependencies = [
@@ -3513,6 +3522,7 @@ dependencies = [
  "candle-flash-attn-v3",
  "candle-metal-kernels",
  "candle-nn",
+ "candle-tiled-attn",
  "cfgrammar",
  "chrono",
  "clap",
