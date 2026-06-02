@@ -98,7 +98,12 @@ impl PagedCacheType {
         block_size: usize,
     ) -> Result<usize> {
         match (self, model_config.kv_cache_layout()) {
-            (PagedCacheType::TurboQuant(), KvCacheLayout::Standard) => {
+            (
+                PagedCacheType::TurboQuant(),
+                KvCacheLayout::Standard
+                | KvCacheLayout::StandardNoFlashInfer
+                | KvCacheLayout::FlashInferHnd,
+            ) => {
                 let mut bytes_per_token = 0;
                 for layer_idx in 0..model_config.num_layers() {
                     let heads = model_config.num_kv_heads_for_layer(layer_idx);
@@ -111,7 +116,12 @@ impl PagedCacheType {
                 }
                 Ok(bytes_per_token * block_size)
             }
-            (PagedCacheType::TurboQuantCached { .. }, KvCacheLayout::Standard) => {
+            (
+                PagedCacheType::TurboQuantCached { .. },
+                KvCacheLayout::Standard
+                | KvCacheLayout::StandardNoFlashInfer
+                | KvCacheLayout::FlashInferHnd,
+            ) => {
                 let mut bytes_per_token = 0;
                 for layer_idx in 0..model_config.num_layers() {
                     let heads = model_config.num_kv_heads_for_layer(layer_idx);
@@ -133,7 +143,12 @@ impl PagedCacheType {
                     "TurboQuantCached paged KV cache does not support MLA cache layout."
                 )
             }
-            (_, KvCacheLayout::Standard) => {
+            (
+                _,
+                KvCacheLayout::Standard
+                | KvCacheLayout::StandardNoFlashInfer
+                | KvCacheLayout::FlashInferHnd,
+            ) => {
                 let dtype = self.to_dtype(act_dtype)?;
                 let mut elements_per_token = 0;
                 for layer_idx in 0..model_config.num_layers() {
@@ -266,7 +281,9 @@ impl CacheEngine {
             let (key_blocks, value_blocks) = match (cache_config.cache_type, kv_cache_layout) {
                 (
                     PagedCacheType::TurboQuant() | PagedCacheType::TurboQuantCached { .. },
-                    KvCacheLayout::Standard,
+                    KvCacheLayout::Standard
+                    | KvCacheLayout::StandardNoFlashInfer
+                    | KvCacheLayout::FlashInferHnd,
                 ) => {
                     let num_heads = model_config.num_kv_heads_for_layer(layer_idx);
                     let key_row_bytes =
@@ -303,7 +320,12 @@ impl CacheEngine {
                         "TurboQuant paged KV cache does not support MLA cache layout."
                     )
                 }
-                (_, KvCacheLayout::Standard) => {
+                (
+                    _,
+                    KvCacheLayout::Standard
+                    | KvCacheLayout::StandardNoFlashInfer
+                    | KvCacheLayout::FlashInferHnd,
+                ) => {
                     let key_block_shape = Self::calculate_key_block_shape(
                         model_config,
                         dtype,
@@ -520,14 +542,10 @@ impl CacheEngine {
         device: &Device,
         layer_devices: Vec<Option<Device>>,
     ) -> Result<Option<Vec<DecodedKVCache>>> {
+        if let Some(decoded_mb) = cache_config.cache_type.turboquant_cache_decoded_size() {
+            tracing::info!("TurboQuant decoded block cache enabled: {} MB", decoded_mb);
+        }
 
-if let Some(decoded_mb) = cache_config.cache_type.turboquant_cache_decoded_size() {
-    tracing::info!(
-        "TurboQuant decoded block cache enabled: {} MB",
-        decoded_mb
-    );
-}
-        
         let Some(decoded_cache_mb) = cache_config.cache_type.turboquant_cache_decoded_size() else {
             return Ok(None);
         };

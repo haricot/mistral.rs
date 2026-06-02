@@ -2,10 +2,7 @@
 
 use std::{
     collections::HashMap,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
-    },
+    sync::{Arc, Mutex},
 };
 
 use candle_core::{DType, Device, Module, Result, Tensor, D};
@@ -27,9 +24,8 @@ use crate::{
     moe::{MoEExperts, MoEExpertsConfig},
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
     pipeline::{
-        extract_logits,
         text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
-        EitherCache, IsqModel, KvCache, NormalLoadingMetadata, ISQ_CPU_DEVICE_SENTINEL,
+        EitherCache, IsqModel, KvCache, ModelForwardContext, NormalLoadingMetadata,
     },
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
@@ -265,71 +261,6 @@ impl FullAttention {
 
 // ====================== MoE ======================
 
-fn cpu_moe_enabled() -> bool {
-    crate::topology::cpu_moe_enabled()
-}
-
-static LOG_CPU_MOE: AtomicBool = AtomicBool::new(false);
-static LOG_SANITIZED_FINAL_HIDDEN: AtomicBool = AtomicBool::new(false);
-static LOG_CLAMPED_FINAL_NORM_INPUT: AtomicBool = AtomicBool::new(false);
-const LEGACY_CUDA_QWEN35_HIDDEN_CLAMP: f64 = 100.0;
-
-fn clamp_final_norm_input_for_legacy_cuda(xs: Tensor) -> Result<Tensor> {
-    if !matches!(xs.dtype(), DType::F16 | DType::BF16)
-        || !crate::utils::is_legacy_cuda_device(xs.device())
-    {
-        return Ok(xs);
-    }
-
-    if !LOG_CLAMPED_FINAL_NORM_INPUT.swap(true, Ordering::Relaxed) {
-        tracing::warn!(
-            "Clamping Qwen3.5-MoE hidden state before final RMSNorm on legacy CUDA for reduced-precision stability."
-        );
-    }
-
-    xs.clamp(
-        -LEGACY_CUDA_QWEN35_HIDDEN_CLAMP,
-        LEGACY_CUDA_QWEN35_HIDDEN_CLAMP,
-    )
-}
-
-fn sanitize_final_hidden_for_legacy_cuda(xs: Tensor) -> Result<Tensor> {
-    if !matches!(xs.dtype(), DType::F16 | DType::BF16)
-        || !crate::utils::is_legacy_cuda_device(xs.device())
-    {
-        return Ok(xs);
-    }
-
-    let device = xs.device().clone();
-    let shape = xs.shape().clone();
-    let mut values = xs
-        .to_dtype(DType::F32)?
-        .to_device(&Device::Cpu)?
-        .flatten_all()?
-        .to_vec1::<f32>()?;
-    let mut changed = false;
-    for value in values.iter_mut() {
-        if value.is_nan() {
-            *value = 0.0;
-            changed = true;
-        } else if !value.is_finite() {
-            *value = value.signum() * LEGACY_CUDA_QWEN35_HIDDEN_CLAMP as f32;
-            changed = true;
-        } else if value.abs() > LEGACY_CUDA_QWEN35_HIDDEN_CLAMP as f32 {
-            *value = value.signum() * LEGACY_CUDA_QWEN35_HIDDEN_CLAMP as f32;
-            changed = true;
-        }
-    }
-
-    if changed && !LOG_SANITIZED_FINAL_HIDDEN.swap(true, Ordering::Relaxed) {
-        tracing::warn!(
-            "Qwen3.5-MoE final hidden state contained non-finite or oversized values on legacy CUDA; sanitized before lm_head."
-        );
-    }
-
-    Tensor::from_vec(values, shape, &device)
-}
-
 #[derive(Clone)]
 struct Mlp {
     gate_proj: Arc<dyn QuantMethod>,
@@ -430,22 +361,10 @@ impl SparseMoeBlock {
             moe_intermediate_size: cfg.moe_intermediate_size,
         };
 
-        let experts_device = if cpu_moe_enabled() {
-            if !layer_device.is_cpu() && !LOG_CPU_MOE.swap(true, Ordering::Relaxed) {
-                tracing::info!(
-                    "Using CPU-MoE mode: routed experts stay on CPU while hot layer weights stay on {:?}",
-                    layer_device
-                );
-            }
-            Device::Cpu
-        } else {
-            layer_device.clone()
-        };
-
         let experts = MoEExperts::new(
             &moe_cfg,
             vb.clone(),
-            experts_device,
+            layer_device.clone(),
             comm,
             loading_isq,
             &cfg.quantization_config,
@@ -484,21 +403,22 @@ impl SparseMoeBlock {
         let xs_flat = xs.reshape(((), hidden_dim))?;
 
         let router_logits = self.gate.forward(&xs_flat)?;
-        let routing_weights =
-            candle_nn::ops::softmax_last_dim(&router_logits.to_dtype(DType::F32)?)?;
+        let topk = crate::ops::moe_router_topk(
+            &router_logits,
+            crate::ops::MoeRouterTopKConfig {
+                top_k: self.num_experts_per_tok,
+                score_function: crate::ops::MoeRouterScoreFunction::Softmax,
+                selected_weight: crate::ops::MoeRouterSelectedWeight::Score,
+                renormalize: self.norm_topk_prob,
+                norm_min: 0.0,
+                output_scale: 1.0,
+                logit_clip: None,
+            },
+            None,
+            None,
+        )?;
 
-        let topk_ids = routing_weights
-            .arg_sort_last_dim(false)?
-            .narrow(D::Minus1, 0, self.num_experts_per_tok)?
-            .contiguous()?;
-
-        let mut topk_weights = routing_weights.gather(&topk_ids, D::Minus1)?;
-
-        if self.norm_topk_prob {
-            topk_weights = topk_weights.broadcast_div(&topk_weights.sum_keepdim(D::Minus1)?)?;
-        }
-
-        let mut y = self.experts.forward(xs, topk_weights, &topk_ids)?;
+        let mut y = self.experts.forward(xs, topk.values, &topk.indices)?;
         y = y.reshape((b_size, seq_len, hidden_dim))?;
 
         let shared_out = self.shared_expert.forward(xs)?;
@@ -513,19 +433,9 @@ impl SparseMoeBlock {
         y + shared_out
     }
 
-    fn get_isq_layers(&mut self) -> Vec<(&mut Arc<dyn QuantMethod>, bool)> {
-        let mut layers = self
-            .experts
-            .get_isq_layers()
-            .into_iter()
-            .map(|layer| (layer, true))
-            .collect::<Vec<_>>();
-        layers.extend(
-            self.shared_expert
-                .get_isq_layers()
-                .into_iter()
-                .map(|layer| (layer, false)),
-        );
+    fn get_isq_layers(&mut self) -> Vec<&mut Arc<dyn QuantMethod>> {
+        let mut layers = self.experts.get_isq_layers();
+        layers.extend(self.shared_expert.get_isq_layers());
         layers
     }
 }
@@ -838,9 +748,7 @@ impl Qwen3_5MoeTextModel {
         attention_mask: &AttentionMask,
         position_ids: &Tensor,
         _seqlen_offsets: &[usize],
-        context_lens: Vec<(usize, usize)>,
-        metadata: Option<(Vec<(Tensor, Tensor)>, &PagedAttentionInputMetadata)>,
-        flash_params: &FlashParams,
+        ctx: &ModelForwardContext<'_>,
         visual_pos_masks: Option<&Tensor>,
         deepstack_visual_embeds: Option<&[Tensor]>,
     ) -> Result<Tensor> {
@@ -911,10 +819,8 @@ impl Qwen3_5MoeTextModel {
                             &attention_mask.get(xs.device()),
                             &cos_sin,
                             kv_cache,
-                            metadata
-                                .as_ref()
-                                .map(|(kv_cache, meta)| (kv_cache[i].clone(), *meta)),
-                            flash_params,
+                            ctx.paged_layer(i),
+                            ctx.flash_params(),
                         )?;
                     }
                 }
@@ -975,10 +881,8 @@ impl Qwen3_5MoeTextModel {
             }
         }
         let xs = xs.to_device(&self.device)?;
-        let xs = clamp_final_norm_input_for_legacy_cuda(xs)?;
         let xs = xs.apply(&self.norm)?;
-        let xs = extract_logits(&xs, context_lens)?;
-        let xs = sanitize_final_hidden_for_legacy_cuda(xs)?;
+        let xs = ctx.logits(&xs)?;
         self.lm_head.forward(&xs)
     }
 
@@ -1031,13 +935,8 @@ impl IsqModel for Qwen3_5MoeTextModel {
                     tensors.push((&mut gdn.out_proj, Some(i)));
                 }
             }
-            for (l, is_routed_expert) in layer.moe.get_isq_layers() {
-                let layer_num = if is_routed_expert && cpu_moe_enabled() {
-                    ISQ_CPU_DEVICE_SENTINEL
-                } else {
-                    i
-                };
-                tensors.push((l, Some(layer_num)));
+            for l in layer.moe.get_isq_layers() {
+                tensors.push((l, Some(i)));
             }
         }
         (tensors, &*self.mapper)

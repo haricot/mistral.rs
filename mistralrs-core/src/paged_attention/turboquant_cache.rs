@@ -1,5 +1,5 @@
-use candle_core::{DType, Device, IndexOp, Result, Tensor};
 use crate::paged_attention::cache_engine::DecodedKVCache;
+use candle_core::{DType, Device, IndexOp, Result, Tensor};
 use std::collections::BTreeSet;
 
 pub const TURBOQUANT_BITS: usize = 4;
@@ -242,7 +242,6 @@ pub fn gather_kv_cache(
     Ok((k, v))
 }
 
-
 pub fn invalidate_decoded_blocks_from_slot_mapping(
     decoded_cache: &mut DecodedKVCache,
     slot_mapping: &Tensor,
@@ -285,7 +284,6 @@ pub fn invalidate_decoded_blocks_from_slot_mapping(
 
     Ok(())
 }
-
 
 pub fn ensure_decoded_block_cache(
     decoded_cache: &mut DecodedKVCache,
@@ -386,11 +384,12 @@ pub fn ensure_decoded_block_cache(
         DType::U32 => Tensor::from_vec(remapped_u32, (rows, cols), &Device::Cpu)?
             .to_device(block_tables.device()),
         other => {
-            candle_core::bail!("decoded block table expects original i32/u32 block table, got {other:?}")
+            candle_core::bail!(
+                "decoded block table expects original i32/u32 block table, got {other:?}"
+            )
         }
     }
 }
-
 
 fn context_lens_to_vec_for_decoded_cache(context_lens: &Tensor) -> Result<Vec<usize>> {
     let context_lens = context_lens.to_device(&Device::Cpu)?;
@@ -462,7 +461,9 @@ fn choose_decoded_slot(decoded_cache: &mut DecodedKVCache) -> Result<usize> {
         .enumerate()
         .min_by_key(|(_, clock)| *clock)
         .map(|(slot, _)| slot)
-        .ok_or_else(|| candle_core::Error::Msg("decoded TurboQuant cache has zero slots".to_string()))
+        .ok_or_else(|| {
+            candle_core::Error::Msg("decoded TurboQuant cache has zero slots".to_string())
+        })
 }
 
 fn touch_decoded_slot(decoded_cache: &mut DecodedKVCache, slot: usize) {
@@ -471,7 +472,6 @@ fn touch_decoded_slot(decoded_cache: &mut DecodedKVCache, slot: usize) {
         decoded_cache.lru_clock[slot] = decoded_cache.clock;
     }
 }
-
 
 fn decode_turboquant_block_into_slot(
     decoded_cache: &mut DecodedKVCache,
@@ -482,8 +482,8 @@ fn decode_turboquant_block_into_slot(
 ) -> Result<()> {
     let device = turboquant_key_cache.device();
 
-    let block_table = Tensor::from_vec(vec![physical_block], (1, 1), &Device::Cpu)?
-        .to_device(device)?;
+    let block_table =
+        Tensor::from_vec(vec![physical_block], (1, 1), &Device::Cpu)?.to_device(device)?;
 
     let cu_seq_lens = Tensor::from_vec(
         vec![0u32, decoded_cache.block_size as u32],
@@ -559,7 +559,6 @@ fn decode_turboquant_block_into_slot(
 
     Ok(())
 }
-
 
 fn write_row(
     cache: &mut Tensor,
