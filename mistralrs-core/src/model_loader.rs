@@ -201,13 +201,23 @@ pub fn get_auto_device_map_params(model: &ModelSelected) -> anyhow::Result<AutoD
             max_batch_size,
             max_image_length,
             max_num_images,
+            text_only,
             ..
-        } => Ok(AutoDeviceMapParams::Multimodal {
-            max_seq_len: *max_seq_len,
-            max_batch_size: *max_batch_size,
-            max_image_shape: (*max_image_length, *max_image_length),
-            max_num_images: *max_num_images,
-        }),
+        } => {
+            if *text_only {
+                Ok(AutoDeviceMapParams::Text {
+                    max_seq_len: *max_seq_len,
+                    max_batch_size: *max_batch_size,
+                })
+            } else {
+                Ok(AutoDeviceMapParams::Multimodal {
+                    max_seq_len: *max_seq_len,
+                    max_batch_size: *max_batch_size,
+                    max_image_shape: (*max_image_length, *max_image_length),
+                    max_num_images: *max_num_images,
+                })
+            }
+        }
         ModelSelected::DiffusionPlain { .. }
         | ModelSelected::Speech { .. }
         | ModelSelected::Embedding { .. } => Ok(AutoDeviceMapParams::default_text()),
@@ -371,6 +381,7 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
             max_batch_size: _,
             max_num_images: _,
             max_image_length: _,
+            text_only,
             hf_cache_path,
             imatrix,
             matformer_config_path,
@@ -379,7 +390,7 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
         } => MultimodalLoaderBuilder::new(
             MultimodalSpecificConfig {
                 topology: Topology::from_option_path(topology)?,
-                text_only: false,
+                text_only,
                 write_uqff,
                 from_uqff: from_uqff.map(|x| {
                     x.split(UQFF_MULTI_FILE_DELIMITER)

@@ -324,6 +324,7 @@ pub(crate) fn convert_to_model_selected(
             max_batch_size: device.max_batch_size,
             max_num_images: multimodal.max_num_images.unwrap_or(1),
             max_image_length: multimodal.max_image_length.unwrap_or(1024),
+            text_only: multimodal.text_only,
             hf_cache_path: device.hf_cache.clone(),
             matformer_config_path: matformer.config_path.clone(),
             matformer_slice_name: matformer.slice_name.clone(),

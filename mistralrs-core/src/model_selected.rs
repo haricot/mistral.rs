@@ -646,6 +646,11 @@ pub enum ModelSelected {
         #[arg(long, default_value_t = AutoDeviceMapParams::DEFAULT_MAX_IMAGE_LENGTH)]
         max_image_length: usize,
 
+        /// Load only the text path for supported multimodal models.
+        #[arg(long)]
+        #[serde(default)]
+        text_only: bool,
+
         /// Cache path for Hugging Face models downloaded locally
         #[arg(long)]
         hf_cache_path: Option<PathBuf>,

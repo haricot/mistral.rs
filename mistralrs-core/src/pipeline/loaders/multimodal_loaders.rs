@@ -419,6 +419,12 @@ impl MultimodalModelLoader for AutoMultimodalLoader {
             .supports_prefix_cacher(config)
     }
 
+    fn supports_text_only_loading(&self, config: &str) -> bool {
+        Self::get_loader(config)
+            .expect("AutoMultimodalLoader")
+            .supports_text_only_loading(config)
+    }
+
     fn prefixer(&self, config: &str) -> Arc<dyn MultimodalPromptPrefixer> {
         Self::get_loader(config)
             .expect("AutoMultimodalLoader")
