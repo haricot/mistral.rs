@@ -1447,9 +1447,12 @@ impl Pipeline for MultimodalPipeline {
         if matches!(config, crate::speculative::SpeculativeConfig::Mtp(_))
             && self.get_metadata().cache_engine.is_none()
         {
-            candle_core::bail!(
-                "MTP speculative decoding currently requires PagedAttention for this pipeline."
+            warn!(
+                "MTP speculative decoding requires PagedAttention for this pipeline; disabling MTP because PagedAttention is not active."
             );
+            self.model
+                .attach_speculative(crate::speculative::SpeculativeConfig::Off)?;
+            return Ok(());
         }
         if let Some(info) = self.model.attach_speculative(config)? {
             self.model.log_speculative_attach(&info);

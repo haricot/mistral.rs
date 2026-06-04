@@ -2,7 +2,9 @@ use std::collections::HashMap;
 
 use candle_core::{DType, Device, Result, Tensor};
 #[allow(unused_imports)]
-use mistralrs_paged_attn::{kv_scale_update, paged_attention, reshape_and_cache};
+use mistralrs_paged_attn::{
+    kv_scale_update, mtp_paged_attention, paged_attention, reshape_and_cache,
+};
 
 const KV_SCALE_UPDATE_ITERATION: i32 = 128;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -28,6 +30,35 @@ fn resolve_tensor_for_device(
         return tensor.to_device(device);
     }
     candle_core::bail!("Missing {what} tensor for {:?}", device.location())
+}
+
+fn resolve_optional_tensor_for_device(
+    tensors: Option<&HashMap<candle_core::DeviceLocation, Tensor>>,
+    device: &Device,
+    what: &str,
+) -> Result<Tensor> {
+    let Some(tensors) = tensors else {
+        candle_core::bail!("Missing {what} metadata for {:?}", device.location());
+    };
+    resolve_tensor_for_device(tensors, device, what)
+}
+
+fn mtp_legacy_fast_verify_enabled() -> bool {
+    std::env::var("MISTRALRS_MTP_LEGACY_FAST_VERIFY")
+        .map(|v| !v.trim().is_empty() && v != "0" && !v.eq_ignore_ascii_case("false"))
+        .unwrap_or(false)
+}
+
+fn mtp_direct_paged_kernel_enabled() -> bool {
+    std::env::var("MISTRALRS_MTP_DIRECT_PAGED_KERNEL")
+        .map(|v| !v.trim().is_empty() && v != "0" && !v.eq_ignore_ascii_case("false"))
+        .unwrap_or(true)
+}
+
+fn mtp_dense_verify_enabled() -> bool {
+    std::env::var("MISTRALRS_MTP_DENSE_VERIFY")
+        .map(|v| !v.trim().is_empty() && v != "0" && !v.eq_ignore_ascii_case("false"))
+        .unwrap_or(false)
 }
 
 fn cumulative_seqlens_from_lengths(lengths: &[usize], device: &Device) -> Result<Tensor> {
@@ -96,6 +127,22 @@ fn adjust_kv_mask(mask: &Tensor, kv_seq_len: usize) -> Result<Tensor> {
         2 if mask_dims[1] > kv_seq_len => mask.narrow(1, 0, kv_seq_len),
         3 if mask_dims[2] > kv_seq_len => mask.narrow(2, 0, kv_seq_len),
         4 if mask_dims[3] > kv_seq_len => mask.narrow(3, 0, kv_seq_len),
+        _ => Ok(mask.clone()),
+    }
+}
+
+fn adjust_local_kv_mask(mask: &Tensor, kv_seq_len: usize) -> Result<Tensor> {
+    let mask_dims = mask.dims();
+    match mask.rank() {
+        2 if mask_dims[1] > kv_seq_len => {
+            mask.narrow(1, mask_dims[1].saturating_sub(kv_seq_len), kv_seq_len)
+        }
+        3 if mask_dims[2] > kv_seq_len => {
+            mask.narrow(2, mask_dims[2].saturating_sub(kv_seq_len), kv_seq_len)
+        }
+        4 if mask_dims[3] > kv_seq_len => {
+            mask.narrow(3, mask_dims[3].saturating_sub(kv_seq_len), kv_seq_len)
+        }
         _ => Ok(mask.clone()),
     }
 }
@@ -203,18 +250,34 @@ impl PagedAttention {
         let use_full =
             sdpa_params.sliding_window.is_none() && input_metadata.full_block_tables.is_some();
 
-        let resolve_block_tables = |dev: &candle_core::DeviceLocation| -> Option<&Tensor> {
+        let resolve_block_tables = |device: &Device| -> Result<Tensor> {
             if use_full {
-                input_metadata.full_block_tables.as_ref()?.get(dev)
+                resolve_optional_tensor_for_device(
+                    input_metadata.full_block_tables.as_ref(),
+                    device,
+                    "full_block_tables",
+                )
             } else {
-                input_metadata.block_tables.as_ref()?.get(dev)
+                resolve_optional_tensor_for_device(
+                    input_metadata.block_tables.as_ref(),
+                    device,
+                    "block_tables",
+                )
             }
         };
-        let resolve_context_lens = |dev: &candle_core::DeviceLocation| -> Option<&Tensor> {
+        let resolve_context_lens = |device: &Device| -> Result<Tensor> {
             if use_full {
-                input_metadata.full_context_lens.as_ref()?.get(dev)
+                resolve_optional_tensor_for_device(
+                    input_metadata.full_context_lens.as_ref(),
+                    device,
+                    "full_context_lens",
+                )
             } else {
-                input_metadata.context_lens.as_ref()?.get(dev)
+                resolve_optional_tensor_for_device(
+                    input_metadata.context_lens.as_ref(),
+                    device,
+                    "context_lens",
+                )
             }
         };
 
@@ -227,6 +290,16 @@ impl PagedAttention {
             .as_ref()
             .is_some_and(turboquant_cache::is_turboquant_cache);
 
+        let is_multi_token_decode = !input_metadata.is_first_prompt_chunk && seq_len > 1;
+        let use_legacy_fast_mtp_verify = write_cache
+            && is_multi_token_decode
+            && !uses_turboquant_cache
+            && key_cache
+                .as_ref()
+                .is_some_and(|cache| cache.dtype() == DType::F8E4M3)
+            && crate::utils::is_legacy_cuda_device(query.device())
+            && mtp_legacy_fast_verify_enabled();
+
         // === Prefix cache / donor-gather prompt path ===
         // Entered when:
         //  - write_cache=true  AND num_cached_tokens is set (prefix cache hit)
@@ -237,14 +310,17 @@ impl PagedAttention {
         let has_block_tables = input_metadata.block_tables.is_some();
         let mask_is_prefill = !matches!(attention_mask, AttentionMask::None);
         let use_gather_path = if write_cache {
-            input_metadata.num_cached_tokens.is_some() && mask_is_prefill && has_block_tables
+            (input_metadata.num_cached_tokens.is_some()
+                || (is_multi_token_decode && !use_legacy_fast_mtp_verify))
+                && mask_is_prefill
+                && has_block_tables
         } else {
             mask_is_prefill && has_block_tables
         };
 
         if use_gather_path {
-            let block_tables = resolve_block_tables(&query.device().location()).unwrap();
-            let context_lens = resolve_context_lens(&query.device().location()).unwrap();
+            let block_tables = resolve_block_tables(query.device())?;
+            let context_lens = resolve_context_lens(query.device())?;
             // Write new tokens to cache (skipped for donor/shared layers)
             if write_cache && key_cache.as_ref().is_some_and(|_| value_cache.is_some()) {
                 let k_flat = key
@@ -274,6 +350,243 @@ impl PagedAttention {
                 }
             }
 
+            // Staged MTP completion metadata has one block-table/context-len row
+            // per query token, so the paged decode kernel can enforce the
+            // causal boundary without materializing a dense KV mask.
+            if write_cache && is_multi_token_decode && !uses_turboquant_cache {
+                let configured_max_context_len = if use_full {
+                    input_metadata.full_max_context_len.unwrap()
+                } else {
+                    input_metadata.max_context_len.unwrap()
+                };
+                let max_context_len = if use_full {
+                    input_metadata
+                        .full_paged_context_lens_cpu
+                        .as_ref()
+                        .and_then(|lens| lens.iter().copied().max())
+                        .unwrap_or(configured_max_context_len)
+                } else {
+                    input_metadata
+                        .paged_context_lens_cpu
+                        .as_ref()
+                        .and_then(|lens| lens.iter().copied().max())
+                        .unwrap_or(configured_max_context_len)
+                };
+
+                if mtp_dense_verify_enabled()
+                    && alibi_slopes.is_none()
+                    && sdpa_params.sinks.is_none()
+                    && matches!(attention_mask, AttentionMask::Custom(_))
+                {
+                    let final_rows = (0..batch_size)
+                        .map(|batch| (batch * seq_len + seq_len - 1) as u32)
+                        .collect::<Vec<_>>();
+                    let final_rows =
+                        Tensor::new(&final_rows[..], &Device::Cpu)?.to_device(query.device())?;
+                    let final_block_tables = block_tables.index_select(&final_rows, 0)?;
+
+                    let metadata_lens = if use_full {
+                        input_metadata.full_paged_context_lens_cpu.as_ref()
+                    } else {
+                        input_metadata.paged_context_lens_cpu.as_ref()
+                    };
+                    let final_kv_lens = if let Some(lens) = metadata_lens {
+                        if lens.len() == batch_size * seq_len {
+                            (0..batch_size)
+                                .map(|batch| lens[batch * seq_len + seq_len - 1])
+                                .collect::<Vec<_>>()
+                        } else if lens.len() == batch_size {
+                            lens.clone()
+                        } else {
+                            context_lens_to_lengths(&context_lens)?
+                        }
+                    } else {
+                        context_lens_to_lengths(&context_lens)?
+                    };
+                    let final_kv_lens = if final_kv_lens.len() == batch_size * seq_len {
+                        (0..batch_size)
+                            .map(|batch| final_kv_lens[batch * seq_len + seq_len - 1])
+                            .collect::<Vec<_>>()
+                    } else {
+                        final_kv_lens
+                    };
+                    if final_kv_lens.len() == batch_size {
+                        let cu_kv =
+                            cumulative_seqlens_from_lengths(&final_kv_lens, query.device())?;
+                        let (k_gathered, v_gathered) = mistralrs_paged_attn::gather_kv_cache(
+                            key_cache.as_ref().unwrap(),
+                            value_cache.as_ref().unwrap(),
+                            self.k_scale.as_ref(),
+                            self.v_scale.as_ref(),
+                            &final_block_tables,
+                            &cu_kv,
+                            query.dtype(),
+                        )?;
+                        let k_batched = unpack_gathered_kv(
+                            &k_gathered,
+                            &final_kv_lens,
+                            key_value_heads,
+                            head_size,
+                            query.device(),
+                        )?;
+                        let v_batched = unpack_gathered_kv(
+                            &v_gathered,
+                            &final_kv_lens,
+                            key_value_heads,
+                            head_size,
+                            query.device(),
+                        )?;
+                        let max_kv = final_kv_lens.iter().copied().max().unwrap_or(0);
+                        let adjusted_mask = match attention_mask {
+                            AttentionMask::Custom(mask) => {
+                                let mask = adjust_kv_mask(mask, max_kv)?;
+                                let mask_dims = mask.dims();
+                                let mask = match mask.rank() {
+                                    2 if mask_dims[0] == batch_size * seq_len => {
+                                        mask.reshape((batch_size, seq_len, max_kv))?.unsqueeze(1)?
+                                    }
+                                    3 if mask_dims[0] == batch_size && mask_dims[1] == seq_len => {
+                                        mask.unsqueeze(1)?
+                                    }
+                                    4 => mask,
+                                    _ => mask,
+                                };
+                                AttentionMask::Custom(mask)
+                            }
+                            other => other.clone(),
+                        };
+                        return Sdpa.run_attention(
+                            query,
+                            &k_batched,
+                            &v_batched,
+                            &adjusted_mask,
+                            None,
+                            sdpa_params,
+                        );
+                    }
+                }
+
+                let q_flat = query
+                    .transpose(1, 2)?
+                    .reshape(((), attention_heads, head_size))?;
+                let can_use_mtp_kernel = mtp_direct_paged_kernel_enabled()
+                    && seq_len <= 8
+                    && alibi_slopes.is_none()
+                    && sdpa_params.sinks.is_none()
+                    && key_cache.as_ref().unwrap().dtype() == DType::F8E4M3;
+                let res = if can_use_mtp_kernel {
+                    mtp_paged_attention(
+                        &q_flat,
+                        self.k_scale.as_ref(),
+                        self.v_scale.as_ref(),
+                        key_cache.as_ref().unwrap(),
+                        value_cache.as_ref().unwrap(),
+                        &block_tables,
+                        &context_lens,
+                        batch_size,
+                        seq_len,
+                        max_context_len,
+                        sdpa_params.softmax_scale,
+                        sdpa_params.softcap.unwrap_or(1.0f32),
+                    )
+                    .or_else(|err| {
+                        tracing::debug!(
+                            "MTP paged-attention kernel unavailable, falling back to standard paged attention: {err}"
+                        );
+                        paged_attention(
+                            &q_flat,
+                            self.k_scale.as_ref(),
+                            self.v_scale.as_ref(),
+                            key_cache.as_ref().unwrap(),
+                            value_cache.as_ref().unwrap(),
+                            &block_tables,
+                            &context_lens,
+                            alibi_slopes.as_ref(),
+                            max_context_len,
+                            sdpa_params.softmax_scale,
+                            sdpa_params.softcap.unwrap_or(1.0f32),
+                            sdpa_params.sinks.as_ref(),
+                        )
+                    })?
+                } else {
+                    paged_attention(
+                        &q_flat,
+                        self.k_scale.as_ref(),
+                        self.v_scale.as_ref(),
+                        key_cache.as_ref().unwrap(),
+                        value_cache.as_ref().unwrap(),
+                        &block_tables,
+                        &context_lens,
+                        alibi_slopes.as_ref(),
+                        max_context_len,
+                        sdpa_params.softmax_scale,
+                        sdpa_params.softcap.unwrap_or(1.0f32),
+                        sdpa_params.sinks.as_ref(),
+                    )?
+                };
+                return res
+                    .reshape((batch_size, seq_len, attention_heads, head_size))?
+                    .transpose(1, 2);
+            }
+
+            if !write_cache && is_multi_token_decode && !uses_turboquant_cache {
+                let configured_max_context_len = if use_full {
+                    input_metadata.full_max_context_len.unwrap()
+                } else {
+                    input_metadata.max_context_len.unwrap()
+                };
+                let max_context_len = if use_full {
+                    input_metadata
+                        .full_paged_context_lens_cpu
+                        .as_ref()
+                        .and_then(|lens| lens.iter().copied().max())
+                        .unwrap_or(configured_max_context_len)
+                } else {
+                    input_metadata
+                        .paged_context_lens_cpu
+                        .as_ref()
+                        .and_then(|lens| lens.iter().copied().max())
+                        .unwrap_or(configured_max_context_len)
+                };
+                let can_use_mtp_kernel = mtp_direct_paged_kernel_enabled()
+                    && seq_len <= 8
+                    && alibi_slopes.is_none()
+                    && sdpa_params.sinks.is_none()
+                    && key_cache.as_ref().unwrap().dtype() == DType::F8E4M3;
+
+                if can_use_mtp_kernel {
+                    let q_flat =
+                        query
+                            .transpose(1, 2)?
+                            .reshape(((), attention_heads, head_size))?;
+                    match mtp_paged_attention(
+                        &q_flat,
+                        self.k_scale.as_ref(),
+                        self.v_scale.as_ref(),
+                        key_cache.as_ref().unwrap(),
+                        value_cache.as_ref().unwrap(),
+                        &block_tables,
+                        &context_lens,
+                        batch_size,
+                        seq_len,
+                        max_context_len,
+                        sdpa_params.softmax_scale,
+                        sdpa_params.softcap.unwrap_or(1.0f32),
+                    ) {
+                        Ok(res) => {
+                            return res
+                                .reshape((batch_size, seq_len, attention_heads, head_size))?
+                                .transpose(1, 2);
+                        }
+                        Err(err) => {
+                            tracing::debug!(
+                                "MTP donor paged-attention kernel unavailable, falling back to gather: {err}"
+                            );
+                        }
+                    }
+                }
+            }
+
             assert!(
                 alibi_slopes.is_none(),
                 "alibi slopes not supported in prefix cache path"
@@ -294,6 +607,17 @@ impl PagedAttention {
                     .zip(query_lens.iter())
                     .map(|(&cached, &query_len)| cached + query_len)
                     .collect::<Vec<_>>()
+            } else if is_multi_token_decode {
+                let metadata_lens = if use_full {
+                    input_metadata.full_paged_context_lens_cpu.as_ref()
+                } else {
+                    input_metadata.paged_context_lens_cpu.as_ref()
+                };
+                if let Some(metadata_lens) = metadata_lens {
+                    metadata_lens.clone()
+                } else {
+                    context_lens_to_lengths(&context_lens)?
+                }
             } else {
                 new_token_lens.clone()
             };
@@ -311,7 +635,7 @@ impl PagedAttention {
                 turboquant_cache::gather_kv_cache(
                     key_cache.as_ref().unwrap(),
                     value_cache.as_ref().unwrap(),
-                    block_tables,
+                    &block_tables,
                     &cu_kv,
                     query.dtype(),
                 )?
@@ -321,7 +645,7 @@ impl PagedAttention {
                     value_cache.as_ref().unwrap(),
                     self.k_scale.as_ref(),
                     self.v_scale.as_ref(),
-                    block_tables,
+                    &block_tables,
                     &cu_kv,
                     query.dtype(),
                 )?
@@ -376,13 +700,40 @@ impl PagedAttention {
                 unpack_gathered_kv(&k_gathered, &kv_lens, key_value_heads, head_size, device)?;
             let v_batched =
                 unpack_gathered_kv(&v_gathered, &kv_lens, key_value_heads, head_size, device)?;
+            let num_query_rows = batch_size * seq_len;
+            let row_per_query_token =
+                kv_lens.len() == num_query_rows && kv_lens.len() != batch_size;
+            let query = if kv_lens.len() == batch_size {
+                query.clone()
+            } else if row_per_query_token {
+                query
+                    .transpose(1, 2)?
+                    .reshape((num_query_rows, attention_heads, 1, head_size))?
+            } else {
+                candle_core::bail!(
+                    "PagedAttention gather metadata mismatch: {} KV rows for query shape {:?}",
+                    kv_lens.len(),
+                    query.shape()
+                );
+            };
             let adjusted_mask = match attention_mask {
-                AttentionMask::Custom(t) => AttentionMask::Custom(adjust_kv_mask(t, max_kv)?),
+                AttentionMask::Custom(t) => {
+                    let mask = adjust_kv_mask(t, max_kv)?;
+                    let mask = if row_per_query_token
+                        && mask.rank() == 2
+                        && mask.dims() == [num_query_rows, max_kv]
+                    {
+                        mask.unsqueeze(1)?.unsqueeze(1)?
+                    } else {
+                        mask
+                    };
+                    AttentionMask::Custom(mask)
+                }
                 other => other.clone(),
             };
 
             return Sdpa.run_attention(
-                query,
+                &query,
                 &k_batched,
                 &v_batched,
                 &adjusted_mask,
@@ -393,6 +744,19 @@ impl PagedAttention {
 
         // === Regular prompt path (no prefix cache, write_cache=true only) ===
         #[allow(clippy::cast_possible_truncation)]
+        let legacy_local_attention_mask = if use_legacy_fast_mtp_verify {
+            match attention_mask {
+                AttentionMask::Custom(mask) => {
+                    Some(AttentionMask::Custom(adjust_local_kv_mask(mask, seq_len)?))
+                }
+                other => Some(other.clone()),
+            }
+        } else {
+            None
+        };
+        let attention_mask_for_prompt = legacy_local_attention_mask
+            .as_ref()
+            .unwrap_or(attention_mask);
         let att = if matches!(attention_mask, AttentionMask::None) {
             None
         } else {
@@ -400,7 +764,7 @@ impl PagedAttention {
                 query,
                 key,
                 value,
-                attention_mask,
+                attention_mask_for_prompt,
                 flash_params,
                 sdpa_params,
             )?)
@@ -454,15 +818,14 @@ impl PagedAttention {
         }
         // === Decode path ===
         #[allow(clippy::cast_possible_truncation)]
-        let dev = query.device().location();
         if uses_turboquant_cache {
             if alibi_slopes.is_some() {
                 candle_core::bail!("TurboQuant paged KV cache does not support alibi slopes yet.");
             }
 
-            let block_tables = resolve_block_tables(&dev).unwrap();
-            let context_lens = resolve_context_lens(&dev).unwrap();
-            let kv_lens = context_lens_to_lengths(context_lens)?;
+            let block_tables = resolve_block_tables(query.device())?;
+            let context_lens = resolve_context_lens(query.device())?;
+            let kv_lens = context_lens_to_lengths(&context_lens)?;
             let cu_kv = cumulative_seqlens_from_lengths(&kv_lens, query.device())?;
 
             if let Some(decoded_cache) = decoded_cache.as_deref_mut() {
@@ -477,8 +840,8 @@ impl PagedAttention {
                     decoded_cache,
                     key_cache.as_ref().unwrap(),
                     value_cache.as_ref().unwrap(),
-                    block_tables,
-                    context_lens,
+                    &block_tables,
+                    &context_lens,
                     query.dtype(),
                 )?;
 
@@ -489,7 +852,7 @@ impl PagedAttention {
                     &decoded_cache.key_cache,
                     &decoded_cache.value_cache,
                     &decoded_block_tables,
-                    context_lens,
+                    &context_lens,
                     alibi_slopes.as_ref(),
                     if use_full {
                         input_metadata.full_max_context_len.unwrap()
@@ -508,7 +871,7 @@ impl PagedAttention {
             let (k_gathered, v_gathered) = turboquant_cache::gather_kv_cache(
                 key_cache.as_ref().unwrap(),
                 value_cache.as_ref().unwrap(),
-                block_tables,
+                &block_tables,
                 &cu_kv,
                 query.dtype(),
             )?;
@@ -566,8 +929,8 @@ impl PagedAttention {
             self.v_scale.as_ref(),
             key_cache.as_ref().unwrap(),
             value_cache.as_ref().unwrap(),
-            resolve_block_tables(&dev).unwrap(),
-            resolve_context_lens(&dev).unwrap(),
+            &resolve_block_tables(query.device())?,
+            &resolve_context_lens(query.device())?,
             alibi_slopes.as_ref(),
             if use_full {
                 input_metadata.full_max_context_len.unwrap()

@@ -50,14 +50,17 @@ fn main() -> Result<()> {
 
     // Declare expected cfg values for check-cfg lint
     println!("cargo::rustc-check-cfg=cfg(has_fp8)");
+    println!("cargo::rustc-check-cfg=cfg(has_flashinfer)");
 
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed=ALLOW_LEGACY");
     println!("cargo:rerun-if-changed=src/cuda/pagedattention.cuh");
     println!("cargo:rerun-if-changed=src/cuda/copy_blocks_kernel.cu");
     println!("cargo:rerun-if-changed=src/cuda/reshape_and_cache_kernel.cu");
     println!("cargo:rerun-if-changed=src/cuda/concat_and_cache_mla_kernel.cu");
     println!("cargo:rerun-if-changed=src/cuda/gather_mla_cache_kernel.cu");
     println!("cargo:rerun-if-changed=src/cuda/gather_kv_cache_kernel.cu");
+    println!("cargo:rerun-if-changed=src/cuda/mtp_paged_attention_kernel.cu");
     println!("cargo:rerun-if-changed=src/cuda/flashinfer_decode.cu");
     println!("cargo:rerun-if-changed=src/cuda/flashinfer_mla_decode.cu");
     println!("cargo:rerun-if-changed=src/cuda/update_kvscales.cu");
@@ -107,9 +110,28 @@ fn main() -> Result<()> {
         .arg(&header_hash_arg);
 
     let compute_cap = builder.get_compute_cap().unwrap_or(80);
-    // Enable FP8 if compute capability >= 8.0 (Ampere and newer)
-    let using_fp8 = if compute_cap >= 80 {
+    let using_flashinfer = compute_cap >= 70;
+    if using_flashinfer {
+        println!("cargo:rustc-cfg=has_flashinfer");
+    } else {
+        println!(
+            "cargo:warning=Disabling FlashInfer paged-attention kernels for sm_{compute_cap}; CUDA synchronization primitives require sm_70+"
+        );
+        builder = builder.exclude(&["flashinfer_decode.cu", "flashinfer_mla_decode.cu"]);
+    }
+    let allow_legacy = std::env::var("ALLOW_LEGACY").unwrap_or_default();
+    let allow_legacy_fp8 = allow_legacy == "all"
+        || allow_legacy
+            .split(',')
+            .map(str::trim)
+            .any(|value| value == "fp8");
+
+    // Enable FP8 on Ampere+ by default, or opt-in on older cards.
+    let using_fp8 = if compute_cap >= 80 || allow_legacy_fp8 {
         builder = builder.arg("-DENABLE_FP8");
+        if allow_legacy_fp8 {
+            builder = builder.arg("-DALLOW_LEGACY_FP8");
+        }
         true
     } else {
         false

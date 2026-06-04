@@ -538,35 +538,45 @@ impl Gemma4MtpDecoderLayer {
         device: &Device,
         mapper: &dyn DeviceMapper,
     ) -> Result<Self> {
-        let self_attn =
-            Gemma4MtpAttention::new(cfg, layer_idx, donor_layer_idx, vb.pp("self_attn"), device)?;
+        let layer_device = mapper
+            .device_for(layer_idx, false)
+            .cloned()
+            .unwrap_or_else(|| device.clone());
+        let layer_vb = mapper.set_device(layer_idx, vb.clone(), false);
+        let self_attn = Gemma4MtpAttention::new(
+            cfg,
+            layer_idx,
+            donor_layer_idx,
+            layer_vb.pp("self_attn"),
+            &layer_device,
+        )?;
         let mlp = Gemma4MtpMlp::new(
             cfg.hidden_size,
             cfg.intermediate_size,
             cfg.hidden_activation,
-            vb.pp("mlp"),
+            layer_vb.pp("mlp"),
         )?;
         let input_layernorm = Gemma4MtpRmsNorm::new(
             cfg.hidden_size,
             cfg.rms_norm_eps,
-            mapper.set_device(layer_idx, vb.pp("input_layernorm"), false),
+            layer_vb.pp("input_layernorm"),
         )?;
         let post_attention_layernorm = Gemma4MtpRmsNorm::new(
             cfg.hidden_size,
             cfg.rms_norm_eps,
-            mapper.set_device(layer_idx, vb.pp("post_attention_layernorm"), false),
+            layer_vb.pp("post_attention_layernorm"),
         )?;
         let pre_feedforward_layernorm = Gemma4MtpRmsNorm::new(
             cfg.hidden_size,
             cfg.rms_norm_eps,
-            mapper.set_device(layer_idx, vb.pp("pre_feedforward_layernorm"), false),
+            layer_vb.pp("pre_feedforward_layernorm"),
         )?;
         let post_feedforward_layernorm = Gemma4MtpRmsNorm::new(
             cfg.hidden_size,
             cfg.rms_norm_eps,
-            mapper.set_device(layer_idx, vb.pp("post_feedforward_layernorm"), false),
+            layer_vb.pp("post_feedforward_layernorm"),
         )?;
-        let layer_scalar = vb.get((1,), "layer_scalar").ok();
+        let layer_scalar = layer_vb.get((1,), "layer_scalar").ok();
         Ok(Self {
             self_attn,
             mlp,

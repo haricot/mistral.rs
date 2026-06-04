@@ -23,7 +23,9 @@ impl AttentionBackendKind {
     pub fn from_cache(key_cache: &Tensor, value_cache: &Tensor) -> Self {
         #[cfg(all(feature = "cuda", target_family = "unix"))]
         {
-            if mistralrs_paged_attn::is_flashinfer_cache(key_cache, value_cache) {
+            if mistralrs_paged_attn::USE_FLASHINFER
+                && mistralrs_paged_attn::is_flashinfer_cache(key_cache, value_cache)
+            {
                 return Self::FlashInfer;
             }
         }
@@ -55,7 +57,10 @@ impl AttentionBackend for FlashInferAttentionBackend {
     }
 
     fn supports_layer(&self, spec: AttentionLayerSpec) -> bool {
-        if !cfg!(feature = "cuda") || !crate::perf_flags::flashinfer_decode_enabled() {
+        if !cfg!(feature = "cuda")
+            || !mistralrs_paged_attn::USE_FLASHINFER
+            || !crate::perf_flags::flashinfer_decode_enabled()
+        {
             return false;
         }
         if spec.kv_heads == 0 || !spec.q_heads.is_multiple_of(spec.kv_heads) {

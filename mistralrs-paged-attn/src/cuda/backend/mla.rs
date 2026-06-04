@@ -1,7 +1,8 @@
 use crate::cuda::backend::slice_ptr;
+#[cfg(has_flashinfer)]
+use crate::cuda::ffi::flashinfer_mla_decode as ffi_flashinfer_mla_decode;
 use crate::cuda::ffi::{
-    concat_and_cache_mla as ffi_concat_and_cache_mla,
-    flashinfer_mla_decode as ffi_flashinfer_mla_decode, gather_mla_cache as ffi_gather_mla_cache,
+    concat_and_cache_mla as ffi_concat_and_cache_mla, gather_mla_cache as ffi_gather_mla_cache,
 };
 use candle_core::backend::BackendStorage;
 use candle_core::cuda_backend::CudaStorageSlice;
@@ -224,6 +225,26 @@ pub fn concat_and_cache_mla(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(not(has_flashinfer))]
+pub fn flashinfer_mla_decode(
+    _q_nope: &Tensor,
+    _q_pe: &Tensor,
+    _ckv_cache: &Tensor,
+    _kpe_cache: &Tensor,
+    _paged_kv_indptr: &Tensor,
+    _paged_kv_indices: &Tensor,
+    _paged_kv_last_page_len: &Tensor,
+    _request_indices: &Tensor,
+    _kv_tile_indices: &Tensor,
+    _o_indptr: &Tensor,
+    _kv_chunk_size: &Tensor,
+    _sm_scale: f32,
+) -> Result<Tensor> {
+    candle_core::bail!("FlashInfer MLA decode is not available on this CUDA compute capability")
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg(has_flashinfer)]
 pub fn flashinfer_mla_decode(
     q_nope: &Tensor,
     q_pe: &Tensor,

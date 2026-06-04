@@ -1720,7 +1720,16 @@ pub mod text_models_inputs_processor {
             // Create paged attention tensors on CPU first (see make_prompt_chunk for explanation)
             let max_slot_mapping_len = slot_mappings.iter().map(Vec::len).max().unwrap_or(1);
             let use_standard_metadata =
-                paged_attn_input.attention_backend == AttentionBackendKind::Standard;
+                paged_attn_input.attention_backend == AttentionBackendKind::Standard || {
+                    #[cfg(all(feature = "cuda", target_family = "unix"))]
+                    {
+                        !mistralrs_paged_attn::USE_FLASHINFER
+                    }
+                    #[cfg(not(all(feature = "cuda", target_family = "unix")))]
+                    {
+                        true
+                    }
+                };
             let slot_mappings = _make_tensor_with_pad(
                 slot_mappings,
                 max_slot_mapping_len,
