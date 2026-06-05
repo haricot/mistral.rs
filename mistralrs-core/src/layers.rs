@@ -311,10 +311,12 @@ impl RmsNorm {
 impl Module for RmsNorm {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
         #[cfg(feature = "cuda")]
-        if let Some(out) =
-            crate::ops::try_cuda_rms_norm_strided_4d(x, &self.weight, self.eps as f32)?
-        {
-            return Ok(out);
+        if x.device().is_cuda() && self.weight.device().is_cuda() {
+            if let Some(out) =
+                crate::ops::try_cuda_rms_norm_strided_4d(x, &self.weight, self.eps as f32)?
+            {
+                return Ok(out);
+            }
         }
 
         candle_nn::ops::rms_norm(&x.contiguous()?, &self.weight, self.eps as f32)
@@ -2652,23 +2654,37 @@ pub fn qk_rms_norm_rope(
     let (cos, sin) = selected_rope_cache(cos_cache, sin_cache, batch, seq_len, seqlen_offsets)?;
 
     #[cfg(feature = "cuda")]
-    if let Some((q, Some(k))) = crate::ops::try_cuda_qk_rms_norm_rope(
-        q,
-        Some(k),
-        q_weight,
-        Some(k_weight),
-        q_eps as f32,
-        k_eps as f32,
-        &cos,
-        &sin,
-        is_gpt_neox,
-    )? {
-        return Ok((q, k));
+    if q.device().is_cuda()
+        && k.device().is_cuda()
+        && q_weight.device().is_cuda()
+        && k_weight.device().is_cuda()
+        && cos.device().is_cuda()
+        && sin.device().is_cuda()
+    {
+        if let Some((q, Some(k))) = crate::ops::try_cuda_qk_rms_norm_rope(
+            q,
+            Some(k),
+            q_weight,
+            Some(k_weight),
+            q_eps as f32,
+            k_eps as f32,
+            &cos,
+            &sin,
+            is_gpt_neox,
+        )? {
+            return Ok((q, k));
+        }
     }
 
     let q = candle_nn::ops::rms_norm(&q.contiguous()?, q_weight, q_eps as f32)?;
     let k = candle_nn::ops::rms_norm(&k.contiguous()?, k_weight, k_eps as f32)?;
-    apply_rotary_selected_qk(&q, &k, &cos, &sin, is_gpt_neox)
+    apply_rotary_selected_qk(
+        &q,
+        &k,
+        &cos.to_device(q.device())?,
+        &sin.to_device(q.device())?,
+        is_gpt_neox,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2685,22 +2701,33 @@ pub fn q_rms_norm_rope(
     let (cos, sin) = selected_rope_cache(cos_cache, sin_cache, batch, seq_len, seqlen_offsets)?;
 
     #[cfg(feature = "cuda")]
-    if let Some((q, None)) = crate::ops::try_cuda_qk_rms_norm_rope(
-        q,
-        None,
-        q_weight,
-        None,
-        q_eps as f32,
-        q_eps as f32,
-        &cos,
-        &sin,
-        is_gpt_neox,
-    )? {
-        return Ok(q);
+    if q.device().is_cuda()
+        && q_weight.device().is_cuda()
+        && cos.device().is_cuda()
+        && sin.device().is_cuda()
+    {
+        if let Some((q, None)) = crate::ops::try_cuda_qk_rms_norm_rope(
+            q,
+            None,
+            q_weight,
+            None,
+            q_eps as f32,
+            q_eps as f32,
+            &cos,
+            &sin,
+            is_gpt_neox,
+        )? {
+            return Ok(q);
+        }
     }
 
     let q = candle_nn::ops::rms_norm(&q.contiguous()?, q_weight, q_eps as f32)?;
-    apply_rotary_selected_q(&q, &cos, &sin, is_gpt_neox)
+    apply_rotary_selected_q(
+        &q,
+        &cos.to_device(q.device())?,
+        &sin.to_device(q.device())?,
+        is_gpt_neox,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2717,24 +2744,40 @@ pub fn qk_rms_norm_rope_positions(
     positions: &Tensor,
 ) -> Result<(Tensor, Tensor)> {
     #[cfg(feature = "cuda")]
-    if let Some((q, Some(k))) = crate::ops::try_cuda_qk_rms_norm_rope_positions(
-        q,
-        Some(k),
-        q_weight,
-        Some(k_weight),
-        q_eps as f32,
-        k_eps as f32,
-        cos_cache,
-        sin_cache,
-        positions,
-        is_gpt_neox,
-    )? {
-        return Ok((q, k));
+    if q.device().is_cuda()
+        && k.device().is_cuda()
+        && q_weight.device().is_cuda()
+        && k_weight.device().is_cuda()
+        && cos_cache.device().is_cuda()
+        && sin_cache.device().is_cuda()
+        && positions.device().is_cuda()
+    {
+        if let Some((q, Some(k))) = crate::ops::try_cuda_qk_rms_norm_rope_positions(
+            q,
+            Some(k),
+            q_weight,
+            Some(k_weight),
+            q_eps as f32,
+            k_eps as f32,
+            cos_cache,
+            sin_cache,
+            positions,
+            is_gpt_neox,
+        )? {
+            return Ok((q, k));
+        }
     }
 
     let q = candle_nn::ops::rms_norm(&q.contiguous()?, q_weight, q_eps as f32)?;
     let k = candle_nn::ops::rms_norm(&k.contiguous()?, k_weight, k_eps as f32)?;
-    apply_rotary_positions_qk(&q, &k, cos_cache, sin_cache, positions, is_gpt_neox)
+    apply_rotary_positions_qk(
+        &q,
+        &k,
+        &cos_cache.to_device(q.device())?,
+        &sin_cache.to_device(q.device())?,
+        &positions.to_device(q.device())?,
+        is_gpt_neox,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2754,28 +2797,46 @@ pub fn qkv_rms_norm_rope_positions(
     positions: &Tensor,
 ) -> Result<(Tensor, Tensor, Tensor)> {
     #[cfg(feature = "cuda")]
-    if let Some((q, k, v)) = crate::ops::try_cuda_qkv_rms_norm_rope_positions(
-        q,
-        k,
-        v,
-        q_weight,
-        k_weight,
-        v_weight,
-        q_eps as f32,
-        k_eps as f32,
-        v_eps as f32,
-        cos_cache,
-        sin_cache,
-        positions,
-        is_gpt_neox,
-    )? {
-        return Ok((q, k, v));
+    if q.device().is_cuda()
+        && k.device().is_cuda()
+        && v.device().is_cuda()
+        && q_weight.device().is_cuda()
+        && k_weight.device().is_cuda()
+        && v_weight.device().is_cuda()
+        && cos_cache.device().is_cuda()
+        && sin_cache.device().is_cuda()
+        && positions.device().is_cuda()
+    {
+        if let Some((q, k, v)) = crate::ops::try_cuda_qkv_rms_norm_rope_positions(
+            q,
+            k,
+            v,
+            q_weight,
+            k_weight,
+            v_weight,
+            q_eps as f32,
+            k_eps as f32,
+            v_eps as f32,
+            cos_cache,
+            sin_cache,
+            positions,
+            is_gpt_neox,
+        )? {
+            return Ok((q, k, v));
+        }
     }
 
     let q = candle_nn::ops::rms_norm(&q.contiguous()?, q_weight, q_eps as f32)?;
     let k = candle_nn::ops::rms_norm(&k.contiguous()?, k_weight, k_eps as f32)?;
     let v = candle_nn::ops::rms_norm(&v.contiguous()?, v_weight, v_eps as f32)?;
-    let (q, k) = apply_rotary_positions_qk(&q, &k, cos_cache, sin_cache, positions, is_gpt_neox)?;
+    let (q, k) = apply_rotary_positions_qk(
+        &q,
+        &k,
+        &cos_cache.to_device(q.device())?,
+        &sin_cache.to_device(q.device())?,
+        &positions.to_device(q.device())?,
+        is_gpt_neox,
+    )?;
     Ok((q, k, v))
 }
 
@@ -2790,23 +2851,36 @@ pub fn q_rms_norm_rope_positions(
     positions: &Tensor,
 ) -> Result<Tensor> {
     #[cfg(feature = "cuda")]
-    if let Some((q, None)) = crate::ops::try_cuda_qk_rms_norm_rope_positions(
-        q,
-        None,
-        q_weight,
-        None,
-        q_eps as f32,
-        q_eps as f32,
-        cos_cache,
-        sin_cache,
-        positions,
-        is_gpt_neox,
-    )? {
-        return Ok(q);
+    if q.device().is_cuda()
+        && q_weight.device().is_cuda()
+        && cos_cache.device().is_cuda()
+        && sin_cache.device().is_cuda()
+        && positions.device().is_cuda()
+    {
+        if let Some((q, None)) = crate::ops::try_cuda_qk_rms_norm_rope_positions(
+            q,
+            None,
+            q_weight,
+            None,
+            q_eps as f32,
+            q_eps as f32,
+            cos_cache,
+            sin_cache,
+            positions,
+            is_gpt_neox,
+        )? {
+            return Ok(q);
+        }
     }
 
     let q = candle_nn::ops::rms_norm(&q.contiguous()?, q_weight, q_eps as f32)?;
-    apply_rotary_positions_q(&q, cos_cache, sin_cache, positions, is_gpt_neox)
+    apply_rotary_positions_q(
+        &q,
+        &cos_cache.to_device(q.device())?,
+        &sin_cache.to_device(q.device())?,
+        &positions.to_device(q.device())?,
+        is_gpt_neox,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3773,6 +3847,7 @@ impl ScaledEmbedding {
 impl Module for ScaledEmbedding {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let embedding = Embedding::new(self.embedding.clone(), self.embedding.dim(D::Minus1)?);
+        let xs = xs.to_device(self.embedding.device())?;
         xs.apply(&embedding)? * self.scale
     }
 }

@@ -59,8 +59,9 @@ use indicatif::{MultiProgress, ParallelProgressIterator, ProgressBar, ProgressSt
 use itertools::Itertools;
 use mistralrs_quant::{
     AfqLayer, CollectedImatrixData, ColumnParallelLayer, DistributedKind, F8Q8Linear, FP8Linear,
-    GgufMatMul, HqqLayer, IsqBits, IsqType, MXFP4Layer, QuantMethod, QuantizeOntoGuard,
-    QuantizedSerde, QuantizedSerdeType, ReplicatedLayer, RowParallelLayer, UnquantLinear,
+    GgufMatMul, HqqLayer, IsqBits, IsqType, LazyGgufMatMul, MXFP4Layer, QuantMethod,
+    QuantizeOntoGuard, QuantizedSerde, QuantizedSerdeType, ReplicatedLayer, RowParallelLayer,
+    UnquantLinear,
 };
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 use regex::Regex;
@@ -80,6 +81,53 @@ const MAX_UQFF_SIZE_BYTES: usize = 10 * 1024 * 1024 * 1024;
 #[cfg(not(target_pointer_width = "64"))]
 const MAX_UQFF_SIZE_BYTES: usize = usize::MAX;
 pub const UQFF_MULTI_FILE_DELIMITER: &str = ";";
+
+fn deserialize_uqff_layer(
+    tensor: &Arc<dyn QuantMethod>,
+    artifact: &[u8],
+    device: &Device,
+    comm: &Arc<mistralrs_quant::Comm>,
+    guard: QuantizeOntoGuard,
+) -> candle_core::Result<Arc<dyn QuantMethod>> {
+    match tensor.is_distributed() {
+        Some(DistributedKind::ColumnParallel) => {
+            ColumnParallelLayer::deserialize(Cow::from(artifact), device, comm, guard)
+        }
+        Some(DistributedKind::RowParallel) => {
+            RowParallelLayer::deserialize(Cow::from(artifact), device, comm, guard)
+        }
+        Some(DistributedKind::Replicated) => {
+            ReplicatedLayer::deserialize(Cow::from(artifact), device, comm, guard)
+        }
+        None => {
+            // NOTE(EricLBuehler): isq type is ALWAYS byte 4 (5th) of the tensor.
+            let isq_type = artifact[mistralrs_quant::UQFF_QUANT_TYPE_OFFSET];
+            match QuantizedSerdeType::try_from(isq_type as usize)? {
+                QuantizedSerdeType::Gguf => {
+                    GgufMatMul::deserialize(Cow::from(artifact), device, comm, guard)
+                }
+                QuantizedSerdeType::Unquant => {
+                    UnquantLinear::deserialize(Cow::from(artifact), device, comm, guard)
+                }
+                QuantizedSerdeType::Hqq => {
+                    HqqLayer::deserialize(Cow::from(artifact), device, comm, guard)
+                }
+                QuantizedSerdeType::Fp8 => {
+                    FP8Linear::deserialize(Cow::from(artifact), device, comm, guard)
+                }
+                QuantizedSerdeType::Afq => {
+                    AfqLayer::deserialize(Cow::from(artifact), device, comm, guard)
+                }
+                QuantizedSerdeType::F8Q8 => {
+                    F8Q8Linear::deserialize(Cow::from(artifact), device, comm, guard)
+                }
+                QuantizedSerdeType::Mxfp4 => {
+                    MXFP4Layer::deserialize(Cow::from(artifact), device, comm, guard)
+                }
+            }
+        }
+    }
+}
 
 pub(crate) struct WeightLoadingState {
     pub(crate) from_uqff: bool,
@@ -1102,7 +1150,8 @@ pub trait IsqModel {
             comms.push(mapper.get_comm_for(comm_layer)?)
         }
 
-        let artifacts = unsafe { candle_core::safetensors::MmapedSafetensors::multi(artifacts)? };
+        let artifacts =
+            Arc::new(unsafe { candle_core::safetensors::MmapedSafetensors::multi(artifacts)? });
 
         let artifact_isqs = artifacts
             .tensors()
@@ -1142,86 +1191,60 @@ pub trait IsqModel {
 
         let guard = QuantizeOntoGuard::new();
 
-        if silent {
+        if devices.iter().any(Device::is_cpu) {
+            let mut lazy_gguf_artifacts = 0usize;
+            for (i, (tensor, layer_num)) in tensors.into_iter().enumerate() {
+                if let Some(artifact) = artifact_isqs.get(&i) {
+                    if layer_num.is_some_and(|layer| layer == ISQ_CPU_DEVICE_SENTINEL)
+                        && tensor.is_distributed().is_none()
+                    {
+                        if let Some(lazy) =
+                            LazyGgufMatMul::from_uqff_mmap(artifacts.clone(), i.to_string())?
+                        {
+                            *tensor = lazy;
+                            lazy_gguf_artifacts += 1;
+                            if !silent {
+                                bar.inc(1);
+                            }
+                            continue;
+                        }
+                    }
+
+                    let comm = comms[i].clone();
+                    *tensor = deserialize_uqff_layer(
+                        tensor,
+                        artifact.data(),
+                        &devices[i],
+                        &comm,
+                        guard.clone(),
+                    )?;
+                }
+                if !silent {
+                    bar.inc(1);
+                }
+            }
+            if !silent {
+                bar.finish_and_clear();
+            }
+            if lazy_gguf_artifacts > 0 {
+                info!(
+                    "Using lazy mmap-backed GGUF UQFF storage for {lazy_gguf_artifacts} CPU_MOE expert tensors."
+                );
+            }
+        } else if silent {
             (0..tensors.len())
                 .into_par_iter()
                 .zip(tensors)
                 .map(|(i, (tensor, _))| {
                     if let Some(artifact) = artifact_isqs.get(&i) {
-                        let artifact = artifact.data();
-
                         let comm = comms[i].clone();
-                        let deserialized = match tensor.is_distributed() {
-                            Some(DistributedKind::ColumnParallel) => {
-                                ColumnParallelLayer::deserialize(
-                                    Cow::from(artifact),
-                                    &devices[i],
-                                    &comm,
-                                    guard.clone(),
-                                )?
-                            }
-                            Some(DistributedKind::RowParallel) => RowParallelLayer::deserialize(
-                                Cow::from(artifact),
-                                &devices[i],
-                                &comm,
-                                guard.clone(),
-                            )?,
-                            Some(DistributedKind::Replicated) => ReplicatedLayer::deserialize(
-                                Cow::from(artifact),
-                                &devices[i],
-                                &comm,
-                                guard.clone(),
-                            )?,
-                            None => {
-                                // NOTE(EricLBuehler): isq type is ALWAYS byte 4 (5th) of the tensor.
-                                let isq_type = artifact[mistralrs_quant::UQFF_QUANT_TYPE_OFFSET];
-                                match QuantizedSerdeType::try_from(isq_type as usize)? {
-                                    QuantizedSerdeType::Gguf => GgufMatMul::deserialize(
-                                        Cow::from(artifact),
-                                        &devices[i],
-                                        &comm,
-                                        guard.clone(),
-                                    )?,
-                                    QuantizedSerdeType::Unquant => UnquantLinear::deserialize(
-                                        Cow::from(artifact),
-                                        &devices[i],
-                                        &comm,
-                                        guard.clone(),
-                                    )?,
-                                    QuantizedSerdeType::Hqq => HqqLayer::deserialize(
-                                        Cow::from(artifact),
-                                        &devices[i],
-                                        &comm,
-                                        guard.clone(),
-                                    )?,
-                                    QuantizedSerdeType::Fp8 => FP8Linear::deserialize(
-                                        Cow::from(artifact),
-                                        &devices[i],
-                                        &comm,
-                                        guard.clone(),
-                                    )?,
-                                    QuantizedSerdeType::Afq => AfqLayer::deserialize(
-                                        Cow::from(artifact),
-                                        &devices[i],
-                                        &comm,
-                                        guard.clone(),
-                                    )?,
-                                    QuantizedSerdeType::F8Q8 => F8Q8Linear::deserialize(
-                                        Cow::from(artifact),
-                                        &devices[i],
-                                        &comm,
-                                        guard.clone(),
-                                    )?,
-                                    QuantizedSerdeType::Mxfp4 => MXFP4Layer::deserialize(
-                                        Cow::from(artifact),
-                                        &devices[i],
-                                        &comm,
-                                        guard.clone(),
-                                    )?,
-                                }
-                            }
-                        };
-                        *tensor = deserialized;
+                        *tensor = deserialize_uqff_layer(
+                            tensor,
+                            artifact.data(),
+                            &devices[i],
+                            &comm,
+                            guard.clone(),
+                        )?;
                     }
                     Ok(())
                 })
@@ -1233,80 +1256,14 @@ pub trait IsqModel {
                 .progress_with(bar)
                 .map(|(i, (tensor, _))| {
                     if let Some(artifact) = artifact_isqs.get(&i) {
-                        let artifact = artifact.data();
-
                         let comm = comms[i].clone();
-                        let deserialized = match tensor.is_distributed() {
-                            Some(DistributedKind::ColumnParallel) => {
-                                ColumnParallelLayer::deserialize(
-                                    Cow::from(artifact),
-                                    &devices[i],
-                                    &comm,
-                                    guard.clone(),
-                                )?
-                            }
-                            Some(DistributedKind::RowParallel) => RowParallelLayer::deserialize(
-                                Cow::from(artifact),
-                                &devices[i],
-                                &comm,
-                                guard.clone(),
-                            )?,
-                            Some(DistributedKind::Replicated) => ReplicatedLayer::deserialize(
-                                Cow::from(artifact),
-                                &devices[i],
-                                &comm,
-                                guard.clone(),
-                            )?,
-                            None => {
-                                // NOTE(EricLBuehler): isq type is ALWAYS byte 4 (5th) of the tensor.
-                                let isq_type = artifact[mistralrs_quant::UQFF_QUANT_TYPE_OFFSET];
-                                match QuantizedSerdeType::try_from(isq_type as usize)? {
-                                    QuantizedSerdeType::Gguf => GgufMatMul::deserialize(
-                                        Cow::from(artifact),
-                                        &devices[i],
-                                        &comm,
-                                        guard.clone(),
-                                    )?,
-                                    QuantizedSerdeType::Unquant => UnquantLinear::deserialize(
-                                        Cow::from(artifact),
-                                        &devices[i],
-                                        &comm,
-                                        guard.clone(),
-                                    )?,
-                                    QuantizedSerdeType::Hqq => HqqLayer::deserialize(
-                                        Cow::from(artifact),
-                                        &devices[i],
-                                        &comm,
-                                        guard.clone(),
-                                    )?,
-                                    QuantizedSerdeType::Fp8 => FP8Linear::deserialize(
-                                        Cow::from(artifact),
-                                        &devices[i],
-                                        &comm,
-                                        guard.clone(),
-                                    )?,
-                                    QuantizedSerdeType::Afq => AfqLayer::deserialize(
-                                        Cow::from(artifact),
-                                        &devices[i],
-                                        &comm,
-                                        guard.clone(),
-                                    )?,
-                                    QuantizedSerdeType::F8Q8 => F8Q8Linear::deserialize(
-                                        Cow::from(artifact),
-                                        &devices[i],
-                                        &comm,
-                                        guard.clone(),
-                                    )?,
-                                    QuantizedSerdeType::Mxfp4 => MXFP4Layer::deserialize(
-                                        Cow::from(artifact),
-                                        &devices[i],
-                                        &comm,
-                                        guard.clone(),
-                                    )?,
-                                }
-                            }
-                        };
-                        *tensor = deserialized;
+                        *tensor = deserialize_uqff_layer(
+                            tensor,
+                            artifact.data(),
+                            &devices[i],
+                            &comm,
+                            guard.clone(),
+                        )?;
                     }
                     Ok(())
                 })

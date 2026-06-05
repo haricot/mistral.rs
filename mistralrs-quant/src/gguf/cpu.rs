@@ -22,7 +22,7 @@ use std::{
     },
 };
 
-use crate::{QuantMethod, QuantMethodConfig, UnquantLinear};
+use crate::{GgufRawTensor, QuantMethod, QuantMethodConfig, UnquantLinear};
 
 type ExpertCacheKey = (usize, usize, u8);
 type Q4_1ExpertCacheKey = (usize, usize);
@@ -515,11 +515,17 @@ fn q4k_cpu_qtensor(qmatmul: &QMatMul) -> Option<&Arc<QTensor>> {
     }
 }
 
-fn q4k_qtensor_shape(qtensor: &QTensor) -> Result<(usize, usize, usize)> {
-    let &[num_experts, out_features, in_features] = qtensor.shape().dims() else {
+fn q4k_raw_shape(raw: &GgufRawTensor<'_>) -> Result<(usize, usize, usize)> {
+    if raw.dtype != GgmlDType::Q4K {
+        candle_core::bail!(
+            "GGUF CPU fused MoE expects Q4K weights, got {:?}",
+            raw.dtype
+        );
+    }
+    let &[num_experts, out_features, in_features] = raw.shape.as_ref() else {
         candle_core::bail!(
             "GGUF CPU fused MoE expects weights [experts, out, in], got {:?}",
-            qtensor.shape().dims()
+            raw.shape.as_ref()
         );
     };
     if in_features % QK_K != 0 {
@@ -642,17 +648,63 @@ where
         return Ok(None);
     };
 
-    let (num_experts, inter, hidden) = q4k_qtensor_shape(gate)?;
-    let (up_num_experts, up_inter, up_hidden) = q4k_qtensor_shape(up)?;
-    let (down_num_experts, down_hidden, down_inter) = q4k_qtensor_shape(down)?;
+    let gate_data = gate.data()?;
+    let up_data = up.data()?;
+    let down_data = down.data()?;
+    let gate_raw = GgufRawTensor {
+        dtype: gate.dtype(),
+        shape: std::borrow::Cow::Borrowed(gate.shape().dims()),
+        data: gate_data,
+        cache_key: Arc::as_ptr(gate) as usize,
+    };
+    let up_raw = GgufRawTensor {
+        dtype: up.dtype(),
+        shape: std::borrow::Cow::Borrowed(up.shape().dims()),
+        data: up_data,
+        cache_key: Arc::as_ptr(up) as usize,
+    };
+    let down_raw = GgufRawTensor {
+        dtype: down.dtype(),
+        shape: std::borrow::Cow::Borrowed(down.shape().dims()),
+        data: down_data,
+        cache_key: Arc::as_ptr(down) as usize,
+    };
+
+    cpu_fused_moe_q4k_forward_raw(
+        &gate_raw,
+        &up_raw,
+        &down_raw,
+        xs,
+        topk_weights,
+        topk_ids,
+        act,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn cpu_fused_moe_q4k_forward_raw<F>(
+    gate: &GgufRawTensor<'_>,
+    up: &GgufRawTensor<'_>,
+    down: &GgufRawTensor<'_>,
+    xs: &Tensor,
+    topk_weights: &Tensor,
+    topk_ids: &Tensor,
+    act: F,
+) -> Result<Option<Tensor>>
+where
+    F: Fn(f32) -> f32 + Copy + Send + Sync,
+{
+    let (num_experts, inter, hidden) = q4k_raw_shape(gate)?;
+    let (up_num_experts, up_inter, up_hidden) = q4k_raw_shape(up)?;
+    let (down_num_experts, down_hidden, down_inter) = q4k_raw_shape(down)?;
     if (up_num_experts, up_inter, up_hidden) != (num_experts, inter, hidden)
         || (down_num_experts, down_hidden, down_inter) != (num_experts, hidden, inter)
     {
         candle_core::bail!(
             "GGUF CPU fused MoE shape mismatch gate={:?} up={:?} down={:?}",
-            gate.shape().dims(),
-            up.shape().dims(),
-            down.shape().dims()
+            gate.shape.as_ref(),
+            up.shape.as_ref(),
+            down.shape.as_ref()
         );
     }
 
@@ -698,12 +750,12 @@ where
         .to_dtype(DType::F32)?
         .to_vec2::<f32>()?;
 
-    let gate_raw = gate.data()?;
-    let up_raw = up.data()?;
-    let down_raw = down.data()?;
-    let gate_key = Arc::as_ptr(gate) as usize;
-    let up_key = Arc::as_ptr(up) as usize;
-    let down_key = Arc::as_ptr(down) as usize;
+    let gate_data = gate.data.as_ref();
+    let up_data = up.data.as_ref();
+    let down_data = down.data.as_ref();
+    let gate_key = gate.cache_key;
+    let up_key = up.cache_key;
+    let down_key = down.cache_key;
     let blocks_per_hidden_row = hidden / QK_K;
     let blocks_per_inter_row = inter / QK_K;
     let gate_expert_bytes = inter * blocks_per_hidden_row * std::mem::size_of::<RawQ4KBlock>();
@@ -724,17 +776,17 @@ where
             let gate_expert = cached_q4k_expert((gate_key, expert_id), || {
                 let start = expert_id * gate_expert_bytes;
                 let end = start + gate_expert_bytes;
-                q4k_blocks_from_raw(&gate_raw[start..end])
+                q4k_blocks_from_raw(&gate_data[start..end])
             })?;
             let up_expert = cached_q4k_expert((up_key, expert_id), || {
                 let start = expert_id * gate_expert_bytes;
                 let end = start + gate_expert_bytes;
-                q4k_blocks_from_raw(&up_raw[start..end])
+                q4k_blocks_from_raw(&up_data[start..end])
             })?;
             let down_expert = cached_q4k_expert((down_key, expert_id), || {
                 let start = expert_id * down_expert_bytes;
                 let end = start + down_expert_bytes;
-                q4k_blocks_from_raw(&down_raw[start..end])
+                q4k_blocks_from_raw(&down_data[start..end])
             })?;
             routes.push(Q4KRouteExperts {
                 gate: gate_expert,
@@ -873,8 +925,8 @@ unsafe fn q4_1_q8_1_dot_avx2(xs: &[RawQ4_1Block], ys: &[RawQ8_1Block]) -> f32 {
     sumf
 }
 
-fn qtensor_indexed_moe_forward_q4_1(
-    qtensor: &Arc<QTensor>,
+fn qtensor_indexed_moe_forward_q4_1_raw(
+    tensor_key: usize,
     x: &Tensor,
     ids_vec: &[Vec<u32>],
     num_tokens: usize,
@@ -894,7 +946,6 @@ fn qtensor_indexed_moe_forward_q4_1(
     let blocks_per_row = in_features / 32;
     let blocks_per_expert = out_features * blocks_per_row;
     let expert_bytes = blocks_per_expert * 20;
-    let tensor_key = Arc::as_ptr(qtensor) as usize;
     let mut q8_rows = Vec::with_capacity(num_tokens * x_slots);
     let mut tasks = Vec::with_capacity(num_tokens * num_experts_per_tok);
 
@@ -1089,8 +1140,8 @@ unsafe fn q4k_q8k_dot_avx2(xs: &[RawQ4KBlock], ys: &[RawQ8KBlock]) -> f32 {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn qtensor_indexed_moe_forward_q4k(
-    qtensor: &Arc<QTensor>,
+fn qtensor_indexed_moe_forward_q4k_raw(
+    tensor_key: usize,
     x: &Tensor,
     ids_vec: &[Vec<u32>],
     num_tokens: usize,
@@ -1110,7 +1161,6 @@ fn qtensor_indexed_moe_forward_q4k(
     let blocks_per_row = in_features / QK_K;
     let blocks_per_expert = out_features * blocks_per_row;
     let expert_bytes = blocks_per_expert * std::mem::size_of::<RawQ4KBlock>();
-    let tensor_key = Arc::as_ptr(qtensor) as usize;
     let mut q8_rows = Vec::with_capacity(num_tokens * x_slots);
     let mut tasks = Vec::with_capacity(num_tokens * num_experts_per_tok);
 
@@ -1184,14 +1234,32 @@ pub fn qtensor_indexed_moe_forward(
     x: &Tensor,
     ids: &Tensor,
 ) -> Result<Tensor> {
-    let shape = qtensor.shape().dims();
+    let raw = qtensor.data()?;
+    cpu_indexed_moe_forward_raw(
+        qtensor.dtype(),
+        qtensor.shape().dims(),
+        &raw,
+        Arc::as_ptr(qtensor) as usize,
+        x,
+        ids,
+    )
+}
+
+pub(crate) fn cpu_indexed_moe_forward_raw(
+    dtype: GgmlDType,
+    shape: &[usize],
+    raw: &[u8],
+    tensor_key: usize,
+    x: &Tensor,
+    ids: &Tensor,
+) -> Result<Tensor> {
     let &[num_experts, out_features, in_features] = shape else {
         candle_core::bail!(
             "GGUF CPU indexed MoE expects weights [experts, out, in], got {:?}",
             shape
         );
     };
-    let block_size = qtensor.dtype().block_size();
+    let block_size = dtype.block_size();
     if in_features % block_size != 0 {
         candle_core::bail!(
             "GGUF CPU indexed MoE expects in_features {in_features} divisible by block size {block_size}"
@@ -1224,10 +1292,9 @@ pub fn qtensor_indexed_moe_forward(
 
     let ids_cpu = ids.to_device(&Device::Cpu)?;
     let ids_vec = ids_cpu.to_vec2::<u32>()?;
-    let raw = qtensor.data()?;
-    if qtensor.dtype() == GgmlDType::Q4_1 && x.device().is_cpu() {
-        return qtensor_indexed_moe_forward_q4_1(
-            qtensor,
+    if dtype == GgmlDType::Q4_1 && x.device().is_cpu() {
+        return qtensor_indexed_moe_forward_q4_1_raw(
+            tensor_key,
             x,
             &ids_vec,
             num_tokens,
@@ -1236,12 +1303,12 @@ pub fn qtensor_indexed_moe_forward(
             num_experts,
             out_features,
             in_features,
-            &raw,
+            raw,
         );
     }
-    if qtensor.dtype() == GgmlDType::Q4K && x.device().is_cpu() {
-        return qtensor_indexed_moe_forward_q4k(
-            qtensor,
+    if dtype == GgmlDType::Q4K && x.device().is_cpu() {
+        return qtensor_indexed_moe_forward_q4k_raw(
+            tensor_key,
             x,
             &ids_vec,
             num_tokens,
@@ -1250,18 +1317,17 @@ pub fn qtensor_indexed_moe_forward(
             num_experts,
             out_features,
             in_features,
-            &raw,
+            raw,
         );
     }
     if !LOG_GGUF_CPU_MOE_FALLBACK.swap(true, Ordering::Relaxed) {
         tracing::info!(
             "Using GGUF CPU indexed MoE dequant fallback (dtype={:?}, x_device={:?}, experts={num_experts}, out={out_features}, in={in_features})",
-            qtensor.dtype(),
+            dtype,
             x.device()
         );
     }
-    let expert_bytes = out_features * in_features / block_size * qtensor.dtype().type_size();
-    let tensor_key = Arc::as_ptr(qtensor) as usize;
+    let expert_bytes = out_features * in_features / block_size * dtype.type_size();
     let mut rows = Vec::with_capacity(num_tokens * num_experts_per_tok);
 
     for (token_idx, token_ids) in ids_vec.iter().enumerate() {
@@ -1277,7 +1343,7 @@ pub fn qtensor_indexed_moe_forward(
                 let start = expert_id * expert_bytes;
                 let end = start + expert_bytes;
                 let expert_qtensor = qtensor_from_ggml(
-                    qtensor.dtype(),
+                    dtype,
                     &raw[start..end],
                     vec![out_features, in_features],
                     x.device(),

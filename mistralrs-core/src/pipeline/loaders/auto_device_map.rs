@@ -280,7 +280,10 @@ pub fn get_device_layers(
     // On unified memory systems (iGPUs), GPU and CPU share the same physical RAM.
     // Don't add CPU as a fallback device since it would double-count memory.
     if !has_unified_memory {
-        let a = MemoryUsage.query(&Device::Cpu)?.available();
+        // Keep CPU fallback unbounded by current MemAvailable. This preserves
+        // the historical "no RAM limits for CPU" behavior and lets mmap/swap
+        // based CPU offload proceed when GPU placement fails.
+        let a = usize::MAX / 4;
         avail.push((a, Device::Cpu));
     }
 

@@ -99,6 +99,13 @@ impl DeviceMapMetadata {
             return Ok(dummy_mapper(device));
         };
 
+        if device_layers.is_empty() {
+            once_log_info(format!("Model has {model_layers} repeating layers."));
+            let mappings = vec![Device::Cpu; model_layers];
+            log_layer_mappings(&mappings)?;
+            return layer_mapper(mappings, &Device::Cpu);
+        }
+
         let n_device_layers = device_layers
             .iter()
             .map(|metadata| metadata.layers)

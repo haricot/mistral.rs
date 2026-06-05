@@ -294,10 +294,12 @@ pub fn moe_router_topk(
         values = (values * config.output_scale as f64)?;
     }
     if let Some(expert_scale) = expert_scale {
+        let flat_indices = indices.flatten_all()?;
         let scales = expert_scale
             .to_dtype(DType::F32)?
-            .index_select(&indices.flatten_all()?, 0)?
-            .reshape(indices.shape())?;
+            .index_select(&flat_indices.to_device(expert_scale.device())?, 0)?
+            .reshape(indices.shape())?
+            .to_device(values.device())?;
         values = (values * scales)?;
     }
 

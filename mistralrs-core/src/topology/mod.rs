@@ -82,6 +82,11 @@ pub struct TopologyRuntime {
         alias = "gguf-cpu-q4k-matmul-max-rows"
     )]
     pub gguf_cpu_q4k_matmul_max_rows: Option<usize>,
+    #[serde(
+        alias = "MISTRALRS_GGUF_CUDA_MOE_STAGED",
+        alias = "gguf-cuda-moe-staged"
+    )]
+    pub gguf_cuda_moe_staged: Option<bool>,
 }
 
 #[derive(Default, Deserialize)]
@@ -352,6 +357,7 @@ impl TopologyRuntime {
             || self.gguf_cpu_q4k_matmul.is_some()
             || self.gguf_cpu_q4k_matmul_cache.is_some()
             || self.gguf_cpu_q4k_matmul_max_rows.is_some()
+            || self.gguf_cuda_moe_staged.is_some()
     }
 
     fn apply(&self) {
@@ -369,6 +375,7 @@ impl TopologyRuntime {
             cpu_q4k_matmul: self.gguf_cpu_q4k_matmul,
             cpu_q4k_matmul_cache: self.gguf_cpu_q4k_matmul_cache,
             cpu_q4k_matmul_max_rows: self.gguf_cpu_q4k_matmul_max_rows,
+            cuda_moe_staged: self.gguf_cuda_moe_staged,
         });
     }
 }
@@ -471,6 +478,7 @@ runtime:
   cpu_moe: true
   cpu_profile: true
   gguf_cpu_moe_q4k_expert_cache: 2048
+  gguf_cuda_moe_staged: true
 layers:
   0-2:
     isq: Q4K
@@ -481,6 +489,7 @@ layers:
         assert_eq!(topology.runtime.qwen35_cpu_moe, Some(true));
         assert_eq!(topology.runtime.qwen35_profile, Some(true));
         assert_eq!(topology.runtime.gguf_cpu_moe_q4k_expert_cache, Some(2048));
+        assert_eq!(topology.runtime.gguf_cuda_moe_staged, Some(true));
         assert_eq!(layer_isq(&topology, 0), Some(IsqType::Q4K));
         assert!(matches!(
             topology.layer_for(0).and_then(|lt| lt.device.as_ref()),

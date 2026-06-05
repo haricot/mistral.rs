@@ -26,6 +26,7 @@ use crate::{
     pipeline::{
         text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
         EitherCache, IsqModel, KvCache, ModelForwardContext, NormalLoadingMetadata,
+        ISQ_CPU_DEVICE_SENTINEL,
     },
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
@@ -433,9 +434,23 @@ impl SparseMoeBlock {
         y + shared_out
     }
 
-    fn get_isq_layers(&mut self) -> Vec<&mut Arc<dyn QuantMethod>> {
-        let mut layers = self.experts.get_isq_layers();
-        layers.extend(self.shared_expert.get_isq_layers());
+    fn get_isq_layers(
+        &mut self,
+        routed_layer_num: Option<usize>,
+        shared_layer_num: Option<usize>,
+    ) -> Vec<(&mut Arc<dyn QuantMethod>, Option<usize>)> {
+        let mut layers = self
+            .experts
+            .get_isq_layers()
+            .into_iter()
+            .map(|layer| (layer, routed_layer_num))
+            .collect::<Vec<_>>();
+        layers.extend(
+            self.shared_expert
+                .get_isq_layers()
+                .into_iter()
+                .map(|layer| (layer, shared_layer_num)),
+        );
         layers
     }
 }
@@ -935,8 +950,13 @@ impl IsqModel for Qwen3_5MoeTextModel {
                     tensors.push((&mut gdn.out_proj, Some(i)));
                 }
             }
-            for l in layer.moe.get_isq_layers() {
-                tensors.push((l, Some(i)));
+            let routed_layer_num = if crate::topology::cpu_moe_enabled() {
+                Some(ISQ_CPU_DEVICE_SENTINEL)
+            } else {
+                Some(i)
+            };
+            for (l, layer_num) in layer.moe.get_isq_layers(routed_layer_num, Some(i)) {
+                tensors.push((l, layer_num));
             }
         }
         (tensors, &*self.mapper)

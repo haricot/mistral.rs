@@ -87,7 +87,7 @@ pub use gguf::fast_mmq::{
     grouped as grouped_moe_mmq, grouped_from_glu_pair as grouped_moe_mmq_from_glu_pair,
     grouped_pair as grouped_moe_mmq_pair, supports as supports_mmq,
 };
-pub use gguf::GgufMatMul;
+pub use gguf::{GgufMatMul, LazyGgufMatMul};
 pub use gptq::GptqLayer;
 pub use hqq::{HqqAxis, HqqBits, HqqConfig, HqqLayer};
 pub use imatrix::{CollectedImatrixData, ImatrixLayerStats};
@@ -112,6 +112,13 @@ pub use utils::{fused_glu, GluActivationType};
 pub use utils::{log, BitWiseOp, CumSumOp, LeftshiftOp, NonZeroOp, SortOp, UQFF_QUANT_TYPE_OFFSET};
 pub use vector_fp8::{fp8_vector_dequantize, fp8_vector_quantize};
 
+pub struct GgufRawTensor<'a> {
+    pub dtype: GgmlDType,
+    pub shape: Cow<'a, [usize]>,
+    pub data: Cow<'a, [u8]>,
+    pub cache_key: usize,
+}
+
 const RUNTIME_UNSET_BOOL: u8 = 0;
 const RUNTIME_FALSE_BOOL: u8 = 1;
 const RUNTIME_TRUE_BOOL: u8 = 2;
@@ -124,6 +131,7 @@ static GGUF_CPU_MOE_PARALLEL_TOPK: AtomicU8 = AtomicU8::new(RUNTIME_UNSET_BOOL);
 static GGUF_CPU_Q4K_MATMUL: AtomicU8 = AtomicU8::new(RUNTIME_UNSET_BOOL);
 static GGUF_CPU_Q4K_MATMUL_CACHE: AtomicUsize = AtomicUsize::new(RUNTIME_UNSET_USIZE);
 static GGUF_CPU_Q4K_MATMUL_MAX_ROWS: AtomicUsize = AtomicUsize::new(RUNTIME_UNSET_USIZE);
+static GGUF_CUDA_MOE_STAGED: AtomicU8 = AtomicU8::new(RUNTIME_UNSET_BOOL);
 
 #[derive(Clone, Debug, Default)]
 pub struct GgufCpuRuntimeOptions {
@@ -134,6 +142,7 @@ pub struct GgufCpuRuntimeOptions {
     pub cpu_q4k_matmul: Option<bool>,
     pub cpu_q4k_matmul_cache: Option<usize>,
     pub cpu_q4k_matmul_max_rows: Option<usize>,
+    pub cuda_moe_staged: Option<bool>,
 }
 
 pub fn set_gguf_cpu_runtime_options(options: GgufCpuRuntimeOptions) {
@@ -153,6 +162,7 @@ pub fn set_gguf_cpu_runtime_options(options: GgufCpuRuntimeOptions) {
         &GGUF_CPU_Q4K_MATMUL_MAX_ROWS,
         options.cpu_q4k_matmul_max_rows,
     );
+    store_optional_bool(&GGUF_CUDA_MOE_STAGED, options.cuda_moe_staged);
 }
 
 fn store_optional_usize(atom: &AtomicUsize, value: Option<usize>) {
@@ -211,6 +221,10 @@ pub(crate) fn gguf_cpu_q4k_matmul_cache_override() -> Option<usize> {
 
 pub(crate) fn gguf_cpu_q4k_matmul_max_rows_override() -> Option<usize> {
     load_optional_usize(&GGUF_CPU_Q4K_MATMUL_MAX_ROWS)
+}
+
+pub(crate) fn gguf_cuda_moe_staged_override() -> Option<bool> {
+    load_optional_bool(&GGUF_CUDA_MOE_STAGED)
 }
 
 use candle_nn::{Conv1d, Conv2d, Linear, Module};
@@ -1155,6 +1169,10 @@ pub trait QuantMethod: Send + Sync + Debug + QuantizedSerde {
         None
     }
 
+    fn gguf_raw_tensor_and_bias(&self) -> Result<Option<(GgufRawTensor<'_>, Option<&Tensor>)>> {
+        Ok(None)
+    }
+
     /// Add a delta weight from LoRA to the weights. This should be prescaled with alpha.
     fn add_delta_w(&self, delta: &Tensor) -> Result<Arc<dyn QuantMethod>>;
 
@@ -1207,17 +1225,88 @@ pub fn gguf_cpu_fused_moe_q4k_forward<F>(
 where
     F: Fn(f32) -> f32 + Copy + Send + Sync,
 {
-    let Some((gate, None)) = gate.gguf_qmatmul_and_bias() else {
+    if let (Some((gate_qmatmul, None)), Some((up_qmatmul, None)), Some((down_qmatmul, None))) = (
+        gate.gguf_qmatmul_and_bias(),
+        up.gguf_qmatmul_and_bias(),
+        down.gguf_qmatmul_and_bias(),
+    ) {
+        if let Some(out) = gguf::cpu_fused_moe_q4k_forward(
+            gate_qmatmul,
+            up_qmatmul,
+            down_qmatmul,
+            xs,
+            topk_weights,
+            topk_ids,
+            act,
+        )? {
+            return Ok(Some(out));
+        }
+    }
+
+    if !std::env::var("MISTRALRS_GGUF_CPU_MOE_Q4K_FUSED_RAW")
+        .is_ok_and(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
+    {
+        return Ok(None);
+    }
+
+    let Some((gate_raw, None)) = gate.gguf_raw_tensor_and_bias()? else {
         return Ok(None);
     };
-    let Some((up, None)) = up.gguf_qmatmul_and_bias() else {
+    let Some((up_raw, None)) = up.gguf_raw_tensor_and_bias()? else {
         return Ok(None);
     };
-    let Some((down, None)) = down.gguf_qmatmul_and_bias() else {
+    let Some((down_raw, None)) = down.gguf_raw_tensor_and_bias()? else {
         return Ok(None);
     };
 
-    gguf::cpu_fused_moe_q4k_forward(gate, up, down, xs, topk_weights, topk_ids, act)
+    gguf::cpu_fused_moe_q4k_forward_raw(
+        &gate_raw,
+        &up_raw,
+        &down_raw,
+        xs,
+        topk_weights,
+        topk_ids,
+        act,
+    )
+}
+
+#[cfg(feature = "cuda")]
+pub fn gguf_cuda_staged_moe_forward(
+    gate: &dyn QuantMethod,
+    up: &dyn QuantMethod,
+    down: &dyn QuantMethod,
+    xs_flat: &Tensor,
+    topk_weights: &Tensor,
+    topk_ids: &Tensor,
+    act_type: i32,
+) -> Result<Option<Tensor>> {
+    let enabled = gguf_cuda_moe_staged_override().unwrap_or_else(|| {
+        !std::env::var("MISTRALRS_GGUF_CUDA_MOE_STAGED")
+            .is_ok_and(|value| value == "0" || value.eq_ignore_ascii_case("false"))
+    });
+    if !enabled {
+        return Ok(None);
+    }
+
+    let Some((gate_raw, None)) = gate.gguf_raw_tensor_and_bias()? else {
+        return Ok(None);
+    };
+    let Some((up_raw, None)) = up.gguf_raw_tensor_and_bias()? else {
+        return Ok(None);
+    };
+    let Some((down_raw, None)) = down.gguf_raw_tensor_and_bias()? else {
+        return Ok(None);
+    };
+
+    gguf::cuda_staged_moe_forward_raw(
+        &gate_raw,
+        &up_raw,
+        &down_raw,
+        xs_flat,
+        topk_weights,
+        topk_ids,
+        act_type,
+    )
 }
 
 impl Module for dyn QuantMethod {
@@ -1234,6 +1323,9 @@ pub fn try_fused_quantized_gate_up(
     activation: GluActivationType,
 ) -> Result<Option<Tensor>> {
     if gate.has_bias() || up.has_bias() {
+        return Ok(None);
+    }
+    if !xs.device().is_cuda() {
         return Ok(None);
     }
     if !matches!(xs.dtype(), DType::BF16 | DType::F16 | DType::F32) {
@@ -1278,6 +1370,9 @@ pub fn try_fused_quantized_qkv(
     v: &dyn QuantMethod,
 ) -> Result<Option<(Tensor, Tensor, Tensor)>> {
     if q.has_bias() || k.has_bias() || v.has_bias() {
+        return Ok(None);
+    }
+    if !xs.device().is_cuda() {
         return Ok(None);
     }
     if !matches!(xs.dtype(), DType::BF16 | DType::F16 | DType::F32) {
