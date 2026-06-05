@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     config::{KvCacheLayout, ModelConfigLike},
-    turboquant_cache,
+    kvarn_cache, turboquant_cache,
 };
 
 #[derive(Debug)]
@@ -59,6 +59,8 @@ pub enum PagedCacheType {
     TurboQuant(),
     #[serde(alias = "turboquant_cached")]
     TurboQuantCached { decoded_cache_mb: usize },
+    #[serde(alias = "kvarn", alias = "kvarn_k4v2_g128")]
+    KVarN(),
 }
 
 impl Default for PagedCacheType {
@@ -74,6 +76,7 @@ impl PagedCacheType {
             PagedCacheType::Auto() => Ok(act_dtype),
             PagedCacheType::TurboQuant() => Ok(DType::U8),
             PagedCacheType::TurboQuantCached { .. } => Ok(DType::U8),
+            PagedCacheType::KVarN() => Ok(DType::U8),
         }
     }
 
@@ -89,6 +92,10 @@ impl PagedCacheType {
             PagedCacheType::TurboQuantCached { decoded_cache_mb } => Some(*decoded_cache_mb),
             _ => None,
         }
+    }
+
+    pub fn is_kvarn(&self) -> bool {
+        matches!(self, PagedCacheType::KVarN())
     }
 
     pub fn bytes_per_block_all_layers(
@@ -144,6 +151,29 @@ impl PagedCacheType {
                 )
             }
             (
+                PagedCacheType::KVarN(),
+                KvCacheLayout::Standard
+                | KvCacheLayout::StandardNoFlashInfer
+                | KvCacheLayout::FlashInferHnd,
+            ) => {
+                let mut bytes_per_block = 0;
+                for layer_idx in 0..model_config.num_layers() {
+                    let heads = model_config.num_kv_heads_for_layer(layer_idx);
+                    bytes_per_block += heads
+                        * (kvarn_cache::key_record_bytes(
+                            model_config.k_head_dim_for_layer(layer_idx),
+                            block_size,
+                        )? + kvarn_cache::value_record_bytes(
+                            model_config.v_head_dim_for_layer(layer_idx),
+                            block_size,
+                        )?);
+                }
+                Ok(bytes_per_block)
+            }
+            (PagedCacheType::KVarN(), KvCacheLayout::Mla { .. }) => {
+                candle_core::bail!("KVarN paged KV cache does not support MLA cache layout.")
+            }
+            (
                 _,
                 KvCacheLayout::Standard
                 | KvCacheLayout::StandardNoFlashInfer
@@ -182,12 +212,13 @@ impl FromStr for PagedCacheType {
             "auto" => Ok(Self::Auto()),
             "f8e4m3" => Ok(Self::F8E4M3()),
             "turboquant" | "tq" => Ok(Self::TurboQuant()),
+            "kvarn" | "kvarn_k4v2_g128" => Ok(Self::KVarN()),
             s if s.contains("turboquant_cached:") => {
                 // Default to 512MB decoded cache size if not specified, which is a reasonable starting point for many models and fits within the VRAM constraints of most GPUs when using an 8-bit quantized cache
                 Ok(Self::TurboQuantCached { decoded_cache_mb: s.strip_prefix("turboquant_cached:").unwrap_or("512").parse().unwrap_or(512) })
             },
             other => Err(format!(
-                "Unexpected `PagedCacheType`, got `{other}` but expected `auto`, `f8e4m3`, or `turboquant`."
+                "Unexpected `PagedCacheType`, got `{other}` but expected `auto`, `f8e4m3`, `turboquant`, or `kvarn`."
             )),
         }
     }
@@ -319,6 +350,36 @@ impl CacheEngine {
                     candle_core::bail!(
                         "TurboQuant paged KV cache does not support MLA cache layout."
                     )
+                }
+                (
+                    PagedCacheType::KVarN(),
+                    KvCacheLayout::Standard
+                    | KvCacheLayout::StandardNoFlashInfer
+                    | KvCacheLayout::FlashInferHnd,
+                ) => {
+                    let num_heads = model_config.num_kv_heads_for_layer(layer_idx);
+                    let key_record_bytes = kvarn_cache::key_record_bytes(
+                        model_config.k_head_dim_for_layer(layer_idx),
+                        cache_config.block_size,
+                    )?;
+                    let value_record_bytes = kvarn_cache::value_record_bytes(
+                        model_config.v_head_dim_for_layer(layer_idx),
+                        cache_config.block_size,
+                    )?;
+                    let key_blocks = Tensor::zeros(
+                        (cache_config.num_gpu_blocks, num_heads, key_record_bytes),
+                        DType::U8,
+                        device,
+                    )?;
+                    let value_blocks = Tensor::zeros(
+                        (cache_config.num_gpu_blocks, num_heads, value_record_bytes),
+                        DType::U8,
+                        device,
+                    )?;
+                    (key_blocks, value_blocks)
+                }
+                (PagedCacheType::KVarN(), KvCacheLayout::Mla { .. }) => {
+                    candle_core::bail!("KVarN paged KV cache does not support MLA cache layout.")
                 }
                 (
                     _,
@@ -704,6 +765,24 @@ mod tests {
             .to_dtype(DType::F16)?,
             DType::U8
         );
+        Ok(())
+    }
+
+    #[test]
+    fn parses_kvarn_cache_type() {
+        assert_eq!(
+            "kvarn".parse::<PagedCacheType>().unwrap(),
+            PagedCacheType::KVarN()
+        );
+        assert_eq!(
+            "kvarn_k4v2_g128".parse::<PagedCacheType>().unwrap(),
+            PagedCacheType::KVarN()
+        );
+    }
+
+    #[test]
+    fn kvarn_cache_type_uses_u8_storage() -> Result<()> {
+        assert_eq!(PagedCacheType::KVarN().to_dtype(DType::F16)?, DType::U8);
         Ok(())
     }
 }

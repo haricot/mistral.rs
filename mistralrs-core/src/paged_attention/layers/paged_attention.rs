@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use crate::{
     attention::{AttentionMask, SdpaParams},
     layers::Sdpa,
-    paged_attention::{cache_engine::DecodedKVCache, turboquant_cache, _PAD_SLOT_ID},
+    paged_attention::{cache_engine::DecodedKVCache, kvarn_cache, turboquant_cache, _PAD_SLOT_ID},
     pipeline::text_models_inputs_processor::{
         FlashKMeta, FlashParams, PagedAttentionInputMetadata,
     },
@@ -289,11 +289,13 @@ impl PagedAttention {
         let uses_turboquant_cache = key_cache
             .as_ref()
             .is_some_and(turboquant_cache::is_turboquant_cache);
+        let uses_kvarn_cache = key_cache.as_ref().is_some_and(kvarn_cache::is_kvarn_cache);
+        let uses_quantized_gather_cache = uses_turboquant_cache || uses_kvarn_cache;
 
         let is_multi_token_decode = !input_metadata.is_first_prompt_chunk && seq_len > 1;
         let use_legacy_fast_mtp_verify = write_cache
             && is_multi_token_decode
-            && !uses_turboquant_cache
+            && !uses_quantized_gather_cache
             && key_cache
                 .as_ref()
                 .is_some_and(|cache| cache.dtype() == DType::F8E4M3)
@@ -337,6 +339,14 @@ impl PagedAttention {
                         value_cache.as_mut().unwrap(),
                         slot_mapping,
                     )?;
+                } else if uses_kvarn_cache {
+                    kvarn_cache::reshape_and_cache(
+                        &k_flat,
+                        &v_flat,
+                        key_cache.as_mut().unwrap(),
+                        value_cache.as_mut().unwrap(),
+                        slot_mapping,
+                    )?;
                 } else {
                     reshape_and_cache(
                         &k_flat,
@@ -353,7 +363,7 @@ impl PagedAttention {
             // Staged MTP completion metadata has one block-table/context-len row
             // per query token, so the paged decode kernel can enforce the
             // causal boundary without materializing a dense KV mask.
-            if write_cache && is_multi_token_decode && !uses_turboquant_cache {
+            if write_cache && is_multi_token_decode && !uses_quantized_gather_cache {
                 let configured_max_context_len = if use_full {
                     input_metadata.full_max_context_len.unwrap()
                 } else {
@@ -529,7 +539,7 @@ impl PagedAttention {
                     .transpose(1, 2);
             }
 
-            if !write_cache && is_multi_token_decode && !uses_turboquant_cache {
+            if !write_cache && is_multi_token_decode && !uses_quantized_gather_cache {
                 let configured_max_context_len = if use_full {
                     input_metadata.full_max_context_len.unwrap()
                 } else {
@@ -633,6 +643,14 @@ impl PagedAttention {
             // Gather all K/V from paged cache into contiguous tensors.
             let (k_gathered, v_gathered) = if uses_turboquant_cache {
                 turboquant_cache::gather_kv_cache(
+                    key_cache.as_ref().unwrap(),
+                    value_cache.as_ref().unwrap(),
+                    &block_tables,
+                    &cu_kv,
+                    query.dtype(),
+                )?
+            } else if uses_kvarn_cache {
+                kvarn_cache::gather_kv_cache(
                     key_cache.as_ref().unwrap(),
                     value_cache.as_ref().unwrap(),
                     &block_tables,
@@ -799,6 +817,14 @@ impl PagedAttention {
                     value_cache.as_mut().unwrap(),
                     slot_mapping,
                 )?;
+            } else if uses_kvarn_cache {
+                kvarn_cache::reshape_and_cache(
+                    &key,
+                    &value,
+                    key_cache.as_mut().unwrap(),
+                    value_cache.as_mut().unwrap(),
+                    slot_mapping,
+                )?;
             } else {
                 reshape_and_cache(
                     &key,
@@ -818,9 +844,16 @@ impl PagedAttention {
         }
         // === Decode path ===
         #[allow(clippy::cast_possible_truncation)]
-        if uses_turboquant_cache {
+        if uses_quantized_gather_cache {
             if alibi_slopes.is_some() {
-                candle_core::bail!("TurboQuant paged KV cache does not support alibi slopes yet.");
+                let cache_name = if uses_kvarn_cache {
+                    "KVarN"
+                } else {
+                    "TurboQuant"
+                };
+                candle_core::bail!(
+                    "{cache_name} paged KV cache does not support alibi slopes yet."
+                );
             }
 
             let block_tables = resolve_block_tables(query.device())?;
@@ -828,53 +861,65 @@ impl PagedAttention {
             let kv_lens = context_lens_to_lengths(&context_lens)?;
             let cu_kv = cumulative_seqlens_from_lengths(&kv_lens, query.device())?;
 
-            if let Some(decoded_cache) = decoded_cache.as_deref_mut() {
-                // The current token has just been written into the TurboQuant cache.
-                // If its physical block is already decoded, that decoded slot is stale.
-                turboquant_cache::invalidate_decoded_blocks_from_slot_mapping(
-                    decoded_cache,
-                    slot_mapping,
-                )?;
+            if uses_turboquant_cache {
+                if let Some(decoded_cache) = decoded_cache.as_deref_mut() {
+                    // The current token has just been written into the TurboQuant cache.
+                    // If its physical block is already decoded, that decoded slot is stale.
+                    turboquant_cache::invalidate_decoded_blocks_from_slot_mapping(
+                        decoded_cache,
+                        slot_mapping,
+                    )?;
 
-                let decoded_block_tables = turboquant_cache::ensure_decoded_block_cache(
-                    decoded_cache,
+                    let decoded_block_tables = turboquant_cache::ensure_decoded_block_cache(
+                        decoded_cache,
+                        key_cache.as_ref().unwrap(),
+                        value_cache.as_ref().unwrap(),
+                        &block_tables,
+                        &context_lens,
+                        query.dtype(),
+                    )?;
+
+                    let res = paged_attention(
+                        &query,
+                        self.k_scale.as_ref(),
+                        self.v_scale.as_ref(),
+                        &decoded_cache.key_cache,
+                        &decoded_cache.value_cache,
+                        &decoded_block_tables,
+                        &context_lens,
+                        alibi_slopes.as_ref(),
+                        if use_full {
+                            input_metadata.full_max_context_len.unwrap()
+                        } else {
+                            input_metadata.max_context_len.unwrap()
+                        },
+                        sdpa_params.softmax_scale,
+                        sdpa_params.softcap.unwrap_or(1.0f32),
+                        sdpa_params.sinks.as_ref(),
+                    )?;
+
+                    return Ok(res);
+                }
+            }
+
+            // Fallback path for packed caches: gather dense KV, then run SDPA.
+            let (k_gathered, v_gathered) = if uses_kvarn_cache {
+                kvarn_cache::gather_kv_cache(
                     key_cache.as_ref().unwrap(),
                     value_cache.as_ref().unwrap(),
                     &block_tables,
-                    &context_lens,
+                    &cu_kv,
                     query.dtype(),
-                )?;
-
-                let res = paged_attention(
-                    &query,
-                    self.k_scale.as_ref(),
-                    self.v_scale.as_ref(),
-                    &decoded_cache.key_cache,
-                    &decoded_cache.value_cache,
-                    &decoded_block_tables,
-                    &context_lens,
-                    alibi_slopes.as_ref(),
-                    if use_full {
-                        input_metadata.full_max_context_len.unwrap()
-                    } else {
-                        input_metadata.max_context_len.unwrap()
-                    },
-                    sdpa_params.softmax_scale,
-                    sdpa_params.softcap.unwrap_or(1.0f32),
-                    sdpa_params.sinks.as_ref(),
-                )?;
-
-                return Ok(res);
-            }
-
-            // Fallback actuel : TurboQuant gather dense + SDPA.
-            let (k_gathered, v_gathered) = turboquant_cache::gather_kv_cache(
-                key_cache.as_ref().unwrap(),
-                value_cache.as_ref().unwrap(),
-                &block_tables,
-                &cu_kv,
-                query.dtype(),
-            )?;
+                )?
+            } else {
+                turboquant_cache::gather_kv_cache(
+                    key_cache.as_ref().unwrap(),
+                    value_cache.as_ref().unwrap(),
+                    &block_tables,
+                    &cu_kv,
+                    query.dtype(),
+                )?
+            };
 
             let k_batched = unpack_gathered_kv(
                 &k_gathered,
@@ -900,7 +945,7 @@ impl PagedAttention {
                     .transpose(1, 2)?
             } else {
                 candle_core::bail!(
-                    "TurboQuant decode metadata mismatch: {} KV rows for query shape {:?}",
+                    "quantized paged KV decode metadata mismatch: {} KV rows for query shape {:?}",
                     kv_lens.len(),
                     query.shape()
                 );

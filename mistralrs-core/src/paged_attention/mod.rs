@@ -12,6 +12,7 @@ mod config;
 pub mod encoder_cache;
 /// KV Cache Manager: high-level block allocation, prefix cache lookups, per-request tracking.
 pub mod kv_cache_manager;
+pub(crate) mod kvarn_cache;
 mod layers;
 mod scheduler;
 pub(crate) mod turboquant_cache;
@@ -108,8 +109,14 @@ pub fn calculate_cache_config(
     model_weight_size_in_bytes: Option<usize>,
     max_num_tokens: Option<usize>,
 ) -> anyhow::Result<CacheConfig> {
-    let block_size = block_size.unwrap_or(DEFAULT_PAGED_ATTENTION_BLOCK_SIZE);
-    if !SUPPORTED_BLOCK_SIZE.contains(&block_size) {
+    let block_size = if cache_type.is_kvarn() {
+        block_size.unwrap_or(kvarn_cache::KVARN_GROUP)
+    } else {
+        block_size.unwrap_or(DEFAULT_PAGED_ATTENTION_BLOCK_SIZE)
+    };
+    if cache_type.is_kvarn() {
+        kvarn_cache::validate_block_size(block_size)?;
+    } else if !SUPPORTED_BLOCK_SIZE.contains(&block_size) {
         anyhow::bail!("Block size must be in {SUPPORTED_BLOCK_SIZE:?}, got {block_size}");
     }
     let bytes_per_block_all_layers =
@@ -174,7 +181,14 @@ pub fn calculate_cache_config(
 
     if !silent {
         info!("Allocating {mem_gpu} MB for PagedAttention KV cache per GPU");
-        if cache_type.is_turboquant() {
+        if cache_type.is_kvarn() {
+            info!(
+                "PagedAttention KV cache type is KVarN (K{} V{} group {})",
+                kvarn_cache::KVARN_KEY_BITS,
+                kvarn_cache::KVARN_VALUE_BITS,
+                kvarn_cache::KVARN_GROUP
+            );
+        } else if cache_type.is_turboquant() {
             info!(
                 "PagedAttention KV cache type is TurboQuant ({}-bit packed u8)",
                 turboquant_cache::TURBOQUANT_BITS
