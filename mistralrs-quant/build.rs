@@ -111,6 +111,70 @@ fn main() -> Result<(), String> {
             println!("cargo:rustc-cfg=allow_legacy_fp8");
         }
 
+        let mut renamed_cuda_symbols = [
+            "launch_mmq_quantize_q8_1_D4",
+            "launch_mmq_quantize_q8_1_DS4",
+            "launch_mmq_quantize_q8_1_D2S6",
+            "launch_mmq_gguf_q4_0",
+            "launch_mmq_gguf_q4_1",
+            "launch_mmq_gguf_q5_0",
+            "launch_mmq_gguf_q5_1",
+            "launch_mmq_gguf_q8_0",
+            "launch_mmq_gguf_q2_k",
+            "launch_mmq_gguf_q3_k",
+            "launch_mmq_gguf_q4_k",
+            "launch_mmq_gguf_q5_k",
+            "launch_mmq_gguf_q6_k",
+        ]
+        .into_iter()
+        .map(|symbol| format!("-D{symbol}=mistralrs_quant_{symbol}"))
+        .collect::<Vec<_>>();
+
+        for dtype in ["bf16", "f16", "f32"] {
+            renamed_cuda_symbols.push(format!(
+                "-Dlaunch_mmvq_gguf_quantize_q8_1_{dtype}=mistralrs_quant_launch_mmvq_gguf_quantize_q8_1_{dtype}"
+            ));
+            renamed_cuda_symbols.push(format!(
+                "-Dmmvq_gguf_quantize_q8_1_{dtype}=mistralrs_quant_mmvq_gguf_quantize_q8_1_{dtype}"
+            ));
+        }
+
+        for tag in [
+            "q4_0", "q4_1", "q5_0", "q5_1", "q8_0", "q2_k", "q3_k", "q4_k", "q5_k", "q6_k",
+        ] {
+            for dtype in ["bf16", "f16", "f32"] {
+                renamed_cuda_symbols.push(format!(
+                    "-Dlaunch_mmvq_gguf_{tag}_{dtype}_plain=mistralrs_quant_launch_mmvq_gguf_{tag}_{dtype}_plain"
+                ));
+                renamed_cuda_symbols.push(format!(
+                    "-Dlaunch_mmvq_gguf_{tag}_{dtype}_fused_qkv=mistralrs_quant_launch_mmvq_gguf_{tag}_{dtype}_fused_qkv"
+                ));
+                for ncols in 1..=8 {
+                    renamed_cuda_symbols.push(format!(
+                        "-Dmmvq_gguf_{tag}_{dtype}_plain_cuda{ncols}=mistralrs_quant_mmvq_gguf_{tag}_{dtype}_plain_cuda{ncols}"
+                    ));
+                    renamed_cuda_symbols.push(format!(
+                        "-Dmmvq_gguf_{tag}_{dtype}_fused_qkv_cuda{ncols}=mistralrs_quant_mmvq_gguf_{tag}_{dtype}_fused_qkv_cuda{ncols}"
+                    ));
+                }
+            }
+        }
+
+        for dtype in ["bf16", "f16", "f32"] {
+            renamed_cuda_symbols.push(format!(
+                "-Dlaunch_mmvq_gguf_q8_0_{dtype}_fused_glu=mistralrs_quant_launch_mmvq_gguf_q8_0_{dtype}_fused_glu"
+            ));
+            for ncols in 1..=8 {
+                renamed_cuda_symbols.push(format!(
+                    "-Dmmvq_gguf_q8_0_{dtype}_fused_glu_cuda{ncols}=mistralrs_quant_mmvq_gguf_q8_0_{dtype}_fused_glu_cuda{ncols}"
+                ));
+            }
+        }
+
+        for symbol_define in &renamed_cuda_symbols {
+            builder = builder.arg(symbol_define);
+        }
+
         let compute_cap = builder.get_compute_cap().unwrap_or(80);
         // ======== Handle optional kernel compilation via rustc-cfg flags
         let cc_over_80 = compute_cap >= 80;
