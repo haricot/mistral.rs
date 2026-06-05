@@ -514,6 +514,25 @@ fn restore_cuda_rope_layout(
 }
 
 #[cfg(feature = "cuda")]
+fn cuda_rope_cache(
+    cache: &Tensor,
+    batch: usize,
+    seq_len: usize,
+    name: &'static str,
+) -> Result<Tensor> {
+    match cache.dims() {
+        [_, _] => Ok(cache.clone()),
+        [cache_batch, cache_seq_len, _] if *cache_batch == batch && *cache_seq_len == seq_len => {
+            cache.flatten(0, 1)
+        }
+        dims => candle_core::bail!(
+            "invalid CUDA RoPE {name} cache shape {:?}, expected rank 2 or ({batch}, {seq_len}, dim)",
+            dims
+        ),
+    }
+}
+
+#[cfg(feature = "cuda")]
 fn cuda_apply_rotary_q(
     q: &Tensor,
     cos: &Tensor,
@@ -523,10 +542,18 @@ fn cuda_apply_rotary_q(
 ) -> Result<Tensor> {
     let (batch, heads, seq_len, head_dim) = q.dims4()?;
     let q_embed = q.transpose(1, 2)?.flatten(0, 1)?;
-    if let Some(positions) = positions {
-        apply_rotary_inplace_q_positions(&q_embed, cos, sin, positions, is_neox)?;
+    let (cos_cache, sin_cache);
+    let (cos_ref, sin_ref) = if positions.is_none() {
+        cos_cache = cuda_rope_cache(cos, batch, seq_len, "cos")?;
+        sin_cache = cuda_rope_cache(sin, batch, seq_len, "sin")?;
+        (&cos_cache, &sin_cache)
     } else {
-        apply_rotary_inplace_q(&q_embed, cos, sin, is_neox)?;
+        (cos, sin)
+    };
+    if let Some(positions) = positions {
+        apply_rotary_inplace_q_positions(&q_embed, cos_ref, sin_ref, positions, is_neox)?;
+    } else {
+        apply_rotary_inplace_q(&q_embed, cos_ref, sin_ref, is_neox)?;
     }
     restore_cuda_rope_layout(q_embed, batch, heads, seq_len, head_dim)
 }
@@ -547,10 +574,18 @@ fn cuda_apply_rotary_qk(
     }
     let q_embed = q.transpose(1, 2)?.flatten(0, 1)?;
     let k_embed = k.transpose(1, 2)?.flatten(0, 1)?;
-    if let Some(positions) = positions {
-        apply_rotary_inplace_positions(&q_embed, &k_embed, cos, sin, positions, is_neox)?;
+    let (cos_cache, sin_cache);
+    let (cos_ref, sin_ref) = if positions.is_none() {
+        cos_cache = cuda_rope_cache(cos, batch, seq_len, "cos")?;
+        sin_cache = cuda_rope_cache(sin, batch, seq_len, "sin")?;
+        (&cos_cache, &sin_cache)
     } else {
-        apply_rotary_inplace(&q_embed, &k_embed, cos, sin, is_neox)?;
+        (cos, sin)
+    };
+    if let Some(positions) = positions {
+        apply_rotary_inplace_positions(&q_embed, &k_embed, cos_ref, sin_ref, positions, is_neox)?;
+    } else {
+        apply_rotary_inplace(&q_embed, &k_embed, cos_ref, sin_ref, is_neox)?;
     }
     Ok((
         restore_cuda_rope_layout(q_embed, batch, q_heads, seq_len, head_dim)?,

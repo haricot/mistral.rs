@@ -186,8 +186,11 @@ impl Sdpa {
         }
 
         // CausalFlash or None: try flash attention, fall back to eager
-        let can_use_flash = q.device().is_cpu()
-            || q.device().is_cuda() && crate::using_flash_attn() && q.dtype() != DType::F32;
+        let qkv_same_device =
+            k.device().same_device(q.device()) && v.device().same_device(q.device());
+        let can_use_flash = qkv_same_device
+            && (q.device().is_cpu()
+                || q.device().is_cuda() && crate::using_flash_attn() && q.dtype() != DType::F32);
 
         if can_use_flash {
             // flash-attn expects (b_sz, seq_len, nheads, head_dim)
@@ -239,6 +242,28 @@ impl Sdpa {
         sdpa_params: &SdpaParams,
         causal: bool,
     ) -> Result<Tensor> {
+        if !k.device().same_device(q.device())
+            || !v.device().same_device(q.device())
+            || mask.is_some_and(|mask| !mask.device().same_device(q.device()))
+        {
+            let target_device = if q.device().is_cpu()
+                || k.device().is_cpu()
+                || v.device().is_cpu()
+                || mask.is_some_and(|mask| mask.device().is_cpu())
+            {
+                Device::Cpu
+            } else {
+                q.device().clone()
+            };
+            let q = q.to_device(&target_device)?;
+            let k = k.to_device(&target_device)?;
+            let v = v.to_device(&target_device)?;
+            let mask = mask
+                .map(|mask| mask.to_device(&target_device))
+                .transpose()?;
+            return self.run_attention_noflash(&q, &k, &v, mask.as_ref(), sdpa_params, causal);
+        }
+
         let (b_sz, n_attn_heads, seq_len, head_dim) = q.dims4()?;
         let (_, _, _, k_head_dim) = k.dims4()?;
         let (_, _, _, v_head_dim) = v.dims4()?;
