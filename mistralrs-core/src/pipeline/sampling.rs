@@ -34,6 +34,23 @@ fn parse_text_and_tool_calls(
     Ok((text_new.map(ToString::to_string), tool_calls))
 }
 
+fn parse_streaming_content_and_tool_calls(
+    content_delta: Option<String>,
+    raw_delta: &str,
+    reasoning_active: bool,
+    matcher: Option<Arc<crate::tools::ToolCallingMatcher>>,
+) -> Result<(Option<String>, Vec<ToolCallResponse>)> {
+    let Some(raw_text) = (if reasoning_active {
+        content_delta
+    } else {
+        Some(raw_delta.to_string())
+    }) else {
+        return Ok((None, vec![]));
+    };
+
+    parse_text_and_tool_calls(raw_text.as_str(), matcher)
+}
+
 pub(crate) async fn finish_or_add_toks_to_seq(
     this: &dyn Pipeline,
     prefix_cacher: &mut PrefixCacheManagerV2,
@@ -179,9 +196,12 @@ pub(crate) async fn finish_or_add_toks_to_seq(
                             vec![]
                         }
                     } else {
-                        let raw_text = content_delta.take().unwrap_or_else(|| delta.to_string());
-                        let (text_new, tool_calls) =
-                            parse_text_and_tool_calls(raw_text.as_str(), seq.tools.clone())?;
+                        let (text_new, tool_calls) = parse_streaming_content_and_tool_calls(
+                            content_delta,
+                            delta.as_str(),
+                            seq.reasoning_mode().is_some(),
+                            seq.tools.clone(),
+                        )?;
                         content_delta = text_new;
                         if !tool_calls.is_empty() {
                             is_done = Some(StopReason::ToolCalls);
@@ -658,5 +678,23 @@ mod tests {
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].function.name, "get_weather");
         assert_eq!(tool_calls[0].function.arguments, r#"{"city":"Paris"}"#);
+    }
+
+    #[test]
+    fn reasoning_streaming_does_not_fall_back_to_raw_delta() {
+        let (content, tool_calls) =
+            parse_streaming_content_and_tool_calls(None, "Thinking", true, None).unwrap();
+
+        assert_eq!(content, None);
+        assert!(tool_calls.is_empty());
+    }
+
+    #[test]
+    fn non_reasoning_streaming_uses_raw_delta() {
+        let (content, tool_calls) =
+            parse_streaming_content_and_tool_calls(None, "Hello", false, None).unwrap();
+
+        assert_eq!(content, Some("Hello".to_string()));
+        assert!(tool_calls.is_empty());
     }
 }
