@@ -268,6 +268,44 @@ extern "C" {
         dtype: u32,
     );
 
+    pub fn kvarn_flash_attn_decode(
+        query: *const c_void,
+        key_cache: *const c_void,
+        value_cache: *const c_void,
+        block_tables: *const c_int,
+        cu_seq_lens: *const c_int,
+        out: *mut c_void,
+        num_seqs: c_int,
+        block_table_stride: c_int,
+        num_heads: c_int,
+        num_kv_heads: c_int,
+        head_dim: c_int,
+        k_record_bytes: c_int,
+        v_record_bytes: c_int,
+        scale: f32,
+        stream: CUstream,
+        dtype: u32,
+    );
+
+    pub fn kvarn_flash_attn_decode_cc61(
+        query: *const c_void,
+        key_cache: *const c_void,
+        value_cache: *const c_void,
+        block_tables: *const c_int,
+        cu_seq_lens: *const c_int,
+        out: *mut c_void,
+        num_seqs: c_int,
+        block_table_stride: c_int,
+        num_heads: c_int,
+        num_kv_heads: c_int,
+        head_dim: c_int,
+        k_record_bytes: c_int,
+        v_record_bytes: c_int,
+        scale: f32,
+        stream: CUstream,
+        dtype: u32,
+    );
+
     pub fn paged_attention_v1_f16(
         out: *const c_void,
         query: *const c_void,

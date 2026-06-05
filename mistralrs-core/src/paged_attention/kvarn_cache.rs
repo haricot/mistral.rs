@@ -77,6 +77,53 @@ pub fn is_kvarn_cache(cache: &Tensor) -> bool {
     cache.dtype() == DType::U8 && cache.rank() == 3
 }
 
+pub fn cuda_fused_decode_enabled() -> bool {
+    std::env::var("MISTRALRS_KVARN_FUSED_DECODE")
+        .map(|v| !v.trim().is_empty() && v != "0" && !v.eq_ignore_ascii_case("false"))
+        .unwrap_or(true)
+}
+
+fn cuda_quantizes_partial_blocks(device: &Device) -> bool {
+    device.is_cuda()
+        && std::env::var("MISTRALRS_KVARN_CUDA_PARTIAL")
+            .map(|v| !v.trim().is_empty() && v != "0" && !v.eq_ignore_ascii_case("false"))
+            .unwrap_or(true)
+}
+
+pub fn flash_attn_decode(
+    query: &Tensor,
+    key_cache: &Tensor,
+    value_cache: &Tensor,
+    block_tables: &Tensor,
+    cu_seq_lens: &Tensor,
+    softmax_scale: f32,
+) -> Result<Tensor> {
+    #[cfg(all(feature = "cuda", target_family = "unix"))]
+    {
+        return mistralrs_paged_attn::kvarn_flash_attn_decode(
+            query,
+            key_cache,
+            value_cache,
+            block_tables,
+            cu_seq_lens,
+            softmax_scale,
+        );
+    }
+
+    #[cfg(not(all(feature = "cuda", target_family = "unix")))]
+    {
+        let _ = (
+            query,
+            key_cache,
+            value_cache,
+            block_tables,
+            cu_seq_lens,
+            softmax_scale,
+        );
+        candle_core::bail!("KVarN fused decode requires the CUDA feature.");
+    }
+}
+
 pub fn reshape_and_cache(
     key: &Tensor,
     value: &Tensor,
@@ -134,6 +181,7 @@ pub fn reshape_and_cache(
         .to_device(&Device::Cpu)?
         .to_dtype(DType::F32)?
         .to_vec3::<f32>()?;
+    let quantize_partial_blocks = cuda_quantizes_partial_blocks(key_cache.device());
 
     for token_idx in 0..num_tokens {
         let slot = slots[token_idx];
@@ -159,6 +207,7 @@ pub fn reshape_and_cache(
                 block_size,
                 num_heads,
                 k_head_dim,
+                quantize_partial_blocks,
             );
             mark_record_raw(key_cache, block, head_idx)?;
             if let Some(raw_block) = key_block {
@@ -175,6 +224,7 @@ pub fn reshape_and_cache(
                 block_size,
                 num_heads,
                 v_head_dim,
+                quantize_partial_blocks,
             );
             mark_record_raw(value_cache, block, head_idx)?;
             if let Some(raw_block) = value_block {
@@ -397,6 +447,7 @@ fn store_tail_row(
     block_size: usize,
     num_heads: usize,
     head_dim: usize,
+    quantize_partial_blocks: bool,
 ) -> Option<Vec<f32>> {
     let mut stores = tail_stores()
         .lock()
@@ -421,6 +472,8 @@ fn store_tail_row(
 
     if block_offset + 1 == block_size {
         store.rows.remove(&key)
+    } else if quantize_partial_blocks {
+        Some(entry.clone())
     } else {
         None
     }

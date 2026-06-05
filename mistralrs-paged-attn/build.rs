@@ -61,6 +61,7 @@ fn main() -> Result<()> {
     println!("cargo:rerun-if-changed=src/cuda/gather_mla_cache_kernel.cu");
     println!("cargo:rerun-if-changed=src/cuda/gather_kv_cache_kernel.cu");
     println!("cargo:rerun-if-changed=src/cuda/mtp_paged_attention_kernel.cu");
+    println!("cargo:rerun-if-changed=src/cuda/kvarn_flash_attn_decode_kernel.cu");
     println!("cargo:rerun-if-changed=src/cuda/flashinfer_decode.cu");
     println!("cargo:rerun-if-changed=src/cuda/flashinfer_mla_decode.cu");
     println!("cargo:rerun-if-changed=src/cuda/update_kvscales.cu");

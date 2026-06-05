@@ -80,6 +80,7 @@ mod flashinfer {
     }
 }
 mod gather_kv;
+mod kvarn;
 mod legacy_flash_attn;
 mod legacy_flash_attn_turboquant;
 mod mla;
@@ -99,6 +100,7 @@ pub use flashinfer::{
     reshape_and_cache_flashinfer,
 };
 pub use gather_kv::gather_kv_cache;
+pub use kvarn::kvarn_flash_attn_decode;
 pub use legacy_flash_attn::{legacy_flash_attn_decode_dense, legacy_flash_attn_decode_paged};
 pub use legacy_flash_attn_turboquant::{
     legacy_flash_attn_decode_turboquant, legacy_flash_attn_decode_turboquant_head512_twopass,

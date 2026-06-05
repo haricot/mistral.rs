@@ -861,6 +861,22 @@ impl PagedAttention {
             let kv_lens = context_lens_to_lengths(&context_lens)?;
             let cu_kv = cumulative_seqlens_from_lengths(&kv_lens, query.device())?;
 
+            if uses_kvarn_cache
+                && query.device().is_cuda()
+                && kvarn_cache::cuda_fused_decode_enabled()
+                && sdpa_params.sinks.is_none()
+                && sdpa_params.softcap.is_none()
+            {
+                return kvarn_cache::flash_attn_decode(
+                    &query,
+                    key_cache.as_ref().unwrap(),
+                    value_cache.as_ref().unwrap(),
+                    &block_tables,
+                    &cu_kv,
+                    sdpa_params.softmax_scale,
+                );
+            }
+
             if uses_turboquant_cache {
                 if let Some(decoded_cache) = decoded_cache.as_deref_mut() {
                     // The current token has just been written into the TurboQuant cache.
