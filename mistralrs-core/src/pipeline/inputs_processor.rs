@@ -80,6 +80,7 @@ pub mod text_models_inputs_processor {
             block_hash::MultimodalAttentionPolicy, AttentionBackendKind, KVCacheManager,
             _PAD_SLOT_ID,
         },
+        pipeline::RecurrentBatchKind,
         sequence::Sequence,
     };
 
@@ -1799,6 +1800,7 @@ pub mod text_models_inputs_processor {
         pub paged_attn_meta: Option<PagedAttentionInputMetadata>,
         pub flash_meta: FlashParams,
         pub flash_meta_full: Option<FlashParams>,
+        pub recurrent_batch_kind: RecurrentBatchKind,
     }
 
     pub struct TextInputsProcessor;
@@ -1882,6 +1884,7 @@ pub mod text_models_inputs_processor {
                     paged_attn_meta,
                     flash_meta,
                     flash_meta_full: Some(flash_meta_full),
+                    recurrent_batch_kind: RecurrentBatchKind::Decode,
                 });
                 Ok(InputProcessorOutput {
                     inputs,
@@ -1923,6 +1926,7 @@ pub mod text_models_inputs_processor {
                     paged_attn_meta,
                     flash_meta: flash_meta.clone(),
                     flash_meta_full: Some(flash_meta),
+                    recurrent_batch_kind: RecurrentBatchKind::Prefill,
                 });
                 Ok(InputProcessorOutput {
                     inputs,
@@ -1964,6 +1968,7 @@ pub mod text_models_inputs_processor {
                     paged_attn_meta,
                     flash_meta,
                     flash_meta_full: None,
+                    recurrent_batch_kind: RecurrentBatchKind::Prefill,
                 });
                 Ok(InputProcessorOutput {
                     inputs,
@@ -2006,6 +2011,7 @@ pub mod text_models_inputs_processor {
                     paged_attn_meta,
                     flash_meta,
                     flash_meta_full: None,
+                    recurrent_batch_kind: RecurrentBatchKind::Decode,
                 });
                 Ok(InputProcessorOutput {
                     inputs,

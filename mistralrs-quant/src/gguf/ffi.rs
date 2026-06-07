@@ -10,7 +10,6 @@ use std::ffi::c_void;
 
 macro_rules! declare_mmvq_fused_qkv {
     ($fn_name:ident) => {
-        #[link_name = concat!("mistralrs_quant_", stringify!($fn_name))]
         pub fn $fn_name(
             vx_q: *const c_void,
             vx_k: *const c_void,
@@ -25,6 +24,24 @@ macro_rules! declare_mmvq_fused_qkv {
             nrows_v: i32,
             stride_col_y: i32,
             b_size: i32,
+            stream: *mut c_void,
+        );
+    };
+}
+
+macro_rules! declare_mmvq_fused_glu {
+    ($fn_name:ident) => {
+        pub fn $fn_name(
+            vx_gate: *const c_void,
+            vx_up: *const c_void,
+            vy: *const c_void,
+            dst: *mut c_void,
+            ncols_x: i32,
+            nrows_x: i32,
+            stride_col_y: i32,
+            stride_col_dst: i32,
+            b_size: i32,
+            activation: i32,
             stream: *mut c_void,
         );
     };
@@ -1095,48 +1112,38 @@ extern "C" {
         stream: *mut c_void,
     );
 
-    #[link_name = "mistralrs_quant_launch_mmvq_gguf_q8_0_bf16_fused_glu"]
-    pub fn launch_mmvq_gguf_q8_0_bf16_fused_glu(
-        vx_gate: *const c_void,
-        vx_up: *const c_void,
-        vy: *const c_void,
-        dst: *mut c_void,
-        ncols_x: i32,
-        nrows_x: i32,
-        stride_col_y: i32,
-        stride_col_dst: i32,
-        b_size: i32,
-        activation: i32,
-        stream: *mut c_void,
-    );
-    #[link_name = "mistralrs_quant_launch_mmvq_gguf_q8_0_f16_fused_glu"]
-    pub fn launch_mmvq_gguf_q8_0_f16_fused_glu(
-        vx_gate: *const c_void,
-        vx_up: *const c_void,
-        vy: *const c_void,
-        dst: *mut c_void,
-        ncols_x: i32,
-        nrows_x: i32,
-        stride_col_y: i32,
-        stride_col_dst: i32,
-        b_size: i32,
-        activation: i32,
-        stream: *mut c_void,
-    );
-    #[link_name = "mistralrs_quant_launch_mmvq_gguf_q8_0_f32_fused_glu"]
-    pub fn launch_mmvq_gguf_q8_0_f32_fused_glu(
-        vx_gate: *const c_void,
-        vx_up: *const c_void,
-        vy: *const c_void,
-        dst: *mut c_void,
-        ncols_x: i32,
-        nrows_x: i32,
-        stride_col_y: i32,
-        stride_col_dst: i32,
-        b_size: i32,
-        activation: i32,
-        stream: *mut c_void,
-    );
+    declare_mmvq_fused_glu!(launch_mmvq_gguf_q4_0_bf16_fused_glu);
+    declare_mmvq_fused_glu!(launch_mmvq_gguf_q4_1_bf16_fused_glu);
+    declare_mmvq_fused_glu!(launch_mmvq_gguf_q5_0_bf16_fused_glu);
+    declare_mmvq_fused_glu!(launch_mmvq_gguf_q5_1_bf16_fused_glu);
+    declare_mmvq_fused_glu!(launch_mmvq_gguf_q8_0_bf16_fused_glu);
+    declare_mmvq_fused_glu!(launch_mmvq_gguf_q2_k_bf16_fused_glu);
+    declare_mmvq_fused_glu!(launch_mmvq_gguf_q3_k_bf16_fused_glu);
+    declare_mmvq_fused_glu!(launch_mmvq_gguf_q4_k_bf16_fused_glu);
+    declare_mmvq_fused_glu!(launch_mmvq_gguf_q5_k_bf16_fused_glu);
+    declare_mmvq_fused_glu!(launch_mmvq_gguf_q6_k_bf16_fused_glu);
+
+    declare_mmvq_fused_glu!(launch_mmvq_gguf_q4_0_f16_fused_glu);
+    declare_mmvq_fused_glu!(launch_mmvq_gguf_q4_1_f16_fused_glu);
+    declare_mmvq_fused_glu!(launch_mmvq_gguf_q5_0_f16_fused_glu);
+    declare_mmvq_fused_glu!(launch_mmvq_gguf_q5_1_f16_fused_glu);
+    declare_mmvq_fused_glu!(launch_mmvq_gguf_q8_0_f16_fused_glu);
+    declare_mmvq_fused_glu!(launch_mmvq_gguf_q2_k_f16_fused_glu);
+    declare_mmvq_fused_glu!(launch_mmvq_gguf_q3_k_f16_fused_glu);
+    declare_mmvq_fused_glu!(launch_mmvq_gguf_q4_k_f16_fused_glu);
+    declare_mmvq_fused_glu!(launch_mmvq_gguf_q5_k_f16_fused_glu);
+    declare_mmvq_fused_glu!(launch_mmvq_gguf_q6_k_f16_fused_glu);
+
+    declare_mmvq_fused_glu!(launch_mmvq_gguf_q4_0_f32_fused_glu);
+    declare_mmvq_fused_glu!(launch_mmvq_gguf_q4_1_f32_fused_glu);
+    declare_mmvq_fused_glu!(launch_mmvq_gguf_q5_0_f32_fused_glu);
+    declare_mmvq_fused_glu!(launch_mmvq_gguf_q5_1_f32_fused_glu);
+    declare_mmvq_fused_glu!(launch_mmvq_gguf_q8_0_f32_fused_glu);
+    declare_mmvq_fused_glu!(launch_mmvq_gguf_q2_k_f32_fused_glu);
+    declare_mmvq_fused_glu!(launch_mmvq_gguf_q3_k_f32_fused_glu);
+    declare_mmvq_fused_glu!(launch_mmvq_gguf_q4_k_f32_fused_glu);
+    declare_mmvq_fused_glu!(launch_mmvq_gguf_q5_k_f32_fused_glu);
+    declare_mmvq_fused_glu!(launch_mmvq_gguf_q6_k_f32_fused_glu);
 
     declare_mmvq_fused_qkv!(launch_mmvq_gguf_q4_0_bf16_fused_qkv);
     declare_mmvq_fused_qkv!(launch_mmvq_gguf_q4_1_bf16_fused_qkv);
@@ -1204,7 +1211,6 @@ extern "C" {
     // ---- MMQ (prompt) kernels ----
 
     // MMQ quantize launchers (f32 -> block_q8_1_mmq)
-    #[link_name = "mistralrs_quant_launch_mmq_quantize_q8_1_D4"]
     pub fn launch_mmq_quantize_q8_1_D4(
         x: *const c_void,
         ids: *const i32,
@@ -1220,7 +1226,6 @@ extern "C" {
         ne3: i64,
         stream: *mut c_void,
     );
-    #[link_name = "mistralrs_quant_launch_mmq_quantize_q8_1_DS4"]
     pub fn launch_mmq_quantize_q8_1_DS4(
         x: *const c_void,
         ids: *const i32,
@@ -1236,7 +1241,6 @@ extern "C" {
         ne3: i64,
         stream: *mut c_void,
     );
-    #[link_name = "mistralrs_quant_launch_mmq_quantize_q8_1_D2S6"]
     pub fn launch_mmq_quantize_q8_1_D2S6(
         x: *const c_void,
         ids: *const i32,
@@ -1290,7 +1294,6 @@ extern "C" {
     );
 
     // MMQ matmul launchers (one per quant type)
-    #[link_name = "mistralrs_quant_launch_mmq_gguf_q4_0"]
     pub fn launch_mmq_gguf_q4_0(
         tmp_fixup: *mut c_void,
         x: *const c_void,
@@ -1308,7 +1311,6 @@ extern "C" {
         type_dst: i32,
         stream: *mut c_void,
     );
-    #[link_name = "mistralrs_quant_launch_mmq_gguf_q4_1"]
     pub fn launch_mmq_gguf_q4_1(
         tmp_fixup: *mut c_void,
         x: *const c_void,
@@ -1326,7 +1328,6 @@ extern "C" {
         type_dst: i32,
         stream: *mut c_void,
     );
-    #[link_name = "mistralrs_quant_launch_mmq_gguf_q5_0"]
     pub fn launch_mmq_gguf_q5_0(
         tmp_fixup: *mut c_void,
         x: *const c_void,
@@ -1344,7 +1345,6 @@ extern "C" {
         type_dst: i32,
         stream: *mut c_void,
     );
-    #[link_name = "mistralrs_quant_launch_mmq_gguf_q5_1"]
     pub fn launch_mmq_gguf_q5_1(
         tmp_fixup: *mut c_void,
         x: *const c_void,
@@ -1362,7 +1362,6 @@ extern "C" {
         type_dst: i32,
         stream: *mut c_void,
     );
-    #[link_name = "mistralrs_quant_launch_mmq_gguf_q8_0"]
     pub fn launch_mmq_gguf_q8_0(
         tmp_fixup: *mut c_void,
         x: *const c_void,
@@ -1580,7 +1579,6 @@ extern "C" {
         warp_size: i32,
         stream: *mut c_void,
     );
-    #[link_name = "mistralrs_quant_launch_mmq_gguf_q2_k"]
     pub fn launch_mmq_gguf_q2_k(
         tmp_fixup: *mut c_void,
         x: *const c_void,
@@ -1598,7 +1596,6 @@ extern "C" {
         type_dst: i32,
         stream: *mut c_void,
     );
-    #[link_name = "mistralrs_quant_launch_mmq_gguf_q3_k"]
     pub fn launch_mmq_gguf_q3_k(
         tmp_fixup: *mut c_void,
         x: *const c_void,
@@ -1616,7 +1613,6 @@ extern "C" {
         type_dst: i32,
         stream: *mut c_void,
     );
-    #[link_name = "mistralrs_quant_launch_mmq_gguf_q4_k"]
     pub fn launch_mmq_gguf_q4_k(
         tmp_fixup: *mut c_void,
         x: *const c_void,
@@ -1634,7 +1630,6 @@ extern "C" {
         type_dst: i32,
         stream: *mut c_void,
     );
-    #[link_name = "mistralrs_quant_launch_mmq_gguf_q5_k"]
     pub fn launch_mmq_gguf_q5_k(
         tmp_fixup: *mut c_void,
         x: *const c_void,
@@ -1652,7 +1647,6 @@ extern "C" {
         type_dst: i32,
         stream: *mut c_void,
     );
-    #[link_name = "mistralrs_quant_launch_mmq_gguf_q6_k"]
     pub fn launch_mmq_gguf_q6_k(
         tmp_fixup: *mut c_void,
         x: *const c_void,
