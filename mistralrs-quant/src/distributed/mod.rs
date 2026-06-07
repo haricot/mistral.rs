@@ -221,12 +221,6 @@ mod nccl {
             if !super::use_nccl() {
                 candle_core::bail!("NCCL is disabled but NCCL Comm was requested");
             }
-            if !world_size.is_power_of_two() {
-                candle_core::bail!(
-                    "NCCL backend requires world_size to be a power of 2, got {}",
-                    world_size
-                );
-            }
             let stream = dev.as_cuda_device()?.cuda_stream();
             let device_ordinal = stream.context().ordinal();
             if rank != device_ordinal {
@@ -361,10 +355,12 @@ pub struct SumAllReduce {
     #[cfg(feature = "ring")]
     ring: Option<ring_ops::SumAllReduce>,
     dummy: Option<dummy_ops::SumAllReduce>,
+    world_size: usize,
 }
 
 impl SumAllReduce {
     pub fn new(comm: &std::sync::Arc<Comm>) -> Self {
+        let world_size = comm.world_size();
         match &**comm {
             #[cfg(all(feature = "cuda", feature = "nccl"))]
             Comm::Nccl(_) => Self {
@@ -373,6 +369,7 @@ impl SumAllReduce {
                 #[cfg(feature = "ring")]
                 ring: None,
                 dummy: None,
+                world_size,
             },
             #[cfg(feature = "ring")]
             Comm::Ring(_) => Self {
@@ -381,6 +378,7 @@ impl SumAllReduce {
                 #[cfg(feature = "ring")]
                 ring: Some(ring_ops::SumAllReduce::new(comm)),
                 dummy: None,
+                world_size,
             },
             Comm::Dummy(_) => Self {
                 #[cfg(all(feature = "cuda", feature = "nccl"))]
@@ -388,11 +386,19 @@ impl SumAllReduce {
                 #[cfg(feature = "ring")]
                 ring: None,
                 dummy: Some(dummy_ops::SumAllReduce::new(comm)),
+                world_size,
             },
         }
     }
 
+    pub fn is_noop(&self) -> bool {
+        self.world_size == 1
+    }
+
     pub fn sum_all_reduce(&self, xs: &candle_core::Tensor) -> Result<candle_core::Tensor> {
+        if self.is_noop() {
+            return Ok(xs.clone());
+        }
         #[cfg(all(feature = "cuda", feature = "nccl"))]
         if let Some(ref nccl) = self.nccl {
             return nccl.sum_all_reduce(xs);

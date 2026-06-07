@@ -177,16 +177,18 @@ macro_rules! handle_pipeline_forward_error {
                             session_id: None,
                         };
 
-                        if seq
-                            .responder()
+                        if let Err(send_err) = seq.responder()
                             .send(Response::ModelError(
                                 e.to_string(),
-                                partial_completion_response
+                                partial_completion_response,
                             ))
                             .await
-                            .is_err()
                         {
-                            tracing::warn!("Receiver disconnected");
+                            tracing::warn!(
+                                "Failed to send chat model error to client for seq {}: {} (client likely disconnected)",
+                                seq.id(),
+                                send_err
+                            );
                         }
                     } else {
                         let partial_completion_response = CompletionResponse {
@@ -199,16 +201,18 @@ macro_rules! handle_pipeline_forward_error {
                             usage: group.get_usage(),
                         };
 
-                        if seq
-                            .responder()
+                        if let Err(send_err) = seq.responder()
                             .send(Response::CompletionModelError(
                                 e.to_string(),
-                                partial_completion_response
+                                partial_completion_response,
                             ))
                             .await
-                            .is_err()
                         {
-                            tracing::warn!("Receiver disconnected");
+                            tracing::warn!(
+                                "Failed to send completion model error to client for seq {}: {} (client likely disconnected)",
+                                seq.id(),
+                                send_err
+                            );
                         }
                     }
                 }
@@ -263,37 +267,6 @@ pub const fn paged_attn_supported() -> bool {
 /// `true` if built with CUDA (requires Unix) /Metal
 #[cfg(not(any(all(feature = "cuda", target_family = "unix"), feature = "metal")))]
 pub const fn paged_attn_supported() -> bool {
-    false
-}
-
-#[cfg(feature = "cuda")]
-pub fn is_legacy_cuda_device(device: &candle_core::Device) -> bool {
-    let candle_core::Device::Cuda(dev) = device else {
-        return false;
-    };
-
-    use candle_core::cuda::cudarc::driver::{result, sys};
-    let cu_device = dev.cuda_stream().context().cu_device();
-    let major = unsafe {
-        result::device::get_attribute(
-            cu_device,
-            sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR,
-        )
-    }
-    .unwrap_or(0);
-    let minor = unsafe {
-        result::device::get_attribute(
-            cu_device,
-            sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR,
-        )
-    }
-    .unwrap_or(0);
-
-    major * 100 + minor * 10 < 700
-}
-
-#[cfg(not(feature = "cuda"))]
-pub fn is_legacy_cuda_device(_device: &candle_core::Device) -> bool {
     false
 }
 

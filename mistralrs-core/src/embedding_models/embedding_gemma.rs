@@ -128,7 +128,7 @@ impl Attention {
             cfg.num_key_value_heads,
             cfg.hidden_size / cfg.num_attention_heads,
             comm,
-        );
+        )?;
         let k_proj = ColumnParallelLayer::new_with_shard(
             hidden_sz,
             num_kv_heads * head_dim,
@@ -187,7 +187,7 @@ impl Attention {
                     cfg.num_key_value_heads,
                     cfg.num_attention_heads,
                     comm,
-                ),
+                )?,
                 softcap: cfg.attn_logit_softcapping.map(|x| x as f32),
                 softmax_scale: 1.0 / (cfg.query_pre_attn_scalar as f32).sqrt(),
                 sliding_window,
@@ -225,9 +225,11 @@ impl Attention {
         q = q.apply(&self.q_norm)?;
         k = k.apply(&self.k_norm)?;
 
+        let positions =
+            crate::pipeline::text_positions_tensor(seqlen_offsets, q.dim(2)?, q.device())?;
         (q, k) = match self.use_sliding_window {
-            true => self.rotary_emb_local.forward(&q, &k, seqlen_offsets)?,
-            false => self.rotary_emb_global.forward(&q, &k, seqlen_offsets)?,
+            true => self.rotary_emb_local.forward(&q, &k, &positions)?,
+            false => self.rotary_emb_global.forward(&q, &k, &positions)?,
         };
 
         let mask = if self.use_sliding_window {

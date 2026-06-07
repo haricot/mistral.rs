@@ -34,20 +34,17 @@ fn parse_text_and_tool_calls(
     Ok((text_new.map(ToString::to_string), tool_calls))
 }
 
-fn parse_streaming_content_and_tool_calls(
+fn parse_streaming_text_and_tool_calls(
     content_delta: Option<String>,
     raw_delta: &str,
-    reasoning_active: bool,
+    has_reasoning_parser: bool,
     matcher: Option<Arc<crate::tools::ToolCallingMatcher>>,
 ) -> Result<(Option<String>, Vec<ToolCallResponse>)> {
-    let Some(raw_text) = (if reasoning_active {
-        content_delta
-    } else {
-        Some(raw_delta.to_string())
-    }) else {
-        return Ok((None, vec![]));
+    let raw_text = match content_delta {
+        Some(content_delta) => content_delta,
+        None if has_reasoning_parser => return Ok((None, Vec::new())),
+        None => raw_delta.to_string(),
     };
-
     parse_text_and_tool_calls(raw_text.as_str(), matcher)
 }
 
@@ -160,12 +157,13 @@ pub(crate) async fn finish_or_add_toks_to_seq(
             let delta_result = seq.get_delta();
             if let Some(delta) = crate::handle_seq_error_ok!(delta_result, seq.responder()) {
                 if seq.get_mut_group().is_chat {
-                    let reasoning_delta = if seq.reasoning_mode().is_some() {
+                    let has_reasoning_parser = seq.reasoning_mode().is_some();
+                    let reasoning_delta = if has_reasoning_parser {
                         seq.get_reasoning_content_delta()
                     } else {
                         None
                     };
-                    let mut content_delta = if seq.reasoning_mode().is_some() {
+                    let mut content_delta = if has_reasoning_parser {
                         seq.get_response_content_delta()
                     } else {
                         None
@@ -196,10 +194,10 @@ pub(crate) async fn finish_or_add_toks_to_seq(
                             vec![]
                         }
                     } else {
-                        let (text_new, tool_calls) = parse_streaming_content_and_tool_calls(
-                            content_delta,
+                        let (text_new, tool_calls) = parse_streaming_text_and_tool_calls(
+                            content_delta.take(),
                             delta.as_str(),
-                            seq.reasoning_mode().is_some(),
+                            has_reasoning_parser,
                             seq.tools.clone(),
                         )?;
                         content_delta = text_new;
@@ -681,20 +679,29 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_streaming_does_not_fall_back_to_raw_delta() {
+    fn reasoning_stream_does_not_fallback_to_raw_delta() {
+        let tool = weather_tool();
+        let matcher = Arc::new(ToolCallingMatcher::new(ToolChoice::Auto, Some(&[tool])).unwrap());
+        let raw = r#"<|tool_call>call:get_weather{city:<|"|>Paris<|"|>}"#;
+
         let (content, tool_calls) =
-            parse_streaming_content_and_tool_calls(None, "Thinking", true, None).unwrap();
+            parse_streaming_text_and_tool_calls(None, raw, true, Some(matcher)).unwrap();
 
         assert_eq!(content, None);
         assert!(tool_calls.is_empty());
     }
 
     #[test]
-    fn non_reasoning_streaming_uses_raw_delta() {
-        let (content, tool_calls) =
-            parse_streaming_content_and_tool_calls(None, "Hello", false, None).unwrap();
+    fn non_reasoning_stream_uses_raw_delta() {
+        let tool = weather_tool();
+        let matcher = Arc::new(ToolCallingMatcher::new(ToolChoice::Auto, Some(&[tool])).unwrap());
+        let raw = r#"<|tool_call>call:get_weather{city:<|"|>Paris<|"|>}"#;
 
-        assert_eq!(content, Some("Hello".to_string()));
-        assert!(tool_calls.is_empty());
+        let (content, tool_calls) =
+            parse_streaming_text_and_tool_calls(None, raw, false, Some(matcher)).unwrap();
+
+        assert_eq!(content, None);
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].function.name, "get_weather");
     }
 }

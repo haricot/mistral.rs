@@ -107,7 +107,7 @@ impl Attention {
             cfg.num_key_value_heads,
             cfg.hidden_size / cfg.num_attention_heads,
             comm,
-        );
+        )?;
         let k_proj = ColumnParallelLayer::new_with_shard(
             hidden_sz,
             num_kv_heads * head_dim,
@@ -161,7 +161,7 @@ impl Attention {
                     cfg.num_key_value_heads,
                     cfg.num_attention_heads,
                     comm,
-                ),
+                )?,
                 softcap: None,
                 softmax_scale: 1.0 / (head_dim as f32).sqrt(),
                 sliding_window,
@@ -196,7 +196,9 @@ impl Attention {
         q = q.apply(&self.q_norm)?;
         k = k.apply(&self.k_norm)?;
 
-        (q, k) = self.rotary_emb.forward(&q, &k, seqlen_offsets)?;
+        let positions =
+            crate::pipeline::text_positions_tensor(seqlen_offsets, q.dim(2)?, q.device())?;
+        (q, k) = self.rotary_emb.forward(&q, &k, &positions)?;
 
         let mut attn_output = Sdpa.run_attention(
             &q,

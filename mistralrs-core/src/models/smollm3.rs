@@ -112,9 +112,9 @@ impl CausalSelfAttention {
 
         if let Some(rotary_emb) = &self.rotary_emb {
             let rope_positions = ctx
-                .rope_positions(q.device())?
+                .text_positions(q.device(), q.dim(2)?)?
                 .ok_or_else(|| candle_core::Error::msg("missing RoPE positions"))?;
-            (q, k) = rotary_emb.forward_positions(&q, &k, rope_positions)?;
+            (q, k) = rotary_emb.forward(&q, &k, rope_positions)?;
         }
         let metadata = ctx.paged_layer(layer_idx);
 
@@ -195,7 +195,7 @@ impl CausalSelfAttention {
             cfg.num_key_value_heads,
             cfg.hidden_size / cfg.num_attention_heads,
             comm,
-        );
+        )?;
         let k_proj = ColumnParallelLayer::new_with_shard(
             size_in,
             size_kv,
@@ -238,7 +238,7 @@ impl CausalSelfAttention {
                     cfg.num_key_value_heads,
                     cfg.num_attention_heads,
                     comm,
-                ),
+                )?,
                 softcap: None,
                 softmax_scale: 1.0 / ((cfg.hidden_size / cfg.num_attention_heads) as f32).sqrt(),
                 sliding_window: None,

@@ -627,7 +627,7 @@ pub fn flashinfer_mla_decode(
             }
         };
 
-        unsafe {
+        let status = unsafe {
             ffi_flashinfer_mla_decode(
                 q_nope_ptr as *const core::ffi::c_void,
                 q_pe_ptr as *const core::ffi::c_void,
@@ -651,7 +651,10 @@ pub fn flashinfer_mla_decode(
                 kv_chunk_ptr as *const i32,
                 dtype_code,
                 dev.cuda_stream().cu_stream(),
-            );
+            )
+        };
+        if status != 0 {
+            candle_core::bail!("flashinfer_mla_decode failed with status {status}");
         }
     }
 

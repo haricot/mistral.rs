@@ -1,7 +1,7 @@
 /// This is the lower-level manager of the cache. It manages swapping and copying the blocks and
 /// actually allocates the KV cache for the CPU and GPU. It is used by the LLMEngine to execute
 /// operations issued by the scheduler.
-mod attention_backend;
+pub(crate) mod attention_backend;
 /// Content-addressable block hashing for prefix caching (vLLM v1 approach).
 pub mod block_hash;
 /// Flat block pool with LRU free list for KV cache block management (vLLM v1 approach).
@@ -12,25 +12,16 @@ mod config;
 pub mod encoder_cache;
 /// KV Cache Manager: high-level block allocation, prefix cache lookups, per-request tracking.
 pub mod kv_cache_manager;
-pub(crate) mod kvarn_cache;
 mod layers;
+#[cfg(all(feature = "cuda", target_family = "unix"))]
+pub(crate) mod plan;
 mod scheduler;
-pub(crate) mod turboquant_cache;
 pub const _PAD_SLOT_ID: i64 = -1;
 
 pub use attention_backend::AttentionBackendKind;
-#[cfg(any(all(feature = "cuda", target_family = "unix"), feature = "metal"))]
-pub use attention_backend::{
-    FLASHINFER_DECODE_MAX_HEAD_SIZE, STANDARD_PAGED_ATTENTION_MAX_HEAD_SIZE,
-};
-#[cfg(all(feature = "cuda", target_family = "unix"))]
-pub use attention_backend::{
-    FLASHINFER_PREFILL_MAX_HEAD_SIZE, FLASHINFER_TENSOR_CORE_DECODE_ENABLED,
-    FLASHINFER_TENSOR_CORE_DECODE_MAX_HEAD_SIZE,
-};
-pub use cache_engine::{CacheConfig, CacheEngine, DecodedKVCache, PagedCacheType};
+pub use cache_engine::{CacheConfig, CacheEngine, PagedCacheType};
 use candle_core::{DType, Device};
-pub use config::{KvCacheLayout, ModelConfigLike, ModelConfigMetadata};
+pub use config::{KvCacheLayout, KvCacheTopology, ModelConfigLike, ModelConfigMetadata};
 pub use kv_cache_manager::KVCacheManager;
 pub use layers::PagedAttention;
 pub use scheduler::{
@@ -83,6 +74,22 @@ const SUPPORTED_BLOCK_SIZE: &[usize] = &[8, 16, 32];
 
 const SIZE_IN_MB: usize = 1024 * 1024;
 
+macro_rules! mb_to_blocks {
+    ($mb_size:expr, $dtype_size:expr, $block_size:expr, $config:expr) => {
+        $mb_size
+            / $dtype_size
+            / $block_size
+            / $config.num_layers()
+            / $config.kv_cache_elements_per_token()
+    };
+}
+
+macro_rules! ctxt_to_blocks {
+    ($context_len:expr, $dtype_size:expr, $block_size:expr, $config:expr) => {
+        $context_len * $dtype_size * $config.num_layers() * $config.kv_cache_elements_per_token()
+    };
+}
+
 /// Memory values are in MBs or a percentage in [0,1]. Specify block size or the default is 32.
 ///
 /// `model_weight_size_in_bytes`: total model weight footprint. When provided, the per-device
@@ -109,19 +116,12 @@ pub fn calculate_cache_config(
     model_weight_size_in_bytes: Option<usize>,
     max_num_tokens: Option<usize>,
 ) -> anyhow::Result<CacheConfig> {
-    let block_size = if cache_type.is_kvarn() {
-        block_size.unwrap_or(kvarn_cache::KVARN_GROUP)
-    } else {
-        block_size.unwrap_or(DEFAULT_PAGED_ATTENTION_BLOCK_SIZE)
-    };
-    if cache_type.is_kvarn() {
-        kvarn_cache::validate_block_size(block_size)?;
-    } else if !SUPPORTED_BLOCK_SIZE.contains(&block_size) {
+    let block_size = block_size.unwrap_or(DEFAULT_PAGED_ATTENTION_BLOCK_SIZE);
+    if !SUPPORTED_BLOCK_SIZE.contains(&block_size) {
         anyhow::bail!("Block size must be in {SUPPORTED_BLOCK_SIZE:?}, got {block_size}");
     }
-    let bytes_per_block_all_layers =
-        cache_type.bytes_per_block_all_layers(dtype, config, block_size)?;
-    let bytes_per_token_all_layers = bytes_per_block_all_layers / block_size;
+    let dtype = cache_type.to_dtype(dtype);
+    let dtype_size = dtype.size_in_bytes();
 
     // For tensor parallelism, each device holds a fraction of the model weights. Approximate it like this.
     let num_devices = layer_devices.len().max(1);
@@ -148,7 +148,7 @@ pub fn calculate_cache_config(
             }
             MemoryGpuConfig::ContextSize(toks) => {
                 // ContextSize is demand-driven (bytes needed for N tokens), not a memory budget, so model weight does not apply here.
-                (toks * bytes_per_token_all_layers).div_ceil(SIZE_IN_MB)
+                ctxt_to_blocks!(toks, dtype_size, block_size, config) / SIZE_IN_MB
             }
         };
         min_mem_gpu = min_mem_gpu.min(mem_gpu);
@@ -162,7 +162,8 @@ pub fn calculate_cache_config(
     let mut mem_gpu = min_mem_gpu;
     if device.is_metal() {
         let max_tokens = max_num_tokens.unwrap_or(config.max_seq_len());
-        let mem_for_tokens = (max_tokens * bytes_per_token_all_layers).div_ceil(SIZE_IN_MB);
+        let mem_for_tokens =
+            ctxt_to_blocks!(max_tokens, dtype_size, block_size, config) / SIZE_IN_MB;
         if mem_for_tokens < mem_gpu {
             if !silent {
                 info!(
@@ -174,36 +175,20 @@ pub fn calculate_cache_config(
         }
     }
 
-    let num_gpu_blocks = (mem_gpu * SIZE_IN_MB) / bytes_per_block_all_layers;
+    let num_gpu_blocks = mb_to_blocks!(mem_gpu * SIZE_IN_MB, dtype_size, block_size, config);
     if num_gpu_blocks == 0 {
         anyhow::bail!("Num GPU blocks is 0. This means there is not enough memory. Either reduce the memory amount/utilization/context size or disable PagedAttention.");
     }
 
     if !silent {
         info!("Allocating {mem_gpu} MB for PagedAttention KV cache per GPU");
-        if cache_type.is_kvarn() {
-            info!(
-                "PagedAttention KV cache type is KVarN (K{} V{} group {})",
-                kvarn_cache::KVARN_KEY_BITS,
-                kvarn_cache::KVARN_VALUE_BITS,
-                kvarn_cache::KVARN_GROUP
-            );
-        } else if cache_type.is_turboquant() {
-            info!(
-                "PagedAttention KV cache type is TurboQuant ({}-bit packed u8)",
-                turboquant_cache::TURBOQUANT_BITS
-            );
-        } else {
-            info!(
-                "PagedAttention KV cache type is {:?}",
-                cache_type.to_dtype(dtype)?
-            );
-        }
+        info!("PagedAttention KV cache type is {dtype:?}");
         info!("Using PagedAttention with block size {block_size} and {num_gpu_blocks} GPU blocks: available context length is {} tokens", num_gpu_blocks*block_size);
     }
     Ok(CacheConfig {
         block_size,
         num_gpu_blocks,
         cache_type,
+        kv_cache_group_ids: config.kv_cache_group_ids(),
     })
 }

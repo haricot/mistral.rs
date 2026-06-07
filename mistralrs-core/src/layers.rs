@@ -311,12 +311,10 @@ impl RmsNorm {
 impl Module for RmsNorm {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
         #[cfg(feature = "cuda")]
-        if x.device().is_cuda() && self.weight.device().is_cuda() {
-            if let Some(out) =
-                crate::ops::try_cuda_rms_norm_strided_4d(x, &self.weight, self.eps as f32)?
-            {
-                return Ok(out);
-            }
+        if let Some(out) =
+            crate::ops::try_cuda_rms_norm_strided_4d(x, &self.weight, self.eps as f32)?
+        {
+            return Ok(out);
         }
 
         candle_nn::ops::rms_norm(&x.contiguous()?, &self.weight, self.eps as f32)
@@ -844,24 +842,11 @@ impl PhiRotaryEmbedding {
         &self,
         q: &Tensor,
         k: &Tensor,
-        seqlen_offsets: &[usize],
-        position_ids: &[usize],
-    ) -> Result<(Tensor, Tensor)> {
-        let (sin, cos) = self.get_long_or_short_sin_cos(position_ids);
-        let (batch, _, seq_len, _) = q.dims4()?;
-        let (cos, sin) = selected_rope_cache(cos, sin, batch, seq_len, seqlen_offsets)?;
-        apply_rotary_selected_qk(q, k, &cos, &sin, true)
-    }
-
-    pub fn forward_positions(
-        &self,
-        q: &Tensor,
-        k: &Tensor,
         positions: &Tensor,
         position_ids: &[usize],
     ) -> Result<(Tensor, Tensor)> {
         let (sin, cos) = self.get_long_or_short_sin_cos(position_ids);
-        apply_rotary_positions_qk(q, k, cos, sin, positions, true)
+        apply_rotary_qk(q, k, cos, sin, positions, true)
     }
 }
 
@@ -1171,22 +1156,8 @@ impl Llama3RotaryEmbedding {
         }
     }
 
-    pub fn forward(
-        &self,
-        q: &Tensor,
-        k: &Tensor,
-        seqlen_offsets: &[usize],
-    ) -> Result<(Tensor, Tensor)> {
-        self.0.forward(q, k, seqlen_offsets)
-    }
-
-    pub fn forward_positions(
-        &self,
-        q: &Tensor,
-        k: &Tensor,
-        positions: &Tensor,
-    ) -> Result<(Tensor, Tensor)> {
-        self.0.forward_positions(q, k, positions)
+    pub fn forward(&self, q: &Tensor, k: &Tensor, positions: &Tensor) -> Result<(Tensor, Tensor)> {
+        self.0.forward(q, k, positions)
     }
 
     pub fn forward_q_norm(
@@ -1194,9 +1165,9 @@ impl Llama3RotaryEmbedding {
         q: &Tensor,
         q_weight: &Tensor,
         q_eps: f64,
-        seqlen_offsets: &[usize],
+        positions: &Tensor,
     ) -> Result<Tensor> {
-        self.0.forward_q_norm(q, q_weight, q_eps, seqlen_offsets)
+        self.0.forward_q_norm(q, q_weight, q_eps, positions)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1208,36 +1179,10 @@ impl Llama3RotaryEmbedding {
         k_weight: &Tensor,
         q_eps: f64,
         k_eps: f64,
-        seqlen_offsets: &[usize],
-    ) -> Result<(Tensor, Tensor)> {
-        self.0
-            .forward_qk_norm(q, k, q_weight, k_weight, q_eps, k_eps, seqlen_offsets)
-    }
-
-    pub fn forward_q_norm_positions(
-        &self,
-        q: &Tensor,
-        q_weight: &Tensor,
-        q_eps: f64,
-        positions: &Tensor,
-    ) -> Result<Tensor> {
-        self.0
-            .forward_q_norm_positions(q, q_weight, q_eps, positions)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn forward_qk_norm_positions(
-        &self,
-        q: &Tensor,
-        k: &Tensor,
-        q_weight: &Tensor,
-        k_weight: &Tensor,
-        q_eps: f64,
-        k_eps: f64,
         positions: &Tensor,
     ) -> Result<(Tensor, Tensor)> {
         self.0
-            .forward_qk_norm_positions(q, k, q_weight, k_weight, q_eps, k_eps, positions)
+            .forward_qk_norm(q, k, q_weight, k_weight, q_eps, k_eps, positions)
     }
 }
 
@@ -1364,22 +1309,8 @@ impl SmolLm3RotaryEmbedding {
         }
     }
 
-    pub fn forward(
-        &self,
-        q: &Tensor,
-        k: &Tensor,
-        seqlen_offsets: &[usize],
-    ) -> Result<(Tensor, Tensor)> {
-        self.0.forward(q, k, seqlen_offsets)
-    }
-
-    pub fn forward_positions(
-        &self,
-        q: &Tensor,
-        k: &Tensor,
-        positions: &Tensor,
-    ) -> Result<(Tensor, Tensor)> {
-        self.0.forward_positions(q, k, positions)
+    pub fn forward(&self, q: &Tensor, k: &Tensor, positions: &Tensor) -> Result<(Tensor, Tensor)> {
+        self.0.forward(q, k, positions)
     }
 
     pub fn forward_q_norm(
@@ -1387,9 +1318,9 @@ impl SmolLm3RotaryEmbedding {
         q: &Tensor,
         q_weight: &Tensor,
         q_eps: f64,
-        seqlen_offsets: &[usize],
+        positions: &Tensor,
     ) -> Result<Tensor> {
-        self.0.forward_q_norm(q, q_weight, q_eps, seqlen_offsets)
+        self.0.forward_q_norm(q, q_weight, q_eps, positions)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1401,36 +1332,10 @@ impl SmolLm3RotaryEmbedding {
         k_weight: &Tensor,
         q_eps: f64,
         k_eps: f64,
-        seqlen_offsets: &[usize],
-    ) -> Result<(Tensor, Tensor)> {
-        self.0
-            .forward_qk_norm(q, k, q_weight, k_weight, q_eps, k_eps, seqlen_offsets)
-    }
-
-    pub fn forward_q_norm_positions(
-        &self,
-        q: &Tensor,
-        q_weight: &Tensor,
-        q_eps: f64,
-        positions: &Tensor,
-    ) -> Result<Tensor> {
-        self.0
-            .forward_q_norm_positions(q, q_weight, q_eps, positions)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn forward_qk_norm_positions(
-        &self,
-        q: &Tensor,
-        k: &Tensor,
-        q_weight: &Tensor,
-        k_weight: &Tensor,
-        q_eps: f64,
-        k_eps: f64,
         positions: &Tensor,
     ) -> Result<(Tensor, Tensor)> {
         self.0
-            .forward_qk_norm_positions(q, k, q_weight, k_weight, q_eps, k_eps, positions)
+            .forward_qk_norm(q, k, q_weight, k_weight, q_eps, k_eps, positions)
     }
 }
 
@@ -1506,7 +1411,7 @@ impl Qwen2VLRotaryEmbedding {
         q: &mut Tensor,
         k: &mut Tensor,
     ) -> Result<()> {
-        let (q_out, k_out) = apply_rotary_selected_qk(q, k, cos, sin, true)?;
+        let (q_out, k_out) = apply_rotary_preselected_qk(q, k, cos, sin, true)?;
         *q = q_out;
         *k = k_out;
         Ok(())
@@ -1622,7 +1527,7 @@ impl Qwen3VLRotaryEmbedding {
         q: &mut Tensor,
         k: &mut Tensor,
     ) -> Result<()> {
-        let (q_out, k_out) = apply_rotary_selected_qk(q, k, cos, sin, true)?;
+        let (q_out, k_out) = apply_rotary_preselected_qk(q, k, cos, sin, true)?;
         *q = q_out;
         *k = k_out;
         Ok(())
@@ -1713,7 +1618,7 @@ impl Qwen2_5VLRotaryEmbedding {
         q: &mut Tensor,
         k: &mut Tensor,
     ) -> Result<()> {
-        let (q_out, k_out) = apply_rotary_selected_qk(q, k, cos, sin, true)?;
+        let (q_out, k_out) = apply_rotary_preselected_qk(q, k, cos, sin, true)?;
         *q = q_out;
         *k = k_out;
         Ok(())
@@ -1896,24 +1801,8 @@ impl DeepSeekV2RotaryEmbedding {
         }
     }
 
-    pub fn forward(
-        &self,
-        q: &Tensor,
-        k: &Tensor,
-        seqlen_offsets: &[usize],
-    ) -> Result<(Tensor, Tensor)> {
-        let (batch, _, seq_len, _) = q.dims4()?;
-        let (cos, sin) = selected_rope_cache(&self.cos, &self.sin, batch, seq_len, seqlen_offsets)?;
-        apply_rotary_selected_qk(q, k, &cos, &sin, false)
-    }
-
-    pub fn forward_positions(
-        &self,
-        q: &Tensor,
-        k: &Tensor,
-        positions: &Tensor,
-    ) -> Result<(Tensor, Tensor)> {
-        apply_rotary_positions_qk(q, k, &self.cos, &self.sin, positions, false)
+    pub fn forward(&self, q: &Tensor, k: &Tensor, positions: &Tensor) -> Result<(Tensor, Tensor)> {
+        apply_rotary_qk(q, k, &self.cos, &self.sin, positions, false)
     }
 }
 
@@ -2064,24 +1953,11 @@ impl Phi4MMRotaryEmbedding {
         &self,
         q: &Tensor,
         k: &Tensor,
-        seqlen_offsets: &[usize],
-        position_ids: &[usize],
-    ) -> Result<(Tensor, Tensor)> {
-        let (sin, cos) = self.get_long_or_short_sin_cos(position_ids);
-        let (batch, _, seq_len, _) = q.dims4()?;
-        let (cos, sin) = selected_rope_cache(cos, sin, batch, seq_len, seqlen_offsets)?;
-        apply_rotary_selected_qk(q, k, &cos, &sin, true)
-    }
-
-    pub fn forward_positions(
-        &self,
-        q: &Tensor,
-        k: &Tensor,
         positions: &Tensor,
         position_ids: &[usize],
     ) -> Result<(Tensor, Tensor)> {
         let (sin, cos) = self.get_long_or_short_sin_cos(position_ids);
-        apply_rotary_positions_qk(q, k, cos, sin, positions, true)
+        apply_rotary_qk(q, k, cos, sin, positions, true)
     }
 }
 
@@ -2153,13 +2029,18 @@ impl Gemma3nRotaryEmbedding {
         self.0.get_cos_sin()
     }
 
-    pub fn forward(
+    pub fn forward(&self, q: &Tensor, k: &Tensor, positions: &Tensor) -> Result<(Tensor, Tensor)> {
+        self.0.forward(q, k, positions)
+    }
+
+    pub fn forward_q_norm(
         &self,
         q: &Tensor,
-        k: &Tensor,
-        seqlen_offsets: &[usize],
-    ) -> Result<(Tensor, Tensor)> {
-        self.0.forward(q, k, seqlen_offsets)
+        q_weight: &Tensor,
+        q_eps: f64,
+        positions: &Tensor,
+    ) -> Result<Tensor> {
+        self.0.forward_q_norm(q, q_weight, q_eps, positions)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2171,45 +2052,10 @@ impl Gemma3nRotaryEmbedding {
         k_weight: &Tensor,
         q_eps: f64,
         k_eps: f64,
-        seqlen_offsets: &[usize],
-    ) -> Result<(Tensor, Tensor)> {
-        self.0
-            .forward_qk_norm(q, k, q_weight, k_weight, q_eps, k_eps, seqlen_offsets)
-    }
-
-    pub fn forward_positions(
-        &self,
-        q: &Tensor,
-        k: &Tensor,
-        positions: &Tensor,
-    ) -> Result<(Tensor, Tensor)> {
-        self.0.forward_positions(q, k, positions)
-    }
-
-    pub fn forward_q_norm_positions(
-        &self,
-        q: &Tensor,
-        q_weight: &Tensor,
-        q_eps: f64,
-        positions: &Tensor,
-    ) -> Result<Tensor> {
-        self.0
-            .forward_q_norm_positions(q, q_weight, q_eps, positions)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn forward_qk_norm_positions(
-        &self,
-        q: &Tensor,
-        k: &Tensor,
-        q_weight: &Tensor,
-        k_weight: &Tensor,
-        q_eps: f64,
-        k_eps: f64,
         positions: &Tensor,
     ) -> Result<(Tensor, Tensor)> {
         self.0
-            .forward_qk_norm_positions(q, k, q_weight, k_weight, q_eps, k_eps, positions)
+            .forward_qk_norm(q, k, q_weight, k_weight, q_eps, k_eps, positions)
     }
 }
 
@@ -2324,13 +2170,8 @@ impl Gemma3RotaryEmbedding {
         }
     }
 
-    pub fn forward(
-        &self,
-        q: &Tensor,
-        k: &Tensor,
-        seqlen_offsets: &[usize],
-    ) -> Result<(Tensor, Tensor)> {
-        self.0.forward(q, k, seqlen_offsets)
+    pub fn forward(&self, q: &Tensor, k: &Tensor, positions: &Tensor) -> Result<(Tensor, Tensor)> {
+        self.0.forward(q, k, positions)
     }
 
     pub fn forward_q_norm(
@@ -2338,9 +2179,9 @@ impl Gemma3RotaryEmbedding {
         q: &Tensor,
         q_weight: &Tensor,
         q_eps: f64,
-        seqlen_offsets: &[usize],
+        positions: &Tensor,
     ) -> Result<Tensor> {
-        self.0.forward_q_norm(q, q_weight, q_eps, seqlen_offsets)
+        self.0.forward_q_norm(q, q_weight, q_eps, positions)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2352,45 +2193,10 @@ impl Gemma3RotaryEmbedding {
         k_weight: &Tensor,
         q_eps: f64,
         k_eps: f64,
-        seqlen_offsets: &[usize],
-    ) -> Result<(Tensor, Tensor)> {
-        self.0
-            .forward_qk_norm(q, k, q_weight, k_weight, q_eps, k_eps, seqlen_offsets)
-    }
-
-    pub fn forward_positions(
-        &self,
-        q: &Tensor,
-        k: &Tensor,
-        positions: &Tensor,
-    ) -> Result<(Tensor, Tensor)> {
-        self.0.forward_positions(q, k, positions)
-    }
-
-    pub fn forward_q_norm_positions(
-        &self,
-        q: &Tensor,
-        q_weight: &Tensor,
-        q_eps: f64,
-        positions: &Tensor,
-    ) -> Result<Tensor> {
-        self.0
-            .forward_q_norm_positions(q, q_weight, q_eps, positions)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn forward_qk_norm_positions(
-        &self,
-        q: &Tensor,
-        k: &Tensor,
-        q_weight: &Tensor,
-        k_weight: &Tensor,
-        q_eps: f64,
-        k_eps: f64,
         positions: &Tensor,
     ) -> Result<(Tensor, Tensor)> {
         self.0
-            .forward_qk_norm_positions(q, k, q_weight, k_weight, q_eps, k_eps, positions)
+            .forward_qk_norm(q, k, q_weight, k_weight, q_eps, k_eps, positions)
     }
 }
 
@@ -2547,35 +2353,6 @@ pub struct RotaryEmbedding {
     is_gpt_neox: bool,
 }
 
-fn selected_rope_cache(
-    cos: &Tensor,
-    sin: &Tensor,
-    batch: usize,
-    seq_len: usize,
-    seqlen_offsets: &[usize],
-) -> Result<(Tensor, Tensor)> {
-    if seqlen_offsets.len() == 1 {
-        Ok((
-            cos.narrow(0, seqlen_offsets[0], seq_len)?,
-            sin.narrow(0, seqlen_offsets[0], seq_len)?,
-        ))
-    } else {
-        if seqlen_offsets.len() != batch {
-            candle_core::bail!(
-                "RoPE offset count {} does not match batch size {batch}",
-                seqlen_offsets.len()
-            );
-        }
-        let mut cos_s = Vec::with_capacity(batch);
-        let mut sin_s = Vec::with_capacity(batch);
-        for offset in seqlen_offsets {
-            cos_s.push(cos.narrow(0, *offset, seq_len)?);
-            sin_s.push(sin.narrow(0, *offset, seq_len)?);
-        }
-        Ok((Tensor::cat(&cos_s, 0)?, Tensor::cat(&sin_s, 0)?))
-    }
-}
-
 fn post_rope_output(mut x: Tensor) -> Result<Tensor> {
     if !(cfg!(feature = "flash-attn") || cfg!(feature = "flash-attn-v3")) {
         x = x.contiguous()?;
@@ -2583,52 +2360,37 @@ fn post_rope_output(mut x: Tensor) -> Result<Tensor> {
     Ok(x)
 }
 
-pub(crate) fn apply_rotary_selected_qk(
+pub(crate) fn apply_rotary_preselected_qk(
     q: &Tensor,
     k: &Tensor,
     cos: &Tensor,
     sin: &Tensor,
     is_gpt_neox: bool,
 ) -> Result<(Tensor, Tensor)> {
-    let (q, k) = mistralrs_quant::rotary::apply_rotary_qk(q, k, cos, sin, is_gpt_neox)?;
+    let (q, k) = mistralrs_quant::rotary::apply_rotary_qk_preselected(q, k, cos, sin, is_gpt_neox)?;
     Ok((post_rope_output(q)?, post_rope_output(k)?))
 }
 
-pub(crate) fn apply_rotary_selected_q(
+pub(crate) fn apply_rotary_qk(
+    q: &Tensor,
+    k: &Tensor,
+    cos: &Tensor,
+    sin: &Tensor,
+    positions: &Tensor,
+    is_gpt_neox: bool,
+) -> Result<(Tensor, Tensor)> {
+    let (q, k) = mistralrs_quant::rotary::apply_rotary_qk(q, k, cos, sin, positions, is_gpt_neox)?;
+    Ok((post_rope_output(q)?, post_rope_output(k)?))
+}
+
+pub(crate) fn apply_rotary_q(
     q: &Tensor,
     cos: &Tensor,
     sin: &Tensor,
+    positions: &Tensor,
     is_gpt_neox: bool,
 ) -> Result<Tensor> {
     post_rope_output(mistralrs_quant::rotary::apply_rotary_q(
-        q,
-        cos,
-        sin,
-        is_gpt_neox,
-    )?)
-}
-
-pub(crate) fn apply_rotary_positions_qk(
-    q: &Tensor,
-    k: &Tensor,
-    cos: &Tensor,
-    sin: &Tensor,
-    positions: &Tensor,
-    is_gpt_neox: bool,
-) -> Result<(Tensor, Tensor)> {
-    let (q, k) =
-        mistralrs_quant::rotary::apply_rotary_qk_positions(q, k, cos, sin, positions, is_gpt_neox)?;
-    Ok((post_rope_output(q)?, post_rope_output(k)?))
-}
-
-pub(crate) fn apply_rotary_positions_q(
-    q: &Tensor,
-    cos: &Tensor,
-    sin: &Tensor,
-    positions: &Tensor,
-    is_gpt_neox: bool,
-) -> Result<Tensor> {
-    post_rope_output(mistralrs_quant::rotary::apply_rotary_q_positions(
         q,
         cos,
         sin,
@@ -2648,140 +2410,31 @@ pub fn qk_rms_norm_rope(
     cos_cache: &Tensor,
     sin_cache: &Tensor,
     is_gpt_neox: bool,
-    seqlen_offsets: &[usize],
-) -> Result<(Tensor, Tensor)> {
-    let (batch, _, seq_len, _) = q.dims4()?;
-    let (cos, sin) = selected_rope_cache(cos_cache, sin_cache, batch, seq_len, seqlen_offsets)?;
-
-    #[cfg(feature = "cuda")]
-    if q.device().is_cuda()
-        && k.device().is_cuda()
-        && q_weight.device().is_cuda()
-        && k_weight.device().is_cuda()
-        && cos.device().is_cuda()
-        && sin.device().is_cuda()
-    {
-        if let Some((q, Some(k))) = crate::ops::try_cuda_qk_rms_norm_rope(
-            q,
-            Some(k),
-            q_weight,
-            Some(k_weight),
-            q_eps as f32,
-            k_eps as f32,
-            &cos,
-            &sin,
-            is_gpt_neox,
-        )? {
-            return Ok((q, k));
-        }
-    }
-
-    let q = candle_nn::ops::rms_norm(&q.contiguous()?, q_weight, q_eps as f32)?;
-    let k = candle_nn::ops::rms_norm(&k.contiguous()?, k_weight, k_eps as f32)?;
-    apply_rotary_selected_qk(
-        &q,
-        &k,
-        &cos.to_device(q.device())?,
-        &sin.to_device(q.device())?,
-        is_gpt_neox,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn q_rms_norm_rope(
-    q: &Tensor,
-    q_weight: &Tensor,
-    q_eps: f64,
-    cos_cache: &Tensor,
-    sin_cache: &Tensor,
-    is_gpt_neox: bool,
-    seqlen_offsets: &[usize],
-) -> Result<Tensor> {
-    let (batch, _qh, seq_len, _head_dim) = q.dims4()?;
-    let (cos, sin) = selected_rope_cache(cos_cache, sin_cache, batch, seq_len, seqlen_offsets)?;
-
-    #[cfg(feature = "cuda")]
-    if q.device().is_cuda()
-        && q_weight.device().is_cuda()
-        && cos.device().is_cuda()
-        && sin.device().is_cuda()
-    {
-        if let Some((q, None)) = crate::ops::try_cuda_qk_rms_norm_rope(
-            q,
-            None,
-            q_weight,
-            None,
-            q_eps as f32,
-            q_eps as f32,
-            &cos,
-            &sin,
-            is_gpt_neox,
-        )? {
-            return Ok(q);
-        }
-    }
-
-    let q = candle_nn::ops::rms_norm(&q.contiguous()?, q_weight, q_eps as f32)?;
-    apply_rotary_selected_q(
-        &q,
-        &cos.to_device(q.device())?,
-        &sin.to_device(q.device())?,
-        is_gpt_neox,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn qk_rms_norm_rope_positions(
-    q: &Tensor,
-    k: &Tensor,
-    q_weight: &Tensor,
-    k_weight: &Tensor,
-    q_eps: f64,
-    k_eps: f64,
-    cos_cache: &Tensor,
-    sin_cache: &Tensor,
-    is_gpt_neox: bool,
     positions: &Tensor,
 ) -> Result<(Tensor, Tensor)> {
     #[cfg(feature = "cuda")]
-    if q.device().is_cuda()
-        && k.device().is_cuda()
-        && q_weight.device().is_cuda()
-        && k_weight.device().is_cuda()
-        && cos_cache.device().is_cuda()
-        && sin_cache.device().is_cuda()
-        && positions.device().is_cuda()
-    {
-        if let Some((q, Some(k))) = crate::ops::try_cuda_qk_rms_norm_rope_positions(
-            q,
-            Some(k),
-            q_weight,
-            Some(k_weight),
-            q_eps as f32,
-            k_eps as f32,
-            cos_cache,
-            sin_cache,
-            positions,
-            is_gpt_neox,
-        )? {
-            return Ok((q, k));
-        }
+    if let Some((q, Some(k))) = crate::ops::try_cuda_qk_rms_norm_rope_positions(
+        q,
+        Some(k),
+        q_weight,
+        Some(k_weight),
+        q_eps as f32,
+        k_eps as f32,
+        cos_cache,
+        sin_cache,
+        positions,
+        is_gpt_neox,
+    )? {
+        return Ok((q, k));
     }
 
     let q = candle_nn::ops::rms_norm(&q.contiguous()?, q_weight, q_eps as f32)?;
     let k = candle_nn::ops::rms_norm(&k.contiguous()?, k_weight, k_eps as f32)?;
-    apply_rotary_positions_qk(
-        &q,
-        &k,
-        &cos_cache.to_device(q.device())?,
-        &sin_cache.to_device(q.device())?,
-        &positions.to_device(q.device())?,
-        is_gpt_neox,
-    )
+    apply_rotary_qk(&q, &k, cos_cache, sin_cache, positions, is_gpt_neox)
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn qkv_rms_norm_rope_positions(
+pub fn qkv_rms_norm_rope(
     q: &Tensor,
     k: &Tensor,
     v: &Tensor,
@@ -2797,51 +2450,33 @@ pub fn qkv_rms_norm_rope_positions(
     positions: &Tensor,
 ) -> Result<(Tensor, Tensor, Tensor)> {
     #[cfg(feature = "cuda")]
-    if q.device().is_cuda()
-        && k.device().is_cuda()
-        && v.device().is_cuda()
-        && q_weight.device().is_cuda()
-        && k_weight.device().is_cuda()
-        && v_weight.device().is_cuda()
-        && cos_cache.device().is_cuda()
-        && sin_cache.device().is_cuda()
-        && positions.device().is_cuda()
-    {
-        if let Some((q, k, v)) = crate::ops::try_cuda_qkv_rms_norm_rope_positions(
-            q,
-            k,
-            v,
-            q_weight,
-            k_weight,
-            v_weight,
-            q_eps as f32,
-            k_eps as f32,
-            v_eps as f32,
-            cos_cache,
-            sin_cache,
-            positions,
-            is_gpt_neox,
-        )? {
-            return Ok((q, k, v));
-        }
+    if let Some((q, k, v)) = crate::ops::try_cuda_qkv_rms_norm_rope_positions(
+        q,
+        k,
+        v,
+        q_weight,
+        k_weight,
+        v_weight,
+        q_eps as f32,
+        k_eps as f32,
+        v_eps as f32,
+        cos_cache,
+        sin_cache,
+        positions,
+        is_gpt_neox,
+    )? {
+        return Ok((q, k, v));
     }
 
     let q = candle_nn::ops::rms_norm(&q.contiguous()?, q_weight, q_eps as f32)?;
     let k = candle_nn::ops::rms_norm(&k.contiguous()?, k_weight, k_eps as f32)?;
     let v = candle_nn::ops::rms_norm(&v.contiguous()?, v_weight, v_eps as f32)?;
-    let (q, k) = apply_rotary_positions_qk(
-        &q,
-        &k,
-        &cos_cache.to_device(q.device())?,
-        &sin_cache.to_device(q.device())?,
-        &positions.to_device(q.device())?,
-        is_gpt_neox,
-    )?;
+    let (q, k) = apply_rotary_qk(&q, &k, cos_cache, sin_cache, positions, is_gpt_neox)?;
     Ok((q, k, v))
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn q_rms_norm_rope_positions(
+pub fn q_rms_norm_rope(
     q: &Tensor,
     q_weight: &Tensor,
     q_eps: f64,
@@ -2851,36 +2486,23 @@ pub fn q_rms_norm_rope_positions(
     positions: &Tensor,
 ) -> Result<Tensor> {
     #[cfg(feature = "cuda")]
-    if q.device().is_cuda()
-        && q_weight.device().is_cuda()
-        && cos_cache.device().is_cuda()
-        && sin_cache.device().is_cuda()
-        && positions.device().is_cuda()
-    {
-        if let Some((q, None)) = crate::ops::try_cuda_qk_rms_norm_rope_positions(
-            q,
-            None,
-            q_weight,
-            None,
-            q_eps as f32,
-            q_eps as f32,
-            cos_cache,
-            sin_cache,
-            positions,
-            is_gpt_neox,
-        )? {
-            return Ok(q);
-        }
+    if let Some((q, None)) = crate::ops::try_cuda_qk_rms_norm_rope_positions(
+        q,
+        None,
+        q_weight,
+        None,
+        q_eps as f32,
+        q_eps as f32,
+        cos_cache,
+        sin_cache,
+        positions,
+        is_gpt_neox,
+    )? {
+        return Ok(q);
     }
 
     let q = candle_nn::ops::rms_norm(&q.contiguous()?, q_weight, q_eps as f32)?;
-    apply_rotary_positions_q(
-        &q,
-        &cos_cache.to_device(q.device())?,
-        &sin_cache.to_device(q.device())?,
-        &positions.to_device(q.device())?,
-        is_gpt_neox,
-    )
+    apply_rotary_q(&q, cos_cache, sin_cache, positions, is_gpt_neox)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2937,7 +2559,7 @@ pub fn qk_rms_norm_mrope(
 
     let q = candle_nn::ops::rms_norm(&q.contiguous()?, q_weight, q_eps as f32)?;
     let k = candle_nn::ops::rms_norm(&k.contiguous()?, k_weight, k_eps as f32)?;
-    apply_rotary_selected_qk(&q, &k, cos, sin, is_gpt_neox)
+    apply_rotary_preselected_qk(&q, &k, cos, sin, is_gpt_neox)
 }
 
 impl RotaryEmbedding {
@@ -2982,52 +2604,9 @@ impl RotaryEmbedding {
         k_weight: &Tensor,
         q_eps: f64,
         k_eps: f64,
-        seqlen_offsets: &[usize],
-    ) -> Result<(Tensor, Tensor)> {
-        qk_rms_norm_rope(
-            q,
-            k,
-            q_weight,
-            k_weight,
-            q_eps,
-            k_eps,
-            &self.cos,
-            &self.sin,
-            self.is_gpt_neox,
-            seqlen_offsets,
-        )
-    }
-
-    pub fn forward_q_norm(
-        &self,
-        q: &Tensor,
-        q_weight: &Tensor,
-        q_eps: f64,
-        seqlen_offsets: &[usize],
-    ) -> Result<Tensor> {
-        q_rms_norm_rope(
-            q,
-            q_weight,
-            q_eps,
-            &self.cos,
-            &self.sin,
-            self.is_gpt_neox,
-            seqlen_offsets,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn forward_qk_norm_positions(
-        &self,
-        q: &Tensor,
-        k: &Tensor,
-        q_weight: &Tensor,
-        k_weight: &Tensor,
-        q_eps: f64,
-        k_eps: f64,
         positions: &Tensor,
     ) -> Result<(Tensor, Tensor)> {
-        qk_rms_norm_rope_positions(
+        qk_rms_norm_rope(
             q,
             k,
             q_weight,
@@ -3042,7 +2621,7 @@ impl RotaryEmbedding {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn forward_qkv_norm_positions(
+    pub fn forward_qkv_norm(
         &self,
         q: &Tensor,
         k: &Tensor,
@@ -3055,7 +2634,7 @@ impl RotaryEmbedding {
         v_eps: f64,
         positions: &Tensor,
     ) -> Result<(Tensor, Tensor, Tensor)> {
-        qkv_rms_norm_rope_positions(
+        qkv_rms_norm_rope(
             q,
             k,
             v,
@@ -3072,14 +2651,14 @@ impl RotaryEmbedding {
         )
     }
 
-    pub fn forward_q_norm_positions(
+    pub fn forward_q_norm(
         &self,
         q: &Tensor,
         q_weight: &Tensor,
         q_eps: f64,
         positions: &Tensor,
     ) -> Result<Tensor> {
-        q_rms_norm_rope_positions(
+        q_rms_norm_rope(
             q,
             q_weight,
             q_eps,
@@ -3090,17 +2669,12 @@ impl RotaryEmbedding {
         )
     }
 
-    pub fn forward_positions(
-        &self,
-        q: &Tensor,
-        k: &Tensor,
-        positions: &Tensor,
-    ) -> Result<(Tensor, Tensor)> {
-        apply_rotary_positions_qk(q, k, &self.cos, &self.sin, positions, self.is_gpt_neox)
+    pub fn forward(&self, q: &Tensor, k: &Tensor, positions: &Tensor) -> Result<(Tensor, Tensor)> {
+        apply_rotary_qk(q, k, &self.cos, &self.sin, positions, self.is_gpt_neox)
     }
 
-    pub fn forward_q_positions(&self, q: &Tensor, positions: &Tensor) -> Result<Tensor> {
-        apply_rotary_positions_q(q, &self.cos, &self.sin, positions, self.is_gpt_neox)
+    pub fn forward_q(&self, q: &Tensor, positions: &Tensor) -> Result<Tensor> {
+        apply_rotary_q(q, &self.cos, &self.sin, positions, self.is_gpt_neox)
     }
 
     pub fn new_partial(
@@ -3129,23 +2703,6 @@ impl RotaryEmbedding {
             sin,
             is_gpt_neox,
         })
-    }
-
-    pub fn forward(
-        &self,
-        q: &Tensor,
-        k: &Tensor,
-        seqlen_offsets: &[usize],
-    ) -> Result<(Tensor, Tensor)> {
-        let (batch, _, seq_len, _) = q.dims4()?;
-        let (cos, sin) = selected_rope_cache(&self.cos, &self.sin, batch, seq_len, seqlen_offsets)?;
-        apply_rotary_selected_qk(q, k, &cos, &sin, self.is_gpt_neox)
-    }
-
-    pub fn forward_q(&self, q: &Tensor, seqlen_offsets: &[usize]) -> Result<Tensor> {
-        let (batch, _, seq_len, _) = q.dims4()?;
-        let (cos, sin) = selected_rope_cache(&self.cos, &self.sin, batch, seq_len, seqlen_offsets)?;
-        apply_rotary_selected_q(q, &cos, &sin, self.is_gpt_neox)
     }
 }
 
@@ -3257,22 +2814,8 @@ impl GptOssRotaryEmbedding {
         })
     }
 
-    pub fn forward(
-        &self,
-        q: &Tensor,
-        k: &Tensor,
-        seqlen_offsets: &[usize],
-    ) -> Result<(Tensor, Tensor)> {
-        self.rotary.forward(q, k, seqlen_offsets)
-    }
-
-    pub fn forward_positions(
-        &self,
-        q: &Tensor,
-        k: &Tensor,
-        positions: &Tensor,
-    ) -> Result<(Tensor, Tensor)> {
-        self.rotary.forward_positions(q, k, positions)
+    pub fn forward(&self, q: &Tensor, k: &Tensor, positions: &Tensor) -> Result<(Tensor, Tensor)> {
+        self.rotary.forward(q, k, positions)
     }
 }
 
@@ -3847,7 +3390,6 @@ impl ScaledEmbedding {
 impl Module for ScaledEmbedding {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let embedding = Embedding::new(self.embedding.clone(), self.embedding.dim(D::Minus1)?);
-        let xs = xs.to_device(self.embedding.device())?;
         xs.apply(&embedding)? * self.scale
     }
 }

@@ -168,7 +168,7 @@ impl Attention {
             cfg.num_key_value_heads,
             cfg.hidden_size / cfg.num_attention_heads,
             comm,
-        );
+        )?;
         let k_proj = ColumnParallelLayer::new_with_shard(
             hidden_sz,
             num_kv_heads * head_dim,
@@ -210,7 +210,7 @@ impl Attention {
                     cfg.num_key_value_heads,
                     cfg.num_attention_heads,
                     comm,
-                ),
+                )?,
                 softcap: None,
                 softmax_scale: 1.0 / (head_dim as f32).sqrt(),
                 sliding_window: cfg.sliding_window,
@@ -249,8 +249,8 @@ impl Attention {
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(candle_core::Error::wrap)?;
         let positions = Tensor::from_vec(positions, ctx.seqlen_offsets().len(), q.device())?;
-        q = OrdinaryRoPE::forward_positions(&q, &positions, rope_parameter.0, rope_parameter.1)?;
-        k = OrdinaryRoPE::forward_positions(&k, &positions, rope_parameter.0, rope_parameter.1)?;
+        q = OrdinaryRoPE::forward(&q, &positions, rope_parameter.0, rope_parameter.1)?;
+        k = OrdinaryRoPE::forward(&k, &positions, rope_parameter.0, rope_parameter.1)?;
         let v = v
             .reshape((b_sz, q_len, self.num_kv_heads, self.head_dim))?
             .transpose(1, 2)?;

@@ -87,7 +87,7 @@ impl Attention {
             cfg.num_key_value_heads,
             cfg.hidden_size / cfg.num_attention_heads,
             comm,
-        );
+        )?;
         let k_proj = ColumnParallelLayer::new_with_shard(
             hidden_sz,
             num_kv_heads * head_dim,
@@ -129,7 +129,7 @@ impl Attention {
                     cfg.num_key_value_heads,
                     cfg.num_attention_heads,
                     comm,
-                ),
+                )?,
                 softcap: None,
                 softmax_scale: 1.0 / (head_dim as f32).sqrt(),
                 sliding_window: cfg.sliding_window,
@@ -169,9 +169,9 @@ impl Attention {
         };
 
         let rope_positions = ctx
-            .rope_positions(q.device())?
+            .text_positions(q.device(), q.dim(2)?)?
             .ok_or_else(|| candle_core::Error::msg("missing RoPE positions"))?;
-        let (q, k) = self.rotary_emb.forward_positions(&q, &k, rope_positions)?;
+        let (q, k) = self.rotary_emb.forward(&q, &k, rope_positions)?;
         let metadata = ctx.paged_layer(layer_idx);
 
         let mut attn_output = match &self.paged_attn {

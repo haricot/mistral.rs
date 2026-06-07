@@ -1290,9 +1290,9 @@ impl CausalSelfAttention {
 
         (q, k) = if let Some(ref rotary_emb) = self.rotary_emb {
             let positions = ctx
-                .rope_positions(q.device())?
+                .text_positions(q.device(), q.dim(2)?)?
                 .ok_or_else(|| candle_core::Error::msg("missing RoPE positions"))?;
-            rotary_emb.forward_positions(&q, &k, positions)?
+            rotary_emb.forward(&q, &k, positions)?
         } else {
             (q, k)
         };
@@ -1370,7 +1370,7 @@ impl CausalSelfAttention {
             vb.pp("q_proj"),
         )?;
         let kv_shard =
-            mistralrs_quant::compute_kv_shard(cfg.num_key_value_heads(), cfg.head_dim(), comm);
+            mistralrs_quant::compute_kv_shard(cfg.num_key_value_heads(), cfg.head_dim(), comm)?;
         let k_proj = ColumnParallelLayer::new_with_shard(
             size_in,
             size_kv,
@@ -1413,7 +1413,7 @@ impl CausalSelfAttention {
                     cfg.num_key_value_heads(),
                     cfg.num_attention_heads,
                     comm,
-                ),
+                )?,
                 softcap: None,
                 // GraniteMoeHybrid uses attention_multiplier instead of 1/sqrt(d)
                 softmax_scale: cfg.attention_multiplier,
