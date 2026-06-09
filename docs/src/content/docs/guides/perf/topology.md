@@ -2,7 +2,7 @@
 title: Configure model topology
 description: Per-layer placement and quantization via a YAML topology file.
 sidebar:
-  order: 8
+  order: 7
 ---
 
 Topology is a per-layer placement and quantization mechanism. A YAML file specifies, per layer range, the device and quantization to use.

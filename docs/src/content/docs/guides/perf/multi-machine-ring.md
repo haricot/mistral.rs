@@ -1,13 +1,11 @@
 ---
 title: Run across multiple machines
-description: Use the ring backend for distributed inference across hosts.
+description: The ring backend for distributed inference across hosts.
 sidebar:
-  order: 9
+  order: 6
 ---
 
-The ring backend is a distributed transport selected by `RING_CONFIG`. It is separate from [multi-node NCCL inference](/mistral.rs/guides/perf/multi-node-nccl/), which uses `MISTRALRS_MN_*` variables and NCCL across all ranks.
-
-Use this page when you explicitly want the ring backend.
+When a model exceeds one machine's GPU memory, mistral.rs can split it across multiple hosts via a ring backend.
 
 ## Build
 
@@ -16,8 +14,6 @@ The `ring` feature must be compiled in:
 ```bash
 cargo install --path mistralrs-cli --features "cuda flash-attn ring"
 ```
-
-If the binary is also built with `nccl`, set `MISTRALRS_NO_NCCL=1` when launching so `Comm::from_device` selects the ring backend.
 
 ## Configuration
 
@@ -39,17 +35,23 @@ Config shape:
 
 Non-master ranks (`rank != 0`) must specify `master_ip`. The master rank (`rank = 0`) is reachable via `master_ip`.
 
-## Environment
+## Multi-node environment variables
 
-Ring backend selection is controlled by `RING_CONFIG`:
+Multi-node coordination is controlled through environment variables, not CLI flags:
 
 | Variable | Purpose |
 |---|---|
 | `RING_CONFIG` | Path to the per-rank ring JSON config. |
-| `MISTRALRS_NO_NCCL=1` | Required only when the same binary also has `nccl` and you want to force ring. |
+| `MISTRALRS_MN_GLOBAL_WORLD_SIZE` | Total world size across nodes. |
+| `MISTRALRS_MN_LOCAL_WORLD_SIZE` | Local TP size override on the node. |
+| `MISTRALRS_MN_HEAD_NUM_WORKERS` | Number of worker nodes (set on head). |
+| `MISTRALRS_MN_HEAD_PORT` | Head node port. |
+| `MISTRALRS_MN_WORKER_SERVER_ADDR` | Head node address (set on workers). |
+| `MISTRALRS_MN_WORKER_ID` | Worker node id. |
+| `MISTRALRS_NO_NCCL=1` | Disable NCCL fallback. |
 
 Full env var reference: [environment variables](/mistral.rs/reference/environment-variables/).
 
 ## Notes
 
-The ring backend is Linux-only. For CUDA tensor parallelism on one machine, prefer [single-machine multi-GPU](/mistral.rs/guides/perf/multi-gpu-tensor-parallel/). For CUDA tensor parallelism across machines, prefer [multi-node NCCL inference](/mistral.rs/guides/perf/multi-node-nccl/).
+The ring backend is Linux-only. For single-machine multi-GPU, prefer NCCL-based [tensor parallelism](/mistral.rs/guides/perf/multi-gpu-tensor-parallel/).
