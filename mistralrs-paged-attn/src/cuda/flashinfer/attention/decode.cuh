@@ -15,7 +15,26 @@
  */
 #ifndef FLASHINFER_DECODE_CUH_
 #define FLASHINFER_DECODE_CUH_
+#ifndef HAS_CG
+#define HAS_CG 1
+#endif
+
+#if HAS_CG
 #include <cooperative_groups.h>
+#endif
+
+#ifndef FLASHINFER_CG_COMPAT_SYNC_DEFINED
+#define FLASHINFER_CG_COMPAT_SYNC_DEFINED
+#if HAS_CG
+#define FLASHINFER_DECLARE_THREAD_BLOCK(name) auto name = cooperative_groups::this_thread_block()
+#define FLASHINFER_DECLARE_GRID(name) auto name = cooperative_groups::this_grid()
+#define FLASHINFER_THREAD_BLOCK_SYNC(name) name.sync()
+#else
+#define FLASHINFER_DECLARE_THREAD_BLOCK(name)
+#define FLASHINFER_DECLARE_GRID(name)
+#define FLASHINFER_THREAD_BLOCK_SYNC(name) __syncthreads()
+#endif
+#endif
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
@@ -35,7 +54,6 @@ namespace flashinfer {
 
 DEFINE_HAS_MEMBER(decode_maybe_q_rope_offset)
 
-namespace cg = cooperative_groups;
 using cp_async::PrefetchMode;
 using cp_async::SharedMemFillMode;
 
@@ -158,12 +176,12 @@ __device__ __forceinline__ void sync_state(AttentionVariant variant, state_t<vec
                                            const uint32_t ty, const uint32_t tz) {
   if constexpr (bdz > 1) {
     constexpr uint32_t head_dim = bdx * vec_size;
-    auto block = cg::this_thread_block();
+    FLASHINFER_DECLARE_THREAD_BLOCK(block);
     st.o.store(smem + (tz * bdy + ty) * head_dim + tx * vec_size);
     if constexpr (variant.use_softmax) {
       smem_md[(tz * bdy + ty) * 2] = st.m;
       smem_md[(tz * bdy + ty) * 2 + 1] = st.d;
-      block.sync();
+      FLASHINFER_THREAD_BLOCK_SYNC(block);
       st.init();
 #pragma unroll
       for (uint32_t j = 0; j < bdz; ++j) {
@@ -173,7 +191,7 @@ __device__ __forceinline__ void sync_state(AttentionVariant variant, state_t<vec
         st.merge(oz, mz, dz);
       }
     } else {
-      block.sync();
+      FLASHINFER_THREAD_BLOCK_SYNC(block);
       st.init();
 #pragma unroll
       for (uint32_t j = 0; j < bdz; ++j) {
@@ -229,8 +247,8 @@ __global__ void SingleDecodeWithKVCacheKernel(const __grid_constant__ Params par
   float* lse = params.lse;
   uint32_t kv_chunk_size = params.kv_chunk_size;
 
-  auto block = cg::this_thread_block();
-  auto grid = cg::this_grid();
+  FLASHINFER_DECLARE_THREAD_BLOCK(block);
+  FLASHINFER_DECLARE_GRID(grid);
 
   constexpr uint32_t head_dim = bdx * vec_size;
   uint32_t kv_head_idx = blockIdx.y;
@@ -267,7 +285,7 @@ __global__ void SingleDecodeWithKVCacheKernel(const __grid_constant__ Params par
     // do not apply rotary embedding to q matrix
     q_vec.cast_load(q + qo_head_idx * q_stride_h + tx * vec_size);
   }
-  block.sync();
+  FLASHINFER_THREAD_BLOCK_SYNC(block);
 
   uint32_t chunk_start = kv_chunk_idx * kv_chunk_size;
   kv_chunk_size = min(kv_chunk_size, seq_len - chunk_start);
@@ -308,13 +326,13 @@ __global__ void SingleDecodeWithKVCacheKernel(const __grid_constant__ Params par
   for (uint32_t iter = 0; iter < ceil_div(kv_chunk_size, tile_size_per_bdx * bdy * bdz); ++iter) {
     // compute qk
     cp_async::wait_group<2 * num_stages_smem - 1>();
-    block.sync();
+    FLASHINFER_THREAD_BLOCK_SYNC(block);
     compute_qk<pos_encoding_mode, vec_size, bdx, bdy * tile_size_per_bdx>(
         params, variant, /*batch_idx=*/0,
         k_smem + (stage_idx * bdz + tz) * bdy * tile_size_per_bdx * head_dim, q_vec, freq,
         consumer_kv_idx_base, iter * bdy * tile_size_per_bdx * bdz, kv_chunk_size, qo_head_idx,
         kv_head_idx, s, st_local, tx, ty, tz);
-    block.sync();
+    FLASHINFER_THREAD_BLOCK_SYNC(block);
     // load k
     for (uint32_t j = 0; j < tile_size_per_bdx; ++j) {
       cp_async::pred_load<vec_bits, PrefetchMode::kPrefetch, SharedMemFillMode::kNoFill>(
@@ -328,11 +346,11 @@ __global__ void SingleDecodeWithKVCacheKernel(const __grid_constant__ Params par
 
     // update m/d/o state
     cp_async::wait_group<2 * num_stages_smem - 1>();
-    block.sync();
+    FLASHINFER_THREAD_BLOCK_SYNC(block);
     update_local_state<vec_size, bdx, bdy * tile_size_per_bdx>(
         v_smem + (stage_idx * bdz + tz) * bdy * tile_size_per_bdx * head_dim, s, stage_idx,
         st_local, tx);
-    block.sync();
+    FLASHINFER_THREAD_BLOCK_SYNC(block);
 
     // load v
     for (uint32_t j = 0; j < tile_size_per_bdx; ++j) {
@@ -350,7 +368,7 @@ __global__ void SingleDecodeWithKVCacheKernel(const __grid_constant__ Params par
     consumer_kv_idx_base += tile_size_per_bdx * bdy * bdz;
   }
   cp_async::wait_group<0>();
-  block.sync();
+  FLASHINFER_THREAD_BLOCK_SYNC(block);
 
   // sync local state of all warps inside a threadblock
   sync_state<vec_size, bdx, bdy, bdz>(variant, st_local, reinterpret_cast<float*>(smem), smem_md,
@@ -399,7 +417,7 @@ __device__ __inline__ void BatchDecodeWithPagedKVCacheDevice(const Params& param
                                                              const uint32_t tx = threadIdx.x,
                                                              const uint32_t ty = threadIdx.y,
                                                              const uint32_t tz = threadIdx.z) {
-  auto block = cg::this_thread_block();
+  FLASHINFER_DECLARE_THREAD_BLOCK(block);
   using DTypeQ = typename Params::DTypeQ;
   using DTypeKV = typename Params::DTypeKV;
   using DTypeO = typename Params::DTypeO;
@@ -485,7 +503,7 @@ __device__ __inline__ void BatchDecodeWithPagedKVCacheDevice(const Params& param
     kv_offset_smem[((j * bdz + tz) * bdy + ty) * bdx + tx] =
         paged_kv.protective_get_kv_offset(q, kv_head_idx, r, 0, last_indptr);
   }
-  block.sync();
+  FLASHINFER_THREAD_BLOCK_SYNC(block);
 
   size_t kv_offset[tile_size_per_bdx];
 #pragma unroll
@@ -535,7 +553,7 @@ __device__ __inline__ void BatchDecodeWithPagedKVCacheDevice(const Params& param
     }
     // compute qk
     cp_async::wait_group<2 * num_stages_smem - 1>();
-    block.sync();
+    FLASHINFER_THREAD_BLOCK_SYNC(block);
     compute_qk<POS_ENCODING_MODE, vec_size, bdx, bdy * tile_size_per_bdx>(
         params, variant, batch_idx,
         k_smem + (stage_idx * bdz + tz) * bdy * tile_size_per_bdx * head_dim, q_vec, freq,
@@ -543,7 +561,7 @@ __device__ __inline__ void BatchDecodeWithPagedKVCacheDevice(const Params& param
             chunk_start + iter * tile_size_per_bdx * bdy * bdz,
         iter * tile_size_per_bdx * bdy * bdz, chunk_size, qo_head_idx, kv_head_idx, s, st, tx, ty,
         tz);
-    block.sync();
+    FLASHINFER_THREAD_BLOCK_SYNC(block);
 
 #pragma unroll
     for (uint32_t j = 0; j < tile_size_per_bdx; ++j) {
@@ -566,10 +584,10 @@ __device__ __inline__ void BatchDecodeWithPagedKVCacheDevice(const Params& param
 
     // update m/d/o states
     cp_async::wait_group<2 * num_stages_smem - 1>();
-    block.sync();
+    FLASHINFER_THREAD_BLOCK_SYNC(block);
     update_local_state<vec_size, bdx, bdy * tile_size_per_bdx>(
         v_smem + (stage_idx * bdz + tz) * bdy * tile_size_per_bdx * head_dim, s, stage_idx, st, tx);
-    block.sync();
+    FLASHINFER_THREAD_BLOCK_SYNC(block);
 
     // load v tiles
 #pragma unroll
@@ -584,7 +602,7 @@ __device__ __inline__ void BatchDecodeWithPagedKVCacheDevice(const Params& param
     stage_idx = (stage_idx + 1) % num_stages_smem;
   }
   cp_async::wait_group<0>();
-  block.sync();
+  FLASHINFER_THREAD_BLOCK_SYNC(block);
 
   // sync local state of all warps inside a threadblock
   sync_state<vec_size, bdx, bdy, bdz>(variant, st, reinterpret_cast<float*>(smem), smem_md, tx, ty,
@@ -887,7 +905,7 @@ template <uint32_t num_stages_smem, uint32_t vec_size_ckv, uint32_t vec_size_kpe
           uint32_t bdy, uint32_t bdz, uint32_t tile_size_qo_heads, typename AttentionVariant,
           typename Params>
 __global__ void BatchDecodeWithPagedKVCacheKernelMLA(Params params) {
-  auto block = cg::this_thread_block();
+  FLASHINFER_DECLARE_THREAD_BLOCK(block);
   using DTypeQ = typename Params::DTypeQ;
   using DTypeKV = typename Params::DTypeKV;
   using DTypeO = typename Params::DTypeO;
@@ -981,7 +999,7 @@ __global__ void BatchDecodeWithPagedKVCacheKernelMLA(Params params) {
   paged_kv.page_size.divmod(packed_page_iter_base + t_offset, q, r);
   ckv_offset_smem[t_offset] = paged_kv.protective_get_offset_ckv(q, r, /*feat_idx*/ 0, last_indptr);
   kpe_offset_smem[t_offset] = paged_kv.protective_get_offset_kpe(q, r, /*feat_idx*/ 0, last_indptr);
-  block.sync();
+  FLASHINFER_THREAD_BLOCK_SYNC(block);
 
   uint32_t stage_idx = 0;
   constexpr uint32_t vec_bits = sizeof(DTypeKV) * vec_size_ckv * 8;
@@ -1013,7 +1031,7 @@ __global__ void BatchDecodeWithPagedKVCacheKernelMLA(Params params) {
 #pragma unroll
   for (uint32_t iter = 0; iter < ceil_div(cur_chunk_len, kv_iter_len); ++iter) {
     cp_async::wait_group<1 * num_stages_smem - 1>();
-    block.sync();
+    FLASHINFER_THREAD_BLOCK_SYNC(block);
     const int32_t kv_idx_base =
         (paged_kv.rope_pos_offset == nullptr ? 0 : paged_kv.rope_pos_offset[mapped_batch_idx]) +
         cur_chunk_start + iter * kv_iter_len;
@@ -1036,7 +1054,7 @@ __global__ void BatchDecodeWithPagedKVCacheKernelMLA(Params params) {
       kpe_offset_smem[t_offset] =
           paged_kv.protective_get_offset_kpe(q, r, /*feat_idx*/ 0, last_indptr);
     }
-    block.sync();
+    FLASHINFER_THREAD_BLOCK_SYNC(block);
 
     is_valid_range =
         ((iter + num_stages_smem) * kv_iter_len + dim2_offset(bdy, tz, ty)) < cur_chunk_len;
@@ -1058,7 +1076,7 @@ __global__ void BatchDecodeWithPagedKVCacheKernelMLA(Params params) {
     stage_idx = (stage_idx + 1) % num_stages_smem;
   }
   cp_async::wait_group<0>();
-  block.sync();
+  FLASHINFER_THREAD_BLOCK_SYNC(block);
 
   if (bdz != 1) {
 #pragma unroll

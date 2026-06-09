@@ -7,7 +7,6 @@ use mistralrs_quant::{
 use std::sync::Arc;
 
 use crate::cuda::moe;
-#[cfg(feature = "cuda")]
 use crate::layers::Activation;
 
 use super::checkpoint::ExpertCheckpoint;
@@ -526,7 +525,51 @@ impl FastExpertsWeights {
             return Ok(result);
         }
 
+        if let Some(result) = self.forward_cpu_fused_q4k(forward, config)? {
+            return Ok(result);
+        }
+
         self.forward_gather(forward, config)
+    }
+
+    fn cpu_fused_q4k_activation(act: Activation) -> Option<fn(f32) -> f32> {
+        fn silu(x: f32) -> f32 {
+            x / (1.0 + (-x).exp())
+        }
+
+        match act {
+            Activation::Silu | Activation::Swish => Some(silu),
+            _ => None,
+        }
+    }
+
+    fn forward_cpu_fused_q4k(
+        &self,
+        forward: &MoEForward,
+        config: MoEForwardConfig,
+    ) -> Result<Option<Tensor>> {
+        let Some(act) = Self::cpu_fused_q4k_activation(config.act) else {
+            return Ok(None);
+        };
+
+        let Some(result) = mistralrs_quant::gguf_cpu_fused_moe_q4k_forward(
+            &*self.fused_gate_proj,
+            &*self.fused_up_proj,
+            &*self.fused_down_proj,
+            forward.xs,
+            forward.topk_weights,
+            forward.topk_ids,
+            act,
+        )?
+        else {
+            return Ok(None);
+        };
+
+        if result.dtype() == forward.xs.dtype() {
+            Ok(Some(result))
+        } else {
+            Ok(Some(result.to_dtype(forward.xs.dtype())?))
+        }
     }
 
     #[cfg(feature = "cuda")]
@@ -617,6 +660,24 @@ impl FastExpertsWeights {
 
         let dev = forward.xs_flat.device().as_cuda_device()?;
 
+        let act_type = match config.act {
+            Activation::GeluPytorchTanh => mistralrs_quant::ACT_GELU_PYTORCH_TANH,
+            Activation::Silu | Activation::Swish => mistralrs_quant::ACT_SILU,
+            _ => return Ok(None), // Fall back for unsupported activations
+        };
+
+        if let Some(result) = mistralrs_quant::gguf_cuda_staged_moe_forward(
+            &*self.fused_gate_proj,
+            &*self.fused_up_proj,
+            &*self.fused_down_proj,
+            forward.xs_flat,
+            forward.topk_weights,
+            forward.topk_ids,
+            act_type,
+        )? {
+            return Ok(Some(result.to_dtype(forward.original_dtype)?));
+        }
+
         // Get QTensors - bail to fallback if not quantized
         let gate_qt = match self.fused_gate_proj.get_qtensor() {
             Some(qt) => qt,
@@ -657,13 +718,6 @@ impl FastExpertsWeights {
             .slice(tw_layout.start_offset()..)
             .device_ptr(tw_slice.stream())
             .0 as *const f32;
-
-        // Map activation to CUDA kernel act_type
-        let act_type = match config.act {
-            Activation::GeluPytorchTanh => mistralrs_quant::ACT_GELU_PYTORCH_TANH,
-            Activation::Silu | Activation::Swish => mistralrs_quant::ACT_SILU,
-            _ => return Ok(None),
-        };
 
         // SAFETY: tw_ptr is a valid device pointer obtained from the topk_weights tensor above.
         let result = unsafe {
@@ -925,7 +979,7 @@ impl SlowExpertsWeights {
             if top_x_expert.is_empty() {
                 continue;
             }
-            let top_x_tensor = Tensor::new(top_x_expert.as_slice(), forward.xs.device())?;
+            let top_x_tensor = Tensor::new(top_x_expert.as_slice(), forward.xs_flat.device())?;
             let selected_experts_tensor =
                 Tensor::new(selected_experts[expert_idx].as_slice(), forward.xs.device())?
                     .reshape(((), 1))?
@@ -944,6 +998,8 @@ impl SlowExpertsWeights {
             let current_hidden_states =
                 self.experts.down_proj[expert_idx].forward(&(gate_out * up_out)?)?;
 
+            let selected_experts_tensor =
+                selected_experts_tensor.to_device(current_hidden_states.device())?;
             let current_hidden_states =
                 current_hidden_states.broadcast_mul(&selected_experts_tensor)?;
             ys = ys.index_add(&top_x_tensor, &current_hidden_states, 0)?;

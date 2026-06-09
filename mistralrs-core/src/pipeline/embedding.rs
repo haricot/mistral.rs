@@ -644,6 +644,7 @@ impl Loader for EmbeddingLoader {
             model.load_from_artifacts(
                 device.clone(),
                 self.config.topology.as_ref(),
+                IsqOrganization::Default,
                 silent,
                 from_uqff,
             )?;

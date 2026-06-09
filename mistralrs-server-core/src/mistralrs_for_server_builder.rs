@@ -108,7 +108,7 @@ pub mod defaults {
     pub const SEARCH_EMBEDDING_MODEL: Option<SearchEmbeddingModel> = None;
     pub const TOKEN_SOURCE: mistralrs_core::TokenSource = mistralrs_core::TokenSource::CacheToken;
     pub const SEARCH_CALLBACK: Option<Arc<mistralrs_core::SearchCallback>> = None;
-    pub const PAGED_CACHE_TYPE: PagedCacheType = PagedCacheType::Auto;
+    pub const PAGED_CACHE_TYPE: PagedCacheType = PagedCacheType::Auto();
     pub const MTP_CONFIG: Option<mistralrs_core::MtpConfig> = None;
 }
 

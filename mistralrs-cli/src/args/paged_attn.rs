@@ -41,7 +41,8 @@ pub struct PagedAttentionOptions {
     #[arg(long = "pa-block-size")]
     pub block_size: Option<usize>,
 
-    /// KV cache quantization type
+    /// KV cache quantization type: auto, f8e4m3, turboquant, or kvarn.
+    /// kvarn uses KVarN K4/V2/G128 tile quantization and defaults to block size 128.
     #[arg(long = "pa-cache-type", default_value = "auto", value_parser = parse_cache_type)]
     #[serde(default)]
     pub cache_type: PagedCacheType,
@@ -55,7 +56,7 @@ impl Default for PagedAttentionOptions {
             memory_mb: None,
             memory_fraction: None,
             block_size: None,
-            cache_type: PagedCacheType::Auto,
+            cache_type: PagedCacheType::Auto(),
         }
     }
 }

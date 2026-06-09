@@ -12,6 +12,32 @@ use super::norm::RmsNormGated;
 use super::projection::GdnProjection;
 use super::weights::{GdnWeightLoadCtx, GdnWeightMode, GdnWeights};
 
+fn gdn_finite_check_enabled() -> bool {
+    std::env::var("MISTRALRS_QWEN35_MOE_FINITE_CHECK")
+        .is_ok_and(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
+}
+
+fn ensure_gdn_finite(xs: &Tensor, label: impl AsRef<str>) -> Result<()> {
+    if !gdn_finite_check_enabled() {
+        return Ok(());
+    }
+
+    let max_abs = xs
+        .to_dtype(DType::F32)?
+        .abs()?
+        .max_all()?
+        .to_scalar::<f32>()?;
+    if !max_abs.is_finite() {
+        candle_core::bail!(
+            "GDN non-finite activation at {}: dtype={:?}, shape={:?}, max_abs={max_abs}",
+            label.as_ref(),
+            xs.dtype(),
+            xs.dims()
+        );
+    }
+    Ok(())
+}
+
 pub struct GatedDeltaNet {
     pub in_proj: Arc<dyn QuantMethod>,
     pub conv1d_weight: Tensor,
@@ -66,7 +92,14 @@ impl GatedDeltaNet {
         let dtype = x.dtype();
 
         let projected = self.project(x, batch_size, seq_len)?;
+        ensure_gdn_finite(&projected.q, "project.q")?;
+        ensure_gdn_finite(&projected.k, "project.k")?;
+        ensure_gdn_finite(&projected.v, "project.v")?;
+        ensure_gdn_finite(&projected.z, "project.z")?;
+        ensure_gdn_finite(&projected.b, "project.b")?;
+        ensure_gdn_finite(&projected.a, "project.a")?;
         let mixed_qkv = projected.conv_input(&self.dims, batch_size, seq_len)?;
+        ensure_gdn_finite(&mixed_qkv, "conv.input")?;
         let mixed_qkv = backend::causal_conv1d(
             &mixed_qkv,
             &self.conv1d_weight,
@@ -74,6 +107,7 @@ impl GatedDeltaNet {
             cache,
             batch_kind,
         )?;
+        ensure_gdn_finite(&mixed_qkv, "conv.output")?;
         let y = backend::apply_recurrence_from_convolved(
             &mixed_qkv,
             &projected.b,
@@ -86,6 +120,7 @@ impl GatedDeltaNet {
             cache,
             dtype,
         )?;
+        ensure_gdn_finite(&y, "recurrence.output")?;
 
         self.finish_forward(y, projected.z, batch_size, seq_len, dtype)
     }
@@ -120,9 +155,15 @@ impl GatedDeltaNet {
         let z_shape = z.shape().clone();
         let y = y.reshape(((), self.dims.head_v_dim))?;
         let z = z.reshape(((), self.dims.head_v_dim))?;
+        ensure_gdn_finite(&y, "finish.pre_norm_y")?;
+        ensure_gdn_finite(&z, "finish.pre_norm_z")?;
         let y = self.norm.forward(&y, &z)?;
+        ensure_gdn_finite(&y, "finish.norm")?;
         let y = y.reshape(z_shape)?;
         let y = y.reshape((batch_size, seq_len, self.dims.value_dim))?;
-        self.out_proj.forward(&y)
+        ensure_gdn_finite(&y, "finish.pre_out_proj")?;
+        let y = self.out_proj.forward(&y)?;
+        ensure_gdn_finite(&y, "finish.out_proj")?;
+        Ok(y)
     }
 }

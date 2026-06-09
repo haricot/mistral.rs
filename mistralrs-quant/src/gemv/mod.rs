@@ -71,6 +71,9 @@ pub fn should_use_gemv(x: &Tensor, w: &Tensor) -> bool {
     let candle_core::Device::Cuda(_) = x.device() else {
         return false;
     };
+    let candle_core::Device::Cuda(_) = w.device() else {
+        return false;
+    };
 
     // Check batch size (1-8 supported)
     let x_dims = x.dims();

@@ -2,6 +2,7 @@
 
 use crate::layers_masker::CausalMaskConfig;
 use std::{
+    borrow::Cow,
     collections::HashMap,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -67,6 +68,43 @@ fn kv_shared_layer_index(cfg: &Gemma4TextConfig, layer_idx: usize) -> Result<Opt
             ))
         })
 }
+
+fn q8_tied_output_projection(
+    embedding_weight: &Tensor,
+    target_device: &Device,
+) -> Result<Option<Arc<dyn QuantMethod>>> {
+    if !target_device.is_cuda() {
+        return Ok(None);
+    }
+
+    let dtype = candle_core::quantized::GgmlDType::Q8_0;
+    let Some(&last_dim) = embedding_weight.dims().last() else {
+        return Ok(None);
+    };
+    if !last_dim.is_multiple_of(dtype.block_size()) {
+        return Ok(None);
+    }
+
+    let cpu_weight = embedding_weight.to_device(&Device::Cpu)?;
+    let q_weight_cpu = candle_core::quantized::QTensor::quantize(&cpu_weight, dtype)?;
+    let qstorage = candle_core::quantized::QStorage::from_data(
+        Cow::Owned(q_weight_cpu.data()?.into_owned()),
+        target_device,
+        dtype,
+    )?;
+    let q_weight = Arc::new(candle_core::quantized::QTensor::new(
+        qstorage,
+        cpu_weight.shape().clone(),
+    )?);
+
+    Ok(Some(Arc::new(GgufMatMul::new(QuantMethodConfig::Gguf {
+        q_weight,
+        b: None,
+    })?) as Arc<dyn QuantMethod>))
+}
+
+static LOG_GEMMA4_LEGACY_TIED_LM_HEAD_Q8: AtomicBool = AtomicBool::new(false);
+const GEMMA4_STANDARD_HD512_SHARED_KV_DONOR: bool = false;
 
 /// Proportional RoPE for Gemma4 full-attention layers.
 ///
@@ -1251,6 +1289,7 @@ pub struct TextModel {
     per_layer_input_scale: f64,
     per_layer_projection_scalar: f64,
     // Standard
+    dtype: DType,
     device: Device,
     cache: EitherCache,
     max_seq_len: usize,
@@ -1455,18 +1494,31 @@ impl TextModel {
                 mapper.set_nm_device(vb_m.pp("lm_head"), normal_loading_metadata.loading_isq),
             )?
         } else {
-            let embed_weight = mapper.cast_nm_device(embed_tokens.embeddings(), false)?;
-            if normal_loading_metadata.loading_isq && embed_weight.device().is_cuda() {
-                let w_f32 = embed_weight.to_dtype(DType::F32)?;
-                let q_weight = candle_core::quantized::QTensor::quantize(
-                    &w_f32,
-                    candle_core::quantized::GgmlDType::Q8_0,
-                )?;
-                Arc::new(GgufMatMul::new(QuantMethodConfig::Gguf {
-                    q_weight: Arc::new(q_weight),
-                    b: None,
-                })?) as Arc<dyn QuantMethod>
+            let legacy_cuda_loading_isq = normal_loading_metadata.loading_isq
+                && crate::utils::is_legacy_cuda_device(&normal_loading_metadata.real_device);
+            let force_legacy_uqff_q8 = std::env::var("MISTRALRS_GEMMA4_UQFF_Q8_TIED_LM_HEAD")
+                .map(|value| value != "0")
+                .unwrap_or(false);
+            let tied_output_projection = if !normal_loading_metadata.loading_isq
+                || (legacy_cuda_loading_isq && force_legacy_uqff_q8)
+            {
+                q8_tied_output_projection(
+                    embed_tokens.embeddings(),
+                    &normal_loading_metadata.real_device,
+                )?
             } else {
+                None
+            };
+            if legacy_cuda_loading_isq
+                && tied_output_projection.is_some()
+                && !LOG_GEMMA4_LEGACY_TIED_LM_HEAD_Q8.swap(true, Ordering::Relaxed)
+            {
+                tracing::info!("Using Q8 tied lm_head projection for Gemma4 UQFF on legacy CUDA.");
+            }
+            if let Some(tied_output_projection) = tied_output_projection {
+                tied_output_projection
+            } else {
+                let embed_weight = mapper.cast_nm_device(embed_tokens.embeddings(), false)?;
                 Arc::new(UnquantLinear::new(QuantMethodConfig::Unquantized(
                     candle_nn::Linear::new(embed_weight, None),
                 ))?) as Arc<dyn QuantMethod>
@@ -1478,7 +1530,11 @@ impl TextModel {
         let ple_vocab = cfg.vocab_size_per_layer_input.unwrap_or(cfg.vocab_size);
         let (embed_tokens_per_layer, per_layer_model_projection, per_layer_projection_norm) =
             if ple_dim > 0 {
-                let ple_emb_vb = mapper.set_nm_device(vb_m.pp("embed_tokens_per_layer"), false);
+                let ple_emb_vb = if normal_loading_metadata.real_device.is_metal() {
+                    mapper.set_nm_device(vb_m.pp("embed_tokens_per_layer"), false)
+                } else {
+                    vb_m.pp("embed_tokens_per_layer").set_device(Device::Cpu)
+                };
                 let ple_emb_weight =
                     ple_emb_vb.get((ple_vocab, cfg.num_hidden_layers * ple_dim), "weight")?;
                 let ple_emb = Embedding::new(ple_emb_weight, cfg.num_hidden_layers * ple_dim);
@@ -1604,6 +1660,7 @@ impl TextModel {
             vocab_size_per_layer_input: ple_vocab,
             per_layer_input_scale: 2f64.powf(-0.5),
             per_layer_projection_scalar: (cfg.hidden_size as f64).powf(-0.5),
+            dtype: vb_m.dtype(),
             device: normal_loading_metadata.real_device,
             cache: EitherCache::Normal(NormalCache::from_types(cache_types)),
             max_seq_len: cfg.max_position_embeddings,
@@ -1645,6 +1702,10 @@ impl TextModel {
         }
     }
 
+    pub fn dtype(&self) -> DType {
+        self.dtype
+    }
+
     pub fn model_config_like(&self) -> Arc<dyn ModelConfigLike + Send + Sync> {
         self.model_config.clone()
     }
@@ -1681,9 +1742,9 @@ impl TextModel {
         let (b, seq, _) = inputs_embeds.dims3()?;
 
         // 1. Token-level per-layer embeddings: [b, seq, num_layers * ple_dim]
-        let embedded = ple_emb.forward(ple_input_ids)?;
+        let embedded = ple_emb.forward(&ple_input_ids.to_device(ple_emb.embeddings().device())?)?;
         // Scale by sqrt(ple_dim)
-        let embedded = (embedded * (ple_dim as f64).sqrt())?;
+        let embedded = (embedded * (ple_dim as f64).sqrt())?.to_device(inputs_embeds.device())?;
         // Reshape to [b, seq, num_layers, ple_dim]
         let embedded = embedded.reshape((b, seq, self.num_hidden_layers, ple_dim))?;
 

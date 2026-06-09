@@ -2,7 +2,10 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, LazyLock, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, LazyLock, Mutex,
+    },
 };
 
 use candle_core::{Device, Error, Result, Tensor};
@@ -17,6 +20,7 @@ use tokenizers::Tokenizer;
 
 static DRY_SEQUENCE_BREAKERS: LazyLock<Vec<String>> =
     LazyLock::new(|| ["\n", ":", "\"", "*"].map(String::from).to_vec());
+static NON_FINITE_LOGITS_WARNED: AtomicBool = AtomicBool::new(false);
 const SUPPRESS_TOKEN_LOGIT_BIAS: f32 = -1.0e9;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -357,6 +361,59 @@ fn partial_sort_top_k(probs: &mut [f32], k: usize, zero_rest: bool) -> Vec<(u32,
     idx_probs.sort_unstable_by(cmp_desc_by_prob);
 
     idx_probs
+}
+
+fn sanitize_logits_for_sampling(logits: &mut [f32]) -> Result<()> {
+    let mut finite = 0usize;
+    let mut pos_inf = 0usize;
+    let mut neg_inf = 0usize;
+    let mut nan = 0usize;
+
+    for value in logits.iter().copied() {
+        if value.is_finite() {
+            finite += 1;
+        } else if value.is_nan() {
+            nan += 1;
+        } else if value.is_sign_positive() {
+            pos_inf += 1;
+        } else {
+            neg_inf += 1;
+        }
+    }
+
+    if pos_inf == 0 && neg_inf == 0 && nan == 0 {
+        return Ok(());
+    }
+
+    if finite == 0 && pos_inf == 0 {
+        candle_core::bail!(
+            "All sampling logits are non-finite (NaN: {nan}, -Inf: {neg_inf}). The model likely produced invalid activations."
+        );
+    }
+
+    if !NON_FINITE_LOGITS_WARNED.swap(true, Ordering::Relaxed) {
+        tracing::warn!(
+            "Sampling logits contained non-finite values (finite={finite}, +Inf={pos_inf}, -Inf={neg_inf}, NaN={nan}); masking invalid logits before softmax."
+        );
+    }
+
+    if pos_inf > 0 {
+        for value in logits {
+            *value = if value.is_infinite() && value.is_sign_positive() {
+                0.0
+            } else {
+                f32::NEG_INFINITY
+            };
+        }
+    } else {
+        for value in logits {
+            if !value.is_finite() {
+                *value = f32::NEG_INFINITY;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Find the index of the maximum element in a slice. O(n) scan.
@@ -1061,6 +1118,10 @@ impl Sampler {
         for processor in &self.logits_processors {
             logits = processor.apply(&logits, context)?;
         }
+        let logits_shape = logits.shape().clone();
+        let mut logits_vec = logits.to_vec1::<f32>()?;
+        sanitize_logits_for_sampling(&mut logits_vec)?;
+        let logits = Tensor::from_vec(logits_vec, logits_shape, &Device::Cpu)?;
 
         let mut probs = match self.temperature {
             None => {
@@ -1350,6 +1411,7 @@ impl Sampler {
     ) -> Result<Logprobs> {
         #[cfg(feature = "cuda")]
         if logits.device().is_cuda()
+            && !crate::utils::is_legacy_cuda_device(logits.device())
             && self.can_sample_topk_on_device(
                 return_logprobs,
                 sample_speculative,
@@ -1384,6 +1446,11 @@ impl Sampler {
         for processor in &self.logits_processors {
             logits = processor.apply(&logits, context)?;
         }
+        let logits_shape = logits.shape().clone();
+        let mut logits_vec = logits.to_vec1::<f32>()?;
+        sanitize_logits_for_sampling(&mut logits_vec)?;
+        let logits = Tensor::from_vec(logits_vec, logits_shape, &Device::Cpu)?;
+
         let next_token = if sample_speculative {
             match self.temperature {
                 None => self.sample_speculative_top_kp_min_p(

@@ -57,16 +57,35 @@ template <> struct LoadVecSize<nv_bfloat16> {
 
 inline __device__ void zero(__nv_bfloat162 &dst) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
-  assert(false);
+  dst.x = __float2bfloat16(0.0f);
+  dst.y = dst.x;
 #else
   dst.x = __ushort_as_bfloat16((unsigned short)0x0000U);
   dst.y = dst.x;
 #endif
 }
+inline __device__ void zero(float2 &dst) {
+  dst.x = 0.0f;
+  dst.y = 0.0f;
+}
 inline __device__ void zero(half2 &dst) {
   dst.x = __half_as_ushort(__float2half(0));
   dst.y = __half_as_ushort(__float2half(0));
 }
+
+template <typename ComputeT, typename AccumT>
+inline __device__ AccumT hfma2_wrapper(ComputeT a, ComputeT b, AccumT c) {
+  return __hfma2(a, b, c);
+}
+
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+template <>
+inline __device__ float2 hfma2_wrapper(nv_bfloat162 a, nv_bfloat162 b,
+                                       float2 c) {
+  return float2{__bfloat162float(a.x) * __bfloat162float(b.x) + c.x,
+                __bfloat162float(a.y) * __bfloat162float(b.y) + c.y};
+}
+#endif
 
 } // namespace vllm_rs
 
@@ -86,8 +105,8 @@ inline __device__ void zero(half2 &dst) {
  * @param N                 Output dimension per expert.
  * @param K                 Input dimension per expert.
  */
-template <typename T, typename VecT, int BLOCK_N_TILE, int BLOCK_K_TILE,
-          int BLOCK_K_THREADS>
+template <typename T, typename VecT, typename AccumT, int BLOCK_N_TILE,
+          int BLOCK_K_TILE, int BLOCK_K_THREADS>
 __global__ void moe_gemm_vectorized_kernel(
     const T *__restrict__ input,                  // [M, K]
     const T *__restrict__ weights,                // [num_experts, N, K]
@@ -137,9 +156,10 @@ __global__ void moe_gemm_vectorized_kernel(
   // s_weights: Caches the [N, K] weight matrix tile
   // Layout: [BLOCK_N_TILE][BLOCK_K_TILE] for coalesced compute
   __shared__ T s_weights[BLOCK_N_TILE][BLOCK_K_TILE];
+  __shared__ float s_acc[BLOCK_N_TILE][BLOCK_K_THREADS];
 
   // This thread's accumulator
-  VecT acc;
+  AccumT acc;
   vllm_rs::zero(acc);
   LoadVecT zero_vec;
   zero_vec.x = zero_vec.y = zero_vec.z = zero_vec.w = 0.0f;
@@ -186,34 +206,203 @@ __global__ void moe_gemm_vectorized_kernel(
     VecT *input_vec = reinterpret_cast<VecT *>(s_input);
     VecT *weight_vec = reinterpret_cast<VecT *>(s_weights[tid_n]);
 #pragma unroll
-    for (int k_vec = 0; k_vec < k_compute_vec_tile_size; ++k_vec) {
-      acc = __hfma2(input_vec[k_vec], weight_vec[k_vec], acc);
+    for (int k_vec = tid_k; k_vec < k_compute_vec_tile_size;
+         k_vec += BLOCK_K_THREADS) {
+      acc = vllm_rs::hfma2_wrapper(input_vec[k_vec], weight_vec[k_vec], acc);
     }
   }
 
+  float thread_sum;
+  if constexpr (std::is_same_v<AccumT, float2>) {
+    thread_sum = acc.x + acc.y;
+  } else {
+    thread_sum = vllm::to_float(__hadd(acc.x, acc.y));
+  }
+  s_acc[tid_n][tid_k] = thread_sum;
   __syncthreads();
 
-  // Finalize and Write Output
-  if (topk_weights) {
-    // Apply top-k weight scaling
-    T output_val;
-    vllm::from_float(output_val, vllm::to_float(__hadd(acc.x, acc.y)) *
-                                     topk_weights[token_id]);
-    output[token_id * N + n] = output_val;
+  if (tid_k == 0) {
+    float final_sum = 0.0f;
+#pragma unroll
+    for (int i = 0; i < BLOCK_K_THREADS; ++i) {
+      final_sum += s_acc[tid_n][i];
+    }
+
+    if (topk_weights) {
+      T output_val;
+      vllm::from_float(output_val, final_sum * topk_weights[token_id]);
+      output[token_id * N + n] = output_val;
+    } else {
+      T output_val;
+      vllm::from_float(output_val, final_sum);
+      output[token_id * N + n] = output_val;
+    }
+  }
+}
+
+/*
+ * Transposed weight kernel for [num_experts, K, N] layout (stacked format).
+ *
+ * @param input             [M, K] - Input activations for all tokens.
+ * @param weights           [num_experts, K, N] - Expert weight matrices
+ * (transposed layout).
+ * @param sorted_token_ids  [M] - Indices of tokens sorted by expert assignment.
+ * @param expert_ids        [M] - Expert ID for each token.
+ * @param topk_weights      [M] (optional) - Per-token gating weights (nullptr
+ * if not used).
+ * @param output            [M, N] - Output activations for all tokens.
+ * @param num_experts       Total number of experts.
+ * @param topk              Number of experts selected per token (top-k
+ * routing).
+ * @param M                 Number of tokens.
+ * @param N                 Output dimension per expert.
+ * @param K                 Input dimension per expert.
+ */
+template <typename T, typename VecT, typename AccumT, int BLOCK_N_TILE,
+          int BLOCK_K_TILE, int BLOCK_K_THREADS>
+__global__ void moe_gemm_transposed_kernel(
+    const T *__restrict__ input,   // [M, K]
+    const T *__restrict__ weights, // [num_experts, K, N] - transposed layout
+    const int32_t *__restrict__ sorted_token_ids, // [M]
+    const int32_t *__restrict__ expert_ids,       // [M]
+    const float *__restrict__ topk_weights, // [M] optional, can be nullptr
+    T *__restrict__ output,                 // [M, N]
+    const int num_experts, const int topk, const int M, const int N,
+    const int K) {
+  // This block processes token at `token_idx`
+  const int token_idx = blockIdx.y;
+  if (token_idx >= M)
+    return;
+
+  // This block computes a tile of N starting at `n_tile_start`
+  const int n_tile_start = blockIdx.x * BLOCK_N_TILE;
+
+  // Thread index for N dimension
+  const int tid_n = threadIdx.x;
+  // Thread index for K loading helper
+  const int tid_k = threadIdx.y;
+
+  // This thread's global N-dimension index
+  const int n = n_tile_start + tid_n;
+  if (n >= N)
+    return;
+
+  const int token_id = sorted_token_ids[token_idx];
+  const int expert = expert_ids[token_idx];
+  if (expert < 0 || expert >= num_experts)
+    return;
+
+  const T *input_row =
+      input + (size_t)(token_id / (topk_weights ? 1 : topk)) * K;
+  // For transposed layout [E, K, N]: base is expert * K * N
+  const T *weight_expert = weights + (size_t)expert * (size_t)K * (size_t)N;
+
+  // Vector size for load
+  constexpr int LOAD_VEC_SIZE = vllm_rs::LoadVecSize<T>::value;
+  using LoadVecT = typename vllm_rs::LoadVecType<T>::type;
+  // Vector size for compute
+  constexpr int VEC_SIZE = sizeof(T);
+
+  // s_input: Caches the [1, K] input vector tile
+  __shared__ T s_input[BLOCK_K_TILE];
+
+  // s_weights: Caches the [N, K] weight matrix tile (conceptually transposed
+  // from global) Layout: [BLOCK_N_TILE][BLOCK_K_TILE] for coalesced compute
+  __shared__ T s_weights[BLOCK_N_TILE][BLOCK_K_TILE];
+  __shared__ float s_acc[BLOCK_N_TILE][BLOCK_K_THREADS];
+
+  // This thread's accumulator
+  AccumT acc;
+  vllm_rs::zero(acc);
+  LoadVecT zero_vec;
+  zero_vec.x = zero_vec.y = zero_vec.z = zero_vec.w = 0.0f;
+
+  const int k_compute_vec_tile_size = BLOCK_K_TILE / VEC_SIZE;
+  const int k_vec_tile_size = BLOCK_K_TILE / LOAD_VEC_SIZE;
+  const int k_vec_dim_size = K / LOAD_VEC_SIZE;
+
+  // Main K-Loop
+  // Loop over the K-dimension in tiles of BLOCK_K_TILE
+  for (int k_start_vec = 0; k_start_vec < k_vec_dim_size;
+       k_start_vec += k_vec_tile_size) {
+    // Load Input Tile to Shared Memory ---
+    // Parallel load of s_input using all threads in the block
+    int k_loader_idx = tid_k * blockDim.x + tid_n;
+    int num_loaders = blockDim.x * blockDim.y;
+
+    for (int i = k_loader_idx; i < k_vec_tile_size; i += num_loaders) {
+      if (k_start_vec + i < k_vec_dim_size) {
+        reinterpret_cast<LoadVecT *>(s_input)[i] =
+            reinterpret_cast<const LoadVecT *>(input_row)[k_start_vec + i];
+      } else {
+        reinterpret_cast<LoadVecT *>(s_input)[i] = zero_vec;
+      }
+    }
+
+    // Load Weight Tile to Shared Memory
+    // For transposed layout [E, K, N]: weight[e, k, n] is at offset k * N + n
+    // We need to load weight[k_start:k_start+BLOCK_K_TILE, n] for each n in our
+    // tile Each thread tid_n loads weights for column n, iterating over k
+    for (int k_inner = tid_k; k_inner < BLOCK_K_TILE;
+         k_inner += BLOCK_K_THREADS) {
+      int k_global = k_start_vec * LOAD_VEC_SIZE + k_inner;
+      if (k_global < K) {
+        // In transposed layout: weight[k, n] = weight_expert[k * N + n]
+        s_weights[tid_n][k_inner] = weight_expert[(size_t)k_global * N + n];
+      } else {
+        s_weights[tid_n][k_inner] = T(0);
+      }
+    }
+
+    __syncthreads(); // Wait for s_input and s_weights to be loaded
+
+    // Compute Partial Dot Product
+    VecT *input_vec = reinterpret_cast<VecT *>(s_input);
+    VecT *weight_vec = reinterpret_cast<VecT *>(s_weights[tid_n]);
+#pragma unroll
+    for (int k_vec = tid_k; k_vec < k_compute_vec_tile_size;
+         k_vec += BLOCK_K_THREADS) {
+      acc = vllm_rs::hfma2_wrapper(input_vec[k_vec], weight_vec[k_vec], acc);
+    }
+  }
+
+  float thread_sum;
+  if constexpr (std::is_same_v<AccumT, float2>) {
+    thread_sum = acc.x + acc.y;
   } else {
-    output[token_id * N + n] = __hadd(acc.x, acc.y);
+    thread_sum = vllm::to_float(__hadd(acc.x, acc.y));
+  }
+  s_acc[tid_n][tid_k] = thread_sum;
+  __syncthreads();
+
+  if (tid_k == 0) {
+    float final_sum = 0.0f;
+#pragma unroll
+    for (int i = 0; i < BLOCK_K_THREADS; ++i) {
+      final_sum += s_acc[tid_n][i];
+    }
+
+    if (topk_weights) {
+      T output_val;
+      vllm::from_float(output_val, final_sum * topk_weights[token_id]);
+      output[token_id * N + n] = output_val;
+    } else {
+      T output_val;
+      vllm::from_float(output_val, final_sum);
+      output[token_id * N + n] = output_val;
+    }
   }
 }
 
 extern "C" void
-moe_gemm(const void *input,   // input [size_m or size_m / topk, size_k]
-         const void *weights, // weights [num_experts, size_n, size_k]
-         const int32_t *sorted_token_ids, const int32_t *expert_ids,
-         const float *topk_weights, // device ptr or nullptr
-         void *output,              // output [size_m, size_n]
-         int num_experts, int topk, int size_m, int size_n, int size_k,
-         int dtype, // 0=float16, 1=bf16
-         cudaStream_t stream) {
+mistralrs_moe_gemm(const void *input,   // input [size_m or size_m / topk, size_k]
+                   const void *weights, // weights [num_experts, size_n, size_k]
+                   const int32_t *sorted_token_ids, const int32_t *expert_ids,
+                   const float *topk_weights, // device ptr or nullptr
+                   void *output,              // output [size_m, size_n]
+                   int num_experts, int topk, int size_m, int size_n, int size_k,
+                   int dtype, // 0=float16, 1=bf16
+                   cudaStream_t stream) {
 
   // These tile sizes can be tuned based on GPU architecture and problem size
   constexpr int BLOCK_N_TILE = 64;
@@ -240,7 +429,7 @@ moe_gemm(const void *input,   // input [size_m or size_m / topk, size_k]
   // cudaMemsetAsync(output, 0, output_bytes, stream);
 
   if (dtype == 0) {
-    moe_gemm_vectorized_kernel<half, half2, BLOCK_N_TILE, BLOCK_K_TILE,
+    moe_gemm_vectorized_kernel<half, half2, half2, BLOCK_N_TILE, BLOCK_K_TILE,
                                BLOCK_K_THREADS><<<grids, blocks, 0, stream>>>(
         reinterpret_cast<const half *>(input),
         reinterpret_cast<const half *>(weights), sorted_token_ids, expert_ids,
@@ -249,16 +438,89 @@ moe_gemm(const void *input,   // input [size_m or size_m / topk, size_k]
   }
 #ifndef NO_BF16_KERNEL
   else if (dtype == 1) {
-    moe_gemm_vectorized_kernel<nv_bfloat16, nv_bfloat162, BLOCK_N_TILE,
-                               BLOCK_K_TILE, BLOCK_K_THREADS>
+#if defined(ALLOW_LEGACY_BF16)
+    moe_gemm_vectorized_kernel<nv_bfloat16, nv_bfloat162, float2,
+                               BLOCK_N_TILE, BLOCK_K_TILE, BLOCK_K_THREADS>
         <<<grids, blocks, 0, stream>>>(
             reinterpret_cast<const nv_bfloat16 *>(input),
             reinterpret_cast<const nv_bfloat16 *>(weights), sorted_token_ids,
             expert_ids, topk_weights, reinterpret_cast<nv_bfloat16 *>(output),
             num_experts, topk, size_m, size_n, size_k);
+#else
+    moe_gemm_vectorized_kernel<nv_bfloat16, nv_bfloat162, nv_bfloat162,
+                               BLOCK_N_TILE, BLOCK_K_TILE, BLOCK_K_THREADS>
+        <<<grids, blocks, 0, stream>>>(
+            reinterpret_cast<const nv_bfloat16 *>(input),
+            reinterpret_cast<const nv_bfloat16 *>(weights), sorted_token_ids,
+            expert_ids, topk_weights, reinterpret_cast<nv_bfloat16 *>(output),
+            num_experts, topk, size_m, size_n, size_k);
+#endif
   }
 #endif
   else {
     fprintf(stderr, "moe_gemm: unsupported dtype.\n");
+  }
+}
+
+// Transposed weight variant: weights are [num_experts, size_k, size_n] instead
+// of [num_experts, size_n, size_k]
+extern "C" void mistralrs_moe_gemm_transposed(
+    const void *input, // input [size_m or size_m / topk, size_k]
+    const void
+        *weights, // weights [num_experts, size_k, size_n] - transposed layout
+    const int32_t *sorted_token_ids, const int32_t *expert_ids,
+    const float *topk_weights, // device ptr or nullptr
+    void *output,              // output [size_m, size_n]
+    int num_experts, int topk, int size_m, int size_n, int size_k,
+    int dtype, // 0=float16, 1=bf16
+    cudaStream_t stream) {
+
+  // These tile sizes can be tuned based on GPU architecture and problem size
+  constexpr int BLOCK_N_TILE = 64;
+  constexpr int BLOCK_K_TILE = 64;
+  constexpr int BLOCK_K_THREADS =
+      8; // BLOCK_N_TILE * BLOCK_K_THREADS = 512 threads
+
+  dim3 blocks(BLOCK_N_TILE, BLOCK_K_THREADS);
+  dim3 grids(CEILDIV(size_n, BLOCK_N_TILE), size_m);
+
+  // Vectorization requires K to be divisible by the vector size
+  int load_vec_size = (dtype == 2) ? 1 : vllm_rs::LoadVecSize<half>::value;
+  ASSERT_THROW(size_k % BLOCK_K_TILE == 0,
+               "size_k must be divisible by BLOCK_K_TILE");
+  ASSERT_THROW(size_k % load_vec_size == 0,
+               "size_k must be divisible by vector size (2 for fp16/bf16)");
+
+  if (dtype == 0) {
+    moe_gemm_transposed_kernel<half, half2, half2, BLOCK_N_TILE, BLOCK_K_TILE,
+                               BLOCK_K_THREADS><<<grids, blocks, 0, stream>>>(
+        reinterpret_cast<const half *>(input),
+        reinterpret_cast<const half *>(weights), sorted_token_ids, expert_ids,
+        topk_weights, reinterpret_cast<half *>(output), num_experts, topk,
+        size_m, size_n, size_k);
+  }
+#ifndef NO_BF16_KERNEL
+  else if (dtype == 1) {
+#if defined(ALLOW_LEGACY_BF16)
+    moe_gemm_transposed_kernel<nv_bfloat16, nv_bfloat162, float2,
+                               BLOCK_N_TILE, BLOCK_K_TILE, BLOCK_K_THREADS>
+        <<<grids, blocks, 0, stream>>>(
+            reinterpret_cast<const nv_bfloat16 *>(input),
+            reinterpret_cast<const nv_bfloat16 *>(weights), sorted_token_ids,
+            expert_ids, topk_weights, reinterpret_cast<nv_bfloat16 *>(output),
+            num_experts, topk, size_m, size_n, size_k);
+#else
+    moe_gemm_transposed_kernel<nv_bfloat16, nv_bfloat162, nv_bfloat162,
+                               BLOCK_N_TILE, BLOCK_K_TILE, BLOCK_K_THREADS>
+        <<<grids, blocks, 0, stream>>>(
+            reinterpret_cast<const nv_bfloat16 *>(input),
+            reinterpret_cast<const nv_bfloat16 *>(weights), sorted_token_ids,
+            expert_ids, topk_weights, reinterpret_cast<nv_bfloat16 *>(output),
+            num_experts, topk, size_m, size_n, size_k);
+#endif
+  }
+#endif
+  else {
+    fprintf(stderr, "moe_gemm_transposed: unsupported dtype.\n");
   }
 }

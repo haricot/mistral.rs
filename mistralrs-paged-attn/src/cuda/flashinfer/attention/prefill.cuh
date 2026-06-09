@@ -16,7 +16,26 @@
 #ifndef FLASHINFER_PREFILL_CUH_
 #define FLASHINFER_PREFILL_CUH_
 
+#ifndef HAS_CG
+#define HAS_CG 1
+#endif
+
+#if HAS_CG
 #include <cooperative_groups.h>
+#endif
+
+#ifndef FLASHINFER_CG_COMPAT_SYNC_DEFINED
+#define FLASHINFER_CG_COMPAT_SYNC_DEFINED
+#if HAS_CG
+#define FLASHINFER_DECLARE_THREAD_BLOCK(name) auto name = cooperative_groups::this_thread_block()
+#define FLASHINFER_DECLARE_GRID(name) auto name = cooperative_groups::this_grid()
+#define FLASHINFER_THREAD_BLOCK_SYNC(name) name.sync()
+#else
+#define FLASHINFER_DECLARE_THREAD_BLOCK(name)
+#define FLASHINFER_DECLARE_GRID(name)
+#define FLASHINFER_THREAD_BLOCK_SYNC(name) __syncthreads()
+#endif
+#endif
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
@@ -61,7 +80,6 @@ struct is_fp4_type<__nv_fp4x2_e2m1> : std::true_type {};
 template <typename T>
 inline constexpr bool is_fp4_type_v = is_fp4_type<T>::value;
 
-namespace cg = cooperative_groups;
 using cp_async::SharedMemFillMode;
 using mma::MMAMode;
 
@@ -1661,7 +1679,7 @@ __device__ __forceinline__ void SinglePrefillWithKVCacheDevice(
         partition_kv ? min((chunk_idx + 1) * max_chunk_size, kv_len) : kv_len;
     const uint32_t chunk_size = chunk_end - chunk_start;
 
-    auto block = cg::this_thread_block();
+    FLASHINFER_DECLARE_THREAD_BLOCK(block);
     auto smem = reinterpret_cast<uint8_t*>(&smem_storage);
     AttentionVariant variant(params, /*batch_idx=*/0, smem);
     const uint32_t window_left = variant.window_left;
@@ -1696,10 +1714,10 @@ __device__ __forceinline__ void SinglePrefillWithKVCacheDevice(
     cp_async::commit_group();
     if constexpr (KTraits::POS_ENCODING_MODE == PosEncodingMode::kRoPELlama) {
       cp_async::wait_group<0>();
-      block.sync();
+      FLASHINFER_THREAD_BLOCK_SYNC(block);
       q_smem_inplace_apply_rotary<KTraits>(qo_packed_idx_base, qo_len, kv_len, group_size, &qo_smem,
                                            &q_smem_offset_r, rope_freq, tid);
-      block.sync();
+      FLASHINFER_THREAD_BLOCK_SYNC(block);
     }
 
     smem_t<SWIZZLE_MODE_KV> k_smem(smem_storage.k_smem), v_smem(smem_storage.v_smem);
@@ -1765,12 +1783,12 @@ __device__ __forceinline__ void SinglePrefillWithKVCacheDevice(
 #pragma unroll 1
     for (uint32_t iter = 0; iter < num_iterations; ++iter) {
       cp_async::wait_group<1>();
-      block.sync();
+      FLASHINFER_THREAD_BLOCK_SYNC(block);
 
       if constexpr (KTraits::POS_ENCODING_MODE == PosEncodingMode::kRoPELlama) {
         k_smem_inplace_apply_rotary<KTraits>(chunk_start + iter * CTA_TILE_KV, &k_smem,
                                              &k_smem_offset_r, rope_freq, tid);
-        block.sync();
+        FLASHINFER_THREAD_BLOCK_SYNC(block);
       }
 
       // compute attention score
@@ -1793,7 +1811,7 @@ __device__ __forceinline__ void SinglePrefillWithKVCacheDevice(
       // compute m,d states in online softmax
       update_mdo_states<KTraits>(variant, s_frag, o_frag, m, d);
 
-      block.sync();
+      FLASHINFER_THREAD_BLOCK_SYNC(block);
       produce_kv<false, SharedMemFillMode::kNoFill, KTraits>(
           k_smem, &k_smem_offset_w, &k_ptr, k_stride_n, (iter + 1) * CTA_TILE_KV, chunk_size, tid);
       produce_kv_sf<false, KTraits>(&smem_storage, maybe_k_cache_sf, kv_abs_base, kv_head_idx,
@@ -1801,7 +1819,7 @@ __device__ __forceinline__ void SinglePrefillWithKVCacheDevice(
                                     warp_idx, lane_idx);
       cp_async::commit_group();
       cp_async::wait_group<1>();
-      block.sync();
+      FLASHINFER_THREAD_BLOCK_SYNC(block);
 
       // compute sfm*v
       compute_sfm_v<KTraits>(&v_smem, &v_smem_offset_r,
@@ -1810,7 +1828,7 @@ __device__ __forceinline__ void SinglePrefillWithKVCacheDevice(
                                                           KTraits::NUM_MMA_D_VO,
                              lane_idx, s_frag, o_frag, d);
 
-      block.sync();
+      FLASHINFER_THREAD_BLOCK_SYNC(block);
       produce_kv<true, SharedMemFillMode::kFillZero, KTraits>(
           v_smem, &v_smem_offset_w, &v_ptr, v_stride_n, (iter + 1) * CTA_TILE_KV, chunk_size, tid);
       produce_kv_sf<true, KTraits>(&smem_storage, maybe_v_cache_sf, kv_abs_base, kv_head_idx,
@@ -1819,7 +1837,7 @@ __device__ __forceinline__ void SinglePrefillWithKVCacheDevice(
       cp_async::commit_group();
     }
     cp_async::wait_group<0>();
-    block.sync();
+    FLASHINFER_THREAD_BLOCK_SYNC(block);
 
     finalize_m<KTraits>(variant, m);
 
@@ -2074,7 +2092,7 @@ __global__ __launch_bounds__(KTraits::NUM_THREADS) void BatchPrefillWithRaggedKV
     const uint32_t kv_chunk_size = *(params.kv_chunk_size_ptr);
     const dim3& tid = threadIdx;
 
-    auto block = cg::this_thread_block();
+    FLASHINFER_DECLARE_THREAD_BLOCK(block);
     const uint32_t bx = blockIdx.x, lane_idx = tid.x,
                    warp_idx = get_warp_idx<KTraits>(tid.y, tid.z), kv_head_idx = blockIdx.z;
     if (block_valid_mask && !block_valid_mask[bx]) {
@@ -2148,7 +2166,7 @@ __global__ __launch_bounds__(KTraits::NUM_THREADS) void BatchPrefillWithRaggedKV
 
     if constexpr (KTraits::POS_ENCODING_MODE == PosEncodingMode::kRoPELlama) {
       cp_async::wait_group<0>();
-      block.sync();
+      FLASHINFER_THREAD_BLOCK_SYNC(block);
       IdType* q_rope_offset = nullptr;
 
       if constexpr (has_maybe_q_rope_offset_v<Params>) {
@@ -2162,7 +2180,7 @@ __global__ __launch_bounds__(KTraits::NUM_THREADS) void BatchPrefillWithRaggedKV
             qo_packed_idx_base, q_rope_offset + q_indptr[request_idx], &qo_smem, group_size,
             &q_smem_offset_r, rope_freq, tid);
       }
-      block.sync();
+      FLASHINFER_THREAD_BLOCK_SYNC(block);
     }
 
     const uint32_t num_iterations = ceil_div(
@@ -2231,7 +2249,7 @@ __global__ __launch_bounds__(KTraits::NUM_THREADS) void BatchPrefillWithRaggedKV
 #pragma unroll 1
     for (uint32_t iter = 0; iter < num_iterations; ++iter) {
       cp_async::wait_group<1>();
-      block.sync();
+      FLASHINFER_THREAD_BLOCK_SYNC(block);
 
       if constexpr (KTraits::POS_ENCODING_MODE == PosEncodingMode::kRoPELlama) {
         IdType* k_rope_offset = nullptr;
@@ -2242,7 +2260,7 @@ __global__ __launch_bounds__(KTraits::NUM_THREADS) void BatchPrefillWithRaggedKV
             (k_rope_offset == nullptr ? 0 : k_rope_offset[request_idx]) + chunk_start +
                 iter * CTA_TILE_KV,
             &k_smem, &k_smem_offset_r, rope_freq, tid);
-        block.sync();
+        FLASHINFER_THREAD_BLOCK_SYNC(block);
       }
 
       // compute attention score
@@ -2266,7 +2284,7 @@ __global__ __launch_bounds__(KTraits::NUM_THREADS) void BatchPrefillWithRaggedKV
       // compute m,d states in online softmax
       update_mdo_states<KTraits>(variant, s_frag, o_frag, m, d);
 
-      block.sync();
+      FLASHINFER_THREAD_BLOCK_SYNC(block);
       produce_kv<false, SharedMemFillMode::kNoFill, KTraits>(
           k_smem, &k_smem_offset_w, &k_ptr, k_stride_n, (iter + 1) * CTA_TILE_KV, chunk_size, tid);
       produce_kv_sf<false, KTraits>(&smem_storage, maybe_k_cache_sf, kv_abs_base, kv_head_idx,
@@ -2274,7 +2292,7 @@ __global__ __launch_bounds__(KTraits::NUM_THREADS) void BatchPrefillWithRaggedKV
                                     warp_idx, lane_idx);
       cp_async::commit_group();
       cp_async::wait_group<1>();
-      block.sync();
+      FLASHINFER_THREAD_BLOCK_SYNC(block);
 
       // compute sfm*v
       compute_sfm_v<KTraits>(&v_smem, &v_smem_offset_r,
@@ -2283,7 +2301,7 @@ __global__ __launch_bounds__(KTraits::NUM_THREADS) void BatchPrefillWithRaggedKV
                                                           KTraits::NUM_MMA_D_VO,
                              lane_idx, s_frag, o_frag, d);
 
-      block.sync();
+      FLASHINFER_THREAD_BLOCK_SYNC(block);
       produce_kv<true, SharedMemFillMode::kFillZero, KTraits>(
           v_smem, &v_smem_offset_w, &v_ptr, v_stride_n, (iter + 1) * CTA_TILE_KV, chunk_size, tid);
       produce_kv_sf<true, KTraits>(&smem_storage, maybe_v_cache_sf, kv_abs_base, kv_head_idx,
@@ -2292,7 +2310,7 @@ __global__ __launch_bounds__(KTraits::NUM_THREADS) void BatchPrefillWithRaggedKV
       cp_async::commit_group();
     }
     cp_async::wait_group<0>();
-    block.sync();
+    FLASHINFER_THREAD_BLOCK_SYNC(block);
 
     finalize_m<KTraits>(variant, m);
 
@@ -2422,7 +2440,7 @@ __device__ __forceinline__ void BatchPrefillWithPagedKVCacheDevice(
     }
 
     static_assert(sizeof(DTypeQ) == 2);
-    auto block = cg::this_thread_block();
+    FLASHINFER_DECLARE_THREAD_BLOCK(block);
     const uint32_t kv_chunk_size = *(params.kv_chunk_size_ptr);
 
     const uint32_t lane_idx = tid.x, warp_idx = get_warp_idx<KTraits>(tid.y, tid.z);
@@ -2492,7 +2510,7 @@ __device__ __forceinline__ void BatchPrefillWithPagedKVCacheDevice(
 
     if constexpr (KTraits::POS_ENCODING_MODE == PosEncodingMode::kRoPELlama) {
       cp_async::wait_group<0>();
-      block.sync();
+      FLASHINFER_THREAD_BLOCK_SYNC(block);
       IdType* q_rope_offset = nullptr;
       if constexpr (has_maybe_q_rope_offset_v<Params>) {
         q_rope_offset = params.maybe_q_rope_offset;
@@ -2505,7 +2523,7 @@ __device__ __forceinline__ void BatchPrefillWithPagedKVCacheDevice(
             qo_packed_idx_base, q_rope_offset + q_indptr[request_idx], &qo_smem, group_size,
             &q_smem_offset_r, rope_freq, tid);
       }
-      block.sync();
+      FLASHINFER_THREAD_BLOCK_SYNC(block);
     }
 
     smem_t<SWIZZLE_MODE_KV> k_smem(smem_storage.k_smem), v_smem(smem_storage.v_smem);
@@ -2638,14 +2656,14 @@ __device__ __forceinline__ void BatchPrefillWithPagedKVCacheDevice(
             (lane_idx % KV_THR_LAYOUT_COL) * upcast_size<DTypeKV>() / fp4_pack_factor, last_indptr);
       }
       cp_async::wait_group<1>();
-      block.sync();
+      FLASHINFER_THREAD_BLOCK_SYNC(block);
 
       if constexpr (KTraits::POS_ENCODING_MODE == PosEncodingMode::kRoPELlama) {
         k_smem_inplace_apply_rotary<KTraits>(
             (paged_kv.rope_pos_offset == nullptr ? 0 : paged_kv.rope_pos_offset[request_idx]) +
                 chunk_start + iter * CTA_TILE_KV,
             &k_smem, &k_smem_offset_r, rope_freq, tid);
-        block.sync();
+        FLASHINFER_THREAD_BLOCK_SYNC(block);
       }
 
       // compute attention score
@@ -2692,7 +2710,7 @@ __device__ __forceinline__ void BatchPrefillWithPagedKVCacheDevice(
       // compute m,d states in online softmax
       update_mdo_states<KTraits>(variant, s_frag, o_frag, m, d);
 
-      block.sync();
+      FLASHINFER_THREAD_BLOCK_SYNC(block);
       page_produce_kv<false, KTraits>(&smem_storage, &k_smem_offset_w, paged_kv.k_data,
                                       (iter + 1) * CTA_TILE_KV, thr_local_kv_offset, chunk_size,
                                       warp_idx, lane_idx);
@@ -2703,7 +2721,7 @@ __device__ __forceinline__ void BatchPrefillWithPagedKVCacheDevice(
                                          (iter + 1) * CTA_TILE_KV, chunk_size, warp_idx, lane_idx);
       cp_async::commit_group();
       cp_async::wait_group<1>();
-      block.sync();
+      FLASHINFER_THREAD_BLOCK_SYNC(block);
 
       // compute sfm*v
       compute_sfm_v<KTraits>(&v_smem, &v_smem_offset_r,
@@ -2712,7 +2730,7 @@ __device__ __forceinline__ void BatchPrefillWithPagedKVCacheDevice(
                                                           KTraits::NUM_MMA_D_VO,
                              lane_idx, s_frag, o_frag, d);
 
-      block.sync();
+      FLASHINFER_THREAD_BLOCK_SYNC(block);
       page_produce_kv<true, KTraits>(&smem_storage, &v_smem_offset_w, paged_kv.v_data,
                                      (iter + 1) * CTA_TILE_KV, thr_local_kv_offset, chunk_size,
                                      warp_idx, lane_idx);
@@ -2724,7 +2742,7 @@ __device__ __forceinline__ void BatchPrefillWithPagedKVCacheDevice(
       cp_async::commit_group();
     }
     cp_async::wait_group<0>();
-    block.sync();
+    FLASHINFER_THREAD_BLOCK_SYNC(block);
 
     finalize_m<KTraits>(variant, m);
 

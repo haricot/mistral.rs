@@ -438,6 +438,10 @@ pub enum TomlModelSelected {
         #[serde(default = "default_max_image_length")]
         max_image_length: usize,
 
+        /// Load only the text path for supported multimodal models.
+        #[serde(default)]
+        text_only: bool,
+
         /// Cache path for Hugging Face models downloaded locally
         hf_cache_path: Option<PathBuf>,
 
@@ -607,13 +611,23 @@ pub fn get_toml_selected_model_device_map_params(
             max_batch_size,
             max_image_length,
             max_num_images,
+            text_only,
             ..
-        } => Ok(AutoDeviceMapParams::Multimodal {
-            max_seq_len,
-            max_batch_size,
-            max_image_shape: (max_image_length, max_image_length),
-            max_num_images,
-        }),
+        } => {
+            if text_only {
+                Ok(AutoDeviceMapParams::Text {
+                    max_seq_len,
+                    max_batch_size,
+                })
+            } else {
+                Ok(AutoDeviceMapParams::Multimodal {
+                    max_seq_len,
+                    max_batch_size,
+                    max_image_shape: (max_image_length, max_image_length),
+                    max_num_images,
+                })
+            }
+        }
     }
 }
 
@@ -937,12 +951,14 @@ fn loader_from_selected(
             max_batch_size: _,
             max_num_images: _,
             max_image_length: _,
+            text_only,
             imatrix,
             hf_cache_path,
             organization,
         } => MultimodalLoaderBuilder::new(
             MultimodalSpecificConfig {
                 topology: Topology::from_option_path(topology)?,
+                text_only,
                 write_uqff,
                 from_uqff: from_uqff.map(|x| {
                     x.split(UQFF_MULTI_FILE_DELIMITER)

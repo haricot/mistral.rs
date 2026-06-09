@@ -438,7 +438,20 @@ static __device__ __forceinline__ int warp_reduce_max(int x) {
         static bool raised[GGML_CUDA_MAX_DEVICES] = {false}; \
         int dev; cudaGetDevice(&dev); \
         if (!raised[dev]) { \
-            cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, nbytes); \
+            int default_smem = 0; \
+            cudaError_t smem_attr_err = cudaDeviceGetAttribute(&default_smem, cudaDevAttrMaxSharedMemoryPerBlock, dev); \
+            if (smem_attr_err != cudaSuccess || default_smem <= 0) { \
+                cudaGetLastError(); \
+                default_smem = 48 * 1024; \
+            } \
+            if ((size_t) (nbytes) > (size_t) default_smem) { \
+                cudaError_t smem_set_err = cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, nbytes); \
+                if (smem_set_err != cudaSuccess) { \
+                    fprintf(stderr, "CUDA warning: failed to set dynamic shared memory limit to %zu bytes: %s\n", \
+                            (size_t) (nbytes), cudaGetErrorString(smem_set_err)); \
+                    cudaGetLastError(); \
+                } \
+            } \
             raised[dev] = true; \
         } \
     } while(0)

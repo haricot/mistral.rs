@@ -37,7 +37,7 @@ __device__ __forceinline__ float warp_reduce_sum(float val) {
 // Type conversion helpers
 __device__ __forceinline__ float to_float(float x) { return x; }
 __device__ __forceinline__ float to_float(__half x) { return __half2float(x); }
-#if __CUDA_ARCH__ >= 800
+#if __CUDA_ARCH__ >= 800 || defined(ALLOW_LEGACY_BF16)
 __device__ __forceinline__ float to_float(__nv_bfloat16 x) {
   return __bfloat162float(x);
 }
@@ -94,7 +94,7 @@ gemv_kernel_batched(const T *__restrict__ A,    // [M, K] weights (row-major)
         acc[b] = fmaf(a_f.x, x_f.x, acc[b]);
         acc[b] = fmaf(a_f.y, x_f.y, acc[b]);
       }
-#if __CUDA_ARCH__ >= 800
+#if __CUDA_ARCH__ >= 800 || defined(ALLOW_LEGACY_BF16)
       else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
         acc[b] =
             fmaf(__bfloat162float(a_val.x), __bfloat162float(x_val.x), acc[b]);
@@ -157,7 +157,7 @@ gemv_kernel_batched(const T *__restrict__ A,    // [M, K] weights (row-major)
       } else if constexpr (std::is_same_v<T, __half>) {
         Y[b * M + row] = __float2half(result);
       }
-#if __CUDA_ARCH__ >= 800
+#if __CUDA_ARCH__ >= 800 || defined(ALLOW_LEGACY_BF16)
       else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
         Y[b * M + row] = __float2bfloat16(result);
       }

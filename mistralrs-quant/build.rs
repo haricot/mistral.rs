@@ -49,6 +49,8 @@ fn main() -> Result<(), String> {
     println!("cargo::rustc-check-cfg=cfg(has_vector_fp8_kernels)");
     println!("cargo::rustc-check-cfg=cfg(has_mxfp4_kernels)");
     println!("cargo::rustc-check-cfg=cfg(has_mxfp4_wmma_kernels)");
+    println!("cargo::rustc-check-cfg=cfg(allow_legacy_bf16)");
+    println!("cargo::rustc-check-cfg=cfg(allow_legacy_fp8)");
 
     #[cfg(feature = "cuda")]
     {
@@ -56,11 +58,26 @@ fn main() -> Result<(), String> {
         const CUDA_NVCC_FLAGS: Option<&'static str> = option_env!("CUDA_NVCC_FLAGS");
 
         println!("cargo:rerun-if-changed=build.rs");
+        println!("cargo:rerun-if-env-changed=ALLOW_LEGACY");
         println!("cargo:rerun-if-env-changed=CUDA_NVCC_FLAGS");
+        for header in [
+            "kernels/mmq_gguf/mmq_common.cuh",
+            "kernels/mmq_gguf/mmq_gguf.cuh",
+            "kernels/mmq_gguf/mmq_mma.cuh",
+            "kernels/mmq_gguf/mmq_vecdotq.cuh",
+        ] {
+            println!("cargo:rerun-if-changed={header}");
+        }
         let build_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
 
         let mut builder = cudaforge::KernelBuilder::new()
             .source_glob("kernels/*/*.cu")
+            .watch([
+                "kernels/mmq_gguf/mmq_common.cuh",
+                "kernels/mmq_gguf/mmq_gguf.cuh",
+                "kernels/mmq_gguf/mmq_mma.cuh",
+                "kernels/mmq_gguf/mmq_vecdotq.cuh",
+            ])
             .out_dir(build_dir.clone())
             .arg("-std=c++17")
             .arg("-O3")
@@ -75,23 +92,112 @@ fn main() -> Result<(), String> {
             .arg("--compiler-options")
             .arg("-fPIC");
 
+        let allow_legacy = std::env::var("ALLOW_LEGACY").unwrap_or_default();
+        let allow_legacy_bf16 = allow_legacy == "all"
+            || allow_legacy
+                .split(',')
+                .map(str::trim)
+                .any(|value| value == "bf16");
+        let allow_legacy_fp8 = allow_legacy == "all"
+            || allow_legacy
+                .split(',')
+                .map(str::trim)
+                .any(|value| value == "fp8");
+        if allow_legacy_bf16 {
+            builder = builder.arg("-DALLOW_LEGACY_BF16");
+            println!("cargo:rustc-cfg=allow_legacy_bf16");
+        }
+        if allow_legacy_fp8 {
+            builder = builder.arg("-DALLOW_LEGACY_FP8");
+            println!("cargo:rustc-cfg=allow_legacy_fp8");
+        }
+
+        let mut renamed_cuda_symbols = [
+            "launch_mmq_quantize_q8_1_D4",
+            "launch_mmq_quantize_q8_1_DS4",
+            "launch_mmq_quantize_q8_1_D2S6",
+            "launch_mmq_gguf_q4_0",
+            "launch_mmq_gguf_q4_1",
+            "launch_mmq_gguf_q5_0",
+            "launch_mmq_gguf_q5_1",
+            "launch_mmq_gguf_q8_0",
+            "launch_mmq_gguf_q2_k",
+            "launch_mmq_gguf_q3_k",
+            "launch_mmq_gguf_q4_k",
+            "launch_mmq_gguf_q5_k",
+            "launch_mmq_gguf_q6_k",
+        ]
+        .into_iter()
+        .map(|symbol| format!("-D{symbol}=mistralrs_quant_{symbol}"))
+        .collect::<Vec<_>>();
+
+        for dtype in ["bf16", "f16", "f32"] {
+            renamed_cuda_symbols.push(format!(
+                "-Dlaunch_mmvq_gguf_quantize_q8_1_{dtype}=mistralrs_quant_launch_mmvq_gguf_quantize_q8_1_{dtype}"
+            ));
+            renamed_cuda_symbols.push(format!(
+                "-Dmmvq_gguf_quantize_q8_1_{dtype}=mistralrs_quant_mmvq_gguf_quantize_q8_1_{dtype}"
+            ));
+        }
+
+        for tag in [
+            "q4_0", "q4_1", "q5_0", "q5_1", "q8_0", "q2_k", "q3_k", "q4_k", "q5_k", "q6_k",
+        ] {
+            for dtype in ["bf16", "f16", "f32"] {
+                renamed_cuda_symbols.push(format!(
+                    "-Dlaunch_mmvq_gguf_{tag}_{dtype}_plain=mistralrs_quant_launch_mmvq_gguf_{tag}_{dtype}_plain"
+                ));
+                renamed_cuda_symbols.push(format!(
+                    "-Dlaunch_mmvq_gguf_{tag}_{dtype}_fused_qkv=mistralrs_quant_launch_mmvq_gguf_{tag}_{dtype}_fused_qkv"
+                ));
+                for ncols in 1..=8 {
+                    renamed_cuda_symbols.push(format!(
+                        "-Dmmvq_gguf_{tag}_{dtype}_plain_cuda{ncols}=mistralrs_quant_mmvq_gguf_{tag}_{dtype}_plain_cuda{ncols}"
+                    ));
+                    renamed_cuda_symbols.push(format!(
+                        "-Dmmvq_gguf_{tag}_{dtype}_fused_qkv_cuda{ncols}=mistralrs_quant_mmvq_gguf_{tag}_{dtype}_fused_qkv_cuda{ncols}"
+                    ));
+                }
+            }
+        }
+
+        for dtype in ["bf16", "f16", "f32"] {
+            renamed_cuda_symbols.push(format!(
+                "-Dlaunch_mmvq_gguf_q8_0_{dtype}_fused_glu=mistralrs_quant_launch_mmvq_gguf_q8_0_{dtype}_fused_glu"
+            ));
+            for ncols in 1..=8 {
+                renamed_cuda_symbols.push(format!(
+                    "-Dmmvq_gguf_q8_0_{dtype}_fused_glu_cuda{ncols}=mistralrs_quant_mmvq_gguf_q8_0_{dtype}_fused_glu_cuda{ncols}"
+                ));
+            }
+        }
+
+        for symbol_define in &renamed_cuda_symbols {
+            builder = builder.arg(symbol_define);
+        }
+
         let compute_cap = builder.get_compute_cap().unwrap_or(80);
         // ======== Handle optional kernel compilation via rustc-cfg flags
         let cc_over_80 = compute_cap >= 80;
+        let enable_legacy_fp8 = cc_over_80 || allow_legacy_fp8;
 
         if cc_over_80 {
             println!("cargo:rustc-cfg=has_marlin_kernels");
+            // WMMA tensor core MXFP4 kernel (FP16/BF16 WMMA requires SM >= 80)
+            println!("cargo:rustc-cfg=has_mxfp4_wmma_kernels");
+        }
+        if enable_legacy_fp8 {
             println!("cargo:rustc-cfg=has_blockwise_fp8_kernels");
             println!("cargo:rustc-cfg=has_scalar_fp8_kernels");
             println!("cargo:rustc-cfg=has_vector_fp8_kernels");
-            // WMMA tensor core MXFP4 kernel (FP16/BF16 WMMA requires SM >= 80)
-            println!("cargo:rustc-cfg=has_mxfp4_wmma_kernels");
         }
         // MXFP4 is always enabled with CUDA (uses LUT-based dequantization)
         println!("cargo:rustc-cfg=has_mxfp4_kernels");
 
         let excluded_files = if cc_over_80 {
             vec!["dummy_*.cu", "*_dummy.cu"]
+        } else if allow_legacy_fp8 {
+            vec!["dummy_*.cu", "*_dummy.cu", "marlin_*.cu", "*_wmma.cu"]
         } else {
             vec!["marlin_*.cu", "*_fp8.cu", "*_fp8_gemm.cu", "*_wmma.cu"]
         };

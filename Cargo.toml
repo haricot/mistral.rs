@@ -36,16 +36,25 @@ rust-version = "1.88"
 # candle-flash-attn-v3 = { version = "0.10.2" }
 # candle-flash-attn = { version = "0.10.2" }
 # candle-metal-kernels = { version = "0.10.2" }
-candle-core = { git = "https://github.com/huggingface/candle.git", version = "0.10.2", rev = "5404348" }
-candle-nn = { git = "https://github.com/huggingface/candle.git", version = "0.10.2", rev = "5404348" }
-candle-flash-attn-v3 = { git = "https://github.com/huggingface/candle.git", version = "0.10.2", rev = "5404348" }
-candle-flash-attn = { git = "https://github.com/huggingface/candle.git", version = "0.10.2", rev = "5404348" }
-candle-metal-kernels = { git = "https://github.com/huggingface/candle.git", version = "0.10.2", rev = "5404348" }
-# candle-core = { path = "../candle/candle-core", version = "0.10.2" }
-# candle-nn = { path = "../candle/candle-nn", version = "0.10.2" }
-# candle-flash-attn-v3 = { path = "../candle/candle-flash-attn-v3", version = "0.10.2" }
-# candle-flash-attn = { path = "../candle/candle-flash-attn", version = "0.10.2" }
-# candle-metal-kernels = { path = "../candle/candle-metal-kernels", version = "0.10.2" }
+#candle-core = { git = "https://github.com/huggingface/candle.git", version = "0.10.2", rev = "5404348" }
+#candle-nn = { git = "https://github.com/huggingface/candle.git", version = "0.10.2", rev = "5404348" }
+#candle-flash-attn-v3 = { git = "https://github.com/huggingface/candle.git", version = "0.10.2", rev = "5404348" }
+#candle-flash-attn = { git = "https://github.com/huggingface/candle.git", version = "0.10.2", rev = "5404348" }
+#candle-metal-kernels = { git = "https://github.com/huggingface/candle.git", version = "0.10.2", rev = "5404348" }
+#candle-tiled-attn = { git = "https://github.com/huggingface/candle.git", version = "0.10.2", rev = "5404348" }
+# candle-core = { path = "../candle/candle-core" }
+# candle-nn = { path = "../candle/candle-nn" }
+# candle-flash-attn-v3 = { path = "../candle/candle-flash-attn-v3" }
+# candle-flash-attn = { path = "../candle/candle-flash-attn" }
+# candle-metal-kernels = { path = "../candle/candle-metal-kernels" }
+candle-core = { git = "https://github.com/haricot/candle", branch = "bf16_candle" }
+candle-nn = { git = "https://github.com/haricot/candle", branch = "bf16_candle" }
+candle-flash-attn-v3 = { git = "https://github.com/haricot/candle", branch = "bf16_candle" }
+candle-flash-attn = { git = "https://github.com/haricot/candle", branch = "bf16_candle" }
+candle-metal-kernels = { git = "https://github.com/haricot/candle", branch = "bf16_candle" }
+candle-kernels = { git = "https://github.com/haricot/candle", branch = "bf16_candle" }
+candle-tiled-attn = { git = "https://github.com/haricot/candle", branch = "bf16_candle" }
+
 
 axum = "0.8.8"
 anyhow = "1.0.100"
@@ -208,6 +217,10 @@ mistralrs-mcp = { path = "mistralrs-mcp", version = "0.8.3" }
 mistralrs-macros = { path = "mistralrs-macros", version = "0.8.3" }
 mistralrs-code-exec = { path = "mistralrs-code-exec", version = "0.8.3" }
 mistralrs-sandbox = { path = "mistralrs-sandbox", version = "0.8.3" }
+
+[patch.crates-io]
+cudaforge = { git = "https://github.com/guoqingbao/cudaforge", rev = "64a7f7a7926cc0c1a9b896ab853dedbcb74617a6" }
+
 
 [profile.release-with-debug]
 inherits = "release"

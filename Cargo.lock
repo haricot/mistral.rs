@@ -141,7 +141,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -152,7 +152,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -656,7 +656,6 @@ checksum = "ade8366b8bd5ba243f0a58f036cc0ca8a2f069cff1a2351ef1cac6b083e16fc0"
 [[package]]
 name = "candle-core"
 version = "0.10.2"
-source = "git+https://github.com/huggingface/candle.git?rev=5404348#54043486fe252e6a068af85e659b3e822738fdb1"
 dependencies = [
  "accelerate-src",
  "byteorder",
@@ -688,22 +687,20 @@ dependencies = [
 [[package]]
 name = "candle-flash-attn"
 version = "0.10.2"
-source = "git+https://github.com/huggingface/candle.git?rev=5404348#54043486fe252e6a068af85e659b3e822738fdb1"
 dependencies = [
  "anyhow",
  "candle-core",
- "cudaforge",
+ "cudaforge 0.1.4",
  "half",
 ]
 
 [[package]]
 name = "candle-flash-attn-v3"
 version = "0.10.2"
-source = "git+https://github.com/huggingface/candle.git?rev=5404348#54043486fe252e6a068af85e659b3e822738fdb1"
 dependencies = [
  "anyhow",
  "candle-core",
- "cudaforge",
+ "cudaforge 0.1.4",
  "half",
  "num_cpus",
  "rayon",
@@ -712,15 +709,13 @@ dependencies = [
 [[package]]
 name = "candle-kernels"
 version = "0.10.2"
-source = "git+https://github.com/huggingface/candle.git?rev=5404348#54043486fe252e6a068af85e659b3e822738fdb1"
 dependencies = [
- "cudaforge",
+ "cudaforge 0.1.5",
 ]
 
 [[package]]
 name = "candle-metal-kernels"
 version = "0.10.2"
-source = "git+https://github.com/huggingface/candle.git?rev=5404348#54043486fe252e6a068af85e659b3e822738fdb1"
 dependencies = [
  "block2",
  "half",
@@ -735,7 +730,6 @@ dependencies = [
 [[package]]
 name = "candle-nn"
 version = "0.10.2"
-source = "git+https://github.com/huggingface/candle.git?rev=5404348#54043486fe252e6a068af85e659b3e822738fdb1"
 dependencies = [
  "accelerate-src",
  "candle-core",
@@ -752,9 +746,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "candle-tiled-attn"
+version = "0.10.2"
+source = "git+https://github.com/haricot/candle?branch=bf16_candle#18e33a71bd24680edef040760022b525f8f8149f"
+dependencies = [
+ "candle-core",
+ "cudaforge 0.1.5",
+ "half",
+]
+
+[[package]]
 name = "candle-ug"
 version = "0.10.2"
-source = "git+https://github.com/huggingface/candle.git?rev=5404348#54043486fe252e6a068af85e659b3e822738fdb1"
 dependencies = [
  "ug",
  "ug-cuda",
@@ -1318,6 +1321,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "cudaforge"
+version = "0.1.5"
+source = "git+https://github.com/guoqingbao/cudaforge?rev=64a7f7a7926cc0c1a9b896ab853dedbcb74617a6#64a7f7a7926cc0c1a9b896ab853dedbcb74617a6"
+dependencies = [
+ "anyhow",
+ "fs2",
+ "glob",
+ "num_cpus",
+ "rayon",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "walkdir",
+ "which 7.0.3",
+]
+
+[[package]]
 name = "cudarc"
 version = "0.17.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1733,7 +1754,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1933,7 +1954,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2545,7 +2566,7 @@ dependencies = [
  "libc",
  "log",
  "rustversion",
- "windows-link 0.2.1",
+ "windows-link 0.1.3",
  "windows-result 0.4.1",
 ]
 
@@ -3882,11 +3903,12 @@ dependencies = [
  "candle-flash-attn-v3",
  "candle-metal-kernels",
  "candle-nn",
+ "candle-tiled-attn",
  "cfgrammar",
  "chrono",
  "clap",
  "csv",
- "cudaforge",
+ "cudaforge 0.1.4",
  "derive-new",
  "derive_more",
  "dirs",
@@ -4007,7 +4029,7 @@ dependencies = [
  "anyhow",
  "candle-core",
  "candle-metal-kernels",
- "cudaforge",
+ "cudaforge 0.1.4",
  "dispatch2",
  "float8",
  "half",
@@ -4053,7 +4075,7 @@ dependencies = [
  "cuda-async",
  "cuda-bindings",
  "cuda-core",
- "cudaforge",
+ "cudaforge 0.1.4",
  "cutile",
  "cutile-compiler",
  "cutile-ir",
@@ -4320,7 +4342,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5816,7 +5838,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.11.0",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5875,7 +5897,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6480,7 +6502,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "psm",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6851,7 +6873,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.3",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -7972,7 +7994,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

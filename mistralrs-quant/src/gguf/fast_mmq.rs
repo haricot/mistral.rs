@@ -267,6 +267,15 @@ fn get_device_info(dev: &CudaDevice) -> DeviceInfo {
         )
     }
     .unwrap_or(49152);
+    let smpb = unsafe {
+        result::device::get_attribute(
+            cu_device,
+            sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK,
+        )
+    }
+    .unwrap_or(49152);
+    let cc = major * 100 + minor * 10;
+    let smpbo = if cc < 700 { smpb } else { smpbo };
     let warp_size = unsafe {
         result::device::get_attribute(
             cu_device,
@@ -275,7 +284,7 @@ fn get_device_info(dev: &CudaDevice) -> DeviceInfo {
     }
     .unwrap_or(32);
     let info = DeviceInfo {
-        cc: major * 100 + minor * 10,
+        cc,
         nsm,
         smpbo: smpbo as i64,
         warp_size,
@@ -1105,4 +1114,31 @@ pub fn grouped_pair(
     ));
 
     Ok((gate_tensor, up_tensor))
+}
+
+#[cfg(all(test, feature = "cuda"))]
+mod tests {
+    use super::*;
+    use candle_core::quantized::QTensor;
+    use candle_core::{DType, Device, Result, Tensor};
+
+    #[test]
+    fn test_fast_mmq_q4k_f16_then_fused_glu() -> Result<()> {
+        let device = Device::new_cuda(0)?;
+        let cpu = Device::Cpu;
+
+        let weight = Tensor::zeros((512, 512), DType::F32, &cpu)?;
+        let weight = QTensor::quantize_onto(&weight, GgmlDType::Q4K, &device)?;
+        let xs = Tensor::zeros((16, 512), DType::F16, &device)?;
+
+        let out = plain(&weight, &xs)?;
+        assert_eq!(out.dims(), &[16, 512]);
+
+        let a = Tensor::zeros((16, 512), DType::F16, &device)?;
+        let b = Tensor::zeros((16, 512), DType::F16, &device)?;
+        let glu = crate::fused_glu(&a, &b, crate::GluActivationType::Silu)?;
+        let _ = glu.to_device(&cpu)?;
+
+        Ok(())
+    }
 }

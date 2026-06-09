@@ -53,12 +53,22 @@ impl QuantMethod for UnquantLinear {
     }
 
     fn forward_raw(&self, a: &Tensor) -> Result<Tensor> {
+        let a_on_weight_device;
+        let a = if self.w.device().same_device(a.device()) {
+            a
+        } else {
+            a_on_weight_device = a.to_device(self.w.device())?;
+            &a_on_weight_device
+        };
+
         // Batch matrix multiplication
         maybe_init_cublas_lt_wrapper(a.device().clone());
 
         // Try custom GEMV for single-token decode (batch_size=1)
         #[cfg(feature = "cuda")]
-        if crate::gemv::should_use_gemv(a, &self.w) {
+        if crate::gemv::should_use_gemv(a, &self.w)
+            && self.b.as_ref().map_or(true, |b| b.device().is_cuda())
+        {
             return crate::gemv::gemv(a, &self.w, self.b.as_ref());
         }
 
@@ -76,13 +86,16 @@ impl QuantMethod for UnquantLinear {
             let mut tgt_shape = a.dims().to_vec();
             tgt_shape[a.dims().len() - 1] = w.dim(D::Minus2)?;
             let b = b.broadcast_as(Shape::from_dims(&tgt_shape))?;
+            let b = b.to_device(a.device())?;
 
             match a.device().location() {
                 DeviceLocation::Cuda { .. } => {
                     // Try to use cublaslt, otherwise fallback to gemm
-                    if let (Device::Cuda(_), Some(cublaslt)) =
-                        (a.device(), CUBLASLT_CONTROLLER.get_for_device(a.device()))
-                    {
+                    if let (Device::Cuda(_), true, Some(cublaslt)) = (
+                        a.device(),
+                        w.device().same_device(a.device()) && b.device().same_device(a.device()),
+                        CUBLASLT_CONTROLLER.get_for_device(a.device()),
+                    ) {
                         cublaslt
                             .batch_matmul(
                                 a,
@@ -125,9 +138,11 @@ impl QuantMethod for UnquantLinear {
         } else {
             match a.device().location() {
                 DeviceLocation::Cuda { .. } => {
-                    if let (Device::Cuda(_), Some(cublaslt)) =
-                        (a.device(), CUBLASLT_CONTROLLER.get_for_device(a.device()))
-                    {
+                    if let (Device::Cuda(_), true, Some(cublaslt)) = (
+                        a.device(),
+                        w.device().same_device(a.device()),
+                        CUBLASLT_CONTROLLER.get_for_device(a.device()),
+                    ) {
                         // cuBLAS batch_matmul requires 3D tensors, fall back to regular matmul for 2D.
                         if a.rank() >= 3 && w.rank() >= 3 {
                             cublaslt

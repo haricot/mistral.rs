@@ -13,6 +13,13 @@ fn use_warp_prefill_recurrence(dims: &GdnDims) -> bool {
     matches!(dims.head_k_dim, 64 | 128)
 }
 
+#[cfg(feature = "cuda")]
+fn use_cuda_from_convolved_recurrence() -> bool {
+    std::env::var("MISTRALRS_GDN_CUDA_FROM_CONVOLVED")
+        .map(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
+        .unwrap_or(true)
+}
+
 pub fn l2_norm(x: &Tensor, eps: f64) -> Result<Tensor> {
     let inv_norm = x
         .sqr()?
@@ -149,7 +156,7 @@ pub fn apply_recurrence_from_convolved(
     dtype: DType,
 ) -> Result<Tensor> {
     #[cfg(feature = "cuda")]
-    if mixed_qkv.device().is_cuda() {
+    if mixed_qkv.device().is_cuda() && use_cuda_from_convolved_recurrence() {
         return recurrence_cuda_from_convolved(
             mixed_qkv, b, a, a_log, dt_bias, dims, batch_size, seq_len, cache, dtype,
         );

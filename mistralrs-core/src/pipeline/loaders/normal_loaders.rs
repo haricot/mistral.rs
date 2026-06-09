@@ -84,6 +84,8 @@ pub struct NormalLoadingMetadata {
     pub real_device: Device,
     // MultiProgress support for parallelized loading
     pub multi_progress: Arc<MultiProgress>,
+    // Load only text submodules for multimodal loaders that support it.
+    pub text_only: bool,
     // Optional Matryoshka Transformer slicing configuration
     pub matformer_slicing_config: Option<MatformerSliceConfig>,
 }

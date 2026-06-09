@@ -140,6 +140,7 @@ pub struct MultimodalLoaderBuilder {
 /// Config specific to loading a multimodal model.
 pub struct MultimodalSpecificConfig {
     pub topology: Option<Topology>,
+    pub text_only: bool,
     pub write_uqff: Option<PathBuf>,
     pub from_uqff: Option<Vec<PathBuf>>,
     pub max_edge: Option<u32>,
@@ -291,6 +292,12 @@ impl Loader for MultimodalLoader {
         let _progress_guard = ProgressScopeGuard::new(silent);
         let config = std::fs::read_to_string(paths.get_config_filename())?;
 
+        if self.config.text_only && !self.inner.supports_text_only_loading(&config) {
+            anyhow::bail!(
+                "`--text-only` was requested, but this multimodal loader does not support text-only loading"
+            );
+        }
+
         if !self.inner.supports_paged_attention(&config) {
             paged_attn_config = None;
         }
@@ -350,7 +357,9 @@ impl Loader for MultimodalLoader {
             };
         } else if let DeviceMapSetting::Auto(mut params) = mapper.clone() {
             // We can promote to multimodal params if we get text params
-            params = params.maybe_promote_to_multimodal();
+            if !self.config.text_only {
+                params = params.maybe_promote_to_multimodal();
+            }
             max_kv_tokens = Some(params.max_seq_len() * params.max_batch_size());
 
             // Initial dtype
@@ -401,12 +410,16 @@ impl Loader for MultimodalLoader {
                         weight_pack_factor,
                         matformer_slicing_config.as_ref(),
                     )?;
-                    let non_mapped_size_in_bytes = self.inner.non_mapped_size_in_bytes(
-                        &config,
-                        dtype,
-                        weight_pack_factor,
-                        matformer_slicing_config.as_ref(),
-                    )?;
+                    let non_mapped_size_in_bytes = if self.config.text_only {
+                        0
+                    } else {
+                        self.inner.non_mapped_size_in_bytes(
+                            &config,
+                            dtype,
+                            weight_pack_factor,
+                            matformer_slicing_config.as_ref(),
+                        )?
+                    };
                     let layer_sizes_sum = layer_sizes_in_bytes.iter().sum::<usize>();
                     (
                         layer_sizes_in_bytes,
@@ -421,12 +434,16 @@ impl Loader for MultimodalLoader {
                         weight_pack_factor,
                         matformer_slicing_config.as_ref(),
                     )?;
-                    let non_mapped_size_in_bytes = self.inner.non_mapped_size_in_bytes(
-                        &config,
-                        dtype,
-                        weight_pack_factor,
-                        matformer_slicing_config.as_ref(),
-                    )?;
+                    let non_mapped_size_in_bytes = if self.config.text_only {
+                        0
+                    } else {
+                        self.inner.non_mapped_size_in_bytes(
+                            &config,
+                            dtype,
+                            weight_pack_factor,
+                            matformer_slicing_config.as_ref(),
+                        )?
+                    };
                     let layer_sizes_sum = layer_sizes_in_bytes.iter().sum::<usize>();
                     (
                         layer_sizes_in_bytes,
@@ -443,12 +460,16 @@ impl Loader for MultimodalLoader {
                         weight_pack_factor,
                         matformer_slicing_config.as_ref(),
                     )?;
-                    let non_mapped_size_in_bytes = self.inner.non_mapped_size_in_bytes(
-                        &config,
-                        dtype,
-                        weight_pack_factor,
-                        matformer_slicing_config.as_ref(),
-                    )?;
+                    let non_mapped_size_in_bytes = if self.config.text_only {
+                        0
+                    } else {
+                        self.inner.non_mapped_size_in_bytes(
+                            &config,
+                            dtype,
+                            weight_pack_factor,
+                            matformer_slicing_config.as_ref(),
+                        )?
+                    };
                     let layer_sizes_sum = layer_sizes_in_bytes.iter().sum::<usize>();
                     (
                         layer_sizes_in_bytes,
@@ -535,14 +556,15 @@ impl Loader for MultimodalLoader {
 
         let mut immediate_ty = None;
         let mut immediate_predicates = Vec::new();
+        let organization = self.config.organization;
+
         if allow_immediate_cli {
             immediate_ty = in_situ_quant;
-            immediate_predicates =
-                if matches!(self.config.organization, IsqOrganization::MoeExpertsOnly) {
-                    self.inner.immediate_isq_predicates_moqe(&config)?
-                } else {
-                    self.inner.immediate_isq_predicates(&config)?
-                };
+            immediate_predicates = if matches!(organization, IsqOrganization::MoeExpertsOnly) {
+                self.inner.immediate_isq_predicates_moqe(&config)?
+            } else {
+                self.inner.immediate_isq_predicates(&config)?
+            };
             info!("Applying ISQ to {in_situ_quant:?}");
             if immediate_predicates.is_empty() {
                 warn!("No predicates for this model and ISQ setting detected. ISQ will not be applied to any weights!");
@@ -623,7 +645,7 @@ impl Loader for MultimodalLoader {
                 &config,
                 loading_isq,
                 self.config.from_uqff.is_some(),
-                self.config.organization,
+                organization,
                 &*self.inner,
                 paths.as_ref(),
             )?;
@@ -639,6 +661,7 @@ impl Loader for MultimodalLoader {
                     device.clone(),
                     attention_mechanism,
                     multi_progress.clone(),
+                    self.config.text_only,
                     matformer_slicing_config.clone(),
                 ),
                 _ => unreachable!(),
@@ -658,8 +681,9 @@ impl Loader for MultimodalLoader {
                     self.config.from_uqff.is_some(),
                     device.clone(),
                     attention_mechanism,
-                    matches!(self.config.organization, IsqOrganization::MoeExpertsOnly),
+                    matches!(organization, IsqOrganization::MoeExpertsOnly),
                     multi_progress,
+                    self.config.text_only,
                     matformer_slicing_config.clone(),
                 ),
                 _ => unreachable!(),
@@ -860,7 +884,7 @@ impl Loader for MultimodalLoader {
                 self.config.topology.as_ref(),
                 silent,
                 imatrix_source,
-                self.config.organization,
+                organization,
                 should_quantize_pass,
                 self.config.write_uqff.as_ref(),
                 UqffFullSer {
@@ -879,6 +903,7 @@ impl Loader for MultimodalLoader {
             model.load_from_artifacts(
                 device.clone(),
                 self.config.topology.as_ref(),
+                organization,
                 silent,
                 from_uqff,
             )?;
@@ -1239,6 +1264,9 @@ impl MultimodalPipeline {
         if !cuda_decode_graphs_enabled() || !self.model.supports_cuda_decode_graphs() {
             return Ok(None);
         }
+        if crate::topology::cpu_moe_enabled() {
+            return Ok(None);
+        }
         if self.model.has_speculative_proposer() {
             return Ok(None);
         }
@@ -1397,6 +1425,11 @@ impl Pipeline for MultimodalPipeline {
             paged_attn_meta.as_ref().map(|(_, meta)| *meta),
             recurrent_batch_kind,
         )?;
+        let mtp_stats = env::var("MISTRALRS_MTP_STATS")
+            .map(|v| !v.trim().is_empty() && v != "0" && !v.eq_ignore_ascii_case("false"))
+            .unwrap_or(false);
+        let target_forward_started = mtp_stats.then(Instant::now);
+        let paged = paged_attn_meta.is_some();
         #[cfg(feature = "cuda")]
         if !return_raw_logits && pixel_values.is_none() {
             match self.try_cuda_decode_graph_forward(
@@ -1407,7 +1440,16 @@ impl Pipeline for MultimodalPipeline {
                 paged_attn_meta.as_ref().map(|(a, b)| (a.clone(), *b)),
                 &flash_meta,
             ) {
-                Ok(Some(logits)) => return Ok(ForwardInputsResult::CausalGeneration { logits }),
+                Ok(Some(logits)) => {
+                    if let Some(started) = target_forward_started.as_ref() {
+                        tracing::info!(
+                            "MTP target forward multimodal: input_shape={:?}, paged={paged}, cuda_graph=true, raw_logits={return_raw_logits}, elapsed_ms={:.2}",
+                            input_ids.dims(),
+                            started.elapsed().as_secs_f64() * 1000.0
+                        );
+                    }
+                    return Ok(ForwardInputsResult::CausalGeneration { logits });
+                }
                 Ok(None) => {}
                 Err(err) => self.disable_cuda_decode_graph(&err),
             }
@@ -1426,6 +1468,13 @@ impl Pipeline for MultimodalPipeline {
         let logits = self
             .model
             .forward(&input_ids, pixel_values, model_specific_args, &mut ctx)?;
+        if let Some(started) = target_forward_started.as_ref() {
+            tracing::info!(
+                "MTP target forward multimodal: input_shape={:?}, paged={paged}, cuda_graph=false, raw_logits={return_raw_logits}, elapsed_ms={:.2}",
+                input_ids.dims(),
+                started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
         if return_raw_logits {
             Ok(ForwardInputsResult::RawLogits { logits })
         } else {
@@ -1440,9 +1489,12 @@ impl Pipeline for MultimodalPipeline {
         if matches!(config, crate::speculative::SpeculativeConfig::Mtp(_))
             && self.get_metadata().cache_engine.is_none()
         {
-            candle_core::bail!(
-                "MTP speculative decoding currently requires PagedAttention for this pipeline."
+            warn!(
+                "MTP speculative decoding requires PagedAttention for this pipeline; disabling MTP because PagedAttention is not active."
             );
+            self.model
+                .attach_speculative(crate::speculative::SpeculativeConfig::Off)?;
+            return Ok(());
         }
         if let Some(info) = self.model.attach_speculative(config)? {
             self.model.log_speculative_attach(&info);

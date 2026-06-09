@@ -118,6 +118,11 @@ pub enum ModelSelected {
         #[arg(long)]
         max_image_length: Option<usize>,
 
+        /// Load only the text path for supported multimodal models.
+        #[arg(long)]
+        #[serde(default)]
+        text_only: bool,
+
         /// Cache path for Hugging Face models downloaded locally.
         #[arg(long)]
         hf_cache_path: Option<PathBuf>,
@@ -640,6 +645,11 @@ pub enum ModelSelected {
         /// This affects automatic device mapping but is not a hard limit.
         #[arg(long, default_value_t = AutoDeviceMapParams::DEFAULT_MAX_IMAGE_LENGTH)]
         max_image_length: usize,
+
+        /// Load only the text path for supported multimodal models.
+        #[arg(long)]
+        #[serde(default)]
+        text_only: bool,
 
         /// Cache path for Hugging Face models downloaded locally
         #[arg(long)]

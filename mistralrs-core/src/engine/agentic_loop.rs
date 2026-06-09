@@ -30,6 +30,9 @@ pub const DEFAULT_MAX_TOOL_ROUNDS: usize = 256;
 /// Set on inner probe requests so `handle_request` doesn't re-enter the loop. Distinct from `None` (unset).
 pub const AGENTIC_LOOP_REENTRY_SENTINEL: Option<usize> = Some(0);
 
+/// Bound each inner model pass in the tool loop when the caller did not set `max_tokens`.
+const DEFAULT_AGENTIC_PROBE_MAX_LEN: usize = 512;
+
 /// Turn = number of completed user messages.
 fn count_user_messages(request: &NormalRequest) -> usize {
     get_messages(request)
@@ -125,6 +128,20 @@ pub(super) fn upgrade_to_multimodal(request: &mut NormalRequest) {
         other @ RequestMessage::MultimodalChat { .. } => other,
         _ => unreachable!(),
     };
+}
+
+fn default_disable_thinking_for_agentic_probe(request: &mut NormalRequest) {
+    match &mut request.messages {
+        RequestMessage::Chat {
+            enable_thinking, ..
+        }
+        | RequestMessage::MultimodalChat {
+            enable_thinking, ..
+        } => {
+            enable_thinking.get_or_insert(false);
+        }
+        _ => unreachable!(),
+    }
 }
 
 pub(super) fn get_images_mut(request: &mut NormalRequest) -> &mut Vec<DynamicImage> {
@@ -959,6 +976,11 @@ pub(super) async fn agentic_loop(this: Arc<Engine>, mut request: NormalRequest) 
             current.max_tool_rounds = AGENTIC_LOOP_REENTRY_SENTINEL;
             current.tool_dispatch_url = None;
             current.files = None;
+            default_disable_thinking_for_agentic_probe(&mut current);
+            current
+                .sampling_params
+                .max_len
+                .get_or_insert(DEFAULT_AGENTIC_PROBE_MAX_LEN);
             let _ = this_clone
                 .tx
                 .send(crate::request::Request::Normal(Box::new(current)))

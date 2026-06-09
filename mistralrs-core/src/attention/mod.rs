@@ -121,6 +121,20 @@ fn repeat_kv(x: Tensor, n_rep: usize) -> Result<Tensor> {
     }
 }
 
+#[cfg(feature = "tiled_attn")]
+fn tiled_attn_enabled() -> bool {
+    std::env::var("MISTRALRS_TILED_ATTN")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
+}
+
+#[cfg(feature = "tiled_attn")]
+fn tiled_attn_trace_enabled() -> bool {
+    std::env::var("MISTRALRS_TILED_ATTN_TRACE")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
+}
+
 pub struct SdpaParams {
     pub n_kv_groups: usize,
     pub softcap: Option<f32>,
@@ -173,8 +187,11 @@ impl Sdpa {
         }
 
         // CausalFlash or None: try flash attention, fall back to eager
-        let can_use_flash = q.device().is_cpu()
-            || q.device().is_cuda() && crate::using_flash_attn() && q.dtype() != DType::F32;
+        let qkv_same_device =
+            k.device().same_device(q.device()) && v.device().same_device(q.device());
+        let can_use_flash = qkv_same_device
+            && (q.device().is_cpu()
+                || q.device().is_cuda() && crate::using_flash_attn() && q.dtype() != DType::F32);
 
         if can_use_flash {
             let expanded_kv = if q.device().is_cuda()
@@ -250,6 +267,28 @@ impl Sdpa {
         sdpa_params: &SdpaParams,
         causal: bool,
     ) -> Result<Tensor> {
+        if !k.device().same_device(q.device())
+            || !v.device().same_device(q.device())
+            || mask.is_some_and(|mask| !mask.device().same_device(q.device()))
+        {
+            let target_device = if q.device().is_cpu()
+                || k.device().is_cpu()
+                || v.device().is_cpu()
+                || mask.is_some_and(|mask| mask.device().is_cpu())
+            {
+                Device::Cpu
+            } else {
+                q.device().clone()
+            };
+            let q = q.to_device(&target_device)?;
+            let k = k.to_device(&target_device)?;
+            let v = v.to_device(&target_device)?;
+            let mask = mask
+                .map(|mask| mask.to_device(&target_device))
+                .transpose()?;
+            return self.run_attention_noflash(&q, &k, &v, mask.as_ref(), sdpa_params, causal);
+        }
+
         let (b_sz, n_attn_heads, seq_len, head_dim) = q.dims4()?;
         let (_, _, _, k_head_dim) = k.dims4()?;
         let (_, _, _, v_head_dim) = v.dims4()?;
@@ -347,6 +386,48 @@ impl Sdpa {
         let k = repeat_kv(k.clone(), sdpa_params.n_kv_groups)?;
         let v = repeat_kv(v.clone(), sdpa_params.n_kv_groups)?;
 
+        #[cfg(feature = "tiled_attn")]
+        if tiled_attn_enabled()
+            && mask.is_none()
+            && sdpa_params.softcap.is_none_or(|x| x == 1.0)
+            && q.device().is_cuda()
+            && !mistralrs_quant::distributed::use_nccl()
+            && q.dtype() == DType::F16
+            && k.dtype() == DType::F16
+            && v.dtype() == DType::F16
+            && seq_len == 1
+            && all_head_dims_match
+            && matches!(head_dim, 256 | 512)
+        {
+            if k.dim(2)? == 0 || v.dim(2)? == 0 {
+                return Tensor::zeros(q.shape(), q.dtype(), q.device());
+            }
+
+            match candle_tiled_attn::tiled_attn_decode(q, &k, &v, sdpa_params.softmax_scale) {
+                Ok(out) => {
+                    if tiled_attn_trace_enabled() {
+                        eprintln!(
+                            "[tiled_attn_decode] q={:?} k={:?} v={:?}",
+                            q.shape(),
+                            k.shape(),
+                            v.shape()
+                        );
+                    }
+                    return Ok(out);
+                }
+                Err(err) => {
+                    if tiled_attn_trace_enabled() {
+                        eprintln!(
+                            "[tiled_attn_decode_fallback] q={:?} k={:?} v={:?} err={err}",
+                            q.shape(),
+                            k.shape(),
+                            v.shape()
+                        );
+                    }
+                }
+            }
+        }
+
         if mask.is_some_and(|x| x.rank() == 2) || mistralrs_quant::distributed::use_nccl() {
             return naive_sdpa(
                 &q.contiguous()?,
@@ -361,7 +442,9 @@ impl Sdpa {
         #[allow(unused)]
         if let (Device::Cuda(_), Some(cublaslt)) = (
             q.device(),
-            mistralrs_quant::cublaslt::CUBLASLT_CONTROLLER.get_for_device(q.device()),
+            (!crate::utils::is_legacy_cuda_device(q.device()))
+                .then(|| mistralrs_quant::cublaslt::CUBLASLT_CONTROLLER.get_for_device(q.device()))
+                .flatten(),
         ) {
             #[cfg(feature = "cuda")]
             {

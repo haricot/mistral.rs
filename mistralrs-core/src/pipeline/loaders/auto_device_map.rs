@@ -1,7 +1,7 @@
 use std::fmt::{self, Display};
 
 use crate::paged_attention::{
-    calculate_cache_config, MemoryGpuConfig, ModelConfigLike, DEFAULT_PAGED_ATTENTION_BLOCK_SIZE,
+    calculate_cache_config, default_block_size_for_cache_type, MemoryGpuConfig,
 };
 use crate::utils::debug::DeviceRepr;
 use crate::{DeviceLayerMapMetadata, DeviceMapMetadata, MemoryUsage, PagedAttentionConfig};
@@ -151,32 +151,6 @@ impl AutoDeviceMapParams {
     }
 }
 
-fn calculate_key_block_shape(
-    model_config: &dyn ModelConfigLike,
-    dtype: DType,
-    block_size: usize,
-) -> (usize, usize, usize, usize) {
-    let element_size = dtype.size_in_bytes();
-    let x = 16 / element_size;
-    (
-        model_config.num_kv_heads(),
-        model_config.k_head_dim() / x,
-        block_size,
-        x,
-    )
-}
-
-fn calculate_value_block_shape(
-    model_config: &dyn ModelConfigLike,
-    block_size: usize,
-) -> (usize, usize, usize) {
-    (
-        model_config.num_kv_heads(),
-        model_config.v_head_dim(),
-        block_size,
-    )
-}
-
 macro_rules! b_to_mb {
     ($x:expr) => {
         $x / (1024 * 1024)
@@ -222,7 +196,7 @@ pub fn get_device_layers(
     };
 
     let model_cfg = loader.model_config(config)?;
-    let kv_cache_elems = match paged_attn_config {
+    let kv_cache_bytes = match paged_attn_config {
         Some(cfg) => {
             // For MbAmount, clamp to available memory so the capacity check
             // below stays consistent. Utilization and ContextSize pass through
@@ -257,7 +231,10 @@ pub fn get_device_layers(
 
             let cache = calculate_cache_config(
                 effective_mem_gpu,
-                Some(cfg.block_size.unwrap_or(DEFAULT_PAGED_ATTENTION_BLOCK_SIZE)),
+                Some(
+                    cfg.block_size
+                        .unwrap_or_else(|| default_block_size_for_cache_type(cfg.cache_type)),
+                ),
                 dtype,
                 paged_attn_config
                     .map(|cfg| cfg.cache_type)
@@ -269,12 +246,13 @@ pub fn get_device_layers(
                 Some(total_model_size_in_bytes),
                 Some(max_seq_len * max_batch_size),
             )?;
-            let key_shape = calculate_key_block_shape(&*model_cfg, dtype, cache.block_size);
-            let key_sz =
-                cache.num_gpu_blocks * key_shape.0 * key_shape.1 * key_shape.2 * key_shape.3;
-            let val_shape = calculate_value_block_shape(&*model_cfg, cache.block_size);
-            let val_sz = cache.num_gpu_blocks * val_shape.0 * val_shape.1 * val_shape.2;
-            key_sz + val_sz
+            let total_kv_cache_bytes = cache.num_gpu_blocks
+                * cfg.cache_type.bytes_per_block_all_layers(
+                    dtype,
+                    &*model_cfg,
+                    cache.block_size,
+                )?;
+            total_kv_cache_bytes.div_ceil(model_cfg.num_layers().max(1))
         }
         None => {
             let key_shape = [
@@ -289,10 +267,10 @@ pub fn get_device_layers(
                 max_seq_len,
                 model_cfg.v_head_dim(),
             ];
-            key_shape.iter().product::<usize>() + val_shape.iter().product::<usize>()
+            (key_shape.iter().product::<usize>() + val_shape.iter().product::<usize>())
+                * dtype.size_in_bytes()
         }
     };
-    let kv_cache_bytes = kv_cache_elems * dtype.size_in_bytes();
 
     // prepare available memory per device, CPU fallback last (unless unified memory)
     let has_unified_memory = devices.iter().any(crate::utils::normal::is_integrated_gpu);
@@ -305,7 +283,10 @@ pub fn get_device_layers(
     // On unified memory systems (iGPUs), GPU and CPU share the same physical RAM.
     // Don't add CPU as a fallback device since it would double-count memory.
     if !has_unified_memory {
-        let a = MemoryUsage.query(&Device::Cpu)?.available();
+        // Keep CPU fallback unbounded by current MemAvailable. This preserves
+        // the historical "no RAM limits for CPU" behavior and lets mmap/swap
+        // based CPU offload proceed when GPU placement fails.
+        let a = usize::MAX / 4;
         avail.push((a, Device::Cpu));
     }
 

@@ -521,6 +521,7 @@ fn parse_which(
         } => MultimodalLoaderBuilder::new(
             MultimodalSpecificConfig {
                 topology: Topology::from_option_path(topology)?,
+                text_only: false,
                 write_uqff,
                 from_uqff: from_uqff.map(|x| {
                     x.right_or_else(|l| vec![l])

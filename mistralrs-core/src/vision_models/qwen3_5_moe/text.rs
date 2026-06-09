@@ -26,7 +26,7 @@ use crate::{
     pipeline::{
         text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
         EitherCache, IsqModel, KvCache, ModelForwardContext, NormalLoadingMetadata,
-        RecurrentBatchKind,
+        RecurrentBatchKind, ISQ_CPU_DEVICE_SENTINEL,
     },
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
@@ -56,6 +56,32 @@ impl GdnConfig for TextConfig {
     fn quantization_config(&self) -> &Option<QuantizedConfig> {
         &self.quantization_config
     }
+}
+
+fn qwen35_moe_finite_check_enabled() -> bool {
+    std::env::var("MISTRALRS_QWEN35_MOE_FINITE_CHECK")
+        .is_ok_and(|value| value != "0" && !value.eq_ignore_ascii_case("false"))
+}
+
+fn ensure_qwen35_moe_finite(xs: &Tensor, label: impl AsRef<str>) -> Result<()> {
+    if !qwen35_moe_finite_check_enabled() {
+        return Ok(());
+    }
+
+    let max_abs = xs
+        .to_dtype(DType::F32)?
+        .abs()?
+        .max_all()?
+        .to_scalar::<f32>()?;
+    if !max_abs.is_finite() {
+        candle_core::bail!(
+            "Qwen3.5-MoE non-finite activation at {}: dtype={:?}, shape={:?}, max_abs={max_abs}",
+            label.as_ref(),
+            xs.dtype(),
+            xs.dims()
+        );
+    }
+    Ok(())
 }
 
 // ====================== Full Attention layer with MRoPE ======================
@@ -262,10 +288,71 @@ impl FullAttention {
 
 // ====================== MoE ======================
 
+#[derive(Clone)]
+struct Mlp {
+    gate_proj: Arc<dyn QuantMethod>,
+    up_proj: Arc<dyn QuantMethod>,
+    down_proj: Arc<dyn QuantMethod>,
+    act_fn: crate::layers::Activation,
+}
+
+impl Mlp {
+    fn new(
+        vb: ShardedVarBuilder,
+        hidden_size: usize,
+        intermediate_size: usize,
+        quant_config: &Option<QuantizedConfig>,
+        act_fn: crate::layers::Activation,
+        comm: &Arc<mistralrs_quant::Comm>,
+    ) -> Result<Self> {
+        let gate_proj = ColumnParallelLayer::new(
+            hidden_size,
+            intermediate_size,
+            quant_config,
+            false,
+            comm,
+            vb.pp("gate_proj"),
+        )?;
+        let up_proj = ColumnParallelLayer::new(
+            hidden_size,
+            intermediate_size,
+            quant_config,
+            false,
+            comm,
+            vb.pp("up_proj"),
+        )?;
+        let down_proj = RowParallelLayer::new(
+            intermediate_size,
+            hidden_size,
+            quant_config,
+            false,
+            comm,
+            vb.pp("down_proj"),
+        )?;
+        Ok(Self {
+            gate_proj,
+            up_proj,
+            down_proj,
+            act_fn,
+        })
+    }
+
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let gate = self.gate_proj.forward(xs)?;
+        let up = self.up_proj.forward(xs)?;
+        let activated = crate::ops::mul_and_act(&gate, &up, self.act_fn)?;
+        self.down_proj.forward(&activated)
+    }
+
+    fn get_isq_layers(&mut self) -> Vec<&mut Arc<dyn QuantMethod>> {
+        vec![&mut self.gate_proj, &mut self.up_proj, &mut self.down_proj]
+    }
+}
+
 struct SparseMoeBlock {
     gate: Linear,
     experts: MoEExperts,
-    shared_expert: layers::Mlp,
+    shared_expert: Mlp,
     shared_expert_gate: Linear,
     num_experts_per_tok: usize,
     norm_topk_prob: bool,
@@ -310,7 +397,7 @@ impl SparseMoeBlock {
             cfg.hidden_act,
         )?;
 
-        let shared_expert = layers::Mlp::new(
+        let shared_expert = Mlp::new(
             vb.pp("shared_expert"),
             cfg.hidden_size,
             cfg.shared_expert_intermediate_size,
@@ -337,44 +424,95 @@ impl SparseMoeBlock {
         })
     }
 
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+    fn forward(&self, xs: &Tensor, layer_idx: usize) -> Result<Tensor> {
         let (b_size, seq_len, hidden_dim) = xs.dims3()?;
         let xs_flat = xs.reshape(((), hidden_dim))?;
 
         let router_logits = self.gate.forward(&xs_flat)?;
-        let topk = crate::ops::moe_router_topk(
+        ensure_qwen35_moe_finite(
             &router_logits,
-            crate::ops::MoeRouterTopKConfig {
-                top_k: self.num_experts_per_tok,
-                score_function: crate::ops::MoeRouterScoreFunction::Softmax,
-                selected_weight: crate::ops::MoeRouterSelectedWeight::Score,
-                renormalize: self.norm_topk_prob,
-                norm_min: 0.0,
-                output_scale: 1.0,
-                logit_clip: None,
-            },
-            None,
-            None,
+            format!("layer {layer_idx} moe.router_logits"),
         )?;
+        let (topk_weights, topk_ids) = if crate::topology::cpu_moe_enabled() {
+            let routing_weights =
+                candle_nn::ops::softmax_last_dim(&router_logits.to_dtype(DType::F32)?)?;
+            ensure_qwen35_moe_finite(
+                &routing_weights,
+                format!("layer {layer_idx} moe.routing_weights"),
+            )?;
+            let topk_ids = routing_weights
+                .arg_sort_last_dim(false)?
+                .narrow(D::Minus1, 0, self.num_experts_per_tok)?
+                .contiguous()?
+                .to_dtype(DType::U32)?;
+            let mut topk_weights = routing_weights.gather(&topk_ids, D::Minus1)?;
 
-        let mut y = self.experts.forward(xs, topk.values, &topk.indices)?;
+            if self.norm_topk_prob {
+                topk_weights = topk_weights.broadcast_div(&topk_weights.sum_keepdim(D::Minus1)?)?;
+            }
+            ensure_qwen35_moe_finite(&topk_weights, format!("layer {layer_idx} moe.topk_weights"))?;
+            (topk_weights, topk_ids)
+        } else {
+            let topk = crate::ops::moe_router_topk(
+                &router_logits,
+                crate::ops::MoeRouterTopKConfig {
+                    top_k: self.num_experts_per_tok,
+                    score_function: crate::ops::MoeRouterScoreFunction::Softmax,
+                    selected_weight: crate::ops::MoeRouterSelectedWeight::Score,
+                    renormalize: self.norm_topk_prob,
+                    norm_min: 0.0,
+                    output_scale: 1.0,
+                    logit_clip: None,
+                },
+                None,
+                None,
+            )?;
+            (topk.values, topk.indices)
+        };
+
+        let mut y = self.experts.forward(xs, topk_weights, &topk_ids)?;
+        ensure_qwen35_moe_finite(&y, format!("layer {layer_idx} moe.routed_experts"))?;
         y = y.reshape((b_size, seq_len, hidden_dim))?;
 
         let shared_out = self.shared_expert.forward(xs)?;
+        ensure_qwen35_moe_finite(&shared_out, format!("layer {layer_idx} moe.shared_expert"))?;
         let shared_gate = candle_nn::ops::sigmoid(
             &self
                 .shared_expert_gate
                 .forward(&xs.reshape(((), hidden_dim))?)?,
         )?;
+        ensure_qwen35_moe_finite(&shared_gate, format!("layer {layer_idx} moe.shared_gate"))?;
         let shared_gate = shared_gate.reshape((b_size, seq_len, 1))?;
         let shared_out = shared_out.broadcast_mul(&shared_gate)?;
+        ensure_qwen35_moe_finite(
+            &shared_out,
+            format!("layer {layer_idx} moe.gated_shared_expert"),
+        )?;
 
-        y + shared_out
+        let res = y + shared_out;
+        if let Ok(res) = &res {
+            ensure_qwen35_moe_finite(res, format!("layer {layer_idx} moe.output"))?;
+        }
+        res
     }
 
-    fn get_isq_layers(&mut self) -> Vec<&mut Arc<dyn QuantMethod>> {
-        let mut layers = self.experts.get_isq_layers();
-        layers.extend(self.shared_expert.get_isq_layers());
+    fn get_isq_layers(
+        &mut self,
+        routed_layer_num: Option<usize>,
+        shared_layer_num: Option<usize>,
+    ) -> Vec<(&mut Arc<dyn QuantMethod>, Option<usize>)> {
+        let mut layers = self
+            .experts
+            .get_isq_layers()
+            .into_iter()
+            .map(|layer| (layer, routed_layer_num))
+            .collect::<Vec<_>>();
+        layers.extend(
+            self.shared_expert
+                .get_isq_layers()
+                .into_iter()
+                .map(|layer| (layer, shared_layer_num)),
+        );
         layers
     }
 }
@@ -397,6 +535,7 @@ impl DecoderLayer {
     #[allow(clippy::too_many_arguments)]
     fn forward_attention(
         &self,
+        layer_idx: usize,
         x: &Tensor,
         attention_mask: &AttentionMask,
         cos_sin: &(Tensor, Tensor),
@@ -410,6 +549,7 @@ impl DecoderLayer {
         };
         let residual = x;
         let x = self.input_layernorm.forward(x)?;
+        ensure_qwen35_moe_finite(&x, format!("layer {layer_idx} attention.input_norm"))?;
         let attn_out = attn.forward(
             &x,
             attention_mask,
@@ -418,15 +558,24 @@ impl DecoderLayer {
             metadata,
             flash_params,
         )?;
+        ensure_qwen35_moe_finite(&attn_out, format!("layer {layer_idx} attention.output"))?;
         let x = (attn_out + residual)?;
+        ensure_qwen35_moe_finite(&x, format!("layer {layer_idx} attention.residual"))?;
         let residual = &x;
         let normed = self.post_attention_layernorm.forward(&x)?;
-        let ffn_out = self.moe.forward(&normed)?;
-        ffn_out + residual
+        ensure_qwen35_moe_finite(&normed, format!("layer {layer_idx} moe.input_norm"))?;
+        let ffn_out = self.moe.forward(&normed, layer_idx)?;
+        ensure_qwen35_moe_finite(&ffn_out, format!("layer {layer_idx} moe.ffn_out"))?;
+        let res = ffn_out + residual;
+        if let Ok(res) = &res {
+            ensure_qwen35_moe_finite(res, format!("layer {layer_idx} output"))?;
+        }
+        res
     }
 
     fn forward_linear(
         &self,
+        layer_idx: usize,
         x: &Tensor,
         cache: &mut GdnLayerCache,
         batch_kind: RecurrentBatchKind,
@@ -437,12 +586,21 @@ impl DecoderLayer {
         };
         let residual = x;
         let x = self.input_layernorm.forward(x)?;
+        ensure_qwen35_moe_finite(&x, format!("layer {layer_idx} linear.input_norm"))?;
         let gdn_out = gdn.forward(&x, cache, batch_kind)?;
+        ensure_qwen35_moe_finite(&gdn_out, format!("layer {layer_idx} linear.output"))?;
         let x = (gdn_out + residual)?;
+        ensure_qwen35_moe_finite(&x, format!("layer {layer_idx} linear.residual"))?;
         let residual = &x;
         let normed = self.post_attention_layernorm.forward(&x)?;
-        let ffn_out = self.moe.forward(&normed)?;
-        ffn_out + residual
+        ensure_qwen35_moe_finite(&normed, format!("layer {layer_idx} moe.input_norm"))?;
+        let ffn_out = self.moe.forward(&normed, layer_idx)?;
+        ensure_qwen35_moe_finite(&ffn_out, format!("layer {layer_idx} moe.ffn_out"))?;
+        let res = ffn_out + residual;
+        if let Ok(res) = &res {
+            ensure_qwen35_moe_finite(res, format!("layer {layer_idx} output"))?;
+        }
+        res
     }
 }
 
@@ -697,6 +855,7 @@ impl Qwen3_5MoeTextModel {
         visual_pos_masks: Option<&Tensor>,
         deepstack_visual_embeds: Option<&[Tensor]>,
     ) -> Result<Tensor> {
+        ensure_qwen35_moe_finite(&xs, "embeds.input")?;
         let mut hybrid_cache = self.cache.hybrid();
         let recurrent_metadata = ctx.recurrent_metadata().cloned();
         if self
@@ -724,6 +883,8 @@ impl Qwen3_5MoeTextModel {
                 _ => unreachable!(),
             }
         };
+        ensure_qwen35_moe_finite(&cos_sin.0, "rope.cos")?;
+        ensure_qwen35_moe_finite(&cos_sin.1, "rope.sin")?;
 
         let attention_mask = DeviceMappedMask::new(attention_mask.clone(), &*self.mapper)?;
 
@@ -755,11 +916,13 @@ impl Qwen3_5MoeTextModel {
 
         for (i, layer) in self.layers.iter().enumerate() {
             xs = self.mapper.map(xs, i)?;
+            ensure_qwen35_moe_finite(&xs, format!("layer {i} mapped_input"))?;
 
             match &self.layer_types[i] {
                 LayerType::FullAttention => {
                     if let Some(HybridLayerCache::Attention(kv_cache)) = hybrid_cache.get_mut(i) {
                         xs = layer.forward_attention(
+                            i,
                             &xs,
                             &attention_mask.get(xs.device()),
                             &cos_sin,
@@ -785,6 +948,7 @@ impl Qwen3_5MoeTextModel {
                         };
 
                         xs = layer.forward_linear(
+                            i,
                             &xs,
                             &mut gdn_cache,
                             recurrent_metadata.batch_kind(),
@@ -814,13 +978,18 @@ impl Qwen3_5MoeTextModel {
             {
                 if i < deepstack.len() {
                     xs = self.deepstack_process(xs, idx, idx_expanded, &deepstack[i])?;
+                    ensure_qwen35_moe_finite(&xs, format!("layer {i} deepstack_output"))?;
                 }
             }
         }
         let xs = xs.to_device(&self.device)?;
         let xs = xs.apply(&self.norm)?;
+        ensure_qwen35_moe_finite(&xs, "final.norm")?;
         let xs = ctx.logits(&xs)?;
-        self.lm_head.forward(&xs)
+        ensure_qwen35_moe_finite(&xs, "final.logits_context")?;
+        let logits = self.lm_head.forward(&xs)?;
+        ensure_qwen35_moe_finite(&logits, "final.lm_head")?;
+        Ok(logits)
     }
 
     fn deepstack_process(
@@ -869,12 +1038,37 @@ impl IsqModel for Qwen3_5MoeTextModel {
                     tensors.push((&mut attn.o_proj, Some(i)));
                 }
                 LayerImpl::LinearAttention(gdn) => {
-                    tensors.push((&mut gdn.in_proj, Some(i)));
                     tensors.push((&mut gdn.out_proj, Some(i)));
                 }
             }
-            for l in layer.moe.get_isq_layers() {
-                tensors.push((l, Some(i)));
+            let routed_layer_num = if crate::topology::cpu_moe_enabled() {
+                Some(ISQ_CPU_DEVICE_SENTINEL)
+            } else {
+                Some(i)
+            };
+            for (l, layer_num) in layer.moe.get_isq_layers(routed_layer_num, Some(i)) {
+                tensors.push((l, layer_num));
+            }
+        }
+        (tensors, &*self.mapper)
+    }
+
+    fn get_layers_moe_experts_only(
+        &mut self,
+    ) -> (
+        Vec<(&mut Arc<dyn QuantMethod>, Option<usize>)>,
+        &dyn DeviceMapper,
+    ) {
+        let mut tensors = Vec::new();
+        tensors.push((&mut self.lm_head, None));
+        for (i, layer) in self.layers.iter_mut().enumerate() {
+            let routed_layer_num = if crate::topology::cpu_moe_enabled() {
+                Some(ISQ_CPU_DEVICE_SENTINEL)
+            } else {
+                Some(i)
+            };
+            for (l, layer_num) in layer.moe.get_isq_layers(routed_layer_num, Some(i)) {
+                tensors.push((l, layer_num));
             }
         }
         (tensors, &*self.mapper)

@@ -3,6 +3,7 @@ use std::{
     fs,
     path::Path,
     sync::{Arc, Mutex},
+    time::Instant,
 };
 
 use candle_core::{DType, Device, Result, Tensor, D};
@@ -31,6 +32,7 @@ use crate::{
     },
     utils::varbuilder_utils::{from_mmaped_safetensors, DeviceForLoadTensor},
 };
+use tracing::info;
 
 use super::{
     config::Gemma4TextConfig,
@@ -77,6 +79,7 @@ impl Gemma4MtpRuntime {
     pub fn load(
         config: MtpConfig,
         target_cfg: &Gemma4TextConfig,
+        target_dtype: DType,
         device: &Device,
         mapper: &dyn DeviceMapper,
         silent: bool,
@@ -137,7 +140,15 @@ impl Gemma4MtpRuntime {
             );
         }
 
-        let dtype = dtype_from_config(assistant_cfg.dtype.as_deref());
+        let assistant_dtype = dtype_from_config(assistant_cfg.dtype.as_deref());
+        let dtype = target_dtype;
+        if assistant_dtype != dtype {
+            info!(
+                "MTP assistant config dtype {:?} overridden by target runtime dtype {:?}.",
+                assistant_dtype, dtype
+            );
+        }
+        info!("Loading MTP model config   {:?}.", config);
         let vb = from_mmaped_safetensors(
             weight_paths,
             Vec::new(),
@@ -227,6 +238,10 @@ impl Gemma4MtpRuntime {
         cache: &Gemma4MtpStepCache<'_>,
     ) -> Result<Vec<SpeculativeProposal>> {
         let batch = sampled_tokens.len();
+        let fast_legacy = mtp_fast_legacy_enabled(self.model.device())
+            && sequences.iter().all(|seq| seq.sampler().is_argmax());
+        let stats = mtp_stats_enabled();
+        let started = stats.then(Instant::now);
         let mut contexts = sequences
             .iter()
             .zip(sampled_tokens.iter().copied())
@@ -243,15 +258,31 @@ impl Gemma4MtpRuntime {
         let mut hidden = target_hiddens;
         let mut tokens = Vec::with_capacity(self.n_predict);
         let mut logits = Vec::with_capacity(self.n_predict);
-        for _ in 0..self.n_predict {
+        for step_idx in 0..self.n_predict {
+            let step_started = stats.then(Instant::now);
             let input_embed = target_embedder(&last_token)?;
-            let (_argmax_token, draft_logits, next_hidden) =
-                self.model.step(input_embed, hidden, base_lens, cache)?;
-            let draft_token = sample_draft_tokens(&draft_logits, sequences, &mut contexts, &rng)?;
+            let (argmax_token, draft_logits, next_hidden) =
+                self.model
+                    .step(input_embed, hidden, base_lens, cache, fast_legacy)?;
+            let draft_token = if fast_legacy {
+                argmax_token
+            } else {
+                sample_draft_tokens(&draft_logits, sequences, &mut contexts, &rng)?
+            };
             tokens.push(draft_token.clone());
-            logits.push(draft_logits);
+            if !fast_legacy {
+                logits.push(draft_logits);
+            }
             last_token = draft_token;
             hidden = next_hidden;
+            if let Some(step_started) = step_started {
+                tracing::info!(
+                    "Gemma4 MTP propose step: step={}, fast_legacy={}, elapsed_ms={:.2}",
+                    step_idx,
+                    fast_legacy,
+                    step_started.elapsed().as_secs_f64() * 1000.0
+                );
+            }
         }
         if tokens.is_empty() {
             return Ok((0..batch)
@@ -260,12 +291,28 @@ impl Gemma4MtpRuntime {
         }
         let tokens = Tensor::cat(&tokens, D::Minus1)?;
         let tokens = tokens.to_vec2::<u32>()?;
-        let logits = Tensor::cat(&logits, 1)?;
-        tokens
-            .into_iter()
-            .enumerate()
-            .map(|(row, tokens)| Ok(SpeculativeProposal::with_logits(tokens, logits.get(row)?)))
-            .collect()
+        let proposals = if fast_legacy {
+            Ok(tokens
+                .into_iter()
+                .map(SpeculativeProposal::new)
+                .collect::<Vec<_>>())
+        } else {
+            let logits = Tensor::cat(&logits, 1)?;
+            tokens
+                .into_iter()
+                .enumerate()
+                .map(|(row, tokens)| Ok(SpeculativeProposal::with_logits(tokens, logits.get(row)?)))
+                .collect::<Result<Vec<_>>>()
+        }?;
+        if let Some(started) = started {
+            tracing::info!(
+                "Gemma4 MTP propose total: steps={}, fast_legacy={}, elapsed_ms={:.2}",
+                self.n_predict,
+                fast_legacy,
+                started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        Ok(proposals)
     }
 }
 
@@ -299,6 +346,19 @@ fn sample_draft_tokens(
     }
 
     Tensor::from_vec(tokens, (batch, 1), logits.device())
+}
+
+fn mtp_fast_legacy_enabled(device: &Device) -> bool {
+    crate::utils::is_legacy_cuda_device(device)
+        && std::env::var("MISTRALRS_MTP_FAST_LEGACY")
+            .map(|v| !v.trim().is_empty() && v != "0" && !v.eq_ignore_ascii_case("false"))
+            .unwrap_or(false)
+}
+
+fn mtp_stats_enabled() -> bool {
+    std::env::var("MISTRALRS_MTP_STATS")
+        .map(|v| !v.trim().is_empty() && v != "0" && !v.eq_ignore_ascii_case("false"))
+        .unwrap_or(false)
 }
 
 impl SpeculativeProposer for Gemma4MtpRuntime {
@@ -473,10 +533,10 @@ impl Gemma4MtpModel {
         target_hidden: Tensor,
         positions: &[usize],
         cache: &Gemma4MtpStepCache<'_>,
+        token_only: bool,
     ) -> Result<(Tensor, Tensor, Tensor)> {
         let mut hidden_states = Tensor::cat(&[input_embed, target_hidden], D::Minus1)?;
         hidden_states = hidden_states.apply(&self.pre_projection)?;
-
         // Each MTP step is a single query over the target donor KV cache, not
         // a causal prefill over newly produced draft tokens.
         let flash = FlashParams::empty(false);
@@ -486,9 +546,20 @@ impl Gemma4MtpModel {
 
         let draft_hidden_states = self.norm.forward(&hidden_states)?;
         let backbone_hidden_states = draft_hidden_states.apply(&self.post_projection)?;
-        let (token, logits) = self
-            .masked_embedding
-            .get_logits_and_top_token(&draft_hidden_states, &self.lm_head_weight)?;
+        let (token, logits) = if token_only {
+            let token = self
+                .masked_embedding
+                .get_top_token(&draft_hidden_states, &self.lm_head_weight)?;
+            let logits = Tensor::zeros(
+                (draft_hidden_states.dim(0)?, 1, 1),
+                DType::F32,
+                token.device(),
+            )?;
+            (token, logits)
+        } else {
+            self.masked_embedding
+                .get_logits_and_top_token(&draft_hidden_states, &self.lm_head_weight)?
+        };
         Ok((token, logits, backbone_hidden_states))
     }
 }
@@ -533,35 +604,45 @@ impl Gemma4MtpDecoderLayer {
         device: &Device,
         mapper: &dyn DeviceMapper,
     ) -> Result<Self> {
-        let self_attn =
-            Gemma4MtpAttention::new(cfg, layer_idx, donor_layer_idx, vb.pp("self_attn"), device)?;
+        let layer_device = mapper
+            .device_for(layer_idx, false)
+            .cloned()
+            .unwrap_or_else(|| device.clone());
+        let layer_vb = mapper.set_device(layer_idx, vb.clone(), false);
+        let self_attn = Gemma4MtpAttention::new(
+            cfg,
+            layer_idx,
+            donor_layer_idx,
+            layer_vb.pp("self_attn"),
+            &layer_device,
+        )?;
         let mlp = Gemma4MtpMlp::new(
             cfg.hidden_size,
             cfg.intermediate_size,
             cfg.hidden_activation,
-            vb.pp("mlp"),
+            layer_vb.pp("mlp"),
         )?;
         let input_layernorm = Gemma4MtpRmsNorm::new(
             cfg.hidden_size,
             cfg.rms_norm_eps,
-            mapper.set_device(layer_idx, vb.pp("input_layernorm"), false),
+            layer_vb.pp("input_layernorm"),
         )?;
         let post_attention_layernorm = Gemma4MtpRmsNorm::new(
             cfg.hidden_size,
             cfg.rms_norm_eps,
-            mapper.set_device(layer_idx, vb.pp("post_attention_layernorm"), false),
+            layer_vb.pp("post_attention_layernorm"),
         )?;
         let pre_feedforward_layernorm = Gemma4MtpRmsNorm::new(
             cfg.hidden_size,
             cfg.rms_norm_eps,
-            mapper.set_device(layer_idx, vb.pp("pre_feedforward_layernorm"), false),
+            layer_vb.pp("pre_feedforward_layernorm"),
         )?;
         let post_feedforward_layernorm = Gemma4MtpRmsNorm::new(
             cfg.hidden_size,
             cfg.rms_norm_eps,
-            mapper.set_device(layer_idx, vb.pp("post_feedforward_layernorm"), false),
+            layer_vb.pp("post_feedforward_layernorm"),
         )?;
-        let layer_scalar = vb.get((1,), "layer_scalar").ok();
+        let layer_scalar = layer_vb.get((1,), "layer_scalar").ok();
         Ok(Self {
             self_attn,
             mlp,
@@ -810,6 +891,34 @@ impl Gemma4MtpMaskedEmbedding {
         hidden_states: &Tensor,
         lm_head_weight: &Tensor,
     ) -> Result<(Tensor, Tensor)> {
+        let (hidden_states, selected, logits, token) =
+            self.selected_logits_and_top_token(hidden_states, lm_head_weight)?;
+        // Match HF's ordered-embedding fallback so speculative q is not
+        // artificially concentrated on the selected centroid tokens.
+        let mask_value = logits.min_all()?.to_scalar::<f32>()? - 1.0;
+        let vocab_size = self.num_centroids * self.vocab_size_per_centroid;
+        let full_logits = Tensor::full(
+            mask_value,
+            (hidden_states.dim(0)?, vocab_size),
+            logits.device(),
+        )?
+        .scatter(&selected.to_dtype(DType::U32)?, &logits, D::Minus1)?;
+        debug_assert_eq!(token.dims(), &[hidden_states.dim(0)?, 1]);
+        Ok((token, full_logits.unsqueeze(1)?))
+    }
+
+    fn get_top_token(&self, hidden_states: &Tensor, lm_head_weight: &Tensor) -> Result<Tensor> {
+        let (hidden_states, _selected, _logits, token) =
+            self.selected_logits_and_top_token(hidden_states, lm_head_weight)?;
+        debug_assert_eq!(token.dims(), &[hidden_states.dim(0)?, 1]);
+        Ok(token)
+    }
+
+    fn selected_logits_and_top_token(
+        &self,
+        hidden_states: &Tensor,
+        lm_head_weight: &Tensor,
+    ) -> Result<(Tensor, Tensor, Tensor, Tensor)> {
         let hidden_states = hidden_states.reshape(((), self.hidden_size))?;
         let centroid_logits = hidden_states.apply(&self.centroids)?;
         let top_k_indices = topk_indices_u32(&centroid_logits, self.centroid_top_k)?;
@@ -828,22 +937,11 @@ impl Gemma4MtpMaskedEmbedding {
             .unsqueeze(1)?
             .broadcast_mul(&selected_embeddings)?
             .sum(D::Minus1)?;
-        // Match HF's ordered-embedding fallback so speculative q is not
-        // artificially concentrated on the selected centroid tokens.
-        let mask_value = logits.min_all()?.to_scalar::<f32>()? - 1.0;
         let argmax = logits.argmax(D::Minus1)?;
         let token = selected
             .gather(&argmax.unsqueeze(1)?, D::Minus1)?
             .to_dtype(DType::U32)?;
-        let vocab_size = self.num_centroids * self.vocab_size_per_centroid;
-        let full_logits = Tensor::full(
-            mask_value,
-            (hidden_states.dim(0)?, vocab_size),
-            logits.device(),
-        )?
-        .scatter(&selected.to_dtype(DType::U32)?, &logits, D::Minus1)?;
-        debug_assert_eq!(token.dims(), &[hidden_states.dim(0)?, 1]);
-        Ok((token, full_logits.unsqueeze(1)?))
+        Ok((hidden_states, selected, logits, token))
     }
 }
 

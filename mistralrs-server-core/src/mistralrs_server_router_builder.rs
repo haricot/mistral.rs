@@ -170,9 +170,25 @@ impl MistralRsServerRouterBuilder {
         self
     }
 
+    /// Sets the CORS allowed origins if provided.
+    pub fn with_allowed_origins_optional(mut self, origins: Option<Vec<String>>) -> Self {
+        if let Some(origins) = origins {
+            self = self.with_allowed_origins(origins);
+        }
+        self
+    }
+
     /// Sets the axum default request body limit.
     pub fn with_max_body_limit(mut self, max_body_limit: usize) -> Self {
         self.max_body_limit = Some(max_body_limit);
+        self
+    }
+
+    /// Sets the axum default request body limit if provided.
+    pub fn with_max_body_limit_optional(mut self, max_body_limit: Option<usize>) -> Self {
+        if let Some(max_body_limit) = max_body_limit {
+            self = self.with_max_body_limit(max_body_limit);
+        }
         self
     }
 

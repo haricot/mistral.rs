@@ -294,10 +294,12 @@ pub fn moe_router_topk(
         values = (values * config.output_scale as f64)?;
     }
     if let Some(expert_scale) = expert_scale {
+        let flat_indices = indices.flatten_all()?;
         let scales = expert_scale
             .to_dtype(DType::F32)?
-            .index_select(&indices.flatten_all()?, 0)?
-            .reshape(indices.shape())?;
+            .index_select(&flat_indices.to_device(expert_scale.device())?, 0)?
+            .reshape(indices.shape())?
+            .to_device(values.device())?;
         values = (values * scales)?;
     }
 
@@ -3375,6 +3377,11 @@ fn candle_glu_activation_type(
     }
 }
 
+#[cfg(feature = "cuda")]
+fn legacy_cuda_device(device: &candle_core::Device) -> bool {
+    crate::utils::is_legacy_cuda_device(device)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GatedActivationOrder {
     GateUp,
@@ -3382,6 +3389,11 @@ pub enum GatedActivationOrder {
 }
 
 pub fn mul_and_act(a: &Tensor, b: &Tensor, act: Activation) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    if legacy_cuda_device(a.device()) {
+        return a.apply(&act)? * b;
+    }
+
     // Check if we can use the fused kernel (works on CUDA, Metal, and CPU)
     if matches!(a.dtype(), DType::F16 | DType::BF16 | DType::F32) && a.dtype() == b.dtype() {
         if let Some(activation_type) = glu_activation_type(act) {
@@ -3393,6 +3405,11 @@ pub fn mul_and_act(a: &Tensor, b: &Tensor, act: Activation) -> Result<Tensor> {
 }
 
 pub fn mul_and_candle_act(a: &Tensor, b: &Tensor, act: candle_nn::Activation) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    if legacy_cuda_device(a.device()) {
+        return a.apply(&act)? * b;
+    }
+
     // Check if we can use the fused kernel (works on CUDA, Metal, and CPU)
     if matches!(a.dtype(), DType::F16 | DType::BF16 | DType::F32) && a.dtype() == b.dtype() {
         if let Some(activation_type) = candle_glu_activation_type(act) {

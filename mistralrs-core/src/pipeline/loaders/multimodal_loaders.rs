@@ -131,6 +131,9 @@ pub trait MultimodalModelLoader: IsqModelLoader + Send + Sync + DeviceMappedMode
         // Default is false, specific model must override.
         false
     }
+    fn supports_text_only_loading(&self, _config: &str) -> bool {
+        false
+    }
     fn modalities(&self, config: &str) -> Result<Modalities>;
     fn prefixer(&self, config: &str) -> Arc<dyn MultimodalPromptPrefixer>;
     /// Return a default chat template (Jinja string) for models that don't ship a
@@ -417,6 +420,12 @@ impl MultimodalModelLoader for AutoMultimodalLoader {
         Self::get_loader(config)
             .expect("AutoMultimodalLoader")
             .supports_prefix_cacher(config)
+    }
+
+    fn supports_text_only_loading(&self, config: &str) -> bool {
+        Self::get_loader(config)
+            .expect("AutoMultimodalLoader")
+            .supports_text_only_loading(config)
     }
 
     fn prefixer(&self, config: &str) -> Arc<dyn MultimodalPromptPrefixer> {
@@ -6354,6 +6363,9 @@ impl MultimodalModelLoader for Qwen3_5Loader {
     fn supports_prefix_cacher(&self, _config: &str) -> bool {
         true
     }
+    fn supports_text_only_loading(&self, _config: &str) -> bool {
+        true
+    }
     fn prefixer(&self, _config: &str) -> Arc<dyn MultimodalPromptPrefixer> {
         Arc::new(Qwen3_5Prefixer)
     }
@@ -6395,29 +6407,35 @@ impl DeviceMappedModelLoader for Qwen3_5Loader {
         config: &str,
         params: &AutoDeviceMapParams,
     ) -> Result<usize> {
-        let AutoDeviceMapParams::Multimodal {
-            max_seq_len,
-            max_batch_size,
-            max_image_shape,
-            max_num_images,
-        } = params
-        else {
-            anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
+        let (max_seq_len, max_batch_size, img_seq_len) = match params {
+            AutoDeviceMapParams::Text {
+                max_seq_len,
+                max_batch_size,
+            } => (*max_seq_len, *max_batch_size, 0),
+            AutoDeviceMapParams::Multimodal {
+                max_seq_len,
+                max_batch_size,
+                max_image_shape,
+                max_num_images,
+            } => {
+                let cfg: Qwen3_5Config = serde_json::from_str(config)?;
+                let cfg = &cfg.vision_config;
+                let grid_t = 1;
+                let grid_h = (max_image_shape.0 / cfg.patch_size) / cfg.spatial_merge_size;
+                let grid_w = (max_image_shape.1 / cfg.patch_size) / cfg.spatial_merge_size;
+                (
+                    *max_seq_len,
+                    *max_batch_size,
+                    grid_t * grid_h * grid_w * *max_num_images,
+                )
+            }
         };
 
         let cfg: Qwen3_5Config = serde_json::from_str(config)?;
 
-        let img_seq_len = {
-            let cfg = &cfg.vision_config;
-            let grid_t = 1;
-            let grid_h = (max_image_shape.0 / cfg.patch_size) / cfg.spatial_merge_size;
-            let grid_w = (max_image_shape.1 / cfg.patch_size) / cfg.spatial_merge_size;
-            grid_t * grid_h * grid_w * max_num_images
-        };
-
         let max_text_attn = {
             let cfg = &cfg.text_config;
-            let max_seq_len = img_seq_len + max_seq_len.min(&ATTENTION_CHUNK_SIZE);
+            let max_seq_len = img_seq_len + max_seq_len.min(ATTENTION_CHUNK_SIZE);
             max_batch_size * cfg.num_attention_heads * max_seq_len * max_seq_len
         };
 
@@ -6436,7 +6454,7 @@ impl DeviceMappedModelLoader for Qwen3_5Loader {
             max_num_images,
         } = params
         else {
-            anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
+            return Ok(0);
         };
 
         let cfg: Qwen3_5Config = serde_json::from_str(config)?;
@@ -6689,6 +6707,9 @@ impl MultimodalModelLoader for Qwen3_5MoeLoader {
     fn supports_prefix_cacher(&self, _config: &str) -> bool {
         true
     }
+    fn supports_text_only_loading(&self, _config: &str) -> bool {
+        true
+    }
     fn prefixer(&self, _config: &str) -> Arc<dyn MultimodalPromptPrefixer> {
         Arc::new(Qwen3_5MoePrefixer)
     }
@@ -6782,29 +6803,35 @@ impl DeviceMappedModelLoader for Qwen3_5MoeLoader {
         config: &str,
         params: &AutoDeviceMapParams,
     ) -> Result<usize> {
-        let AutoDeviceMapParams::Multimodal {
-            max_seq_len,
-            max_batch_size,
-            max_image_shape,
-            max_num_images,
-        } = params
-        else {
-            anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
+        let (max_seq_len, max_batch_size, img_seq_len) = match params {
+            AutoDeviceMapParams::Text {
+                max_seq_len,
+                max_batch_size,
+            } => (*max_seq_len, *max_batch_size, 0),
+            AutoDeviceMapParams::Multimodal {
+                max_seq_len,
+                max_batch_size,
+                max_image_shape,
+                max_num_images,
+            } => {
+                let cfg: Qwen3_5MoeConfig = serde_json::from_str(config)?;
+                let cfg = &cfg.vision_config;
+                let grid_t = 1;
+                let grid_h = (max_image_shape.0 / cfg.patch_size) / cfg.spatial_merge_size;
+                let grid_w = (max_image_shape.1 / cfg.patch_size) / cfg.spatial_merge_size;
+                (
+                    *max_seq_len,
+                    *max_batch_size,
+                    grid_t * grid_h * grid_w * *max_num_images,
+                )
+            }
         };
 
         let cfg: Qwen3_5MoeConfig = serde_json::from_str(config)?;
 
-        let img_seq_len = {
-            let cfg = &cfg.vision_config;
-            let grid_t = 1;
-            let grid_h = (max_image_shape.0 / cfg.patch_size) / cfg.spatial_merge_size;
-            let grid_w = (max_image_shape.1 / cfg.patch_size) / cfg.spatial_merge_size;
-            grid_t * grid_h * grid_w * max_num_images
-        };
-
         let max_text_attn = {
             let cfg = &cfg.text_config;
-            let max_seq_len = img_seq_len + max_seq_len.min(&ATTENTION_CHUNK_SIZE);
+            let max_seq_len = img_seq_len + max_seq_len.min(ATTENTION_CHUNK_SIZE);
             max_batch_size * cfg.num_attention_heads * max_seq_len * max_seq_len
         };
 
@@ -6823,7 +6850,7 @@ impl DeviceMappedModelLoader for Qwen3_5MoeLoader {
             max_num_images,
         } = params
         else {
-            anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
+            return Ok(0);
         };
 
         let cfg: Qwen3_5MoeConfig = serde_json::from_str(config)?;
@@ -6936,6 +6963,7 @@ impl DeviceMappedModelLoader for Qwen3_5MoeLoader {
         let cfg: Qwen3_5MoeConfig = serde_json::from_str(config)?;
         let text_cfg = &cfg.text_config;
         let layer_types = text_cfg.layer_types();
+        let cpu_moe = crate::topology::cpu_moe_enabled();
 
         let mut layer_sizes = Vec::with_capacity(text_cfg.num_hidden_layers);
 
@@ -6998,13 +7026,23 @@ impl DeviceMappedModelLoader for Qwen3_5MoeLoader {
                     gate_proj + up_proj + down_proj
                 };
                 let shared_expert_gate = text_cfg.hidden_size;
-                gate + per_expert * text_cfg.num_experts + shared_expert + shared_expert_gate
+                let routed_experts = if cpu_moe {
+                    0
+                } else {
+                    per_expert * text_cfg.num_experts
+                };
+                gate + routed_experts + shared_expert + shared_expert_gate
             };
 
             let per_layer_elems =
                 input_layernorm + post_attention_layernorm + attn_elems + moe_elems;
 
-            layer_sizes.push(per_layer_elems * dtype.size_in_bytes());
+            let mut per_layer_bytes = per_layer_elems * dtype.size_in_bytes();
+            if weight_pack_factor > 1 {
+                // UQFF/ISQ artifacts need temporary and allocator headroom while loading.
+                per_layer_bytes = per_layer_bytes.saturating_mul(5) / 4;
+            }
+            layer_sizes.push(per_layer_bytes);
         }
 
         Ok(layer_sizes)
@@ -7353,6 +7391,9 @@ impl MultimodalModelLoader for Gemma4Loader {
     fn supports_prefix_cacher(&self, _config: &str) -> bool {
         true
     }
+    fn supports_text_only_loading(&self, _config: &str) -> bool {
+        true
+    }
     fn prefixer(&self, _config: &str) -> Arc<dyn MultimodalPromptPrefixer> {
         Arc::new(Gemma4Prefixer)
     }
@@ -7425,26 +7466,33 @@ impl DeviceMappedModelLoader for Gemma4Loader {
         config: &str,
         params: &AutoDeviceMapParams,
     ) -> Result<usize> {
-        let AutoDeviceMapParams::Multimodal {
-            max_seq_len,
-            max_batch_size,
-            max_image_shape: _,
-            max_num_images,
-        } = params
-        else {
-            anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
+        let (max_seq_len, max_batch_size, max_num_images, include_multimodal) = match params {
+            AutoDeviceMapParams::Text {
+                max_seq_len,
+                max_batch_size,
+            } => (*max_seq_len, *max_batch_size, 0, false),
+            AutoDeviceMapParams::Multimodal {
+                max_seq_len,
+                max_batch_size,
+                max_image_shape: _,
+                max_num_images,
+            } => (*max_seq_len, *max_batch_size, *max_num_images, true),
         };
 
         let cfg: Gemma4Config = serde_json::from_str(config)?;
         let tc = &cfg.text_config;
 
-        let vision_tokens_per_image = if cfg.vision_config.is_some() {
+        let vision_tokens_per_image = if include_multimodal && cfg.vision_config.is_some() {
             cfg.vision_soft_tokens_per_image.unwrap_or(280)
         } else {
             0
         };
-        let audio_tokens = if cfg.audio_config.is_some() { 750 } else { 0 };
-        let total_seq_len = *max_seq_len + vision_tokens_per_image * max_num_images + audio_tokens;
+        let audio_tokens = if include_multimodal && cfg.audio_config.is_some() {
+            750
+        } else {
+            0
+        };
+        let total_seq_len = max_seq_len + vision_tokens_per_image * max_num_images + audio_tokens;
         let max_text_attn = max_batch_size * tc.num_attention_heads * total_seq_len * total_seq_len;
 
         Ok(max_text_attn)
@@ -7462,7 +7510,7 @@ impl DeviceMappedModelLoader for Gemma4Loader {
             max_num_images,
         } = params
         else {
-            anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
+            return Ok(0);
         };
 
         let cfg: Gemma4Config = serde_json::from_str(config)?;
@@ -7745,7 +7793,7 @@ impl DeviceMappedModelLoader for Gemma4Loader {
     }
 
     fn non_mapped_sub_models(&self) -> Option<Vec<NonMappedSubModel>> {
-        Some(vec![NonMappedSubModel::Vision, NonMappedSubModel::Audio])
+        None
     }
 
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {

@@ -78,10 +78,13 @@ afq_qmv_kernel(const T *__restrict__ x, const uint32_t *__restrict__ w_q,
     } else if constexpr (std::is_same_v<T, __half>) {
       scale = __half2float(scales_row[group_idx]);
       bias = __half2float(biases_row[group_idx]);
-    } else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+    }
+#if __CUDA_ARCH__ >= 800
+    else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
       scale = __bfloat162float(scales_row[group_idx]);
       bias = __bfloat162float(biases_row[group_idx]);
     }
+#endif
 
     // Dequantize: w = q * scale + bias
     float w = (float)q * scale + bias;
@@ -92,9 +95,12 @@ afq_qmv_kernel(const T *__restrict__ x, const uint32_t *__restrict__ w_q,
       x_val = x_row[k];
     } else if constexpr (std::is_same_v<T, __half>) {
       x_val = __half2float(x_row[k]);
-    } else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+    }
+#if __CUDA_ARCH__ >= 800 || defined(ALLOW_LEGACY_BF16)
+    else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
       x_val = __bfloat162float(x_row[k]);
     }
+#endif
 
     acc = fmaf(x_val, w, acc);
   }
@@ -108,9 +114,12 @@ afq_qmv_kernel(const T *__restrict__ x, const uint32_t *__restrict__ w_q,
       y[m * N + n] = acc;
     } else if constexpr (std::is_same_v<T, __half>) {
       y[m * N + n] = __float2half(acc);
-    } else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+    }
+#if __CUDA_ARCH__ >= 800 || defined(ALLOW_LEGACY_BF16)
+    else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
       y[m * N + n] = __float2bfloat16(acc);
     }
+#endif
   }
 }
 
@@ -151,10 +160,13 @@ afq_qmv_3bit_kernel(const T *__restrict__ x, const uint8_t *__restrict__ w_q,
     } else if constexpr (std::is_same_v<T, __half>) {
       scale = __half2float(scales_row[group_idx]);
       bias = __half2float(biases_row[group_idx]);
-    } else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+    }
+#if __CUDA_ARCH__ >= 800 || defined(ALLOW_LEGACY_BF16)
+    else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
       scale = __bfloat162float(scales_row[group_idx]);
       bias = __bfloat162float(biases_row[group_idx]);
     }
+#endif
 
     float w = (float)q * scale + bias;
 
@@ -163,9 +175,12 @@ afq_qmv_3bit_kernel(const T *__restrict__ x, const uint8_t *__restrict__ w_q,
       x_val = x_row[k];
     } else if constexpr (std::is_same_v<T, __half>) {
       x_val = __half2float(x_row[k]);
-    } else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+    }
+#if __CUDA_ARCH__ >= 800 || defined(ALLOW_LEGACY_BF16)
+    else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
       x_val = __bfloat162float(x_row[k]);
     }
+#endif
 
     acc = fmaf(x_val, w, acc);
   }
@@ -177,9 +192,12 @@ afq_qmv_3bit_kernel(const T *__restrict__ x, const uint8_t *__restrict__ w_q,
       y[m * N + n] = acc;
     } else if constexpr (std::is_same_v<T, __half>) {
       y[m * N + n] = __float2half(acc);
-    } else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+    }
+#if __CUDA_ARCH__ >= 800 || defined(ALLOW_LEGACY_BF16)
+    else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
       y[m * N + n] = __float2bfloat16(acc);
     }
+#endif
   }
 }
 
@@ -220,10 +238,13 @@ afq_qmv_6bit_kernel(const T *__restrict__ x, const uint8_t *__restrict__ w_q,
     } else if constexpr (std::is_same_v<T, __half>) {
       scale = __half2float(scales_row[group_idx]);
       bias = __half2float(biases_row[group_idx]);
-    } else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+    }
+#if __CUDA_ARCH__ >= 800 || defined(ALLOW_LEGACY_BF16)
+    else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
       scale = __bfloat162float(scales_row[group_idx]);
       bias = __bfloat162float(biases_row[group_idx]);
     }
+#endif
 
     float w = (float)q * scale + bias;
 
@@ -232,9 +253,12 @@ afq_qmv_6bit_kernel(const T *__restrict__ x, const uint8_t *__restrict__ w_q,
       x_val = x_row[k];
     } else if constexpr (std::is_same_v<T, __half>) {
       x_val = __half2float(x_row[k]);
-    } else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+    }
+#if __CUDA_ARCH__ >= 800 || defined(ALLOW_LEGACY_BF16)
+    else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
       x_val = __bfloat162float(x_row[k]);
     }
+#endif
 
     acc = fmaf(x_val, w, acc);
   }
@@ -246,9 +270,12 @@ afq_qmv_6bit_kernel(const T *__restrict__ x, const uint8_t *__restrict__ w_q,
       y[m * N + n] = acc;
     } else if constexpr (std::is_same_v<T, __half>) {
       y[m * N + n] = __float2half(acc);
-    } else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+    }
+#if __CUDA_ARCH__ >= 800 || defined(ALLOW_LEGACY_BF16)
+    else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
       y[m * N + n] = __float2bfloat16(acc);
     }
+#endif
   }
 }
 
@@ -292,9 +319,12 @@ afq_qmm_kernel(const T *__restrict__ x, const uint32_t *__restrict__ w_q,
         x_tile[ty][tx] = x[m_idx * K + k_idx];
       } else if constexpr (std::is_same_v<T, __half>) {
         x_tile[ty][tx] = __half2float(x[m_idx * K + k_idx]);
-      } else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+      }
+#if __CUDA_ARCH__ >= 800 || defined(ALLOW_LEGACY_BF16)
+      else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
         x_tile[ty][tx] = __bfloat162float(x[m_idx * K + k_idx]);
       }
+#endif
     } else {
       x_tile[ty][tx] = 0.0f;
     }
@@ -315,10 +345,13 @@ afq_qmm_kernel(const T *__restrict__ x, const uint32_t *__restrict__ w_q,
       } else if constexpr (std::is_same_v<T, __half>) {
         scale = __half2float(scales[n_idx * groups_per_row + group_idx]);
         bias = __half2float(biases[n_idx * groups_per_row + group_idx]);
-      } else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+      }
+#if __CUDA_ARCH__ >= 800 || defined(ALLOW_LEGACY_BF16)
+      else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
         scale = __bfloat162float(scales[n_idx * groups_per_row + group_idx]);
         bias = __bfloat162float(biases[n_idx * groups_per_row + group_idx]);
       }
+#endif
 
       w_tile[ty][tx] = (float)q * scale + bias;
     } else {
@@ -344,9 +377,12 @@ afq_qmm_kernel(const T *__restrict__ x, const uint32_t *__restrict__ w_q,
       y[m_out * N + n_out] = acc;
     } else if constexpr (std::is_same_v<T, __half>) {
       y[m_out * N + n_out] = __float2half(acc);
-    } else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+    }
+#if __CUDA_ARCH__ >= 800 || defined(ALLOW_LEGACY_BF16)
+    else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
       y[m_out * N + n_out] = __float2bfloat16(acc);
     }
+#endif
   }
 }
 
