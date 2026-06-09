@@ -12,7 +12,7 @@ This page documents what the binary actually exposes. For complete and current h
 | Subcommand | Purpose |
 |---|---|
 | `mistralrs run` | Load a model and open an interactive chat (or one-shot with `-i`). |
-| `mistralrs serve` | Load a model and expose an OpenAI-compatible HTTP server. |
+| `mistralrs serve` | Load a model and expose OpenAI-compatible and Anthropic-compatible HTTP APIs. |
 | `mistralrs bench` | Benchmark a model. |
 | `mistralrs tune` | Recommend a quantization and device-mapping configuration. |
 | `mistralrs quantize` | Generate UQFF files from a model. |
@@ -238,5 +238,6 @@ Common ones:
 | `HF_HUB_OFFLINE` | `HF_HUB_OFFLINE=1` disables all network calls to the Hugging Face Hub; files are loaded from the local cache only. |
 | `MCP_CONFIG_PATH` | MCP config path (alternative to `--mcp-config`). |
 | `MISTRALRS_SANDBOX` | `auto`/`on`/`off`. Overrides the sandbox only when the resolved mode is `auto`; `on` and `off` win. |
+| `MISTRALRS_CUDA_GRAPHS` | Set to `0` to disable CUDA decode graphs for supported paged-attention decode steps. |
 
 See [environment variables](/mistral.rs/reference/environment-variables/) for the full list.
