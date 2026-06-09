@@ -26,13 +26,49 @@ use crate::ui::build_ui_router;
 #[allow(clippy::too_many_arguments)]
 pub async fn run_server(
     mut model_type: ModelType,
-    server: ServerOptions,
-    _srv_config: Option<PathBuf>,
+    mut server: ServerOptions,
+    srv_config: Option<PathBuf>,
     mut runtime: RuntimeOptions,
     agent_options: AgentCliOptions,
     sandbox: SandboxOptions,
     global: GlobalOptions,
 ) -> Result<()> {
+    if let Some(srv_config) = srv_config {
+        let content = std::fs::read_to_string(&srv_config)?;
+        let config: crate::args::ServerConfig = toml::from_str(&content)?;
+        if let Some(server_config) = config.server {
+            // Only update fields that were provided in the TOML file.
+            // This ensures CLI flags take precedence where they exist.
+            if let Some(port) = server_config.port {
+                server.port = port;
+            }
+            if let Some(host) = server_config.host {
+                server.host = host;
+            }
+            if let Some(no_ui) = server_config.no_ui {
+                server.no_ui = no_ui;
+            }
+            if let Some(max_tool_rounds) = server_config.max_tool_rounds {
+                server.max_tool_rounds = Some(max_tool_rounds);
+            }
+            if let Some(tool_dispatch_url) = server_config.tool_dispatch_url {
+                server.tool_dispatch_url = Some(tool_dispatch_url);
+            }
+            if let Some(cors_origins) = server_config.cors_origins {
+                server.cors_origins = Some(cors_origins);
+            }
+            if let Some(base_path) = server_config.base_path {
+                server.base_path = Some(base_path);
+            }
+            if let Some(include_swagger_routes) = server_config.include_swagger_routes {
+                server.include_swagger_routes = include_swagger_routes;
+            }
+            if let Some(max_body_limit) = server_config.max_body_limit {
+                server.max_body_limit = Some(max_body_limit);
+            }
+        }
+    }
+
     initialize_logging();
 
     agent_options.apply_to(&mut runtime);
@@ -125,11 +161,16 @@ pub async fn run_server(
     let mut app = MistralRsServerRouterBuilder::new()
         .with_mistralrs(mistralrs)
         .with_max_tool_rounds_optional(server.max_tool_rounds)
+        .with_allowed_origins_optional(server.cors_origins)
+        .with_max_body_limit_optional(server.max_body_limit)
+        .with_include_swagger_routes(server.include_swagger_routes)
         .with_tool_dispatch_url_optional(server.tool_dispatch_url.clone())
         .with_agent_permission(runtime.code_exec_permission.into())
         .with_approval_broker(approval_broker.clone())
         .build()
         .await?;
+
+    // let mut app = builder.build().await?;
 
     if !server.no_ui {
         let enable_code_execution = {

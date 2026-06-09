@@ -1107,10 +1107,14 @@ pub trait IsqModel {
         &mut self,
         device: Device,
         topology: Option<&Topology>,
+        organization: IsqOrganization,
         silent: bool,
         artifacts: &[PathBuf],
     ) -> candle_core::Result<()> {
-        let (tensors, mapper) = self.get_layers();
+        let (tensors, mapper) = match organization {
+            IsqOrganization::Default => self.get_layers(),
+            IsqOrganization::MoeExpertsOnly => self.get_layers_moe_experts_only(),
+        };
         let total_tensors = tensors.len();
 
         let layers = topology.map(|x| {
@@ -1272,7 +1276,10 @@ pub trait IsqModel {
 
         // Verify no DummyLayers remain after deserialization
         {
-            let (check_tensors, _) = self.get_layers();
+            let (check_tensors, _) = match organization {
+                IsqOrganization::Default => self.get_layers(),
+                IsqOrganization::MoeExpertsOnly => self.get_layers_moe_experts_only(),
+            };
             for (i, (tensor, layer_num)) in check_tensors.iter().enumerate() {
                 if let Some(info) = tensor.dummy_info() {
                     let artifact_note = if artifact_isqs.contains_key(&i) {

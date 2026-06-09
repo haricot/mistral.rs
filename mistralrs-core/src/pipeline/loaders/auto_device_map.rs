@@ -1,7 +1,7 @@
 use std::fmt::{self, Display};
 
 use crate::paged_attention::{
-    calculate_cache_config, MemoryGpuConfig, DEFAULT_PAGED_ATTENTION_BLOCK_SIZE,
+    calculate_cache_config, default_block_size_for_cache_type, MemoryGpuConfig,
 };
 use crate::utils::debug::DeviceRepr;
 use crate::{DeviceLayerMapMetadata, DeviceMapMetadata, MemoryUsage, PagedAttentionConfig};
@@ -231,7 +231,10 @@ pub fn get_device_layers(
 
             let cache = calculate_cache_config(
                 effective_mem_gpu,
-                Some(cfg.block_size.unwrap_or(DEFAULT_PAGED_ATTENTION_BLOCK_SIZE)),
+                Some(
+                    cfg.block_size
+                        .unwrap_or_else(|| default_block_size_for_cache_type(cfg.cache_type)),
+                ),
                 dtype,
                 paged_attn_config
                     .map(|cfg| cfg.cache_type)

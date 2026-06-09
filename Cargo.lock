@@ -656,7 +656,6 @@ checksum = "ade8366b8bd5ba243f0a58f036cc0ca8a2f069cff1a2351ef1cac6b083e16fc0"
 [[package]]
 name = "candle-core"
 version = "0.10.2"
-source = "git+https://github.com/huggingface/candle.git?rev=5404348#54043486fe252e6a068af85e659b3e822738fdb1"
 dependencies = [
  "accelerate-src",
  "byteorder",
@@ -688,22 +687,20 @@ dependencies = [
 [[package]]
 name = "candle-flash-attn"
 version = "0.10.2"
-source = "git+https://github.com/huggingface/candle.git?rev=5404348#54043486fe252e6a068af85e659b3e822738fdb1"
 dependencies = [
  "anyhow",
  "candle-core",
- "cudaforge",
+ "cudaforge 0.1.4",
  "half",
 ]
 
 [[package]]
 name = "candle-flash-attn-v3"
 version = "0.10.2"
-source = "git+https://github.com/huggingface/candle.git?rev=5404348#54043486fe252e6a068af85e659b3e822738fdb1"
 dependencies = [
  "anyhow",
  "candle-core",
- "cudaforge",
+ "cudaforge 0.1.4",
  "half",
  "num_cpus",
  "rayon",
@@ -712,15 +709,13 @@ dependencies = [
 [[package]]
 name = "candle-kernels"
 version = "0.10.2"
-source = "git+https://github.com/huggingface/candle.git?rev=5404348#54043486fe252e6a068af85e659b3e822738fdb1"
 dependencies = [
- "cudaforge",
+ "cudaforge 0.1.5",
 ]
 
 [[package]]
 name = "candle-metal-kernels"
 version = "0.10.2"
-source = "git+https://github.com/huggingface/candle.git?rev=5404348#54043486fe252e6a068af85e659b3e822738fdb1"
 dependencies = [
  "block2",
  "half",
@@ -735,7 +730,6 @@ dependencies = [
 [[package]]
 name = "candle-nn"
 version = "0.10.2"
-source = "git+https://github.com/huggingface/candle.git?rev=5404348#54043486fe252e6a068af85e659b3e822738fdb1"
 dependencies = [
  "accelerate-src",
  "candle-core",
@@ -752,9 +746,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "candle-tiled-attn"
+version = "0.10.2"
+source = "git+https://github.com/haricot/candle?branch=bf16_candle#18e33a71bd24680edef040760022b525f8f8149f"
+dependencies = [
+ "candle-core",
+ "cudaforge 0.1.5",
+ "half",
+]
+
+[[package]]
 name = "candle-ug"
 version = "0.10.2"
-source = "git+https://github.com/huggingface/candle.git?rev=5404348#54043486fe252e6a068af85e659b3e822738fdb1"
 dependencies = [
  "ug",
  "ug-cuda",
@@ -1303,6 +1306,24 @@ name = "cudaforge"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ac9cd50bed6f024583322f1a5b8027eabef203086ccceb27aac1b0b58515a32"
+dependencies = [
+ "anyhow",
+ "fs2",
+ "glob",
+ "num_cpus",
+ "rayon",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "walkdir",
+ "which 7.0.3",
+]
+
+[[package]]
+name = "cudaforge"
+version = "0.1.5"
+source = "git+https://github.com/guoqingbao/cudaforge?rev=64a7f7a7926cc0c1a9b896ab853dedbcb74617a6#64a7f7a7926cc0c1a9b896ab853dedbcb74617a6"
 dependencies = [
  "anyhow",
  "fs2",
@@ -3882,11 +3903,12 @@ dependencies = [
  "candle-flash-attn-v3",
  "candle-metal-kernels",
  "candle-nn",
+ "candle-tiled-attn",
  "cfgrammar",
  "chrono",
  "clap",
  "csv",
- "cudaforge",
+ "cudaforge 0.1.4",
  "derive-new",
  "derive_more",
  "dirs",
@@ -4007,7 +4029,7 @@ dependencies = [
  "anyhow",
  "candle-core",
  "candle-metal-kernels",
- "cudaforge",
+ "cudaforge 0.1.4",
  "dispatch2",
  "float8",
  "half",
@@ -4053,7 +4075,7 @@ dependencies = [
  "cuda-async",
  "cuda-bindings",
  "cuda-core",
- "cudaforge",
+ "cudaforge 0.1.4",
  "cutile",
  "cutile-compiler",
  "cutile-ir",

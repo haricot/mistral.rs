@@ -6,6 +6,7 @@ use candle_core::{DType, Device, Result, Tensor, D};
 use config::Gemma4Config;
 use mistralrs_quant::{NonZeroOp, QuantMethod, ShardedVarBuilder};
 use text::TextModel;
+use tracing::info;
 
 use crate::{
     amoe::AnyMoeBaseModelMixin,
@@ -227,7 +228,10 @@ impl Gemma4Model {
         let audio_dtype = DType::F32;
 
         let text_hidden = cfg.text_config.hidden_size;
-        let vision = if let Some(ref vision_cfg) = cfg.vision_config {
+        let vision = if normal_loading_metadata.text_only {
+            info!("Gemma4 text-only mode enabled; skipping vision submodel load.");
+            None
+        } else if let Some(ref vision_cfg) = cfg.vision_config {
             if cfg.is_unified() {
                 Some(Gemma4VisionPath::Unified(
                     vision::UnifiedVisionEmbedder::new(
@@ -266,7 +270,10 @@ impl Gemma4Model {
             None
         };
 
-        let audio = if let Some(ref audio_cfg) = cfg.audio_config {
+        let audio = if normal_loading_metadata.text_only {
+            info!("Gemma4 text-only mode enabled; skipping audio submodel load.");
+            None
+        } else if let Some(ref audio_cfg) = cfg.audio_config {
             if cfg.is_unified() {
                 let embedder = multimodal_embedding::Gemma4MultimodalEmbedder::new(
                     audio_cfg.input_feat_size(),
@@ -876,6 +883,7 @@ impl crate::speculative::SpeculativeTargetMixin for Gemma4Model {
         let runtime = mtp::Gemma4MtpRuntime::load(
             config,
             &self.cfg.text_config,
+            self.language_model.dtype(),
             self.language_model.device(),
             self.language_model.device_mapper(),
             false,

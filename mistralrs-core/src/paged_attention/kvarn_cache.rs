@@ -21,11 +21,67 @@ const LOG_S_MAX: f32 = 10.0;
 
 type BlockHead = (usize, usize);
 
+struct GpuTailPool {
+    raw: Tensor,
+    block_to_slot: HashMap<usize, usize>,
+    slot_to_block: Vec<Option<usize>>,
+}
+
+impl GpuTailPool {
+    fn new(
+        tail_slots: usize,
+        num_heads: usize,
+        block_size: usize,
+        head_dim: usize,
+        dtype: DType,
+        device: &Device,
+    ) -> Result<Self> {
+        Ok(Self {
+            raw: Tensor::zeros((tail_slots, num_heads, block_size, head_dim), dtype, device)?,
+            block_to_slot: HashMap::new(),
+            slot_to_block: vec![None; tail_slots],
+        })
+    }
+
+    fn slot_for_block(&mut self, block: usize) -> Option<usize> {
+        if let Some(slot) = self.block_to_slot.get(&block) {
+            return Some(*slot);
+        }
+        let slot = self.slot_to_block.iter().position(Option::is_none)?;
+        self.block_to_slot.insert(block, slot);
+        self.slot_to_block[slot] = Some(block);
+        Some(slot)
+    }
+
+    fn release_block(&mut self, block: usize) {
+        if let Some(slot) = self.block_to_slot.remove(&block) {
+            if let Some(slot_block) = self.slot_to_block.get_mut(slot) {
+                *slot_block = None;
+            }
+        }
+    }
+
+    fn evict_one_except(&mut self, protected_blocks: &[usize]) -> Option<(usize, usize)> {
+        let (slot, block) = self
+            .slot_to_block
+            .iter()
+            .enumerate()
+            .find_map(|(slot, block)| {
+                let block = (*block)?;
+                (!protected_blocks.contains(&block)).then_some((slot, block))
+            })?;
+        self.block_to_slot.remove(&block);
+        self.slot_to_block[slot] = None;
+        Some((block, slot))
+    }
+}
+
 struct TailStore {
     block_size: usize,
     num_heads: usize,
     head_dim: usize,
     rows: HashMap<BlockHead, Vec<f32>>,
+    gpu: Option<GpuTailPool>,
 }
 
 impl TailStore {
@@ -35,6 +91,7 @@ impl TailStore {
             num_heads,
             head_dim,
             rows: HashMap::new(),
+            gpu: None,
         }
     }
 
@@ -44,6 +101,9 @@ impl TailStore {
 }
 
 static TAIL_STORES: OnceLock<Mutex<HashMap<TensorId, TailStore>>> = OnceLock::new();
+static CUDA_TAIL_POOL_MODE_LOGGED: OnceLock<()> = OnceLock::new();
+static CUDA_TAIL_POOL_EVICTION_LOGGED: OnceLock<()> = OnceLock::new();
+static CUDA_TAIL_POOL_FALLBACK_LOGGED: OnceLock<()> = OnceLock::new();
 
 fn tail_stores() -> &'static Mutex<HashMap<TensorId, TailStore>> {
     TAIL_STORES.get_or_init(|| Mutex::new(HashMap::new()))
@@ -83,11 +143,69 @@ pub fn cuda_fused_decode_enabled() -> bool {
         .unwrap_or(true)
 }
 
+pub fn cuda_mtp_shared_decode_enabled(device: &Device) -> bool {
+    if !device.is_cuda() || !cuda_fused_decode_enabled() {
+        return false;
+    }
+    if let Ok(v) = std::env::var("MISTRALRS_KVARN_MTP_SHARED") {
+        return !v.trim().is_empty() && v != "0" && !v.eq_ignore_ascii_case("false");
+    }
+    true
+}
+
+pub fn cuda_fused_tail_pool_decode_enabled() -> bool {
+    std::env::var("MISTRALRS_KVARN_FUSED_TAIL_POOL")
+        .map(|v| !v.trim().is_empty() && v != "0" && !v.eq_ignore_ascii_case("false"))
+        .unwrap_or(false)
+}
+
 fn cuda_quantizes_partial_blocks(device: &Device) -> bool {
     device.is_cuda()
         && std::env::var("MISTRALRS_KVARN_CUDA_PARTIAL")
             .map(|v| !v.trim().is_empty() && v != "0" && !v.eq_ignore_ascii_case("false"))
             .unwrap_or(true)
+}
+
+fn cuda_tail_pool_enabled(device: &Device) -> bool {
+    device.is_cuda()
+        && cuda_fused_decode_enabled()
+        && std::env::var("MISTRALRS_KVARN_TAIL_POOL")
+            .map(|v| !v.trim().is_empty() && v != "0" && !v.eq_ignore_ascii_case("false"))
+            .unwrap_or(true)
+}
+
+fn cuda_tail_pool_slots(num_blocks: usize) -> usize {
+    let configured = std::env::var("MISTRALRS_KVARN_TAIL_POOL_SLOTS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(1)
+        .max(1);
+    configured.min(num_blocks.max(1))
+}
+
+fn mtp_stats_enabled() -> bool {
+    std::env::var("MISTRALRS_MTP_STATS")
+        .map(|v| !v.trim().is_empty() && v != "0" && !v.eq_ignore_ascii_case("false"))
+        .unwrap_or(false)
+}
+
+fn log_cuda_tail_pool_mode(device: &Device, num_blocks: usize) {
+    if !device.is_cuda() || !mtp_stats_enabled() {
+        return;
+    }
+    let enabled = cuda_tail_pool_enabled(device);
+    let slots = if enabled {
+        cuda_tail_pool_slots(num_blocks)
+    } else {
+        0
+    };
+    CUDA_TAIL_POOL_MODE_LOGGED.get_or_init(|| {
+        tracing::info!(
+            "KVarN CUDA tail-pool mode: enabled={enabled}, slots={slots}, num_blocks={num_blocks}, fused_decode={}, fused_tail_pool={}",
+            cuda_fused_decode_enabled(),
+            cuda_fused_tail_pool_decode_enabled()
+        );
+    });
 }
 
 pub fn flash_attn_decode(
@@ -100,6 +218,22 @@ pub fn flash_attn_decode(
 ) -> Result<Tensor> {
     #[cfg(all(feature = "cuda", target_family = "unix"))]
     {
+        if let Some((key_tail, value_tail, key_tail_slots, value_tail_slots)) =
+            gpu_tail_for_decode(key_cache, value_cache)?
+        {
+            return mistralrs_paged_attn::kvarn_flash_attn_decode_with_tail(
+                query,
+                key_cache,
+                value_cache,
+                &key_tail,
+                &value_tail,
+                &key_tail_slots,
+                &value_tail_slots,
+                block_tables,
+                cu_seq_lens,
+                softmax_scale,
+            );
+        }
         return mistralrs_paged_attn::kvarn_flash_attn_decode(
             query,
             key_cache,
@@ -121,6 +255,56 @@ pub fn flash_attn_decode(
             softmax_scale,
         );
         candle_core::bail!("KVarN fused decode requires the CUDA feature.");
+    }
+}
+
+pub fn flash_attn_decode_mtp(
+    query: &Tensor,
+    key_cache: &Tensor,
+    value_cache: &Tensor,
+    block_tables: &Tensor,
+    cu_seq_lens: &Tensor,
+    softmax_scale: f32,
+) -> Result<Tensor> {
+    #[cfg(all(feature = "cuda", target_family = "unix"))]
+    {
+        if let Some((key_tail, value_tail, key_tail_slots, value_tail_slots)) =
+            gpu_tail_for_decode(key_cache, value_cache)?
+        {
+            return mistralrs_paged_attn::kvarn_flash_attn_decode_mtp_with_tail(
+                query,
+                key_cache,
+                value_cache,
+                &key_tail,
+                &value_tail,
+                &key_tail_slots,
+                &value_tail_slots,
+                block_tables,
+                cu_seq_lens,
+                softmax_scale,
+            );
+        }
+        return mistralrs_paged_attn::kvarn_flash_attn_decode_mtp(
+            query,
+            key_cache,
+            value_cache,
+            block_tables,
+            cu_seq_lens,
+            softmax_scale,
+        );
+    }
+
+    #[cfg(not(all(feature = "cuda", target_family = "unix")))]
+    {
+        let _ = (
+            query,
+            key_cache,
+            value_cache,
+            block_tables,
+            cu_seq_lens,
+            softmax_scale,
+        );
+        candle_core::bail!("KVarN fused MTP decode requires the CUDA feature.");
     }
 }
 
@@ -171,6 +355,31 @@ pub fn reshape_and_cache(
             "KVarN slot mapping length mismatch: got {}, expected {num_tokens}",
             slots.len()
         );
+    }
+    log_cuda_tail_pool_mode(key_cache.device(), num_blocks);
+
+    if cuda_tail_pool_enabled(key_cache.device()) {
+        match reshape_and_cache_cuda_tail_pool(
+            key,
+            value,
+            key_cache,
+            value_cache,
+            slot_mapping,
+            &slots,
+            num_blocks,
+            num_heads,
+            k_head_dim,
+            v_head_dim,
+            block_size,
+        ) {
+            Ok(true) => return Ok(()),
+            Ok(false) => {}
+            Err(err) => {
+                tracing::debug!(
+                    "KVarN CUDA tail-pool store unavailable, falling back to CPU store: {err}"
+                );
+            }
+        }
     }
 
     let key_cpu = key
@@ -330,7 +539,7 @@ pub fn gather_kv_cache(
                         head_idx,
                         block_offset,
                         k_head_dim,
-                    ));
+                    )?);
                 }
 
                 if v_record[STATUS_OFFSET] == STATUS_QUANTIZED {
@@ -347,7 +556,7 @@ pub fn gather_kv_cache(
                         head_idx,
                         block_offset,
                         v_head_dim,
-                    ));
+                    )?);
                 }
             }
         }
@@ -438,6 +647,364 @@ fn value_head_dim_from_record_bytes(record_bytes: usize, block_size: usize) -> R
     Ok(head_dim)
 }
 
+struct GpuTailUpdate {
+    raw: Tensor,
+    tail_slots: Tensor,
+    evicted_blocks: Vec<(usize, usize)>,
+    full_blocks: Vec<(usize, usize)>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reshape_and_cache_cuda_tail_pool(
+    key: &Tensor,
+    value: &Tensor,
+    key_cache: &mut Tensor,
+    value_cache: &mut Tensor,
+    slot_mapping: &Tensor,
+    slots: &[i64],
+    num_blocks: usize,
+    num_heads: usize,
+    k_head_dim: usize,
+    v_head_dim: usize,
+    block_size: usize,
+) -> Result<bool> {
+    #[cfg(all(feature = "cuda", target_family = "unix"))]
+    {
+        if key.dtype() != value.dtype()
+            || k_head_dim != v_head_dim
+            || slot_mapping.dtype() != DType::I64
+        {
+            return Ok(false);
+        }
+
+        let Some(key_update) = prepare_gpu_tail_update(
+            key_cache.id(),
+            key_cache.device(),
+            key.dtype(),
+            slots,
+            num_blocks,
+            num_heads,
+            k_head_dim,
+            block_size,
+        )?
+        else {
+            return Ok(false);
+        };
+        let Some(value_update) = prepare_gpu_tail_update(
+            value_cache.id(),
+            value_cache.device(),
+            value.dtype(),
+            slots,
+            num_blocks,
+            num_heads,
+            v_head_dim,
+            block_size,
+        )?
+        else {
+            return Ok(false);
+        };
+
+        quantize_full_gpu_tail_blocks(
+            key_cache.id(),
+            key_cache,
+            &key_update.raw,
+            &key_update.evicted_blocks,
+            k_head_dim,
+            block_size,
+            true,
+        )?;
+        quantize_full_gpu_tail_blocks(
+            value_cache.id(),
+            value_cache,
+            &value_update.raw,
+            &value_update.evicted_blocks,
+            v_head_dim,
+            block_size,
+            false,
+        )?;
+
+        mistralrs_paged_attn::kvarn_store_tail(
+            key,
+            value,
+            key_cache,
+            value_cache,
+            &key_update.raw,
+            &value_update.raw,
+            slot_mapping,
+            &key_update.tail_slots,
+            &value_update.tail_slots,
+        )?;
+
+        quantize_full_gpu_tail_blocks(
+            key_cache.id(),
+            key_cache,
+            &key_update.raw,
+            &key_update.full_blocks,
+            k_head_dim,
+            block_size,
+            true,
+        )?;
+        quantize_full_gpu_tail_blocks(
+            value_cache.id(),
+            value_cache,
+            &value_update.raw,
+            &value_update.full_blocks,
+            v_head_dim,
+            block_size,
+            false,
+        )?;
+        Ok(true)
+    }
+
+    #[cfg(not(all(feature = "cuda", target_family = "unix")))]
+    {
+        let _ = (
+            key,
+            value,
+            key_cache,
+            value_cache,
+            slot_mapping,
+            slots,
+            num_blocks,
+            num_heads,
+            k_head_dim,
+            v_head_dim,
+            block_size,
+        );
+        Ok(false)
+    }
+}
+
+fn prepare_gpu_tail_update(
+    cache_id: TensorId,
+    device: &Device,
+    dtype: DType,
+    slots: &[i64],
+    num_blocks: usize,
+    num_heads: usize,
+    head_dim: usize,
+    block_size: usize,
+) -> Result<Option<GpuTailUpdate>> {
+    let mut touched_blocks = Vec::new();
+    for &slot in slots {
+        if slot < 0 {
+            continue;
+        }
+        let block = slot as usize / block_size;
+        if block >= num_blocks {
+            candle_core::bail!(
+                "KVarN slot {slot} maps to block {block}, but cache has only {num_blocks} blocks."
+            );
+        }
+        if !touched_blocks.contains(&block) {
+            touched_blocks.push(block);
+        }
+    }
+
+    let mut stores = tail_stores()
+        .lock()
+        .expect("KVarN tail cache mutex poisoned");
+    let store = stores
+        .entry(cache_id)
+        .or_insert_with(|| TailStore::new(block_size, num_heads, head_dim));
+    if !store.matches(block_size, num_heads, head_dim) {
+        *store = TailStore::new(block_size, num_heads, head_dim);
+    }
+
+    if store.gpu.is_none() {
+        let tail_slots = cuda_tail_pool_slots(num_blocks);
+        store.gpu = Some(GpuTailPool::new(
+            tail_slots, num_heads, block_size, head_dim, dtype, device,
+        )?);
+    }
+    let gpu = store.gpu.as_mut().unwrap();
+
+    let needed_new_blocks = touched_blocks
+        .iter()
+        .copied()
+        .filter(|block| !gpu.block_to_slot.contains_key(block))
+        .collect::<Vec<_>>();
+    let free_slots = gpu
+        .slot_to_block
+        .iter()
+        .filter(|slot| slot.is_none())
+        .count();
+    let mut evicted_blocks = Vec::new();
+    if needed_new_blocks.len() > free_slots {
+        let mut missing = needed_new_blocks.len() - free_slots;
+        while missing > 0 {
+            let Some(evicted) = gpu.evict_one_except(&touched_blocks) else {
+                tracing::debug!(
+                    "KVarN CUDA tail-pool has {free_slots} free slots, needs {}; falling back to CPU store",
+                    needed_new_blocks.len()
+                );
+                if mtp_stats_enabled() {
+                    CUDA_TAIL_POOL_FALLBACK_LOGGED.get_or_init(|| {
+                        tracing::info!(
+                            "KVarN CUDA tail-pool fallback: free_slots={free_slots}, needed_new={}; CPU partial-block store will be used",
+                            needed_new_blocks.len()
+                        );
+                    });
+                }
+                return Ok(None);
+            };
+            evicted_blocks.push(evicted);
+            missing -= 1;
+        }
+        if mtp_stats_enabled() {
+            let evicted = evicted_blocks.len();
+            CUDA_TAIL_POOL_EVICTION_LOGGED.get_or_init(|| {
+                tracing::info!(
+                    "KVarN CUDA tail-pool eviction: evicted_blocks={evicted}; evicted partial blocks are quantized before slot reuse"
+                );
+            });
+        }
+    }
+
+    let mut tail_slots = vec![-1i32; slots.len()];
+    let mut full_blocks = Vec::new();
+    for (token_idx, &slot) in slots.iter().enumerate() {
+        if slot < 0 {
+            continue;
+        }
+        let slot = slot as usize;
+        let block = slot / block_size;
+        let block_offset = slot % block_size;
+        let Some(tail_slot) = gpu.slot_for_block(block) else {
+            return Ok(None);
+        };
+        tail_slots[token_idx] = tail_slot as i32;
+        if block_offset + 1 == block_size && !full_blocks.iter().any(|(b, _)| *b == block) {
+            full_blocks.push((block, tail_slot));
+        }
+    }
+
+    let raw = gpu.raw.clone();
+    drop(stores);
+    let tail_slots =
+        Tensor::from_vec(tail_slots, (slots.len(),), &Device::Cpu)?.to_device(device)?;
+    Ok(Some(GpuTailUpdate {
+        raw,
+        tail_slots,
+        evicted_blocks,
+        full_blocks,
+    }))
+}
+
+fn quantize_full_gpu_tail_blocks(
+    cache_id: TensorId,
+    cache: &mut Tensor,
+    raw: &Tensor,
+    full_blocks: &[(usize, usize)],
+    head_dim: usize,
+    block_size: usize,
+    is_key: bool,
+) -> Result<()> {
+    for &(block, tail_slot) in full_blocks {
+        let raw_heads = raw
+            .i(tail_slot)?
+            .to_device(&Device::Cpu)?
+            .to_dtype(DType::F32)?
+            .to_vec3::<f32>()?;
+        for (head_idx, rows) in raw_heads.iter().enumerate() {
+            let mut flat = Vec::with_capacity(block_size * head_dim);
+            for row in rows {
+                flat.extend_from_slice(row);
+            }
+            let record = if is_key {
+                quantize_key_block(&flat, head_dim, block_size)?
+            } else {
+                quantize_value_block(&flat, head_dim, block_size)?
+            };
+            write_record(cache, block, head_idx, &record)?;
+        }
+        release_gpu_tail_block(cache_id, block);
+    }
+    Ok(())
+}
+
+fn release_gpu_tail_block(cache_id: TensorId, block: usize) {
+    let mut stores = tail_stores()
+        .lock()
+        .expect("KVarN tail cache mutex poisoned");
+    if let Some(store) = stores.get_mut(&cache_id) {
+        if let Some(gpu) = store.gpu.as_mut() {
+            gpu.release_block(block);
+        }
+    }
+}
+
+fn gpu_tail_for_decode(
+    key_cache: &Tensor,
+    value_cache: &Tensor,
+) -> Result<Option<(Tensor, Tensor, Tensor, Tensor)>> {
+    if !cuda_tail_pool_enabled(key_cache.device()) {
+        return Ok(None);
+    }
+
+    let (num_blocks, _, _) = key_cache.dims3()?;
+    let stores = tail_stores()
+        .lock()
+        .expect("KVarN tail cache mutex poisoned");
+    let Some(key_store) = stores.get(&key_cache.id()) else {
+        return Ok(None);
+    };
+    let Some(value_store) = stores.get(&value_cache.id()) else {
+        return Ok(None);
+    };
+    let Some(key_gpu) = key_store.gpu.as_ref() else {
+        return Ok(None);
+    };
+    let Some(value_gpu) = value_store.gpu.as_ref() else {
+        return Ok(None);
+    };
+
+    let mut key_map = vec![-1i32; num_blocks];
+    for (&block, &slot) in &key_gpu.block_to_slot {
+        if block < num_blocks {
+            key_map[block] = slot as i32;
+        }
+    }
+    let mut value_map = vec![-1i32; num_blocks];
+    for (&block, &slot) in &value_gpu.block_to_slot {
+        if block < num_blocks {
+            value_map[block] = slot as i32;
+        }
+    }
+    let key_raw = key_gpu.raw.clone();
+    let value_raw = value_gpu.raw.clone();
+    let device = key_cache.device().clone();
+    drop(stores);
+
+    let key_map = Tensor::from_vec(key_map, (num_blocks,), &Device::Cpu)?.to_device(&device)?;
+    let value_map = Tensor::from_vec(value_map, (num_blocks,), &Device::Cpu)?.to_device(&device)?;
+    Ok(Some((key_raw, value_raw, key_map, value_map)))
+}
+
+pub fn cuda_tail_pool_active(key_cache: &Tensor, value_cache: &Tensor) -> bool {
+    if !cuda_tail_pool_enabled(key_cache.device()) {
+        return false;
+    }
+
+    let stores = tail_stores()
+        .lock()
+        .expect("KVarN tail cache mutex poisoned");
+    let Some(key_store) = stores.get(&key_cache.id()) else {
+        return false;
+    };
+    let Some(value_store) = stores.get(&value_cache.id()) else {
+        return false;
+    };
+    key_store
+        .gpu
+        .as_ref()
+        .is_some_and(|gpu| !gpu.block_to_slot.is_empty())
+        || value_store
+            .gpu
+            .as_ref()
+            .is_some_and(|gpu| !gpu.block_to_slot.is_empty())
+}
+
 fn store_tail_row(
     cache_id: TensorId,
     block: usize,
@@ -485,18 +1052,32 @@ fn load_tail_row(
     head: usize,
     block_offset: usize,
     head_dim: usize,
-) -> Vec<f32> {
+) -> Result<Vec<f32>> {
     let stores = tail_stores()
         .lock()
         .expect("KVarN tail cache mutex poisoned");
     let Some(store) = stores.get(&cache_id) else {
-        return vec![0.0; head_dim];
+        return Ok(vec![0.0; head_dim]);
     };
-    let Some(rows) = store.rows.get(&(block, head)) else {
-        return vec![0.0; head_dim];
-    };
-    let start = block_offset * head_dim;
-    rows[start..start + head_dim].to_vec()
+    if let Some(rows) = store.rows.get(&(block, head)) {
+        let start = block_offset * head_dim;
+        return Ok(rows[start..start + head_dim].to_vec());
+    }
+    let gpu_tail = store.gpu.as_ref().and_then(|gpu| {
+        gpu.block_to_slot
+            .get(&block)
+            .map(|slot| (gpu.raw.clone(), *slot))
+    });
+    drop(stores);
+
+    if let Some((raw, tail_slot)) = gpu_tail {
+        return raw
+            .i((tail_slot, head, block_offset))?
+            .to_device(&Device::Cpu)?
+            .to_dtype(DType::F32)?
+            .to_vec1::<f32>();
+    }
+    Ok(vec![0.0; head_dim])
 }
 
 fn mark_record_raw(cache: &mut Tensor, block: usize, head: usize) -> Result<()> {
@@ -971,6 +1552,166 @@ mod tests {
         let (k, v) = gather_kv_cache(&key_cache, &value_cache, &block_table, &cu, DType::F32)?;
         assert_eq!(k.dims(), &[KVARN_GROUP, 1, head_dim]);
         assert_eq!(v.dims(), &[KVARN_GROUP, 1, head_dim]);
+        Ok(())
+    }
+
+    #[cfg(all(feature = "cuda", target_family = "unix"))]
+    #[test]
+    fn cuda_tail_pool_gathers_raw_partial_when_available() -> Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        let head_dim = 32;
+        let mut key_cache = Tensor::zeros(
+            (1, 1, key_record_bytes(head_dim, KVARN_GROUP)?),
+            DType::U8,
+            &device,
+        )?;
+        let mut value_cache = Tensor::zeros(
+            (1, 1, value_record_bytes(head_dim, KVARN_GROUP)?),
+            DType::U8,
+            &device,
+        )?;
+        let key_data = (0..3 * head_dim)
+            .map(|v| v as f32 / 97.0)
+            .collect::<Vec<_>>();
+        let value_data = (0..3 * head_dim)
+            .map(|v| (v as f32 / 53.0).cos())
+            .collect::<Vec<_>>();
+        let key = Tensor::from_vec(key_data.clone(), (3, 1, head_dim), &Device::Cpu)?
+            .to_device(&device)?;
+        let value = Tensor::from_vec(value_data.clone(), (3, 1, head_dim), &Device::Cpu)?
+            .to_device(&device)?;
+        let slots_vec = vec![0i64, 1, 2];
+        let slots = Tensor::from_vec(slots_vec.clone(), (3,), &Device::Cpu)?.to_device(&device)?;
+        assert!(reshape_and_cache_cuda_tail_pool(
+            &key,
+            &value,
+            &mut key_cache,
+            &mut value_cache,
+            &slots,
+            &slots_vec,
+            1,
+            1,
+            head_dim,
+            head_dim,
+            KVARN_GROUP,
+        )?);
+
+        let block_table = Tensor::from_vec(vec![0i32], (1, 1), &Device::Cpu)?;
+        let cu = Tensor::from_vec(vec![0u32, 3], (2,), &Device::Cpu)?;
+        let (k, v) = gather_kv_cache(&key_cache, &value_cache, &block_table, &cu, DType::F32)?;
+        let k = k.to_device(&Device::Cpu)?.flatten_all()?.to_vec1::<f32>()?;
+        let v = v.to_device(&Device::Cpu)?.flatten_all()?.to_vec1::<f32>()?;
+
+        for (got, expected) in k.iter().zip(key_data.iter()) {
+            assert!((got - expected).abs() < 1e-6);
+        }
+        for (got, expected) in v.iter().zip(value_data.iter()) {
+            assert!((got - expected).abs() < 1e-6);
+        }
+        Ok(())
+    }
+
+    #[cfg(all(feature = "cuda", target_family = "unix"))]
+    #[test]
+    fn cuda_tail_pool_evicts_partial_block_before_reuse() -> Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        let head_dim = 32;
+        let key_record_bytes = key_record_bytes(head_dim, KVARN_GROUP)?;
+        let value_record_bytes = value_record_bytes(head_dim, KVARN_GROUP)?;
+        let mut key_cache = Tensor::zeros((2, 1, key_record_bytes), DType::U8, &device)?;
+        let mut value_cache = Tensor::zeros((2, 1, value_record_bytes), DType::U8, &device)?;
+
+        let key0 = Tensor::from_vec(
+            (0..3 * head_dim)
+                .map(|v| v as f32 / 97.0)
+                .collect::<Vec<_>>(),
+            (3, 1, head_dim),
+            &Device::Cpu,
+        )?
+        .to_device(&device)?;
+        let value0 = Tensor::from_vec(
+            (0..3 * head_dim)
+                .map(|v| (v as f32 / 53.0).cos())
+                .collect::<Vec<_>>(),
+            (3, 1, head_dim),
+            &Device::Cpu,
+        )?
+        .to_device(&device)?;
+        let slots0_vec = vec![0i64, 1, 2];
+        let slots0 =
+            Tensor::from_vec(slots0_vec.clone(), (3,), &Device::Cpu)?.to_device(&device)?;
+        assert!(reshape_and_cache_cuda_tail_pool(
+            &key0,
+            &value0,
+            &mut key_cache,
+            &mut value_cache,
+            &slots0,
+            &slots0_vec,
+            2,
+            1,
+            head_dim,
+            head_dim,
+            KVARN_GROUP,
+        )?);
+
+        let key1_data = (0..2 * head_dim)
+            .map(|v| 1.0 + v as f32 / 89.0)
+            .collect::<Vec<_>>();
+        let value1_data = (0..2 * head_dim)
+            .map(|v| (1.0 + v as f32 / 47.0).sin())
+            .collect::<Vec<_>>();
+        let key1 = Tensor::from_vec(key1_data.clone(), (2, 1, head_dim), &Device::Cpu)?
+            .to_device(&device)?;
+        let value1 = Tensor::from_vec(value1_data.clone(), (2, 1, head_dim), &Device::Cpu)?
+            .to_device(&device)?;
+        let slots1_vec = vec![KVARN_GROUP as i64, KVARN_GROUP as i64 + 1];
+        let slots1 =
+            Tensor::from_vec(slots1_vec.clone(), (2,), &Device::Cpu)?.to_device(&device)?;
+        assert!(reshape_and_cache_cuda_tail_pool(
+            &key1,
+            &value1,
+            &mut key_cache,
+            &mut value_cache,
+            &slots1,
+            &slots1_vec,
+            2,
+            1,
+            head_dim,
+            head_dim,
+            KVARN_GROUP,
+        )?);
+
+        let key_records = key_cache
+            .to_device(&Device::Cpu)?
+            .flatten_all()?
+            .to_vec1::<u8>()?;
+        let value_records = value_cache
+            .to_device(&Device::Cpu)?
+            .flatten_all()?
+            .to_vec1::<u8>()?;
+        assert_eq!(key_records[STATUS_OFFSET], STATUS_QUANTIZED);
+        assert_eq!(value_records[STATUS_OFFSET], STATUS_QUANTIZED);
+        assert_eq!(key_records[key_record_bytes + STATUS_OFFSET], STATUS_RAW);
+        assert_eq!(
+            value_records[value_record_bytes + STATUS_OFFSET],
+            STATUS_RAW
+        );
+
+        let block_table = Tensor::from_vec(vec![1i32], (1, 1), &Device::Cpu)?;
+        let cu = Tensor::from_vec(vec![0u32, 2], (2,), &Device::Cpu)?;
+        let (k, v) = gather_kv_cache(&key_cache, &value_cache, &block_table, &cu, DType::F32)?;
+        let k = k.to_device(&Device::Cpu)?.flatten_all()?.to_vec1::<f32>()?;
+        let v = v.to_device(&Device::Cpu)?.flatten_all()?.to_vec1::<f32>()?;
+        for (got, expected) in k.iter().zip(key1_data.iter()) {
+            assert!((got - expected).abs() < 1e-6);
+        }
+        for (got, expected) in v.iter().zip(value1_data.iter()) {
+            assert!((got - expected).abs() < 1e-6);
+        }
         Ok(())
     }
 }

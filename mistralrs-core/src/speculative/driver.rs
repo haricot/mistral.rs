@@ -1,5 +1,6 @@
 use std::any::Any;
 use std::sync::Arc;
+use std::time::Instant;
 
 use candle_core::{Result, Tensor};
 use rand_isaac::Isaac64Rng;
@@ -14,6 +15,12 @@ use super::cache::{SpeculativeCacheAccess, SpeculativeCacheGuard, SpeculativeCac
 use super::proposer::{SpeculativeProposalBatch, SpeculativeProposeBatchCtx};
 use super::staging::{staged_batch_state, StagedBatchState};
 use super::verifier::{finish_verified_step, VerificationOutcome};
+
+fn mtp_stats_enabled() -> bool {
+    std::env::var("MISTRALRS_MTP_STATS")
+        .map(|v| !v.trim().is_empty() && v != "0" && !v.eq_ignore_ascii_case("false"))
+        .unwrap_or(false)
+}
 
 pub trait SpeculativePipelineExt: Pipeline {
     fn has_speculative_proposer(&self) -> bool;
@@ -140,6 +147,8 @@ where
     P: SpeculativePipelineExt,
     C: SpeculativeCacheAccess,
 {
+    let stats = mtp_stats_enabled();
+    let started = stats.then(Instant::now);
     let general_metadata = target.get_metadata();
     let eos_tok = if disable_eos_stop {
         None
@@ -185,7 +194,15 @@ where
         &hidden_rows,
         rng,
         cache,
-    )
+    )?;
+    if let Some(started) = started {
+        tracing::info!(
+            "MTP bootstrap: active={}, elapsed_ms={:.2}",
+            active_indices.len(),
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -203,6 +220,8 @@ where
     P: SpeculativePipelineExt,
     C: SpeculativeCacheAccess,
 {
+    let stats = mtp_stats_enabled();
+    let started = stats.then(Instant::now);
     let mut outcomes: Vec<Option<VerificationOutcome>> = Vec::with_capacity(seqs.len());
     let mut cache_guards: Vec<Option<C::Guard>> = Vec::with_capacity(seqs.len());
     let mut cache_outcomes: Vec<Option<SpeculativeCacheOutcome>> = Vec::with_capacity(seqs.len());
@@ -224,6 +243,7 @@ where
         }
 
         let cache_guard = cache.guard_for_reserved(*seq.id(), base_len, staged_len + 1);
+        let verify_started = stats.then(Instant::now);
         let outcome = finish_verified_step(
             target,
             seq,
@@ -237,6 +257,16 @@ where
             None,
         )
         .await?;
+        if let Some(verify_started) = verify_started {
+            tracing::info!(
+                "MTP verify row: accepted={}/{}, keep_len={}, continuation={}, elapsed_ms={:.2}",
+                outcome.accepted_drafts,
+                outcome.proposed_drafts,
+                outcome.keep_len,
+                outcome.continuation_token.is_some(),
+                verify_started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
         let accepted_all = outcome.accepted_drafts == outcome.proposed_drafts;
         cache_outcomes.push(Some(SpeculativeCacheOutcome {
             keep_len: outcome.keep_len,
@@ -245,7 +275,14 @@ where
         cache_guards.push(Some(cache_guard));
         outcomes.push(Some(outcome));
     }
+    let cache_started = stats.then(Instant::now);
     cache.finish_verification_batch(&mut cache_guards, seqs, &cache_outcomes)?;
+    if let Some(cache_started) = cache_started {
+        tracing::info!(
+            "MTP cache finish: elapsed_ms={:.2}",
+            cache_started.elapsed().as_secs_f64() * 1000.0
+        );
+    }
 
     let mut active_indices = Vec::new();
     let mut sampled_tokens = Vec::new();
@@ -273,7 +310,25 @@ where
         &hidden_rows,
         rng,
         cache,
-    )
+    )?;
+    if let Some(started) = started {
+        let (accepted, proposed) =
+            outcomes
+                .iter()
+                .flatten()
+                .fold((0usize, 0usize), |(accepted, proposed), outcome| {
+                    (
+                        accepted + outcome.accepted_drafts,
+                        proposed + outcome.proposed_drafts,
+                    )
+                });
+        tracing::info!(
+            "MTP verify batch: accepted={accepted}/{proposed}, repropose_active={}, elapsed_ms={:.2}",
+            active_indices.len(),
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -291,6 +346,8 @@ where
     P: SpeculativePipelineExt,
     C: SpeculativeCacheAccess,
 {
+    let stats = mtp_stats_enabled();
+    let started = stats.then(Instant::now);
     // Staging in one concrete sequence:
     //
     //   1. Target verifies [A B C D E F G].
@@ -341,6 +398,7 @@ where
         .iter()
         .map(|idx| *seqs[*idx].id())
         .collect::<Vec<_>>();
+    let propose_started = stats.then(Instant::now);
     let proposal_batch = {
         let sequences = active_indices
             .iter()
@@ -357,6 +415,14 @@ where
             rng: rng.clone(),
         })?
     };
+    if let Some(propose_started) = propose_started {
+        tracing::info!(
+            "MTP proposer call: active={}, proposal_len={}, elapsed_ms={:.2}",
+            active_indices.len(),
+            proposal_len,
+            propose_started.elapsed().as_secs_f64() * 1000.0
+        );
+    }
 
     let Some(proposal_batch) = proposal_batch else {
         clear_active_staged(seqs, active_indices);
@@ -376,6 +442,15 @@ where
         } else {
             seqs[*idx].clear_staged_speculative_tokens();
         }
+    }
+
+    if let Some(started) = started {
+        tracing::info!(
+            "MTP propose+stage: active={}, proposal_len={}, elapsed_ms={:.2}",
+            active_indices.len(),
+            proposal_len,
+            started.elapsed().as_secs_f64() * 1000.0
+        );
     }
 
     Ok(())

@@ -20,10 +20,11 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
-#include <cuda/pipeline>
-
 #include "cp_async.cuh"
+
+#if HAS_LDMATRIX
 #include "mma.cuh"
+#endif
 
 namespace flashinfer {
 
@@ -125,59 +126,122 @@ struct smem_t {
   }
 
   __device__ __forceinline__ void ldmatrix_m8n8x4(uint32_t offset, uint32_t* R) {
+#if HAS_LDMATRIX
     b128_t* smem_ptr = base + offset;
     mma::ldmatrix_m8n8x4(R, smem_ptr);
+#else
+    (void)offset;
+    (void)R;
+    asm volatile("trap;");
+#endif
   }
 
   __device__ __forceinline__ void ldmatrix_m8n8x4_left_half(uint32_t offset, uint32_t* R) {
+#if HAS_LDMATRIX
     b128_t* smem_ptr = base + offset;
     mma::ldmatrix_m8n8x4_left_half(R, smem_ptr);
+#else
+    (void)offset;
+    (void)R;
+    asm volatile("trap;");
+#endif
   }
 
   __device__ __forceinline__ void ldmatrix_m8n8x4_right_half(uint32_t offset, uint32_t* R) {
+#if HAS_LDMATRIX
     b128_t* smem_ptr = base + offset;
     mma::ldmatrix_m8n8x4_right_half(R, smem_ptr);
+#else
+    (void)offset;
+    (void)R;
+    asm volatile("trap;");
+#endif
   }
 
   __device__ __forceinline__ void stmatrix_m8n8x4(uint32_t offset, uint32_t* R) {
+#if HAS_LDMATRIX
     b128_t* smem_ptr = base + offset;
     mma::stmatrix_m8n8x4(R, smem_ptr);
+#else
+    (void)offset;
+    (void)R;
+    asm volatile("trap;");
+#endif
   }
 
   __device__ __forceinline__ void ldmatrix_m8n8x4_trans(uint32_t offset, uint32_t* R) {
+#if HAS_LDMATRIX
     b128_t* smem_ptr = base + offset;
     mma::ldmatrix_m8n8x4_trans(R, smem_ptr);
+#else
+    (void)offset;
+    (void)R;
+    asm volatile("trap;");
+#endif
   }
 
   __device__ __forceinline__ void ldmatrix_m8n8x4_trans_left_half(uint32_t offset, uint32_t* R) {
+#if HAS_LDMATRIX
     b128_t* smem_ptr = base + offset;
     mma::ldmatrix_m8n8x4_trans_left_half(R, smem_ptr);
+#else
+    (void)offset;
+    (void)R;
+    asm volatile("trap;");
+#endif
   }
 
   __device__ __forceinline__ void ldmatrix_m8n8x4_trans_right_half(uint32_t offset, uint32_t* R) {
+#if HAS_LDMATRIX
     b128_t* smem_ptr = base + offset;
     mma::ldmatrix_m8n8x4_trans_right_half(R, smem_ptr);
+#else
+    (void)offset;
+    (void)R;
+    asm volatile("trap;");
+#endif
   }
 
   template <cp_async::SharedMemFillMode fill_mode, typename T>
   __device__ __forceinline__ void load_128b_async(uint32_t offset, const T* gptr, bool predicate) {
     b128_t* smem_ptr = base + offset;
+#if HAS_CP_ASYNC
     cp_async::pred_load_128b<cp_async::PrefetchMode::kPrefetch, fill_mode>(
         smem_ptr, reinterpret_cast<const b128_t*>(gptr), predicate);
+#else
+    if (predicate) {
+      *smem_ptr = *reinterpret_cast<const b128_t*>(gptr);
+    } else if constexpr (fill_mode == cp_async::SharedMemFillMode::kFillZero) {
+      *smem_ptr = make_uint4(0, 0, 0, 0);
+    }
+#endif
   }
 
   template <typename T>
   __device__ __forceinline__ void load_128b_async(uint32_t offset, const T* gptr) {
     b128_t* smem_ptr = base + offset;
+#if HAS_CP_ASYNC
     cp_async::load_128b<cp_async::PrefetchMode::kPrefetch>(smem_ptr,
                                                            reinterpret_cast<const b128_t*>(gptr));
+#else
+    *smem_ptr = *reinterpret_cast<const b128_t*>(gptr);
+#endif
   }
 
   template <cp_async::SharedMemFillMode fill_mode, typename T>
   __device__ __forceinline__ void load_64b_async(uint32_t offset, const T* gptr, bool predicate) {
     b128_t* smem_ptr = base + offset;
+#if HAS_CP_ASYNC
     cp_async::pred_load_128b_from_64b<cp_async::PrefetchMode::kPrefetch, fill_mode>(
         smem_ptr, reinterpret_cast<const b128_t*>(gptr), predicate);
+#else
+    if (predicate) {
+      const uint2 v = *reinterpret_cast<const uint2*>(gptr);
+      *smem_ptr = make_uint4(v.x, v.y, 0, 0);
+    } else if constexpr (fill_mode == cp_async::SharedMemFillMode::kFillZero) {
+      *smem_ptr = make_uint4(0, 0, 0, 0);
+    }
+#endif
   }
 
   template <typename T>

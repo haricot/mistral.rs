@@ -7,6 +7,12 @@ mod flashinfer;
 mod flashinfer {
     use candle_core::{DType, Result, Tensor};
 
+    #[derive(Clone, Copy)]
+    pub struct FlashInferDecodeScratch<'a> {
+        pub tmp_v: &'a Tensor,
+        pub tmp_s: &'a Tensor,
+    }
+
     pub fn is_flashinfer_cache(_key_cache: &Tensor, _value_cache: &Tensor) -> bool {
         false
     }
@@ -32,6 +38,8 @@ mod flashinfer {
         _paged_kv_indptr: &Tensor,
         _paged_kv_indices: &Tensor,
         _paged_kv_last_page_len: &Tensor,
+        _q_indptr: Option<&Tensor>,
+        _qo_tile_indices: Option<&Tensor>,
         _request_indices: &Tensor,
         _kv_tile_indices: &Tensor,
         _o_indptr: &Tensor,
@@ -41,6 +49,7 @@ mod flashinfer {
         _window_left: Option<usize>,
         _logits_soft_cap: Option<f32>,
         _use_tensor_cores: bool,
+        _scratch: Option<FlashInferDecodeScratch<'_>>,
     ) -> Result<Tensor> {
         candle_core::bail!("FlashInfer decode is not available on this CUDA compute capability")
     }
@@ -61,6 +70,7 @@ mod flashinfer {
         _kv_chunk_size: &Tensor,
         _block_valid_mask: &Tensor,
         _batch_size: usize,
+        _causal: bool,
         _sm_scale: f32,
         _window_left: Option<usize>,
         _logits_soft_cap: Option<f32>,
@@ -81,7 +91,9 @@ mod flashinfer {
 }
 mod gather_kv;
 mod kvarn;
+#[allow(dead_code)]
 mod legacy_flash_attn;
+#[allow(dead_code)]
 mod legacy_flash_attn_turboquant;
 mod mla;
 mod mtp_paged_attention;
@@ -100,8 +112,13 @@ pub use flashinfer::{
     reshape_and_cache_flashinfer, FlashInferDecodeScratch,
 };
 pub use gather_kv::gather_kv_cache;
-pub use kvarn::kvarn_flash_attn_decode;
+pub use kvarn::{
+    kvarn_flash_attn_decode, kvarn_flash_attn_decode_mtp, kvarn_flash_attn_decode_mtp_with_tail,
+    kvarn_flash_attn_decode_with_tail, kvarn_store_tail,
+};
+#[allow(unused_imports)]
 pub use legacy_flash_attn::{legacy_flash_attn_decode_dense, legacy_flash_attn_decode_paged};
+#[allow(unused_imports)]
 pub use legacy_flash_attn_turboquant::{
     legacy_flash_attn_decode_turboquant, legacy_flash_attn_decode_turboquant_head512_twopass,
     legacy_flash_attn_turboquant_allowed,

@@ -578,6 +578,16 @@ impl IsqModel for Qwen3_5MoeModel {
     ) {
         self.text.get_layers()
     }
+
+    fn get_layers_moe_experts_only(
+        &mut self,
+    ) -> (
+        Vec<(&mut Arc<dyn QuantMethod>, Option<usize>)>,
+        &dyn DeviceMapper,
+    ) {
+        self.text.get_layers_moe_experts_only()
+    }
+
     fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let mut tensors = self.text.residual_tensors();
         if let Some(vision) = &self.vision {

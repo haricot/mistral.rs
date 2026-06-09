@@ -363,6 +363,111 @@ impl PagedAttention {
             // Staged MTP completion metadata has one block-table/context-len row
             // per query token, so the paged decode kernel can enforce the
             // causal boundary without materializing a dense KV mask.
+            if write_cache
+                && is_multi_token_decode
+                && uses_kvarn_cache
+                && query.device().is_cuda()
+                && kvarn_cache::cuda_fused_decode_enabled()
+                && seq_len <= 8
+                && alibi_slopes.is_none()
+                && sdpa_params.sinks.is_none()
+                && sdpa_params.softcap.is_none()
+            {
+                let q_flat = query
+                    .transpose(1, 2)?
+                    .reshape(((), attention_heads, head_size))?;
+                let query_rows = q_flat.dim(0)?;
+                let block_table_rows = block_tables.dim(0)?;
+                let metadata_lens = if use_full {
+                    input_metadata.full_paged_context_lens_cpu.as_ref()
+                } else {
+                    input_metadata.paged_context_lens_cpu.as_ref()
+                };
+                let kv_lens = if let Some(metadata_lens) = metadata_lens {
+                    metadata_lens.clone()
+                } else {
+                    context_lens_to_lengths(&context_lens)?
+                };
+
+                let tail_pool_active = kvarn_cache::cuda_tail_pool_active(
+                    key_cache.as_ref().unwrap(),
+                    value_cache.as_ref().unwrap(),
+                );
+                let tail_pool_fused_decode = kvarn_cache::cuda_fused_tail_pool_decode_enabled();
+                if (!tail_pool_active || tail_pool_fused_decode)
+                    && kv_lens.len() == query_rows
+                    && block_table_rows == query_rows
+                {
+                    let cu_kv = cumulative_seqlens_from_lengths(&kv_lens, query.device())?;
+                    let use_shared_mtp = batch_size == 1
+                        && kvarn_cache::cuda_mtp_shared_decode_enabled(query.device());
+                    let mtp_stats = std::env::var("MISTRALRS_MTP_STATS")
+                        .map(|v| {
+                            !v.trim().is_empty() && v != "0" && !v.eq_ignore_ascii_case("false")
+                        })
+                        .unwrap_or(false);
+                    let res = if use_shared_mtp {
+                        tracing::trace!(
+                            "Using KVarN fused MTP shared decode: query_rows={query_rows}, seq_len={seq_len}"
+                        );
+                        if mtp_stats {
+                            tracing::info!(
+                                "KVarN MTP decode path: shared, query_rows={query_rows}, seq_len={seq_len}, max_kv_len={}",
+                                kv_lens.iter().copied().max().unwrap_or(0)
+                            );
+                        }
+                        kvarn_cache::flash_attn_decode_mtp(
+                            &q_flat,
+                            key_cache.as_ref().unwrap(),
+                            value_cache.as_ref().unwrap(),
+                            &block_tables,
+                            &cu_kv,
+                            sdpa_params.softmax_scale,
+                        )?
+                    } else {
+                        tracing::trace!(
+                            "Using KVarN fused MTP direct decode: query_rows={query_rows}, seq_len={seq_len}"
+                        );
+                        if mtp_stats {
+                            tracing::info!(
+                                "KVarN MTP decode path: direct, query_rows={query_rows}, seq_len={seq_len}, max_kv_len={}",
+                                kv_lens.iter().copied().max().unwrap_or(0)
+                            );
+                        }
+                        kvarn_cache::flash_attn_decode(
+                            &q_flat,
+                            key_cache.as_ref().unwrap(),
+                            value_cache.as_ref().unwrap(),
+                            &block_tables,
+                            &cu_kv,
+                            sdpa_params.softmax_scale,
+                        )?
+                    };
+                    return res
+                        .reshape((batch_size, seq_len, attention_heads, head_size))?
+                        .transpose(1, 2);
+                }
+
+                let fallback_reason = if tail_pool_active && !tail_pool_fused_decode {
+                    "tail-pool-active"
+                } else {
+                    "metadata-mismatch"
+                };
+                tracing::trace!(
+                    "KVarN MTP direct decode fallback to gather: reason={fallback_reason}, query_rows={query_rows}, block_table_rows={block_table_rows}, kv_lens={}",
+                    kv_lens.len()
+                );
+                if std::env::var("MISTRALRS_MTP_STATS")
+                    .map(|v| !v.trim().is_empty() && v != "0" && !v.eq_ignore_ascii_case("false"))
+                    .unwrap_or(false)
+                {
+                    tracing::info!(
+                        "KVarN MTP decode path: fallback-gather, reason={fallback_reason}, query_rows={query_rows}, block_table_rows={block_table_rows}, kv_lens={}",
+                        kv_lens.len()
+                    );
+                }
+            }
+
             if write_cache && is_multi_token_decode && !uses_quantized_gather_cache {
                 let configured_max_context_len = if use_full {
                     input_metadata.full_max_context_len.unwrap()
@@ -867,14 +972,26 @@ impl PagedAttention {
                 && sdpa_params.sinks.is_none()
                 && sdpa_params.softcap.is_none()
             {
-                return kvarn_cache::flash_attn_decode(
-                    &query,
+                let tail_pool_active = kvarn_cache::cuda_tail_pool_active(
                     key_cache.as_ref().unwrap(),
                     value_cache.as_ref().unwrap(),
-                    &block_tables,
-                    &cu_kv,
-                    sdpa_params.softmax_scale,
                 );
+                if !tail_pool_active || kvarn_cache::cuda_fused_tail_pool_decode_enabled() {
+                    return kvarn_cache::flash_attn_decode(
+                        &query,
+                        key_cache.as_ref().unwrap(),
+                        value_cache.as_ref().unwrap(),
+                        &block_tables,
+                        &cu_kv,
+                        sdpa_params.softmax_scale,
+                    );
+                }
+                if std::env::var("MISTRALRS_MTP_STATS")
+                    .map(|v| !v.trim().is_empty() && v != "0" && !v.eq_ignore_ascii_case("false"))
+                    .unwrap_or(false)
+                {
+                    tracing::info!("KVarN decode path: fallback-gather, reason=tail-pool-active");
+                }
             }
 
             if uses_turboquant_cache {

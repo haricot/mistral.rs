@@ -16,7 +16,9 @@
 #ifndef FLASHINFER_CASCADE_CUH_
 #define FLASHINFER_CASCADE_CUH_
 
+
 #include "../cp_async.cuh"
+
 #include "../math.cuh"
 #include "../utils.cuh"
 #include "state.cuh"

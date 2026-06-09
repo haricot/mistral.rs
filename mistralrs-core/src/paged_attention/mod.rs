@@ -12,10 +12,12 @@ mod config;
 pub mod encoder_cache;
 /// KV Cache Manager: high-level block allocation, prefix cache lookups, per-request tracking.
 pub mod kv_cache_manager;
+pub(crate) mod kvarn_cache;
 mod layers;
 #[cfg(any(all(feature = "cuda", target_family = "unix"), feature = "metal"))]
 pub(crate) mod plan;
 mod scheduler;
+pub(crate) mod turboquant_cache;
 pub const _PAD_SLOT_ID: i64 = -1;
 
 pub use attention_backend::AttentionBackendKind;
@@ -32,6 +34,14 @@ use crate::MemoryUsage;
 use tracing::info;
 
 pub const DEFAULT_PAGED_ATTENTION_BLOCK_SIZE: usize = 32;
+
+pub fn default_block_size_for_cache_type(cache_type: PagedCacheType) -> usize {
+    if cache_type.is_kvarn() {
+        kvarn_cache::KVARN_GROUP
+    } else {
+        DEFAULT_PAGED_ATTENTION_BLOCK_SIZE
+    }
+}
 
 /// All memory counts in MB. Default for block size is 32.
 #[derive(Clone, Copy)]
@@ -90,6 +100,16 @@ macro_rules! ctxt_to_blocks {
     };
 }
 
+fn validate_block_size(cache_type: PagedCacheType, block_size: usize) -> anyhow::Result<()> {
+    if cache_type.is_kvarn() {
+        return Ok(kvarn_cache::validate_block_size(block_size)?);
+    }
+    if !SUPPORTED_BLOCK_SIZE.contains(&block_size) {
+        anyhow::bail!("Block size must be in {SUPPORTED_BLOCK_SIZE:?}, got {block_size}");
+    }
+    Ok(())
+}
+
 /// Memory values are in MBs or a percentage in [0,1]. Specify block size or the default is 32.
 ///
 /// `model_weight_size_in_bytes`: total model weight footprint. When provided, the per-device
@@ -116,11 +136,9 @@ pub fn calculate_cache_config(
     model_weight_size_in_bytes: Option<usize>,
     max_num_tokens: Option<usize>,
 ) -> anyhow::Result<CacheConfig> {
-    let block_size = block_size.unwrap_or(DEFAULT_PAGED_ATTENTION_BLOCK_SIZE);
-    if !SUPPORTED_BLOCK_SIZE.contains(&block_size) {
-        anyhow::bail!("Block size must be in {SUPPORTED_BLOCK_SIZE:?}, got {block_size}");
-    }
-    let dtype = cache_type.to_dtype(dtype);
+    let block_size = block_size.unwrap_or_else(|| default_block_size_for_cache_type(cache_type));
+    validate_block_size(cache_type, block_size)?;
+    let dtype = cache_type.to_dtype(dtype)?;
     let dtype_size = dtype.size_in_bytes();
 
     // For tensor parallelism, each device holds a fraction of the model weights. Approximate it like this.
@@ -191,4 +209,34 @@ pub fn calculate_cache_config(
         cache_type,
         kv_cache_group_ids: config.kv_cache_group_ids(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kvarn_defaults_to_group_block_size() {
+        assert_eq!(
+            default_block_size_for_cache_type(PagedCacheType::KVarN()),
+            kvarn_cache::KVARN_GROUP
+        );
+        assert_eq!(
+            default_block_size_for_cache_type(PagedCacheType::Auto()),
+            DEFAULT_PAGED_ATTENTION_BLOCK_SIZE
+        );
+    }
+
+    #[test]
+    fn validates_cache_specific_block_sizes() {
+        assert!(validate_block_size(PagedCacheType::KVarN(), kvarn_cache::KVARN_GROUP).is_ok());
+        assert!(
+            validate_block_size(PagedCacheType::KVarN(), DEFAULT_PAGED_ATTENTION_BLOCK_SIZE)
+                .is_err()
+        );
+        assert!(
+            validate_block_size(PagedCacheType::Auto(), DEFAULT_PAGED_ATTENTION_BLOCK_SIZE).is_ok()
+        );
+        assert!(validate_block_size(PagedCacheType::Auto(), kvarn_cache::KVARN_GROUP).is_err());
+    }
 }

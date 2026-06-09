@@ -270,6 +270,37 @@ pub const fn paged_attn_supported() -> bool {
     false
 }
 
+#[cfg(feature = "cuda")]
+pub fn is_legacy_cuda_device(device: &candle_core::Device) -> bool {
+    let candle_core::Device::Cuda(dev) = device else {
+        return false;
+    };
+
+    use candle_core::cuda::cudarc::driver::{result, sys};
+    let cu_device = dev.cuda_stream().context().cu_device();
+    let major = unsafe {
+        result::device::get_attribute(
+            cu_device,
+            sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR,
+        )
+    }
+    .unwrap_or(0);
+    let minor = unsafe {
+        result::device::get_attribute(
+            cu_device,
+            sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR,
+        )
+    }
+    .unwrap_or(0);
+
+    major * 100 + minor * 10 < 700
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn is_legacy_cuda_device(_device: &candle_core::Device) -> bool {
+    false
+}
+
 /// `true` if built with the `flash-attn` or `flash-attn-v3` features, false otherwise.
 #[cfg(not(any(feature = "flash-attn", feature = "flash-attn-v3")))]
 pub const fn using_flash_attn() -> bool {

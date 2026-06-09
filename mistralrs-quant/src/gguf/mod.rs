@@ -97,6 +97,32 @@ thread_local! {
 }
 
 #[cfg(feature = "cuda")]
+fn legacy_cuda_device(device: &Device) -> bool {
+    let Device::Cuda(dev) = device else {
+        return false;
+    };
+
+    use candle_core::cuda::cudarc::driver::{result, sys};
+    let cu_device = dev.cuda_stream().context().cu_device();
+    let major = unsafe {
+        result::device::get_attribute(
+            cu_device,
+            sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR,
+        )
+    }
+    .unwrap_or(0);
+    let minor = unsafe {
+        result::device::get_attribute(
+            cu_device,
+            sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR,
+        )
+    }
+    .unwrap_or(0);
+
+    major * 100 + minor * 10 < 700
+}
+
+#[cfg(feature = "cuda")]
 fn cuda_staged_dtype_supported(dtype: GgmlDType) -> bool {
     matches!(
         dtype,
@@ -569,10 +595,17 @@ impl GgufMatMul {
 
     #[cfg(feature = "cuda")]
     fn uses_fast_mmvq(&self) -> bool {
-        matches!(
-            &self.w,
-            QMatMul::QTensor(q) if q.device().is_cuda() && fast_mmvq::supports(q.dtype())
-        )
+        let QMatMul::QTensor(q) = &self.w else {
+            return false;
+        };
+        if !q.device().is_cuda() || !fast_mmvq::supports(q.dtype()) {
+            return false;
+        }
+
+        match std::env::var("MISTRALRS_GGUF_FAST_MMVQ") {
+            Ok(value) => value != "0" && !value.eq_ignore_ascii_case("false"),
+            Err(_) => !legacy_cuda_device(&q.device()),
+        }
     }
 
     #[cfg(feature = "cuda")]

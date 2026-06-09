@@ -34,7 +34,15 @@ enum class PrefetchMode {
   kPrefetch     // Fetch additional data from global memory to L2
 };
 
-#if (__CUDACC_VER_MAJOR__ >= 11)
+#ifndef HAS_CP_ASYNC
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ < 800)
+#define HAS_CP_ASYNC 0
+#else
+#define HAS_CP_ASYNC 1
+#endif
+#endif
+
+#if (__CUDACC_VER_MAJOR__ >= 11) && HAS_CP_ASYNC
 #if (!defined(__CUDA_ARCH__) || (__CUDA_ARCH__ >= 800))
 #define FLASHINFER_CP_ASYNC_ENABLED
 #endif

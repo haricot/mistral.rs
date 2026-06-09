@@ -558,14 +558,15 @@ impl Loader for NormalLoader {
 
         let mut immediate_ty = None;
         let mut immediate_predicates = Vec::new();
+        let organization = self.config.organization;
+
         if allow_immediate_cli {
             immediate_ty = in_situ_quant;
-            immediate_predicates =
-                if matches!(self.config.organization, IsqOrganization::MoeExpertsOnly) {
-                    self.inner.immediate_isq_predicates_moqe(&config)?
-                } else {
-                    self.inner.immediate_isq_predicates(&config)?
-                };
+            immediate_predicates = if matches!(organization, IsqOrganization::MoeExpertsOnly) {
+                self.inner.immediate_isq_predicates_moqe(&config)?
+            } else {
+                self.inner.immediate_isq_predicates(&config)?
+            };
             info!("Applying ISQ to {in_situ_quant:?}");
             if immediate_predicates.is_empty() {
                 warn!("No predicates for this model and ISQ setting detected. ISQ will not be applied to any weights!");
@@ -669,7 +670,7 @@ impl Loader for NormalLoader {
                 &config,
                 loading_isq,
                 self.config.from_uqff.is_some(),
-                self.config.organization,
+                organization,
                 &*self.inner,
                 paths.as_ref(),
             )?;
@@ -718,7 +719,7 @@ impl Loader for NormalLoader {
                     self.config.from_uqff.is_some(),
                     device.clone(),
                     attention_mechanism,
-                    matches!(self.config.organization, IsqOrganization::MoeExpertsOnly),
+                    matches!(organization, IsqOrganization::MoeExpertsOnly),
                     multi_progress.clone(),
                     matformer_slicing_config.clone(),
                 ),
@@ -739,7 +740,7 @@ impl Loader for NormalLoader {
                     self.config.from_uqff.is_some(),
                     device.clone(),
                     attention_mechanism,
-                    matches!(self.config.organization, IsqOrganization::MoeExpertsOnly),
+                    matches!(organization, IsqOrganization::MoeExpertsOnly),
                     multi_progress.clone(),
                     matformer_slicing_config.clone(),
                 ),
@@ -926,7 +927,7 @@ impl Loader for NormalLoader {
                 self.config.topology.as_ref(),
                 silent,
                 imatrix_source,
-                self.config.organization,
+                organization,
                 should_quantize_pass,
                 self.config.write_uqff.as_ref(),
                 UqffFullSer {
@@ -945,6 +946,7 @@ impl Loader for NormalLoader {
             model.load_from_artifacts(
                 device.clone(),
                 self.config.topology.as_ref(),
+                organization,
                 silent,
                 from_uqff,
             )?;
@@ -1245,6 +1247,9 @@ impl NormalPipeline {
         if !cuda_decode_graphs_enabled() || !self.model.supports_cuda_decode_graphs() {
             return Ok(None);
         }
+        if crate::topology::cpu_moe_enabled() {
+            return Ok(None);
+        }
         if self.model.has_speculative_proposer() {
             return Ok(None);
         }
@@ -1386,6 +1391,11 @@ impl Pipeline for NormalPipeline {
             }
             (None, None) => None,
         };
+        let mtp_stats = env::var("MISTRALRS_MTP_STATS")
+            .map(|v| !v.trim().is_empty() && v != "0" && !v.eq_ignore_ascii_case("false"))
+            .unwrap_or(false);
+        let target_forward_started = mtp_stats.then(Instant::now);
+        let paged = paged_attn_meta.is_some();
         let logits = match self.model.is_xlora() {
             false => {
                 let paged_attn_meta = paged_attn_meta
@@ -1403,7 +1413,14 @@ impl Pipeline for NormalPipeline {
                         &flash_meta,
                     ) {
                         Ok(Some(logits)) => {
-                            return Ok(ForwardInputsResult::CausalGeneration { logits })
+                            if let Some(started) = target_forward_started.as_ref() {
+                                tracing::info!(
+                                    "MTP target forward normal: input_shape={:?}, paged={paged}, cuda_graph=true, raw_logits={return_raw_logits}, elapsed_ms={:.2}",
+                                    input_ids.dims(),
+                                    started.elapsed().as_secs_f64() * 1000.0
+                                );
+                            }
+                            return Ok(ForwardInputsResult::CausalGeneration { logits });
                         }
                         Ok(None) => {}
                         Err(err) => self.disable_cuda_decode_graph(&err),
@@ -1436,6 +1453,13 @@ impl Pipeline for NormalPipeline {
                 flash_meta_full.as_ref().unwrap_or(&flash_meta),
             )?,
         };
+        if let Some(started) = target_forward_started.as_ref() {
+            tracing::info!(
+                "MTP target forward normal: input_shape={:?}, paged={paged}, cuda_graph=false, raw_logits={return_raw_logits}, elapsed_ms={:.2}",
+                input_ids.dims(),
+                started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
         if return_raw_logits {
             Ok(ForwardInputsResult::RawLogits { logits })
         } else {

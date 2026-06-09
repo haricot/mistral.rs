@@ -270,6 +270,18 @@ fn q4k_fused_moe_parallel_topk_enabled() -> bool {
         .unwrap_or(true)
 }
 
+fn q4k_fused_moe_enabled() -> bool {
+    std::env::var("MISTRALRS_GGUF_CPU_MOE_Q4K_FUSED")
+        .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+        .unwrap_or(true)
+}
+
+fn q4k_indexed_moe_enabled() -> bool {
+    std::env::var("MISTRALRS_GGUF_CPU_MOE_Q4K_INDEXED")
+        .map(|v| v != "0" && !v.eq_ignore_ascii_case("false"))
+        .unwrap_or(true)
+}
+
 fn q4k_fused_moe_max_prefill_tokens() -> usize {
     std::env::var("MISTRALRS_GGUF_CPU_MOE_Q4K_FUSED_MAX_PREFILL_TOKENS")
         .ok()
@@ -694,6 +706,10 @@ pub(crate) fn cpu_fused_moe_q4k_forward_raw<F>(
 where
     F: Fn(f32) -> f32 + Copy + Send + Sync,
 {
+    if !q4k_fused_moe_enabled() {
+        return Ok(None);
+    }
+
     let (num_experts, inter, hidden) = q4k_raw_shape(gate)?;
     let (up_num_experts, up_inter, up_hidden) = q4k_raw_shape(up)?;
     let (down_num_experts, down_hidden, down_inter) = q4k_raw_shape(down)?;
@@ -750,9 +766,9 @@ where
         .to_dtype(DType::F32)?
         .to_vec2::<f32>()?;
 
-    let gate_data = gate.data.as_ref();
-    let up_data = up.data.as_ref();
-    let down_data = down.data.as_ref();
+    let gate_data: &[u8] = gate.data.as_ref();
+    let up_data: &[u8] = up.data.as_ref();
+    let down_data: &[u8] = down.data.as_ref();
     let gate_key = gate.cache_key;
     let up_key = up.cache_key;
     let down_key = down.cache_key;
@@ -1306,7 +1322,7 @@ pub(crate) fn cpu_indexed_moe_forward_raw(
             raw,
         );
     }
-    if dtype == GgmlDType::Q4K && x.device().is_cpu() {
+    if dtype == GgmlDType::Q4K && x.device().is_cpu() && q4k_indexed_moe_enabled() {
         return qtensor_indexed_moe_forward_q4k_raw(
             tensor_key,
             x,
