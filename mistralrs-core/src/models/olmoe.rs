@@ -7,21 +7,26 @@ use mistralrs_quant::{
     ShardedVarBuilder,
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
 
 use crate::moe::{MoEExperts, MoEExpertsConfig};
 use crate::{
     amoe::AnyMoeBaseModelMixin,
     attention::{AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
-    layers::{embedding, Activation, CausalMasker, RmsNorm, RotaryEmbedding, Sdpa},
-    layers_masker::{CausalMaskConfig, PastKvLenCache},
+    layers::{self, embedding, Activation, CausalMasker, RmsNorm, RotaryEmbedding, Sdpa},
+    layers_masker::CausalMaskConfig,
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
     pipeline::{
-        extract_logits,
         text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
-        EitherCache, IsqModel, KvCache, NormalCache, NormalCacheType, NormalLoadingMetadata,
-        NormalModel,
+        EitherCache, IsqModel, KvCache, ModelForwardContext, NormalCache, NormalCacheType,
+        NormalLoadingMetadata, NormalModel,
     },
     serde_default_fn,
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
@@ -29,6 +34,12 @@ use crate::{
 
 serde_default_fn!(bool, tie_word_embeddings, false);
 serde_default_fn!(bool, norm_topk_prob, false);
+
+const EMO_EXPERT_SUBSET_ENV: &str = "MISTRALRS_EMO_EXPERT_SUBSET";
+const EMO_KEEP_EXPERTS_ENV: &str = "MISTRALRS_EMO_KEEP_EXPERTS";
+const EMO_EXPERT_MASK_VALUE: f32 = -1.0e30;
+
+static LOG_EMO_EXPERT_SUBSET: AtomicBool = AtomicBool::new(false);
 
 fn default_hidden_act() -> Activation {
     Activation::Silu
@@ -80,6 +91,113 @@ impl Config {
     }
 }
 
+#[derive(Clone, Debug)]
+struct ExpertSubset {
+    routed: Vec<usize>,
+}
+
+impl ExpertSubset {
+    fn from_env(
+        num_experts: usize,
+        num_routed_experts: usize,
+        num_routed_experts_per_tok: usize,
+    ) -> Result<Option<Self>> {
+        let routed = if let Ok(spec) = std::env::var(EMO_EXPERT_SUBSET_ENV) {
+            parse_expert_subset_spec(&spec, num_experts, num_routed_experts)?
+        } else if let Ok(keep) = std::env::var(EMO_KEEP_EXPERTS_ENV) {
+            let keep = keep.parse::<usize>().map_err(|err| {
+                candle_core::Error::msg(format!("{EMO_KEEP_EXPERTS_ENV} must be usize: {err}"))
+            })?;
+            if keep == 0 || keep > num_routed_experts {
+                candle_core::bail!(
+                    "{EMO_KEEP_EXPERTS_ENV} must be in [1, {num_routed_experts}], got {keep}"
+                );
+            }
+            (0..keep).collect()
+        } else {
+            return Ok(None);
+        };
+
+        if routed.len() < num_routed_experts_per_tok {
+            candle_core::bail!(
+                "EMO selected routed experts ({}) must be >= routed top-k ({})",
+                routed.len(),
+                num_routed_experts_per_tok
+            );
+        }
+
+        Ok(Some(Self { routed }))
+    }
+
+    fn mask_logits(&self, logits: &Tensor, num_routed_experts: usize) -> Result<Tensor> {
+        let mut bias = vec![EMO_EXPERT_MASK_VALUE; num_routed_experts];
+        for &expert in &self.routed {
+            bias[expert] = 0.0;
+        }
+        let bias = Tensor::from_vec(bias, (num_routed_experts,), logits.device())?;
+        logits.broadcast_add(&bias)
+    }
+}
+
+fn parse_expert_subset_spec(
+    spec: &str,
+    num_experts: usize,
+    num_routed_experts: usize,
+) -> Result<Vec<usize>> {
+    let spec = spec.trim();
+    if spec.is_empty() || spec.eq_ignore_ascii_case("all") {
+        return Ok((0..num_routed_experts).collect());
+    }
+
+    let mut selected = vec![false; num_routed_experts];
+    for part in spec
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
+        let (start, end) = if let Some((start, end)) = part.split_once("..") {
+            (parse_expert_id(start)?, parse_expert_id(end)?)
+        } else if let Some((start, end)) = part.split_once('-') {
+            (parse_expert_id(start)?, parse_expert_id(end)?)
+        } else {
+            let expert = parse_expert_id(part)?;
+            (expert, expert)
+        };
+
+        if start > end {
+            candle_core::bail!("invalid EMO expert range `{part}`");
+        }
+        if end >= num_experts {
+            candle_core::bail!(
+                "EMO expert id {} out of range for {} experts",
+                end,
+                num_experts
+            );
+        }
+        for expert in start..=end {
+            if expert < num_routed_experts {
+                selected[expert] = true;
+            }
+        }
+    }
+
+    let routed = selected
+        .into_iter()
+        .enumerate()
+        .filter_map(|(idx, selected)| selected.then_some(idx))
+        .collect::<Vec<_>>();
+    if routed.is_empty() {
+        candle_core::bail!("EMO expert subset did not select any routed experts");
+    }
+    Ok(routed)
+}
+
+fn parse_expert_id(value: &str) -> Result<usize> {
+    value.trim().parse::<usize>().map_err(|err| {
+        candle_core::Error::msg(format!("invalid EMO expert id `{}`: {err}", value.trim()))
+    })
+}
+
 struct Attention {
     q_proj: Arc<dyn QuantMethod>,
     k_proj: Arc<dyn QuantMethod>,
@@ -121,7 +239,7 @@ impl Attention {
             cfg.num_key_value_heads,
             cfg.hidden_size / cfg.num_attention_heads,
             comm,
-        );
+        )?;
         let k_proj = ColumnParallelLayer::new_with_shard(
             hidden_sz,
             num_kv_heads * head_dim,
@@ -163,7 +281,7 @@ impl Attention {
                     cfg.num_key_value_heads,
                     cfg.num_attention_heads,
                     comm,
-                ),
+                )?,
                 softcap: None,
                 softmax_scale: 1.0 / (head_dim as f32).sqrt(),
                 sliding_window: None,
@@ -172,22 +290,18 @@ impl Attention {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn forward(
         &self,
         xs: &Tensor,
         attention_mask: &AttentionMask,
-        seqlen_offsets: &[usize],
         kv_cache: &mut KvCache,
-        metadata: Option<((Tensor, Tensor), &PagedAttentionInputMetadata)>,
-        flash_params: &FlashParams,
+        ctx: &mut ModelForwardContext<'_>,
+        layer_idx: usize,
     ) -> Result<Tensor> {
         let (b_sz, q_len, _) = xs.dims3()?;
 
-        let mut q = self.q_proj.forward(xs)?;
-        let mut k = self.k_proj.forward(xs)?;
-        let mut v = self.v_proj.forward(xs)?;
-
+        let (mut q, mut k, mut v) =
+            crate::ops::qkv_projections(xs, &*self.q_proj, &*self.k_proj, &*self.v_proj)?;
         (q, k, v) = if q_len != 1 {
             let q = q
                 .reshape((b_sz, q_len, self.num_heads, self.head_dim))?
@@ -206,7 +320,11 @@ impl Attention {
             (q, k, v)
         };
 
-        (q, k) = self.rotary_emb.forward(&q, &k, seqlen_offsets)?;
+        let rope_positions = ctx
+            .text_positions(q.device(), q.dim(2)?)?
+            .ok_or_else(|| candle_core::Error::msg("missing RoPE positions"))?;
+        (q, k) = self.rotary_emb.forward(&q, &k, rope_positions)?;
+        let metadata = ctx.paged_layer(layer_idx);
 
         let mut attn_output = match &self.paged_attn {
             Some(paged_attn) => match metadata {
@@ -219,13 +337,10 @@ impl Attention {
                     Some(value_cache),
                     input_metadata,
                     &self.sdpa_params,
-                    Some(flash_params),
+                    Some(ctx.flash_params()),
                 )?,
                 None => {
-                    // If we don't have metadata, we are most likely generating an imatrix so we don't want to populate that.
-                    // Generating the dummy metadata with the assumption that we are not generating text (only processing prompts).
                     let input_metadata = PagedAttentionInputMetadata::dummy(q.device())?;
-                    // Sanity check.
                     assert!(!matches!(attention_mask, AttentionMask::None));
                     paged_attn.forward(
                         &q,
@@ -236,7 +351,7 @@ impl Attention {
                         None,
                         &input_metadata,
                         &self.sdpa_params,
-                        Some(flash_params),
+                        Some(ctx.flash_params()),
                     )?
                 }
             },
@@ -248,7 +363,7 @@ impl Attention {
                     &k,
                     &v,
                     attention_mask,
-                    Some(flash_params),
+                    Some(ctx.flash_params()),
                     &self.sdpa_params,
                 )?
             }
@@ -263,7 +378,6 @@ impl Attention {
     }
 }
 
-/// MoE MLP layer for OLMoE/EMO.
 struct MoeMlp {
     gate: Linear,
     experts: MoEExperts,
@@ -272,6 +386,7 @@ struct MoeMlp {
     num_experts_per_tok: usize,
     num_shared_experts: usize,
     norm_topk_prob: bool,
+    expert_subset: Option<ExpertSubset>,
 }
 
 impl MoeMlp {
@@ -297,12 +412,29 @@ impl MoeMlp {
             );
         }
 
-        let gate = Linear::new(
-            vb.pp("gate")
-                .set_device(layer_device.clone())
-                .get((cfg.num_experts, cfg.hidden_size), "weight")?,
-            None,
-        );
+        let num_routed_experts = cfg.num_experts - cfg.num_shared_experts;
+        let num_routed_experts_per_tok = cfg.num_experts_per_tok - cfg.num_shared_experts;
+        let expert_subset = ExpertSubset::from_env(
+            cfg.num_experts,
+            num_routed_experts,
+            num_routed_experts_per_tok,
+        )?;
+        if let Some(subset) = &expert_subset {
+            if !LOG_EMO_EXPERT_SUBSET.swap(true, Ordering::Relaxed) {
+                tracing::info!(
+                    "EMO selective expert routing enabled: routed experts {}/{} selected, shared experts {} always active.",
+                    subset.routed.len(),
+                    num_routed_experts,
+                    cfg.num_shared_experts
+                );
+            }
+        }
+
+        let gate = layers::linear_no_bias(
+            cfg.hidden_size,
+            cfg.num_experts,
+            vb.pp("gate").set_device(layer_device.clone()),
+        )?;
 
         let moe_cfg = MoEExpertsConfig {
             num_experts: cfg.num_experts,
@@ -311,7 +443,6 @@ impl MoeMlp {
             moe_intermediate_size: cfg.intermediate_size,
         };
 
-        // Load experts with automatic backend selection
         let experts = MoEExperts::new(
             &moe_cfg,
             vb,
@@ -326,42 +457,56 @@ impl MoeMlp {
             gate,
             experts,
             num_experts: cfg.num_experts,
-            num_routed_experts: cfg.num_experts - cfg.num_shared_experts,
+            num_routed_experts,
             num_experts_per_tok: cfg.num_experts_per_tok,
             num_shared_experts: cfg.num_shared_experts,
             norm_topk_prob: cfg.norm_topk_prob,
+            expert_subset,
         })
     }
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let (b_size, seq_len, hidden_dim) = xs.dims3()?;
         let xs_flat = xs.reshape(((), hidden_dim))?;
-
-        // Compute routing weights
         let router_logits = self.gate.forward(&xs_flat)?.to_dtype(DType::F32)?;
 
-        let (topk_ids, mut topk_weights) = if self.num_shared_experts == 0 {
-            let routing_weights = candle_nn::ops::softmax_last_dim(&router_logits)?;
-            // Get top-k experts
-            let topk_ids = routing_weights
-                .arg_sort_last_dim(false)?
-                .narrow(D::Minus1, 0, self.num_experts_per_tok)?
-                .contiguous()?;
-            let topk_weights = routing_weights.gather(&topk_ids, D::Minus1)?;
-            (topk_ids, topk_weights)
+        let (topk_ids, topk_weights) = if self.num_shared_experts == 0 {
+            let router_logits = if let Some(subset) = &self.expert_subset {
+                subset.mask_logits(&router_logits, self.num_routed_experts)?
+            } else {
+                router_logits
+            };
+            let topk = crate::ops::moe_router_topk(
+                &router_logits,
+                crate::ops::MoeRouterTopKConfig {
+                    top_k: self.num_experts_per_tok,
+                    score_function: crate::ops::MoeRouterScoreFunction::Softmax,
+                    selected_weight: crate::ops::MoeRouterSelectedWeight::Score,
+                    renormalize: self.norm_topk_prob,
+                    norm_min: 0.0,
+                    output_scale: 1.0,
+                    logit_clip: None,
+                },
+                None,
+                None,
+            )?;
+            (topk.indices, topk.values)
         } else {
             let num_tokens = b_size * seq_len;
             let routed_k = self.num_experts_per_tok - self.num_shared_experts;
-
             let routed_logits = router_logits
                 .narrow(D::Minus1, 0, self.num_routed_experts)?
                 .contiguous()?;
+            let routed_logits = if let Some(subset) = &self.expert_subset {
+                subset.mask_logits(&routed_logits, self.num_routed_experts)?
+            } else {
+                routed_logits
+            };
             let routed_weights = candle_nn::ops::softmax_last_dim(&routed_logits)?.contiguous()?;
             let shared_logits = router_logits
                 .narrow(D::Minus1, self.num_routed_experts, self.num_shared_experts)?
                 .contiguous()?;
             let shared_weights = candle_nn::ops::softmax_last_dim(&shared_logits)?;
-
             let shared_ids = Tensor::from_vec(
                 (0..num_tokens)
                     .flat_map(|_| {
@@ -372,7 +517,7 @@ impl MoeMlp {
                 router_logits.device(),
             )?;
 
-            if routed_k == 0 {
+            let (ids, mut weights) = if routed_k == 0 {
                 (shared_ids.contiguous()?, shared_weights)
             } else {
                 let routed_ids = routed_weights
@@ -384,25 +529,19 @@ impl MoeMlp {
                     Tensor::cat(&[routed_ids, shared_ids], D::Minus1)?.contiguous()?,
                     Tensor::cat(&[routed_topk_weights, shared_weights], D::Minus1)?,
                 )
+            };
+            if self.norm_topk_prob {
+                weights = weights.broadcast_div(&weights.sum_keepdim(D::Minus1)?)?;
             }
+            (ids, weights)
         };
 
-        if self.norm_topk_prob {
-            topk_weights = topk_weights.broadcast_div(&topk_weights.sum_keepdim(D::Minus1)?)?;
-        }
-
-        // Forward through experts (is_prefill determined internally based on seq_len)
         let ys = self.experts.forward(xs, topk_weights, &topk_ids)?;
-
         ys.reshape((b_size, seq_len, hidden_dim))
     }
 
     fn gate(&self) -> &Linear {
         &self.gate
-    }
-
-    fn get_isq_layers(&mut self) -> Vec<&mut Arc<dyn QuantMethod>> {
-        self.experts.get_isq_layers()
     }
 }
 
@@ -436,7 +575,6 @@ impl DecoderLayer {
             paged_attn,
             comm,
         )?;
-
         let mlp_vb = mapper.set_device(layer_idx, vb.pp("mlp"), loading_isq);
         let layer_device = mapper
             .device_for(layer_idx, false)
@@ -461,26 +599,19 @@ impl DecoderLayer {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn forward(
         &self,
         xs: &Tensor,
         attention_mask: &AttentionMask,
-        seqlen_offsets: &[usize],
         kv_cache: &mut KvCache,
-        metadata: Option<((Tensor, Tensor), &PagedAttentionInputMetadata)>,
-        flash_params: &FlashParams,
+        ctx: &mut ModelForwardContext<'_>,
+        layer_idx: usize,
     ) -> Result<Tensor> {
         let residual = xs;
         let xs = self.pre_attention_layernorm.forward(xs)?;
-        let xs = self.self_attn.forward(
-            &xs,
-            attention_mask,
-            seqlen_offsets,
-            kv_cache,
-            metadata,
-            flash_params,
-        )?;
+        let xs = self
+            .self_attn
+            .forward(&xs, attention_mask, kv_cache, ctx, layer_idx)?;
         let xs = (xs + residual)?;
         let residual = &xs;
         let xs = self
@@ -543,7 +674,6 @@ impl Model {
         {
             candle_core::bail!(
                 "EMO checkpoint declares dtype=float32, but mistral.rs selected F16. \
-                 This produces non-finite activations and incoherent text for `allenai/Emo_1b14b_1T`. \
                  Use `--dtype f32` with fewer/no GPU layers, or set MISTRALRS_OLMOE_ALLOW_F16=1 \
                  to run the experimental F16 path anyway."
             );
@@ -603,7 +733,7 @@ impl Model {
                 .get_comm_for(layer_idx)
                 .expect("Failed to get comm for layer");
             DecoderLayer::new(
-                rotary_emb.clone(),
+                rotary_emb,
                 cfg,
                 vb_l.pp(layer_idx),
                 &*mapper,
@@ -628,13 +758,16 @@ impl Model {
                 mapper.set_nm_device(vb_lm_head, normal_loading_metadata.loading_isq),
             )?
         } else {
-            ReplicatedLayer::from_linear(candle_nn::Linear::new(
-                mapper.cast_nm_device(
-                    embed_tokens.embeddings(),
-                    normal_loading_metadata.loading_isq,
-                )?,
-                None,
-            ))?
+            ReplicatedLayer::from_linear(
+                candle_nn::Linear::new(
+                    mapper.cast_nm_device(
+                        embed_tokens.embeddings(),
+                        normal_loading_metadata.loading_isq,
+                    )?,
+                    None,
+                ),
+                mapper.set_nm_device(vb_lm_head, normal_loading_metadata.loading_isq),
+            )?
         };
         let cache_types = (0..cfg.num_hidden_layers)
             .map(|_| NormalCacheType::Normal {
@@ -665,51 +798,26 @@ impl Model {
         })
     }
 
-    pub fn forward(
-        &self,
-        input_ids: &Tensor,
-        seqlen_offsets: &[usize],
-        context_lens: Vec<(usize, usize)>,
-        metadata: Option<(Vec<(Tensor, Tensor)>, &PagedAttentionInputMetadata)>,
-        flash_params: &FlashParams,
-    ) -> Result<Tensor> {
-        self.forward_embeds(
-            input_ids,
-            self.embed_tokens.forward(input_ids)?,
-            seqlen_offsets,
-            context_lens,
-            metadata,
-            flash_params,
-        )
+    pub fn forward(&self, input_ids: &Tensor, ctx: &mut ModelForwardContext<'_>) -> Result<Tensor> {
+        self.forward_embeds(input_ids, self.embed_tokens.forward(input_ids)?, ctx)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn forward_embeds(
         &self,
         input_ids: &Tensor,
         input_embeds: Tensor,
-        seqlen_offsets: &[usize],
-        context_lens: Vec<(usize, usize)>,
-        metadata: Option<(Vec<(Tensor, Tensor)>, &PagedAttentionInputMetadata)>,
-        flash_params: &FlashParams,
+        ctx: &mut ModelForwardContext<'_>,
     ) -> Result<Tensor> {
         let mut xs = input_embeds;
         let cache = &mut self.cache.normal().0;
+        let mask_cache = ctx.mask_cache(cache);
         let attention_mask = CausalMasker.make_causal_mask(
             input_ids,
-            metadata
-                .as_ref()
-                .map(|(_, _)| &seqlen_offsets as &dyn PastKvLenCache)
-                .unwrap_or(cache as &dyn PastKvLenCache),
+            &mask_cache,
             xs.dtype(),
             &CausalMaskConfig::default(),
         )?;
-        // PagedAttention prompt chunking
-        let attention_mask = if metadata
-            .as_ref()
-            .map(|(_, meta)| meta.is_first_prompt_chunk)
-            .unwrap_or(true)
-        {
+        let attention_mask = if ctx.is_first_prompt_chunk() {
             attention_mask
         } else {
             AttentionMask::None
@@ -717,46 +825,16 @@ impl Model {
         let attention_mask = DeviceMappedMask::new(attention_mask, &*self.mapper)?;
         for (i, layer) in self.layers.iter().enumerate() {
             xs = self.mapper.map(xs, i)?;
-            xs = layer.forward(
-                &xs,
-                &attention_mask.get(xs.device()),
-                seqlen_offsets,
-                &mut cache[i],
-                metadata
-                    .as_ref()
-                    .map(|(kv_cache, metadata)| (kv_cache[i].clone(), *metadata)),
-                flash_params,
-            )?;
-            // dbg!(&i);
+            xs = layer.forward(&xs, &attention_mask.get(xs.device()), &mut cache[i], ctx, i)?;
         }
         let xs = xs.to_device(&self.device)?;
         let xs = xs.apply(&self.norm)?;
-        let xs = extract_logits(&xs, context_lens)?;
+        let xs = ctx.logits(&xs)?;
         self.lm_head.forward(&xs)
     }
 }
 
 impl IsqModel for Model {
-    fn get_layers(
-        &mut self,
-    ) -> (
-        Vec<(&mut Arc<dyn QuantMethod>, Option<usize>)>,
-        &dyn DeviceMapper,
-    ) {
-        let mut tensors = Vec::new();
-        tensors.push((&mut self.lm_head, None));
-        for (i, layer) in self.layers.iter_mut().enumerate() {
-            tensors.push((&mut layer.self_attn.q_proj, Some(i)));
-            tensors.push((&mut layer.self_attn.k_proj, Some(i)));
-            tensors.push((&mut layer.self_attn.v_proj, Some(i)));
-            tensors.push((&mut layer.self_attn.o_proj, Some(i)));
-            for layer in layer.mlp.get_isq_layers() {
-                tensors.push((layer, Some(i)));
-            }
-        }
-        (tensors, &*self.mapper)
-    }
-
     fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let uvb = UnVarBuilder::new();
 
@@ -779,24 +857,13 @@ impl IsqModel for Model {
     }
 }
 
+impl crate::speculative::SpeculativeTargetMixin for Model {}
+
 impl NormalModel for Model {
-    fn forward(
-        &self,
-        input_ids: &Tensor,
-        seqlen_offsets: &[usize],
-        context_lens: Vec<(usize, usize)>,
-        _position_ids: Vec<usize>,
-        metadata: Option<(Vec<(Tensor, Tensor)>, &PagedAttentionInputMetadata)>,
-        flash_params: &FlashParams,
-    ) -> Result<Tensor> {
-        self.forward(
-            input_ids,
-            seqlen_offsets,
-            context_lens,
-            metadata,
-            flash_params,
-        )
+    fn forward(&self, input_ids: &Tensor, ctx: &mut ModelForwardContext<'_>) -> Result<Tensor> {
+        self.forward(input_ids, ctx)
     }
+
     fn xlora_forward(
         &self,
         _input_ids: &Tensor,
@@ -812,24 +879,48 @@ impl NormalModel for Model {
     ) -> Result<Tensor> {
         candle_core::bail!("OLMoE/EMO does not currently support X-LoRA forward")
     }
+
     fn cache(&self) -> &EitherCache {
         &self.cache
     }
-    fn cache_mut(&mut self) -> &mut EitherCache {
-        &mut self.cache
-    }
+
     fn device(&self) -> &Device {
         &self.device
     }
+
     fn is_xlora(&self) -> bool {
         false
     }
+
     fn max_seq_len(&self) -> usize {
         self.max_seq_len
     }
+
     fn config(&self) -> &ModelConfigMetadata {
         &self.cfg
+    }
+
+    #[cfg(feature = "cuda")]
+    fn supports_cuda_decode_graphs(&self) -> bool {
+        true
     }
 }
 
 impl AnyMoeBaseModelMixin for Model {}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_expert_subset_spec;
+
+    #[test]
+    fn parses_expert_subset_ranges() {
+        let parsed = parse_expert_subset_spec("0-2,4,6..7", 10, 9).unwrap();
+        assert_eq!(parsed, vec![0, 1, 2, 4, 6, 7]);
+    }
+
+    #[test]
+    fn ignores_shared_experts_in_subset() {
+        let parsed = parse_expert_subset_spec("125-127", 128, 127).unwrap();
+        assert_eq!(parsed, vec![125, 126]);
+    }
+}
