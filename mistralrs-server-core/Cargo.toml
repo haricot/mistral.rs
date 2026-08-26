@@ -51,6 +51,8 @@ intel-mkl-src = { workspace = true, optional = true }
 default = ["swagger-ui"]
 swagger-ui = ["dep:utoipa-swagger-ui"]
 cuda = ["mistralrs-core/cuda"]
+cuda-legacy-bf16 = ["cuda", "mistralrs-core/cuda-legacy-bf16"]
+cuda-legacy-fp8 = ["cuda", "mistralrs-core/cuda-legacy-fp8"]
 cudnn = ["mistralrs-core/cudnn"]
 metal = ["mistralrs-core/metal"]
 flash-attn = ["cuda", "mistralrs-core/flash-attn"]

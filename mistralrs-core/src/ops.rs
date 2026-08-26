@@ -4764,6 +4764,10 @@ pub(crate) fn try_cuda_qk_rms_norm_rope(
     }
 }
 
+#[cfg_attr(
+    not(all(feature = "flash-attn", target_family = "unix")),
+    allow(dead_code)
+)]
 #[cfg(feature = "cuda")]
 pub(crate) fn try_cuda_rope_sincos_positions(
     positions: &Tensor,

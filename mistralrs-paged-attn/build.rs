@@ -125,6 +125,12 @@ fn main() -> Result<()> {
         .arg(&header_hash_arg);
 
     let compute_cap = builder.get_compute_cap().unwrap_or(80);
+    builder = builder.arg(if compute_cap >= 75 {
+        "-DHAS_PTX_TANH=1"
+    } else {
+        "-DHAS_PTX_TANH=0"
+    });
+
     // Enable FP8 if compute capability >= 8.0 (Ampere and newer)
     let using_fp8 = if compute_cap >= 80 {
         builder = builder.arg("-DENABLE_FP8");

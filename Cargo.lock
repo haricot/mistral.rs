@@ -649,7 +649,7 @@ checksum = "ade8366b8bd5ba243f0a58f036cc0ca8a2f069cff1a2351ef1cac6b083e16fc0"
 [[package]]
 name = "candle-core"
 version = "0.11.0"
-source = "git+https://github.com/huggingface/candle.git?rev=35d7ae7ca5c93e17c77359c3617376b8a72e96a4#35d7ae7ca5c93e17c77359c3617376b8a72e96a4"
+source = "git+https://github.com/haricot/candle.git?rev=267c4d8fa8f0f1d2e01c0365875eaedd98414c1e#267c4d8fa8f0f1d2e01c0365875eaedd98414c1e"
 dependencies = [
  "accelerate-src",
  "byteorder",
@@ -682,7 +682,7 @@ dependencies = [
 [[package]]
 name = "candle-flash-attn-v3"
 version = "0.11.0"
-source = "git+https://github.com/huggingface/candle.git?rev=35d7ae7ca5c93e17c77359c3617376b8a72e96a4#35d7ae7ca5c93e17c77359c3617376b8a72e96a4"
+source = "git+https://github.com/haricot/candle.git?rev=267c4d8fa8f0f1d2e01c0365875eaedd98414c1e#267c4d8fa8f0f1d2e01c0365875eaedd98414c1e"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -695,7 +695,7 @@ dependencies = [
 [[package]]
 name = "candle-kernels"
 version = "0.11.0"
-source = "git+https://github.com/huggingface/candle.git?rev=35d7ae7ca5c93e17c77359c3617376b8a72e96a4#35d7ae7ca5c93e17c77359c3617376b8a72e96a4"
+source = "git+https://github.com/haricot/candle.git?rev=267c4d8fa8f0f1d2e01c0365875eaedd98414c1e#267c4d8fa8f0f1d2e01c0365875eaedd98414c1e"
 dependencies = [
  "cudaforge",
 ]
@@ -703,7 +703,7 @@ dependencies = [
 [[package]]
 name = "candle-metal-kernels"
 version = "0.11.0"
-source = "git+https://github.com/huggingface/candle.git?rev=35d7ae7ca5c93e17c77359c3617376b8a72e96a4#35d7ae7ca5c93e17c77359c3617376b8a72e96a4"
+source = "git+https://github.com/haricot/candle.git?rev=267c4d8fa8f0f1d2e01c0365875eaedd98414c1e#267c4d8fa8f0f1d2e01c0365875eaedd98414c1e"
 dependencies = [
  "block2",
  "half",
@@ -718,7 +718,7 @@ dependencies = [
 [[package]]
 name = "candle-nn"
 version = "0.11.0"
-source = "git+https://github.com/huggingface/candle.git?rev=35d7ae7ca5c93e17c77359c3617376b8a72e96a4#35d7ae7ca5c93e17c77359c3617376b8a72e96a4"
+source = "git+https://github.com/haricot/candle.git?rev=267c4d8fa8f0f1d2e01c0365875eaedd98414c1e#267c4d8fa8f0f1d2e01c0365875eaedd98414c1e"
 dependencies = [
  "accelerate-src",
  "candle-core",
@@ -737,7 +737,7 @@ dependencies = [
 [[package]]
 name = "candle-ug"
 version = "0.11.0"
-source = "git+https://github.com/huggingface/candle.git?rev=35d7ae7ca5c93e17c77359c3617376b8a72e96a4#35d7ae7ca5c93e17c77359c3617376b8a72e96a4"
+source = "git+https://github.com/haricot/candle.git?rev=267c4d8fa8f0f1d2e01c0365875eaedd98414c1e#267c4d8fa8f0f1d2e01c0365875eaedd98414c1e"
 dependencies = [
  "ug",
  "ug-cuda",
@@ -1247,9 +1247,9 @@ dependencies = [
 
 [[package]]
 name = "cudaforge"
-version = "0.1.4"
+version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ac9cd50bed6f024583322f1a5b8027eabef203086ccceb27aac1b0b58515a32"
+checksum = "8d475ff95b9e4096878f47fe0ca5dbad0e23849a79fc225305ea06c2f25771cd"
 dependencies = [
  "anyhow",
  "fs2",

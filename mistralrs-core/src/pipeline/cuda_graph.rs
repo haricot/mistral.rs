@@ -60,6 +60,10 @@ static CUDA_GRAPH_MEMORY_POOL_SCOPES: OnceLock<Mutex<HashMap<usize, MemoryPoolSc
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum CudaGraphComponent {
     Target,
+    #[cfg_attr(
+        not(all(feature = "flash-attn", target_family = "unix")),
+        allow(dead_code)
+    )]
     DFlash,
 }
 
@@ -2955,6 +2959,10 @@ impl CudaGraphPinnedBuffer {
         Ok(())
     }
 
+    #[cfg_attr(
+        not(all(feature = "flash-attn", target_family = "unix")),
+        allow(dead_code)
+    )]
     fn copy_from_f32_slice(
         &mut self,
         src: &[f32],
@@ -3208,6 +3216,10 @@ impl CudaGraphHostStaging {
         buffer.copy_from_u32_slice(src, dst, &stream)
     }
 
+    #[cfg_attr(
+        not(all(feature = "flash-attn", target_family = "unix")),
+        allow(dead_code)
+    )]
     pub(crate) fn copy_from_f32_slice(
         &mut self,
         name: &'static str,

@@ -947,6 +947,10 @@ pub(crate) struct DFlashSamplingInputs<'a> {
 pub(crate) enum DFlashProposalBatch {
     Tokens(Vec<Vec<u32>>),
     #[cfg(feature = "cuda")]
+    #[cfg_attr(
+        not(all(feature = "flash-attn", target_family = "unix")),
+        allow(dead_code)
+    )]
     DeviceTokens(Tensor),
     #[cfg(feature = "cuda")]
     DeviceSparse {
