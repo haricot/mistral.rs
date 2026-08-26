@@ -32,9 +32,9 @@ mistralrs-metal-compile = { workspace = true, optional = true }
 cuda = [
     "dep:cudaforge",
     "candle-core/cuda",
-    "candle-core/cuda-legacy-bf16",
-    "candle-core/cuda-legacy-fp8",
 ]
+cuda-legacy-bf16 = ["cuda", "candle-core/cuda-legacy-bf16"]
+cuda-legacy-fp8 = ["cuda", "candle-core/cuda-legacy-fp8"]
 metal = [
     "candle-core/metal",
     "dep:objc2-metal",
