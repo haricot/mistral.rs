@@ -49,7 +49,7 @@ fn main() {
         if compute_cap >= 70 {
             println!("cargo:rustc-cfg=has_moe_wmma");
         } else {
-            builder = builder.exclude(&["src/cuda/moe_gemm_wmma.cu"]);
+            builder = builder.exclude(&["moe_gemm_wmma.cu"]);
         }
 
         // Check if CUDA_COMPUTE_CAP < 80 and disable bf16 kernels if so.
