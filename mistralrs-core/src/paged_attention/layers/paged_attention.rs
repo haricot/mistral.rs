@@ -532,6 +532,37 @@ fn adjust_kv_mask(mask: &Tensor, kv_seq_len: usize) -> Result<Tensor> {
     }
 }
 
+fn normalize_multitoken_decode_mask(
+    mask: &Tensor,
+    batch: usize,
+    heads: usize,
+    query_len: usize,
+    kv_len: usize,
+) -> Result<Tensor> {
+    match mask.dims() {
+        [mask_query, mask_kv]
+            if batch == 1 && *mask_query == query_len && *mask_kv == kv_len => {
+            mask.unsqueeze(0)?.unsqueeze(0)
+        }
+        [mask_batch, mask_query, mask_kv]
+            if (*mask_batch == 1 || *mask_batch == batch)
+                && *mask_query == query_len
+                && *mask_kv == kv_len => {
+            mask.unsqueeze(1)
+        }
+        [mask_batch, mask_heads, mask_query, mask_kv]
+            if (*mask_batch == 1 || *mask_batch == batch)
+                && (*mask_heads == 1 || *mask_heads == heads)
+                && *mask_query == query_len
+                && *mask_kv == kv_len => {
+            Ok(mask.clone())
+        }
+        dims => candle_core::bail!(
+            "multi-token decode mask shape {dims:?} is incompatible with batch {batch}, heads {heads}, query length {query_len}, and KV length {kv_len}"
+        ),
+    }
+}
+
 fn prefix_attention_output_layout(
     output: Tensor,
     attention_mask: &AttentionMask,
@@ -1985,15 +2016,7 @@ impl PagedAttention {
         )?;
         let max_kv = kv_lens.iter().copied().max().unwrap_or(0);
         let mask = adjust_kv_mask(mask, max_kv)?;
-        match mask.dims() {
-            [mask_batch, _, mask_query, mask_kv]
-                if (*mask_batch == 1 || *mask_batch == batch)
-                    && *mask_query == query_len
-                    && *mask_kv == max_kv => {}
-            dims => candle_core::bail!(
-                "multi-token decode mask shape {dims:?} is incompatible with batch {batch}, query length {query_len}, and KV length {max_kv}"
-            ),
-        }
+        let mask = normalize_multitoken_decode_mask(&mask, batch, heads, query_len, max_kv)?;
         let output = Sdpa.run_attention(
             query,
             &k_batched,
@@ -2389,6 +2412,20 @@ mod tests {
     fn multitoken_decode_rejects_inconsistent_metadata() {
         assert!(compact_multitoken_decode_rows(&[40, 41], 1, 1).is_err());
         assert!(compact_multitoken_decode_rows(&[40, 41], 1, 3).is_err());
+    }
+
+    #[test]
+    fn multitoken_decode_normalizes_rank_two_causal_mask() -> Result<()> {
+        let mask = Tensor::zeros((9, 1275), DType::F32, &Device::Cpu)?;
+        let mask = normalize_multitoken_decode_mask(&mask, 1, 32, 9, 1275)?;
+        assert_eq!(mask.dims(), &[1, 1, 9, 1275]);
+        Ok(())
+    }
+
+    #[test]
+    fn multitoken_decode_rejects_ambiguous_rank_two_batch_mask() -> Result<()> {
+        let mask = Tensor::zeros((9, 1275), DType::F32, &Device::Cpu).unwrap();
+        assert!(normalize_multitoken_decode_mask(&mask, 2, 32, 9, 1275).is_err());
     }
 
     #[cfg(all(feature = "cuda", target_family = "unix"))]
