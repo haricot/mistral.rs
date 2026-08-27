@@ -369,6 +369,36 @@ fn decode_query_rows(query: &Tensor, kv_lens: &[usize]) -> Result<usize> {
     Ok(query_rows)
 }
 
+fn compact_multitoken_decode_rows(
+    kv_lens: &[usize],
+    batch_size: usize,
+    query_len: usize,
+) -> Result<(Vec<usize>, Vec<u32>)> {
+    if query_len <= 1 {
+        candle_core::bail!("multi-token decode compaction requires query length greater than 1");
+    }
+    let expected_rows = batch_size
+        .checked_mul(query_len)
+        .ok_or_else(|| candle_core::Error::msg("multi-token decode row count overflow"))?;
+    if kv_lens.len() != expected_rows {
+        candle_core::bail!(
+            "multi-token decode has {} KV rows for batch {batch_size} and query length {query_len}",
+            kv_lens.len()
+        );
+    }
+    let mut compact_lens = Vec::with_capacity(batch_size);
+    let mut final_rows = Vec::with_capacity(batch_size);
+    for batch_idx in 0..batch_size {
+        let final_row = (batch_idx + 1)
+            .checked_mul(query_len)
+            .and_then(|row| row.checked_sub(1))
+            .ok_or_else(|| candle_core::Error::msg("multi-token decode row index overflow"))?;
+        compact_lens.push(kv_lens[final_row]);
+        final_rows.push(u32::try_from(final_row).map_err(candle_core::Error::wrap)?);
+    }
+    Ok((compact_lens, final_rows))
+}
+
 fn pad_packed_query(query: &Tensor, query_lens: &[usize]) -> Result<Tensor> {
     let (batch, heads, total_tokens, head_size) = query.dims4()?;
     if batch != 1 || query_lens.is_empty() || query_lens.contains(&0) {
@@ -1690,6 +1720,16 @@ impl PagedAttention {
         let dev = query.device().location();
         let key_cache_ref = key_cache.as_ref().unwrap();
         let value_cache_ref = value_cache.as_ref().unwrap();
+        if tensors.attention_mask.is_custom() && ctx.dims.seq_len > 1 {
+            return self.run_multitoken_decode_gather_sdpa(
+                ctx,
+                tensors.query,
+                key_cache_ref,
+                value_cache_ref,
+                &dev,
+                tensors.attention_mask,
+            );
+        }
         if tensors.attention_mask.is_custom() {
             return self.run_decode_gather_sdpa(
                 ctx,
@@ -1859,6 +1899,116 @@ impl PagedAttention {
             None,
             ctx.sdpa_params,
         )
+    }
+
+    fn run_multitoken_decode_gather_sdpa(
+        &self,
+        ctx: &PagedForwardCtx<'_>,
+        query: &Tensor,
+        key_cache: &Tensor,
+        value_cache: &Tensor,
+        dev: &DeviceLocation,
+        attention_mask: &AttentionMask,
+    ) -> Result<Tensor> {
+        let (batch, heads, query_len, head_size) = query.dims4()?;
+        if (batch, heads, query_len, head_size)
+            != (
+                ctx.dims.batch_size,
+                ctx.dims.attention_heads,
+                ctx.dims.seq_len,
+                ctx.dims.head_size,
+            )
+        {
+            candle_core::bail!(
+                "multi-token decode query shape {:?} does not match paged dimensions",
+                query.dims()
+            );
+        }
+        let AttentionMask::Custom(mask) = attention_mask else {
+            candle_core::bail!("multi-token decode gather requires a custom attention mask");
+        };
+        let block_tables = ctx.block_tables(dev).ok_or_else(|| {
+            candle_core::Error::msg("multi-token paged decode gather is missing block tables")
+        })?;
+        let all_kv_lens = match ctx.context_lens_cpu() {
+            Some(lens) => lens.to_vec(),
+            None => {
+                let context_lens_t = ctx.context_lens(dev).ok_or_else(|| {
+                    candle_core::Error::msg(
+                        "multi-token paged decode gather is missing context lengths",
+                    )
+                })?;
+                match context_lens_t.dtype() {
+                    DType::U32 => context_lens_t
+                        .to_vec1::<u32>()?
+                        .into_iter()
+                        .map(|len| len as usize)
+                        .collect(),
+                    DType::I32 => context_lens_t
+                        .to_vec1::<i32>()?
+                        .into_iter()
+                        .map(|len| len as usize)
+                        .collect(),
+                    other => candle_core::bail!("unexpected context_lens dtype {other:?}"),
+                }
+            }
+        };
+        let (kv_lens, final_rows) =
+            compact_multitoken_decode_rows(&all_kv_lens, batch, query_len)?;
+        let final_rows = Tensor::from_vec(final_rows, (batch,), block_tables.device())?;
+        let block_tables = block_tables.contiguous()?.index_select(&final_rows, 0)?;
+        let num_kv_tokens = checked_sequence_token_count(&kv_lens)?;
+        let cu_kv = cumulative_seqlens_from_lengths(&kv_lens, query.device())?;
+        let scales = self.cache_scales(key_cache);
+        let (k_gathered, v_gathered) = gather_kv_cache_for_layout(
+            key_cache,
+            value_cache,
+            scales,
+            &block_tables,
+            &cu_kv,
+            num_kv_tokens,
+            query.dtype(),
+        )?;
+        let k_batched = unpack_gathered_kv(
+            &k_gathered,
+            &kv_lens,
+            ctx.dims.key_value_heads,
+            head_size,
+            query.device(),
+        )?;
+        let v_batched = unpack_gathered_kv(
+            &v_gathered,
+            &kv_lens,
+            ctx.dims.key_value_heads,
+            head_size,
+            query.device(),
+        )?;
+        let max_kv = kv_lens.iter().copied().max().unwrap_or(0);
+        let mask = adjust_kv_mask(mask, max_kv)?;
+        match mask.dims() {
+            [mask_batch, _, mask_query, mask_kv]
+                if (*mask_batch == 1 || *mask_batch == batch)
+                    && *mask_query == query_len
+                    && *mask_kv == max_kv => {}
+            dims => candle_core::bail!(
+                "multi-token decode mask shape {dims:?} is incompatible with batch {batch}, query length {query_len}, and KV length {max_kv}"
+            ),
+        }
+        let output = Sdpa.run_attention(
+            query,
+            &k_batched,
+            &v_batched,
+            &AttentionMask::Custom(mask),
+            None,
+            ctx.sdpa_params,
+        )?;
+        if output.dims() != [batch, heads, query_len, head_size] {
+            candle_core::bail!(
+                "multi-token decode attention returned shape {:?}, expected [{batch}, {heads}, {query_len}, {head_size}]",
+                output.dims()
+            );
+        }
+        Ok(output)
     }
 
     #[cfg(all(feature = "cuda", target_family = "unix"))]
@@ -2224,6 +2374,21 @@ mod tests {
         let kernel_limit = usize::try_from(i32::MAX).unwrap();
         assert!(checked_sequence_token_count(&[kernel_limit, 1]).is_err());
         assert!(checked_sequence_token_count(&[usize::MAX, 1]).is_err());
+    }
+
+    #[test]
+    fn multitoken_decode_compacts_each_sequence_to_its_final_cache_row() -> Result<()> {
+        let (kv_lens, rows) =
+            compact_multitoken_decode_rows(&[40, 41, 42, 17, 18, 19], 2, 3)?;
+        assert_eq!(kv_lens, vec![42, 19]);
+        assert_eq!(rows, vec![2, 5]);
+        Ok(())
+    }
+
+    #[test]
+    fn multitoken_decode_rejects_inconsistent_metadata() {
+        assert!(compact_multitoken_decode_rows(&[40, 41], 1, 1).is_err());
+        assert!(compact_multitoken_decode_rows(&[40, 41], 1, 3).is_err());
     }
 
     #[cfg(all(feature = "cuda", target_family = "unix"))]
