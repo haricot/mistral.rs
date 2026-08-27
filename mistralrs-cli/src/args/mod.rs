@@ -635,7 +635,7 @@ pub struct RuntimeOptions {
     #[serde(default)]
     pub mtp: bool,
 
-    /// MTP assistant model id or path.
+    /// MTP, DFlash, or DSpark assistant model id or path.
     #[arg(long)]
     #[serde(default)]
     pub mtp_model: Option<String>,
@@ -824,7 +824,7 @@ pub struct BenchRuntimeOptions {
     #[arg(long, conflicts_with = "mtp_model")]
     pub mtp: bool,
 
-    /// MTP assistant model id or path.
+    /// MTP, DFlash, or DSpark assistant model id or path.
     #[arg(long)]
     pub mtp_model: Option<String>,
 

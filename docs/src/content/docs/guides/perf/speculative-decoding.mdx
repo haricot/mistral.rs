@@ -64,6 +64,7 @@ For full control, `with_mtp_config(MtpConfig { model, n_predict })` is equivalen
 | MTP | Gemma 4 | Gemma 4 assistant checkpoints (`--mtp-model`) | Supported with paged attention |
 | MTP | Qwen3.5, Qwen3.8 | Built into the checkpoint (`--mtp`) | Supported with paged attention |
 | DFlash / DFlash 2 | Qwen3.5, Qwen3.8 | DFlash draft checkpoints (`--mtp-model`) | Supported with paged attention |
+| DSpark | LFM2.5 | Native Safetensors DSpark checkpoint (`--mtp-model`) | Supported with paged attention, static full-block verification |
 
 Legacy target/draft speculative decoding has been removed. New speculative decoding features use the MTP proposer/target path.
 
@@ -107,6 +108,27 @@ Acceptance is strongly content-dependent: [incoai/Qwen3.8-27B-DFlash2](https://h
 accepts ~7 of 7 drafts on math/code and much less on thinking-mode reasoning traces, which are out
 of its training distribution. As everywhere in this engine, drafts are verified by the target:
 greedy output is byte-identical to non-speculative decoding.
+
+## LFM2.5 DSpark
+
+LFM2.5 targets can attach Liquid AI's native Safetensors DSpark sidecar. mistral.rs detects
+`Lfm2DSparkDraftModel` from `config.json`, captures the configured LFM target layers, runs the
+five-layer attention drafter with interleaved RoPE, and applies the checkpoint's rank-256 Markov
+head sequentially across the proposed block. The target's attention KV and ShortConv state are
+committed transactionally after verification, so a rejected suffix cannot leak recurrent state.
+
+```bash
+mistralrs run -m LiquidAI/LFM2.5-2.6B \
+  --mtp-model LiquidAI/LFM2.5-2.6B-DSpark \
+  --mtp-n-predict 8 \
+  --mtp-draft-sampling greedy
+```
+
+The target and drafter are loaded from their original Safetensors checkpoints; GGUF conversion is
+not involved. Omitting `--mtp-n-predict` uses the checkpoint's full `block_size - 1` draft width.
+The confidence head is loaded and evaluated, while the current homogeneous-batch engine uses
+DSpark's exact static full-block verification mode. Compact confidence-scheduled ragged
+verification is not enabled by this mode.
 
 ## Gemma 4
 

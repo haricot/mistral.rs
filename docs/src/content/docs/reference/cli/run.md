@@ -69,7 +69,7 @@ mistralrs run [OPTIONS] [COMMAND]
 | `--matformer-config-path <MATFORMER_CONFIG_PATH>` |  | Path to a MatFormer config (CSV/JSON describing available slices). See model card |
 | `--matformer-slice-name <MATFORMER_SLICE_NAME>` |  | MatFormer slice to load (must match a slice name in the config file) |
 | `--mtp` | `false` | Enable MTP speculative decoding with the head built into the model checkpoint |
-| `--mtp-model <MTP_MODEL>` |  | MTP assistant model id or path |
+| `--mtp-model <MTP_MODEL>` |  | MTP, DFlash, or DSpark assistant model id or path |
 | `--mtp-n-predict <MTP_N_PREDICT>` |  | Number of MTP draft tokens to propose per target step |
 | `--mtp-draft-sampling <MTP_DRAFT_SAMPLING>` | `auto` | MTP draft sampling policy. Auto uses probabilistic DFlash2 drafting when supported. Possible values: `auto`, `greedy`, `probabilistic`. |
 | `--mcp-config <MCP_CONFIG>` |  | Path to an MCP client configuration JSON. Also reads `MCP_CONFIG_PATH` if unset |
@@ -338,4 +338,3 @@ mistralrs run embedding [OPTIONS] --model-id <MODEL_ID>
 | `--pa-memory-fraction <MEMORY_FRACTION>` |  | GPU memory utilization fraction 0.0-1.0 (alternative to context-len/memory-mb) |
 | `--pa-block-size <BLOCK_SIZE>` |  | Tokens per block (default: 32 on CUDA) |
 | `--pa-cache-type <CACHE_TYPE>` | `auto` | KV cache quantization type |
-
