@@ -296,4 +296,56 @@ mod tests {
             .contains("paged attention device memory reservation overflow"));
         Ok(())
     }
+
+    #[test]
+    fn dspark_reserves_recurrent_checkpoint_lanes_before_pipeline_build() -> anyhow::Result<()> {
+        let dir = tempdir()?;
+        let path = dir.path().join("model.safetensors");
+        let data = vec![0u8; 8];
+        serialize_to_file(
+            HashMap::from([(
+                "layers.0.weight",
+                TensorView::new(SafeDtype::BF16, vec![4], &data)?,
+            )]),
+            None,
+            &path,
+        )?;
+        fs::write(
+            dir.path().join("config.json"),
+            r#"{
+                "architectures": ["Lfm2DSparkDraftModel"],
+                "hidden_size": 2048,
+                "intermediate_size": 6144,
+                "num_hidden_layers": 5,
+                "num_attention_heads": 32,
+                "num_key_value_heads": 8,
+                "head_dim": 64,
+                "rms_norm_eps": 1e-5,
+                "vocab_size": 128000,
+                "block_size": 9,
+                "dflash_config": {
+                    "target_layer_ids": [2, 9, 17, 21, 27]
+                },
+                "markov_rank": 256,
+                "markov_head_type": "vanilla"
+            }"#,
+        )?;
+        let config = MtpConfig::new(dir.path().to_string_lossy().into_owned(), Some(8));
+        let cache_config = crate::PagedAttentionConfig::new(
+            None,
+            crate::MemoryGpuConfig::Utilization(0.9),
+            crate::PagedCacheType::Auto,
+        )?;
+
+        let cache_config = reserve_external_mtp_memory(
+            Some(cache_config),
+            Some(&config),
+            &DType::F16,
+            &Device::Cpu,
+        )?
+        .expect("cache config missing");
+
+        assert_eq!(cache_config.recurrent_checkpoint_lanes, 9);
+        Ok(())
+    }
 }

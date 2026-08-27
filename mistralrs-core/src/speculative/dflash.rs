@@ -2128,23 +2128,26 @@ fn linear_from_weight(
     }
 }
 
-/// Reads only the drafter's config when it identifies a DFlash checkpoint.
+fn is_dflash_family_config(value: &serde_json::Value) -> bool {
+    value
+        .get("architectures")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|architectures| {
+            architectures.iter().any(|architecture| {
+                architecture.as_str().is_some_and(|name| {
+                    name.contains("DFlash") || name.contains("Dflash") || name.contains("DSpark")
+                })
+            })
+        })
+}
+
+/// Reads only the drafter's config when it identifies a DFlash-family checkpoint.
 pub fn peek_config(config: &MtpConfig) -> Result<Option<DFlashConfig>> {
     let path = config.resolve_path()?;
     let raw = fs::read_to_string(path.join("config.json"))
         .map_err(|e| candle_core::Error::Msg(format!("failed to read MTP model config: {e}")))?;
     let value: serde_json::Value = serde_json::from_str(&raw).map_err(candle_core::Error::msg)?;
-    let is_dflash = value
-        .get("architectures")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|architectures| {
-            architectures.iter().any(|architecture| {
-                architecture
-                    .as_str()
-                    .is_some_and(|name| name.contains("DFlash") || name.contains("Dflash"))
-            })
-        });
-    if !is_dflash {
+    if !is_dflash_family_config(&value) {
         return Ok(None);
     }
     serde_json::from_value(value)
@@ -2173,17 +2176,7 @@ pub(crate) fn windowed_kv_cache_size_in_bytes(
     let raw = fs::read_to_string(path.join("config.json"))
         .map_err(|err| candle_core::Error::msg(format!("failed to read MTP config: {err}")))?;
     let value: serde_json::Value = serde_json::from_str(&raw).map_err(candle_core::Error::msg)?;
-    let is_dflash = value
-        .get("architectures")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|architectures| {
-            architectures.iter().any(|architecture| {
-                architecture
-                    .as_str()
-                    .is_some_and(|name| name.contains("DFlash") || name.contains("Dflash"))
-            })
-        });
-    if !is_dflash {
+    if !is_dflash_family_config(&value) {
         return Ok(0);
     }
     let cfg: DFlashConfig = serde_json::from_str(&raw).map_err(candle_core::Error::msg)?;
