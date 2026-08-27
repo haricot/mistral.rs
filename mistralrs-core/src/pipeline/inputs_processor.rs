@@ -1753,7 +1753,9 @@ pub mod text_models_inputs_processor {
     impl PagedDecodeMetadataRequirements {
         fn conservative(rows: &DecodePagedRows) -> Self {
             Self {
-                block_tables: rows.use_standard_metadata || rows.decode_window > 1,
+                block_tables: rows.use_standard_metadata
+                    || rows.decode_window > 1
+                    || rows.query_len > 1,
                 context_lens: rows.use_standard_metadata,
                 flashinfer_paged_kv: true,
                 flashinfer_tile_plan: true,
@@ -2848,6 +2850,34 @@ pub mod text_models_inputs_processor {
                 view.tile_plan.request_indices[&Device::Cpu.location()].dims(),
                 &[2]
             );
+        }
+
+        #[test]
+        fn flashinfer_speculative_rows_keep_gather_block_tables() {
+            let metadata = Arc::new(DecodePagedRows {
+                slot_mappings: vec![vec![120, 121, 122]],
+                block_tables: BlockTableSnapshot::from_owned_sequence_tables(
+                    vec![vec![1, 2, 3, 4]],
+                    3,
+                ),
+                context_lens: vec![126, 127, 128],
+                full_context_lens: vec![126, 127, 128],
+                query_len: 3,
+                block_size: 32,
+                use_standard_metadata: false,
+                max_paged_context_len: 1_604_288,
+                sliding_window: None,
+                decode_window: 1,
+                devices: vec![Device::Cpu],
+                num_kv_heads: 4,
+            })
+            .build_materialized()
+            .unwrap();
+
+            let location = Device::Cpu.location();
+            assert!(metadata.block_tables.as_ref().unwrap().contains_key(&location));
+            assert!(metadata.full_block_tables.as_ref().unwrap().contains_key(&location));
+            assert!(metadata.context_lens.is_none());
         }
 
         #[test]

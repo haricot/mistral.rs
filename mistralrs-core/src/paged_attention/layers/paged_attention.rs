@@ -1740,12 +1740,16 @@ impl PagedAttention {
         dev: &DeviceLocation,
         attention_mask: &AttentionMask,
     ) -> Result<Tensor> {
-        let block_tables = ctx.block_tables(dev).unwrap();
+        let block_tables = ctx.block_tables(dev).ok_or_else(|| {
+            candle_core::Error::msg("paged decode gather is missing block tables")
+        })?;
         let kv_lens: Vec<usize> = match ctx.context_lens_cpu() {
             Some(lens) => lens.to_vec(),
             // Fallback costs a GPU->CPU sync per layer per decode step.
             None => {
-                let context_lens_t = ctx.context_lens(dev).unwrap();
+                let context_lens_t = ctx.context_lens(dev).ok_or_else(|| {
+                    candle_core::Error::msg("paged decode gather is missing context lengths")
+                })?;
                 match context_lens_t.dtype() {
                     DType::U32 => context_lens_t
                         .to_vec1::<u32>()?
