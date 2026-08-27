@@ -33,6 +33,7 @@ pub mod gemv;
 mod gguf;
 mod gptq;
 mod hqq;
+pub mod hyperquant;
 mod imatrix;
 mod isq_executor;
 mod lora;

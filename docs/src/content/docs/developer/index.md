@@ -9,4 +9,5 @@ How mistral.rs works inside:
 - [cuTile setup](/developer/moe-backends/) - install optional cuTile acceleration on supported NVIDIA GPUs.
 - [Multimodal pipeline](/developer/multimodal-pipeline/) - how image, video, and audio inputs reach the model.
 - [Session memory](/developer/session-memory/) - how agentic conversation state is stored and matched.
+- [HyperQuant UQFF schema](/developer/hyperquant-uqff/) - the HQZ4 weight codec and artifact contract.
 - [Build from source](/developer/from-source/) - local build setup and feature flags.
