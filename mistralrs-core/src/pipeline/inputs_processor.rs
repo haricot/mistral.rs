@@ -2875,8 +2875,16 @@ pub mod text_models_inputs_processor {
             .unwrap();
 
             let location = Device::Cpu.location();
-            assert!(metadata.block_tables.as_ref().unwrap().contains_key(&location));
-            assert!(metadata.full_block_tables.as_ref().unwrap().contains_key(&location));
+            assert!(metadata
+                .block_tables
+                .as_ref()
+                .unwrap()
+                .contains_key(&location));
+            assert!(metadata
+                .full_block_tables
+                .as_ref()
+                .unwrap()
+                .contains_key(&location));
             assert!(metadata.context_lens.is_none());
         }
 

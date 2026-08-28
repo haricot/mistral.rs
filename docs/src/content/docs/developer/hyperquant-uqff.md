@@ -1,11 +1,11 @@
 ---
 title: HyperQuant UQFF schema
-description: Development contract for the HQZ4 weight codec and its future UQFF representation.
+description: Development contract for the HQZ4 weight codec and its UQFF representation.
 ---
 
 HQZ4 is the first HyperQuant profile. It is a deterministic 4-bit weight codec intended to support
-both a portable reference path and a fused INT8 DP4A path. The codec exists before the UQFF format
-tag and command-line integration so its numerical contract can be tested independently.
+both a portable reference path and a fused INT8 DP4A path. UQFF 1.3 stores this codec with a stable
+format tag. Command-line quantization and accelerator kernels remain separate integration stages.
 
 ## Scope
 
@@ -27,11 +27,11 @@ therefore approximates `W x` without reconstructing the complete original-space 
 
 ## UQFF tensors
 
-The planned UQFF 1.3 representation is:
+The UQFF 1.3 representation is:
 
 | Suffix | Dtype | Shape | Meaning |
 | --- | --- | --- | --- |
-| `weight.format` | U8 | scalar | HyperQuant serde discriminator |
+| `weight.format` | U8 | scalar | `7`, the HyperQuant serde discriminator |
 | `weight.schema` | U32 | scalar | `1` for HQZ4 v1 |
 | `weight.layout` | U8 | scalar | `0`, row-major signed nibbles |
 | `weight.transform` | U8 | scalar | `0`, shared randomized Hadamard transform |
@@ -54,10 +54,12 @@ zero for every rank.
 
 ## Execution profiles
 
-The same artifact has two planned execution profiles:
+The same artifact has two execution profiles. The first is implemented; the second is planned:
 
-- A16 reference: decode codes during multiplication and retain floating-point activations.
-- A8 DP4A: transform and dynamically quantize activations to INT8, unpack W4 to INT8, accumulate
+- A16 reference: deterministic dequantization followed by dense CPU matrix multiplication with
+  floating-point activations.
+- A8 DP4A (planned): transform and dynamically quantize activations to INT8, unpack W4 to INT8,
+  accumulate
   with DP4A into INT32, then apply scales and produce the requested floating-point output.
 
 The SM61 backend must support single-token decode and multi-token matrices with query lengths up to

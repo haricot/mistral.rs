@@ -23,7 +23,7 @@ A loader is pointed at one or more shard files (`from_uqff`); the residual safet
 
 Each `.uqff` shard is a standard safetensors file with named entries. Every quantized layer is self-describing:
 
-- `<key>.weight` - the layer data (raw blocks for GGML-family types, packed tensors for AFQ/MXFP4/FP8, or a native safetensors tensor for unquantized fallback layers; see [quantization types](/reference/quantization-types/)).
+- `<key>.weight` - the layer data (raw blocks for GGML-family types, packed tensors for AFQ/MXFP4/FP8/HQZ4, or a native safetensors tensor for unquantized fallback layers; see [quantization types](/reference/quantization-types/)).
 - `<key>.weight.format` - a u8 tag naming the quantization family, used to dispatch the deserializer.
 - Family-specific metadata next to it, e.g. `<key>.weight.dtype` and `<key>.weight.shape` for GGML types, `<key>.weight.scales`/`.bits`/`.group_size` for AFQ.
 - `<key>.bias` when the layer has one.
@@ -49,6 +49,10 @@ Each shard set carries three u32 scalar entries: `uqff.version.major`, `uqff.ver
 UQFF 1.1 adds inline unquantized linear entries (`weight.format = Unquant`) so mixed files can preserve unsupported layer shapes without moving those weights into `residual.safetensors`.
 
 UQFF 1.2 stores quantized token embeddings as regular layer entries and omits their original dense weights from `residual.safetensors`. Readers still accept UQFF 1.1 files whose token embeddings remain in the residual file.
+
+UQFF 1.3 adds the HyperQuant HQZ4 family (`weight.format = 7`). HQZ4 stores signed 4-bit
+row-major codes, F16 group scales, logical shape, group width, and the deterministic randomized
+Hadamard seed. Input-dimension shards must start and end on group boundaries.
 
 ## Tensor parallelism
 

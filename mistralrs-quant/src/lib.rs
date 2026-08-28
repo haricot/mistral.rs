@@ -138,6 +138,7 @@ pub use afq::ops::{
 };
 pub use afq::{AfqBits, AfqGroupSize, AfqInner, AfqLayer};
 pub use bitsandbytes::{BnbLinear, BnbQuantParams, BnbQuantType};
+pub use hyperquant::{Hqz4Config, Hqz4Tensor, HyperQuantLinear};
 pub use blockwise_fp8::{
     blockwise_fp8_moe, fp8_blockwise_dequantize, fp8_blockwise_quantize, BlockwiseFP8Linear,
 };
@@ -835,6 +836,7 @@ pub enum IsqType {
     AFQ2,
     F8Q8,
     MXFP4,
+    HQZ4,
 }
 
 /// Target bit width for automatic ISQ quantization.
@@ -938,6 +940,7 @@ impl std::fmt::Display for IsqType {
             Self::AFQ2 => write!(f, "afq2"),
             Self::F8Q8 => write!(f, "f8q8"),
             Self::MXFP4 => write!(f, "mxfp4"),
+            Self::HQZ4 => write!(f, "hqz4"),
         }
     }
 }
@@ -1032,6 +1035,11 @@ impl IsqType {
                 mxfp4::MXFP4_BLOCK_SIZE * mxfp4::N_BITS / u8::BITS as usize
                     + DType::U8.size_in_bytes(),
             ),
+            Self::HQZ4 => block_pack_factor(
+                hyperquant::HQZ4_DEFAULT_GROUP_SIZE,
+                dtype,
+                hyperquant::HQZ4_DEFAULT_GROUP_SIZE / 2 + DType::F16.size_in_bytes(),
+            ),
         }
     }
 
@@ -1068,6 +1076,7 @@ impl IsqType {
                 | Self::AFQ8
                 | Self::F8Q8
                 | Self::MXFP4
+                | Self::HQZ4
         )
     }
 
@@ -1089,8 +1098,9 @@ impl IsqType {
             | IsqType::AFQ4
             | IsqType::AFQ6
             | IsqType::AFQ8
-            | IsqType::MXFP4 => {
-                // Use 1 because our HQQ quantizes on the GPU
+            | IsqType::MXFP4
+            | IsqType::HQZ4 => {
+                // These formats use an exclusive quantization path.
                 Some(1.try_into().unwrap())
             }
             IsqType::F8E4M3 | IsqType::F8Q8 => None,
@@ -1184,10 +1194,11 @@ pub enum QuantizedSerdeType {
     Afq = 4,
     F8Q8 = 5,
     Mxfp4 = 6,
+    HyperQuant = 7,
 }
 
 impl QuantizedSerdeType {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Gguf,
         Self::Unquant,
         Self::Hqq,
@@ -1195,6 +1206,7 @@ impl QuantizedSerdeType {
         Self::Afq,
         Self::F8Q8,
         Self::Mxfp4,
+        Self::HyperQuant,
     ];
 
     pub fn stored_label(self, quant_group: &str) -> String {
@@ -1224,6 +1236,7 @@ impl QuantizedSerdeType {
             }
             Self::F8Q8 => "f8q8".to_string(),
             Self::Mxfp4 => "mxfp4".to_string(),
+            Self::HyperQuant => "hqz4".to_string(),
         }
     }
 
@@ -1239,6 +1252,7 @@ impl QuantizedSerdeType {
             Self::Afq => AfqLayer::inspect_uqff_header(layer),
             Self::F8Q8 => F8Q8Linear::inspect_uqff_header(layer),
             Self::Mxfp4 => MXFP4Layer::inspect_uqff_header(layer),
+            Self::HyperQuant => HyperQuantLinear::inspect_uqff_header(layer),
         }
     }
 
@@ -1255,6 +1269,9 @@ impl QuantizedSerdeType {
             Self::Afq => AfqLayer::stored_label_from_uqff_tensors(tensors, prefix),
             Self::F8Q8 => F8Q8Linear::stored_label_from_uqff_tensors(tensors, prefix),
             Self::Mxfp4 => MXFP4Layer::stored_label_from_uqff_tensors(tensors, prefix),
+            Self::HyperQuant => {
+                HyperQuantLinear::stored_label_from_uqff_tensors(tensors, prefix)
+            }
         }
     }
 }
@@ -1270,6 +1287,7 @@ impl TryFrom<usize> for QuantizedSerdeType {
             4 => Ok(Self::Afq),
             5 => Ok(Self::F8Q8),
             6 => Ok(Self::Mxfp4),
+            7 => Ok(Self::HyperQuant),
             other => candle_core::bail!("QuantizedSerdeType {other} is invalid."),
         }
     }

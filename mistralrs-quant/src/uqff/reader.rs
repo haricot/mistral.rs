@@ -10,8 +10,8 @@ use safetensors::tensor::Dtype;
 use super::{bias_shard, BiasShard};
 use crate::{
     block_pack_factor, safetensors::MmapedSafetensors, AfqLayer, F8Q8Linear, FP8Linear, GgufMatMul,
-    HqqLayer, MXFP4Layer, QuantMethod, QuantizedSerde, QuantizedSerdeType, QuantizedWeightSource,
-    Shard, UnquantLinear,
+    HqqLayer, HyperQuantLinear, MXFP4Layer, QuantMethod, QuantizedSerde, QuantizedSerdeType,
+    QuantizedWeightSource, Shard, UnquantLinear,
 };
 
 pub struct UqffReader {
@@ -304,6 +304,16 @@ impl UqffReader {
                     })?;
                 (logical_elements, &["weight", "weight.scales"])
             }
+            QuantizedSerdeType::HyperQuant => {
+                let logical_elements = self
+                    .load_u32_vec(&format!("{prefix}.weight.shape"))?
+                    .into_iter()
+                    .try_fold(1usize, |elements, dim| elements.checked_mul(dim))
+                    .ok_or_else(|| {
+                        candle_core::Error::Msg("UQFF HQZ4 logical element overflow".into())
+                    })?;
+                (logical_elements, &["weight", "weight.scales"])
+            }
         };
         let packed_bytes = weight_suffixes.iter().try_fold(0usize, |bytes, suffix| {
             bytes
@@ -338,7 +348,10 @@ impl UqffReader {
         if weight_rank == 3
             && matches!(
                 format,
-                QuantizedSerdeType::Hqq | QuantizedSerdeType::Fp8 | QuantizedSerdeType::F8Q8
+                QuantizedSerdeType::Hqq
+                    | QuantizedSerdeType::Fp8
+                    | QuantizedSerdeType::F8Q8
+                    | QuantizedSerdeType::HyperQuant
             )
         {
             candle_core::bail!(
@@ -367,6 +380,9 @@ impl UqffReader {
             QuantizedSerdeType::Mxfp4 => {
                 MXFP4Layer::deserialize_uqff(self, key, device, shard).map(Some)
             }
+            QuantizedSerdeType::HyperQuant => {
+                HyperQuantLinear::deserialize_uqff(self, key, device, shard).map(Some)
+            }
         }
     }
 
@@ -381,6 +397,16 @@ impl UqffReader {
                 Ok(self.load_u8_scalar(&format!("{key}.weight.group_size"))? as usize)
             }
             QuantizedSerdeType::Mxfp4 | QuantizedSerdeType::F8Q8 => Ok(32),
+            QuantizedSerdeType::HyperQuant => {
+                let group_size =
+                    self.load_u32_scalar(&format!("{key}.weight.group_size"))? as usize;
+                if group_size < 2 || !group_size.is_power_of_two() {
+                    candle_core::bail!(
+                        "HQZ4 group size {group_size} must be a power of two of at least 2."
+                    );
+                }
+                Ok(group_size)
+            }
             QuantizedSerdeType::Fp8 => Ok(1),
             QuantizedSerdeType::Hqq => {
                 candle_core::bail!("HQQ UQFF artifacts do not support sharded loading.")

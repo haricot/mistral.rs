@@ -1984,8 +1984,7 @@ impl PagedAttention {
                 }
             }
         };
-        let (kv_lens, final_rows) =
-            compact_multitoken_decode_rows(&all_kv_lens, batch, query_len)?;
+        let (kv_lens, final_rows) = compact_multitoken_decode_rows(&all_kv_lens, batch, query_len)?;
         let final_rows = Tensor::from_vec(final_rows, (batch,), block_tables.device())?;
         let block_tables = block_tables.contiguous()?.index_select(&final_rows, 0)?;
         let num_kv_tokens = checked_sequence_token_count(&kv_lens)?;
@@ -2401,8 +2400,7 @@ mod tests {
 
     #[test]
     fn multitoken_decode_compacts_each_sequence_to_its_final_cache_row() -> Result<()> {
-        let (kv_lens, rows) =
-            compact_multitoken_decode_rows(&[40, 41, 42, 17, 18, 19], 2, 3)?;
+        let (kv_lens, rows) = compact_multitoken_decode_rows(&[40, 41, 42, 17, 18, 19], 2, 3)?;
         assert_eq!(kv_lens, vec![42, 19]);
         assert_eq!(rows, vec![2, 5]);
         Ok(())

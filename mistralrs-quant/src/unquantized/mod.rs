@@ -559,6 +559,24 @@ impl QuantMethod for UnquantLinear {
                 let b = self.b.as_ref().map(|b| b.to_device(&device)).transpose()?;
                 crate::MXFP4Layer::quantize(&w, b, &device)
             }
+            Some(IsqType::HQZ4) => {
+                let _acquired_quantize_guard = guard.acquire(&device);
+                if !device.is_cpu() {
+                    candle_core::bail!("HQZ4 currently uses the CPU reference backend.");
+                }
+                if imatrix_weight.is_some() {
+                    candle_core::bail!("HQZ4 does not support imatrix.");
+                }
+
+                n_quantized.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let weight = self.w.to_device(&device)?;
+                let bias = self.b.as_ref().map(|b| b.to_device(&device)).transpose()?;
+                Ok(Arc::new(crate::HyperQuantLinear::from_weight(
+                    &weight,
+                    bias,
+                    crate::Hqz4Config::default(),
+                )?))
+            }
             Some(IsqType::F8Q8) => {
                 let _acquired_quantize_guard = guard.acquire(&device);
                 if imatrix_weight.is_some() {
