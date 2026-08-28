@@ -239,9 +239,13 @@ impl Mlp {
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let gate = self.w1.forward(x)?.silu()?;
-        let up = self.w3.forward(x)?;
-        self.w2.forward(&(gate * up)?)
+        crate::ops::quantized_ffn(
+            x,
+            self.w1.as_ref(),
+            self.w3.as_ref(),
+            self.w2.as_ref(),
+            Activation::Silu,
+        )
     }
 }
 

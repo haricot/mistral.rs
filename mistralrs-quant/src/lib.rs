@@ -1433,9 +1433,16 @@ pub enum DistributedKind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActivationQuantizationTransform {
+    Identity,
+    Hqz4Rht { seed: u64, group_offset: usize },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ActivationQuantizationScheme {
     pub dtype: DType,
     pub block_shape: [usize; 2],
+    pub transform: ActivationQuantizationTransform,
 }
 
 #[derive(Clone, Debug)]
@@ -2592,7 +2599,17 @@ mod tests {
     use super::*;
 
     #[derive(Debug)]
-    struct SharedActivationProbe;
+    struct SharedActivationProbe {
+        transform: ActivationQuantizationTransform,
+    }
+
+    impl Default for SharedActivationProbe {
+        fn default() -> Self {
+            Self {
+                transform: ActivationQuantizationTransform::Identity,
+            }
+        }
+    }
 
     impl QuantizedSerde for SharedActivationProbe {
         fn name(&self) -> &'static str {
@@ -2602,7 +2619,7 @@ mod tests {
 
     impl QuantMethod for SharedActivationProbe {
         fn new(_method: QuantMethodConfig) -> Result<Self> {
-            Ok(Self)
+            Ok(Self::default())
         }
 
         fn dequantize_w(&self) -> Result<Tensor> {
@@ -2617,6 +2634,7 @@ mod tests {
             Some(ActivationQuantizationScheme {
                 dtype: DType::F8E4M3,
                 block_shape: [1, 4],
+                transform: self.transform,
             })
         }
 
@@ -2655,8 +2673,26 @@ mod tests {
     #[test]
     fn shared_activation_falls_back_for_unsupported_input_dtype() -> Result<()> {
         let input = Tensor::zeros((1, 4), DType::F32, &Device::Cpu)?;
-        let method = SharedActivationProbe;
+        let method = SharedActivationProbe::default();
         assert!(try_forward_with_shared_quantized_activation(&input, &[&method])?.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn shared_activation_rejects_different_transforms_before_quantizing() -> Result<()> {
+        let input = Tensor::zeros((1, 4), DType::F16, &Device::Cpu)?;
+        let identity = SharedActivationProbe::default();
+        let hqz4 = SharedActivationProbe {
+            transform: ActivationQuantizationTransform::Hqz4Rht {
+                seed: 7,
+                group_offset: 0,
+            },
+        };
+        assert!(try_forward_with_shared_quantized_activation(
+            &input,
+            &[&identity, &hqz4]
+        )?
+        .is_none());
         Ok(())
     }
 
@@ -2665,6 +2701,7 @@ mod tests {
         let scheme = ActivationQuantizationScheme {
             dtype: DType::F8E4M3,
             block_shape: [1, 4],
+            transform: ActivationQuantizationTransform::Identity,
         };
         let quantized = Tensor::zeros((6, 8), DType::F8E4M3, &Device::Cpu)?;
         let scales = Tensor::zeros((6, 2), DType::F32, &Device::Cpu)?;

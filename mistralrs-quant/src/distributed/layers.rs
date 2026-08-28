@@ -2781,6 +2781,7 @@ mod tests {
             Some(ActivationQuantizationScheme {
                 dtype: DType::F8E4M3,
                 block_shape: [1, 4],
+                transform: crate::ActivationQuantizationTransform::Identity,
             })
         }
 
@@ -2981,6 +2982,7 @@ mod tests {
         let expected_scheme = ActivationQuantizationScheme {
             dtype: DType::F8E4M3,
             block_shape: [1, 4],
+            transform: crate::ActivationQuantizationTransform::Identity,
         };
         for layer in [&row as &dyn QuantMethod, &column, &replicated] {
             assert_eq!(

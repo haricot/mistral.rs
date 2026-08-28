@@ -11,6 +11,7 @@ constexpr uint64_t GROUP_MIX = 0xd1b54a32d192ed03ULL;
 constexpr uint64_t ELEMENT_MIX = 0x8cb92baa7f3dd15bULL;
 constexpr int WARP_SIZE = 32;
 constexpr int WARPS_PER_BLOCK = 4;
+constexpr int PREFILL_M_TILE = 4;
 
 enum Hqz4CudaDtype : uint32_t {
   HQZ4_CUDA_F16 = 0,
@@ -30,6 +31,33 @@ struct Hqz4Dp4aLaunch {
   uint32_t group_size;
   uint64_t group_offset;
   uint64_t seed;
+  uint32_t dtype;
+  cudaStream_t stream;
+};
+
+struct Hqz4QuantizeLaunch {
+  const void *input;
+  int8_t *quantized_activation;
+  float *activation_scales;
+  uint32_t m;
+  uint32_t k;
+  uint32_t group_size;
+  uint64_t group_offset;
+  uint64_t seed;
+  uint32_t dtype;
+  cudaStream_t stream;
+};
+
+struct Hqz4QuantizedMatmulLaunch {
+  const int8_t *quantized_activation;
+  const float *activation_scales;
+  const uint8_t *weight;
+  const float *weight_scales;
+  void *output;
+  uint32_t m;
+  uint32_t n;
+  uint32_t k;
+  uint32_t group_size;
   uint32_t dtype;
   cudaStream_t stream;
 };
@@ -274,8 +302,96 @@ __global__ void hqz4_dp4a_matmul(
     output[output_index] = store_float<T>(result);
 }
 
+// Prefill kernel: each block computes a 4x4 output tile. A warp owns one
+// weight row and reuses every packed W4 load across four activation rows.
+// This keeps the decode kernel lean while reducing weight traffic and launch
+// count once the flattened token count is at least PREFILL_M_TILE.
 template <typename T>
-cudaError_t launch_typed(const Hqz4Dp4aLaunch &params) {
+__global__ void hqz4_dp4a_prefill_tiled(
+    const int8_t *__restrict__ activation,
+    const float *__restrict__ activation_scales,
+    const uint8_t *__restrict__ weight,
+    const float *__restrict__ weight_scales, T *__restrict__ output,
+    uint32_t m, uint32_t n, uint32_t k, uint32_t group_size) {
+  const uint32_t warp = threadIdx.x / WARP_SIZE;
+  const uint32_t lane = threadIdx.x % WARP_SIZE;
+  const uint32_t weight_row = blockIdx.x * WARPS_PER_BLOCK + warp;
+  if (weight_row >= n)
+    return;
+
+  const uint32_t activation_row_base = blockIdx.y * PREFILL_M_TILE;
+  const uint32_t groups_per_row = k / group_size;
+  float results[PREFILL_M_TILE] = {0.0f, 0.0f, 0.0f, 0.0f};
+
+  for (uint32_t group = 0; group < groups_per_row; ++group) {
+    int dots[PREFILL_M_TILE] = {0, 0, 0, 0};
+    const uint64_t group_element = static_cast<uint64_t>(group) * group_size;
+    for (uint32_t offset = lane * 4; offset < group_size;
+         offset += WARP_SIZE * 4) {
+      const uint64_t weight_element =
+          static_cast<uint64_t>(weight_row) * k + group_element + offset;
+      const uint16_t packed = *reinterpret_cast<const uint16_t *>(
+          &weight[weight_element / 2]);
+      const int packed_weights = pack_four_weights(packed);
+
+#pragma unroll
+      for (uint32_t row_in_tile = 0; row_in_tile < PREFILL_M_TILE;
+           ++row_in_tile) {
+        const uint32_t activation_row = activation_row_base + row_in_tile;
+        if (activation_row < m) {
+          const uint64_t activation_element =
+              static_cast<uint64_t>(activation_row) * k + group_element +
+              offset;
+          const int packed_activation = *reinterpret_cast<const int *>(
+              &activation[activation_element]);
+          dots[row_in_tile] =
+              dp4a_signed(packed_weights, packed_activation, dots[row_in_tile]);
+        }
+      }
+    }
+
+    for (uint32_t delta = WARP_SIZE / 2; delta > 0; delta >>= 1) {
+#pragma unroll
+      for (uint32_t row_in_tile = 0; row_in_tile < PREFILL_M_TILE;
+           ++row_in_tile)
+        dots[row_in_tile] +=
+            __shfl_down_sync(0xffffffff, dots[row_in_tile], delta);
+    }
+
+    if (lane == 0) {
+      const float weight_scale =
+          weight_scales[static_cast<uint64_t>(weight_row) * groups_per_row +
+                        group];
+#pragma unroll
+      for (uint32_t row_in_tile = 0; row_in_tile < PREFILL_M_TILE;
+           ++row_in_tile) {
+        const uint32_t activation_row = activation_row_base + row_in_tile;
+        if (activation_row < m) {
+          const float activation_scale =
+              activation_scales[static_cast<uint64_t>(activation_row) *
+                                    groups_per_row +
+                                group];
+          results[row_in_tile] += static_cast<float>(dots[row_in_tile]) *
+                                  weight_scale * activation_scale;
+        }
+      }
+    }
+  }
+
+  if (lane == 0) {
+#pragma unroll
+    for (uint32_t row_in_tile = 0; row_in_tile < PREFILL_M_TILE;
+         ++row_in_tile) {
+      const uint32_t activation_row = activation_row_base + row_in_tile;
+      if (activation_row < m)
+        output[static_cast<uint64_t>(activation_row) * n + weight_row] =
+            store_float<T>(results[row_in_tile]);
+    }
+  }
+}
+
+template <typename T>
+cudaError_t launch_quantize_typed(const Hqz4QuantizeLaunch &params) {
   const uint32_t groups_per_row = params.k / params.group_size;
   const uint64_t activation_groups =
       static_cast<uint64_t>(params.m) * groups_per_row;
@@ -285,20 +401,67 @@ cudaError_t launch_typed(const Hqz4Dp4aLaunch &params) {
           static_cast<const T *>(params.input), params.quantized_activation,
           params.activation_scales, params.m, params.k, params.group_size,
           params.group_offset, params.seed);
-  cudaError_t status = cudaGetLastError();
+  return cudaGetLastError();
+}
+
+template <typename T>
+cudaError_t
+launch_quantized_matmul_typed(const Hqz4QuantizedMatmulLaunch &params) {
+  if (params.m >= PREFILL_M_TILE) {
+    const dim3 blocks((params.n + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK,
+                      (params.m + PREFILL_M_TILE - 1) / PREFILL_M_TILE);
+    hqz4_dp4a_prefill_tiled<T>
+        <<<blocks, WARPS_PER_BLOCK * WARP_SIZE, 0, params.stream>>>(
+            params.quantized_activation, params.activation_scales,
+            params.weight, params.weight_scales,
+            static_cast<T *>(params.output), params.m, params.n, params.k,
+            params.group_size);
+  } else {
+    const uint64_t outputs = static_cast<uint64_t>(params.m) * params.n;
+    const uint32_t blocks =
+        static_cast<uint32_t>((outputs + WARPS_PER_BLOCK - 1) /
+                              WARPS_PER_BLOCK);
+    hqz4_dp4a_matmul<T><<<blocks, WARPS_PER_BLOCK * WARP_SIZE, 0,
+                          params.stream>>>(
+        params.quantized_activation, params.activation_scales, params.weight,
+        params.weight_scales, static_cast<T *>(params.output), params.m,
+        params.n, params.k, params.group_size);
+  }
+  return cudaGetLastError();
+}
+
+template <typename T>
+cudaError_t launch_typed(const Hqz4Dp4aLaunch &params) {
+  const Hqz4QuantizeLaunch quantize = {
+      params.input,
+      params.quantized_activation,
+      params.activation_scales,
+      params.m,
+      params.k,
+      params.group_size,
+      params.group_offset,
+      params.seed,
+      params.dtype,
+      params.stream,
+  };
+  cudaError_t status = launch_quantize_typed<T>(quantize);
   if (status != cudaSuccess)
     return status;
 
-  const uint64_t outputs = static_cast<uint64_t>(params.m) * params.n;
-  const uint32_t blocks =
-      static_cast<uint32_t>((outputs + WARPS_PER_BLOCK - 1) /
-                            WARPS_PER_BLOCK);
-  hqz4_dp4a_matmul<T><<<blocks, WARPS_PER_BLOCK * WARP_SIZE, 0,
-                        params.stream>>>(
-      params.quantized_activation, params.activation_scales, params.weight,
-      params.weight_scales, static_cast<T *>(params.output), params.m,
-      params.n, params.k, params.group_size);
-  return cudaGetLastError();
+  const Hqz4QuantizedMatmulLaunch matmul = {
+      params.quantized_activation,
+      params.activation_scales,
+      params.weight,
+      params.weight_scales,
+      params.output,
+      params.m,
+      params.n,
+      params.k,
+      params.group_size,
+      params.dtype,
+      params.stream,
+  };
+  return launch_quantized_matmul_typed<T>(matmul);
 }
 
 template <typename T>
@@ -316,6 +479,59 @@ cudaError_t launch_embedding_typed(const Hqz4EmbeddingLaunch &params) {
 }
 
 } // namespace
+
+extern "C" int launch_hqz4_quantize(const Hqz4QuantizeLaunch *params) {
+  if (params == nullptr || params->input == nullptr ||
+      params->quantized_activation == nullptr ||
+      params->activation_scales == nullptr || params->m == 0 ||
+      params->k == 0 || params->group_size < 4 ||
+      params->group_size > 1024 ||
+      (params->group_size & (params->group_size - 1)) != 0 ||
+      params->k % params->group_size != 0) {
+    return static_cast<int>(cudaErrorInvalidValue);
+  }
+
+  cudaError_t status;
+  switch (params->dtype) {
+  case HQZ4_CUDA_F16:
+    status = launch_quantize_typed<__half>(*params);
+    break;
+  case HQZ4_CUDA_F32:
+    status = launch_quantize_typed<float>(*params);
+    break;
+  default:
+    status = cudaErrorInvalidValue;
+    break;
+  }
+  return static_cast<int>(status);
+}
+
+extern "C" int launch_hqz4_dp4a_quantized(
+    const Hqz4QuantizedMatmulLaunch *params) {
+  if (params == nullptr || params->quantized_activation == nullptr ||
+      params->activation_scales == nullptr || params->weight == nullptr ||
+      params->weight_scales == nullptr || params->output == nullptr ||
+      params->m == 0 || params->n == 0 || params->k == 0 ||
+      params->group_size < 4 || params->group_size > 1024 ||
+      (params->group_size & (params->group_size - 1)) != 0 ||
+      params->k % params->group_size != 0) {
+    return static_cast<int>(cudaErrorInvalidValue);
+  }
+
+  cudaError_t status;
+  switch (params->dtype) {
+  case HQZ4_CUDA_F16:
+    status = launch_quantized_matmul_typed<__half>(*params);
+    break;
+  case HQZ4_CUDA_F32:
+    status = launch_quantized_matmul_typed<float>(*params);
+    break;
+  default:
+    status = cudaErrorInvalidValue;
+    break;
+  }
+  return static_cast<int>(status);
+}
 
 extern "C" int launch_hqz4_dp4a(const Hqz4Dp4aLaunch *params) {
   if (params == nullptr || params->input == nullptr || params->weight == nullptr ||

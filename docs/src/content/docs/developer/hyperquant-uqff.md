@@ -14,7 +14,7 @@ HQZ4 v1 supports rank-2 linear weights with shape `[output, input]`. It uses:
 - a power-of-two group size along the input dimension;
 - one randomized Hadamard transform per input group;
 - signs derived from a 64-bit seed and the input-group index;
-- one non-negative F16 scale per output row and input group;
+- one non-negative F32 scale per output row and input group in schema 2;
 - signed scalar levels in `[-7, 7]`;
 - two low-nibble-first codes per byte.
 
@@ -32,7 +32,7 @@ The UQFF 1.3 representation is:
 | Suffix | Dtype | Shape | Meaning |
 | --- | --- | --- | --- |
 | `weight.format` | U8 | scalar | `7`, the HyperQuant serde discriminator |
-| `weight.schema` | U32 | scalar | `1` for HQZ4 v1 |
+| `weight.schema` | U32 | scalar | `2` for current HQZ4; readers also accept schema 1 |
 | `weight.layout` | U8 | scalar | `0`, row-major signed nibbles |
 | `weight.transform` | U8 | scalar | `0`, shared randomized Hadamard transform |
 | `weight.bits` | U8 | scalar | `4` |
@@ -41,7 +41,7 @@ The UQFF 1.3 representation is:
 | `weight.seed_lo` | U32 | scalar | Low half of the RHT seed |
 | `weight.seed_hi` | U32 | scalar | High half of the RHT seed |
 | `weight` | U8 | `[output, input / 2]` | Packed signed codes |
-| `weight.scales` | F16 | `[output, input / group_size]` | Group scales |
+| `weight.scales` | F32 | `[output, input / group_size]` | Group scales (`F16` in legacy schema 1) |
 | `bias` | source dtype | optional | Linear bias |
 
 The format stores algorithmic facts, not backend promises. In particular, it does not serialize a
@@ -54,16 +54,30 @@ zero for every rank.
 
 ## Execution profiles
 
-The same artifact has two execution profiles. The first is implemented; the second is planned:
+The same artifact has two implemented execution profiles:
 
 - A16 reference: deterministic dequantization followed by dense CPU matrix multiplication with
   floating-point activations.
-- A8 DP4A (planned): transform and dynamically quantize activations to INT8, unpack W4 to INT8,
-  accumulate
-  with DP4A into INT32, then apply scales and produce the requested floating-point output.
+- A8/W4 DP4A on SM61+: transform and dynamically quantize activations to signed bytes, unpack W4
+  to signed bytes, accumulate with DP4A into INT32, then apply activation and weight scales.
 
-The SM61 backend must support single-token decode and multi-token matrices with query lengths up to
-9 so LFM2.5 DSpark verification does not fall back to a full dequantization path.
+Single-token decode uses one warp per output. Multi-token prefill uses a 4x4 output tile: each warp
+owns one weight row and reuses its packed W4 loads across four activation rows. Compatible Q/K/V,
+gate/up, and GDN projections share one transformed A8 activation. Compatibility includes the
+activation block shape, transform, seed, and global group offset; a mismatch falls back to separate
+projection calls.
+
+With the default group width of 128 and schema-2 F32 scales, the linear-layer payload is
+`4 + 32 / 128 = 4.25` bits per weight, excluding per-layer metadata and optional bias tensors.
+
+## Relation to GGUF quantization
+
+UQFF and GGUF are containers; HQZ4 must be compared with a GGML tensor quantization type, not with
+GGUF itself. By payload density, HQZ4 at its default group width is closest to `IQ4_XS` (4.25 bits
+per weight). It is not byte-compatible or algorithmically equivalent: `IQ4_XS` is a nonlinear
+codebook quantization, while HQZ4 is a signed linear W4 quantization after a shared randomized
+Hadamard transform. `Q4_0` and `Q4_K` use 4.5 bits per weight and are useful conventional W4
+baselines. `Q4_K_M` is a model-level mixed recipe rather than one tensor encoding.
 
 ## Excluded from v1
 

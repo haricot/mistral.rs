@@ -382,6 +382,7 @@ impl QuantMethod for BlockwiseFP8Linear {
             Some(ActivationQuantizationScheme {
                 dtype: DType::F8E4M3,
                 block_shape: [1, self.weight_block_size[1]],
+                transform: crate::ActivationQuantizationTransform::Identity,
             })
         }
         #[cfg(not(all(feature = "cuda", has_cutlass_fp8_sm90_kernels)))]

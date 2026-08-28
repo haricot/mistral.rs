@@ -7,9 +7,11 @@ use half::f16;
 use safetensors::tensor::Dtype;
 
 use crate::uqff::{UqffHeaderMatch, UqffLayerHeaderView};
+#[cfg(feature = "cuda")]
+use crate::ActivationQuantizationTransform;
 use crate::{
-    IsqType, QuantMethod, QuantMethodConfig, QuantizeOntoGuard, QuantizedSerde, QuantizedSerdeType,
-    Shard, UqffReader, UqffTensor,
+    ActivationQuantizationScheme, IsqType, QuantMethod, QuantMethodConfig, QuantizeOntoGuard,
+    QuantizedActivation, QuantizedSerde, QuantizedSerdeType, Shard, UqffReader, UqffTensor,
 };
 
 #[cfg(feature = "cuda")]
@@ -730,6 +732,95 @@ impl QuantMethod for HyperQuantLinear {
 
     fn quantized_act_type(&self) -> Option<DType> {
         None
+    }
+
+    fn activation_quantization_scheme(&self) -> Option<ActivationQuantizationScheme> {
+        #[cfg(feature = "cuda")]
+        if self.device.is_cuda() && cuda::HAVE_HQZ4_DP4A_KERNELS {
+            return Some(ActivationQuantizationScheme {
+                // Candle stores the signed two's-complement A8 payload in U8
+                // tensors; the DP4A kernel interprets those bytes as i8.
+                dtype: DType::U8,
+                block_shape: [1, self.weight.group_size()],
+                transform: ActivationQuantizationTransform::Hqz4Rht {
+                    seed: self.weight.seed(),
+                    group_offset: self.weight.group_offset(),
+                },
+            });
+        }
+        None
+    }
+
+    fn quantize_activation(&self, activation: &Tensor) -> Result<QuantizedActivation> {
+        let scheme = self.activation_quantization_scheme().ok_or_else(|| {
+            candle_core::Error::msg("HQZ4 shared activation quantization is unavailable")
+        })?;
+        if !activation.device().same_device(&self.device) {
+            candle_core::bail!("HQZ4 activations and weights must use the same device.");
+        }
+        let source_shape = activation.dims().to_vec();
+        let source_dtype = activation.dtype();
+        let kernel_activation = match source_dtype {
+            DType::F16 | DType::F32 => activation.clone(),
+            DType::BF16 => activation.to_dtype(DType::F16)?,
+            dtype => candle_core::bail!(
+                "HQZ4 shared activation supports F16, BF16, and F32, got {dtype:?}."
+            ),
+        };
+        #[cfg(feature = "cuda")]
+        {
+            let (quantized, scales) = cuda::quantize_activation(&kernel_activation, &self.weight)?;
+            crate::utils::log::once_log_info(
+                "HQZ4 CUDA: sharing one transformed A8 activation across compatible projections.",
+            );
+            QuantizedActivation::new(quantized, scales, source_shape, source_dtype, scheme)
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            let _ = (kernel_activation, source_shape, source_dtype, scheme);
+            candle_core::bail!("HQZ4 CUDA support is not compiled.")
+        }
+    }
+
+    fn forward_quantized(&self, activation: &QuantizedActivation) -> Result<Tensor> {
+        let scheme = self.activation_quantization_scheme().ok_or_else(|| {
+            candle_core::Error::msg("HQZ4 shared activation quantization is unavailable")
+        })?;
+        if activation.scheme() != scheme {
+            candle_core::bail!(
+                "HQZ4 activation scheme {:?} does not match layer scheme {:?}.",
+                activation.scheme(),
+                scheme
+            );
+        }
+        if !activation.quantized().device().same_device(&self.device) {
+            candle_core::bail!("HQZ4 quantized activations and weights must use the same device.");
+        }
+        #[cfg(feature = "cuda")]
+        {
+            let cuda_weight = self
+                .cuda_weight
+                .as_ref()
+                .expect("CUDA HQZ4 weights are initialized on CUDA devices");
+            let mut output = cuda::dp4a_matmul_quantized(
+                activation.quantized(),
+                activation.scales(),
+                &cuda_weight.codes,
+                &cuda_weight.scales,
+                &self.weight,
+                activation.source_shape(),
+                activation.source_dtype(),
+            )?;
+            if let Some(bias) = &self.bias {
+                output = output.broadcast_add(&bias.to_dtype(output.dtype())?)?;
+            }
+            Ok(output)
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            let _ = activation;
+            candle_core::bail!("HQZ4 CUDA support is not compiled.")
+        }
     }
 
     fn dtype_and_device(&self) -> (DType, Device) {

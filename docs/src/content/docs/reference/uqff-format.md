@@ -58,7 +58,8 @@ row-major codes, group scales, logical shape, group width, and the deterministic
 Hadamard seed. HQZ4 schema 2 uses F32 group scales so BF16 checkpoints retain their full exponent
 range; readers remain compatible with schema 1 artifacts whose scales were F16. Input-dimension
 shards must start and end on group boundaries. CUDA builds targeting SM61 or newer use an A8/W4
-DP4A inference backend; BF16 activations are dispatched through F16 on that backend.
+DP4A inference backend; BF16 activations are dispatched through F16 on that backend. Multi-token
+prefill uses a tiled kernel, and compatible related projections reuse one transformed A8 activation.
 
 ## Tensor parallelism
 

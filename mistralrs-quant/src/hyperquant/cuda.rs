@@ -6,11 +6,12 @@ use candle_core::{
         cudarc::driver::DeviceRepr,
         CudaDType,
     },
-    CpuStorage, CudaStorage, CustomOp3, DType, Layout, Result, Shape, Tensor,
+    CpuStorage, CudaStorage, CustomOp3, DType, Device, Layout, Result, Shape, Storage,
+    Tensor,
 };
 use half::f16;
 
-use crate::utils::{slice_ptr, slice_ptr_mut_on_stream};
+use crate::utils::{slice_ptr, slice_ptr_mut_on_stream, slice_ptr_on_stream};
 
 pub(super) const HAVE_HQZ4_DP4A_KERNELS: bool = cfg!(has_hqz4_dp4a_kernels);
 
@@ -37,6 +38,35 @@ struct Hqz4Dp4aLaunch {
 }
 
 #[repr(C)]
+struct Hqz4QuantizeLaunch {
+    input: *const c_void,
+    quantized_activation: *mut i8,
+    activation_scales: *mut f32,
+    m: u32,
+    k: u32,
+    group_size: u32,
+    group_offset: u64,
+    seed: u64,
+    dtype: u32,
+    stream: candle_core::cuda::cudarc::driver::sys::CUstream,
+}
+
+#[repr(C)]
+struct Hqz4QuantizedMatmulLaunch {
+    quantized_activation: *const i8,
+    activation_scales: *const f32,
+    weight: *const u8,
+    weight_scales: *const f32,
+    output: *mut c_void,
+    m: u32,
+    n: u32,
+    k: u32,
+    group_size: u32,
+    dtype: u32,
+    stream: candle_core::cuda::cudarc::driver::sys::CUstream,
+}
+
+#[repr(C)]
 struct Hqz4EmbeddingLaunch {
     ids: *const u32,
     weight: *const u8,
@@ -55,6 +85,8 @@ struct Hqz4EmbeddingLaunch {
 #[cfg(has_hqz4_dp4a_kernels)]
 extern "C" {
     fn launch_hqz4_dp4a(params: *const Hqz4Dp4aLaunch) -> i32;
+    fn launch_hqz4_quantize(params: *const Hqz4QuantizeLaunch) -> i32;
+    fn launch_hqz4_dp4a_quantized(params: *const Hqz4QuantizedMatmulLaunch) -> i32;
     fn launch_hqz4_embedding(params: *const Hqz4EmbeddingLaunch) -> i32;
 }
 
@@ -464,6 +496,11 @@ pub(super) fn dp4a_matmul(
     scales: &Tensor,
     encoded: &super::Hqz4Tensor,
 ) -> Result<Tensor> {
+    if encoded.cols() != 0 && input.elem_count() / encoded.cols() >= 4 {
+        crate::utils::log::once_log_info(
+            "HQZ4 CUDA: using tiled 4x4 A8/W4 DP4A prefill backend (SM61+).",
+        );
+    }
     input.apply_op3_no_bwd(
         weight,
         scales,
@@ -475,6 +512,314 @@ pub(super) fn dp4a_matmul(
             seed: encoded.seed(),
         },
     )
+}
+
+pub(super) fn quantize_activation(
+    input: &Tensor,
+    encoded: &super::Hqz4Tensor,
+) -> Result<(Tensor, Tensor)> {
+    if !HAVE_HQZ4_DP4A_KERNELS {
+        candle_core::bail!(
+            "HQZ4 activation quantization was not compiled; set CUDA_COMPUTE_CAP to at least 61."
+        );
+    }
+    let input = input.contiguous()?;
+    let Device::Cuda(device) = input.device() else {
+        candle_core::bail!("HQZ4 activation quantization requires CUDA storage.");
+    };
+    let Some(&k) = input.dims().last() else {
+        candle_core::bail!("HQZ4 activation input must have rank at least one.");
+    };
+    if k != encoded.cols() || !k.is_multiple_of(encoded.group_size()) {
+        candle_core::bail!(
+            "HQZ4 activation width {k} does not match encoded width {} and group size {}.",
+            encoded.cols(),
+            encoded.group_size()
+        );
+    }
+    let elements = input.elem_count();
+    if elements == 0 || !elements.is_multiple_of(k) {
+        candle_core::bail!("HQZ4 activation input must contain complete nonempty rows.");
+    }
+    let m = elements / k;
+    let scale_count = m
+        .checked_mul(k / encoded.group_size())
+        .ok_or_else(|| candle_core::Error::msg("HQZ4 activation scale count overflow."))?;
+    let stream = device.cuda_stream();
+    // Candle has no signed 8-bit tensor dtype. The kernel writes two's-
+    // complement i8 values into U8 storage and the DP4A consumer reinterprets
+    // the same bytes as signed values.
+    let mut quantized = unsafe { device.alloc::<u8>(elements)? };
+    let mut scales = unsafe { device.alloc::<f32>(scale_count)? };
+    let (quantized_ptr, quantized_guard) =
+        slice_ptr_mut_on_stream(&mut quantized, 0, &stream);
+    let (scales_ptr, scales_guard) =
+        slice_ptr_mut_on_stream(&mut scales, 0, &stream);
+    let (input_storage, input_layout) = input.storage_and_layout();
+    let Storage::Cuda(input_storage) = &*input_storage else {
+        unreachable!("CUDA device returned non-CUDA storage")
+    };
+
+    let status = match input.dtype() {
+        DType::F16 => {
+            let input = input_storage.as_cuda_slice::<f16>()?;
+            let (input_ptr, input_guard) =
+                slice_ptr_on_stream(input, input_layout.start_offset(), &stream);
+            let params = Hqz4QuantizeLaunch {
+                input: input_ptr as *const c_void,
+                quantized_activation: quantized_ptr as *mut i8,
+                activation_scales: scales_ptr as *mut f32,
+                m: Hqz4Dp4aMatmul::checked_u32("activation row count", m)?,
+                k: Hqz4Dp4aMatmul::checked_u32("activation width", k)?,
+                group_size: Hqz4Dp4aMatmul::checked_u32(
+                    "activation group size",
+                    encoded.group_size(),
+                )?,
+                group_offset: encoded.group_offset() as u64,
+                seed: encoded.seed(),
+                dtype: HQZ4_CUDA_F16,
+                stream: stream.cu_stream(),
+            };
+            let status = {
+                #[cfg(has_hqz4_dp4a_kernels)]
+                {
+                    unsafe { launch_hqz4_quantize(&params) }
+                }
+                #[cfg(not(has_hqz4_dp4a_kernels))]
+                {
+                    let _ = &params;
+                    unreachable!("HQZ4 DP4A availability was checked before dispatch")
+                }
+            };
+            drop(input_guard);
+            status
+        }
+        DType::F32 => {
+            let input = input_storage.as_cuda_slice::<f32>()?;
+            let (input_ptr, input_guard) =
+                slice_ptr_on_stream(input, input_layout.start_offset(), &stream);
+            let params = Hqz4QuantizeLaunch {
+                input: input_ptr as *const c_void,
+                quantized_activation: quantized_ptr as *mut i8,
+                activation_scales: scales_ptr as *mut f32,
+                m: Hqz4Dp4aMatmul::checked_u32("activation row count", m)?,
+                k: Hqz4Dp4aMatmul::checked_u32("activation width", k)?,
+                group_size: Hqz4Dp4aMatmul::checked_u32(
+                    "activation group size",
+                    encoded.group_size(),
+                )?,
+                group_offset: encoded.group_offset() as u64,
+                seed: encoded.seed(),
+                dtype: HQZ4_CUDA_F32,
+                stream: stream.cu_stream(),
+            };
+            let status = {
+                #[cfg(has_hqz4_dp4a_kernels)]
+                {
+                    unsafe { launch_hqz4_quantize(&params) }
+                }
+                #[cfg(not(has_hqz4_dp4a_kernels))]
+                {
+                    let _ = &params;
+                    unreachable!("HQZ4 DP4A availability was checked before dispatch")
+                }
+            };
+            drop(input_guard);
+            status
+        }
+        dtype => candle_core::bail!(
+            "HQZ4 activation quantization supports F16 and F32 inputs, got {dtype:?}."
+        ),
+    };
+    if status != 0 {
+        candle_core::bail!(
+            "HQZ4 activation quantization CUDA launch failed with status {status}."
+        );
+    }
+    drop((quantized_guard, scales_guard));
+
+    let quantized = Tensor::from((
+        Storage::Cuda(CudaStorage::wrap_cuda_slice(quantized, device.clone())),
+        Shape::from_dims(&[m, k]),
+    ));
+    let scales = Tensor::from((
+        Storage::Cuda(CudaStorage::wrap_cuda_slice(scales, device.clone())),
+        Shape::from_dims(&[m, k / encoded.group_size()]),
+    ));
+    Ok((quantized, scales))
+}
+
+pub(super) fn dp4a_matmul_quantized(
+    activation: &Tensor,
+    activation_scales: &Tensor,
+    weight: &Tensor,
+    weight_scales: &Tensor,
+    encoded: &super::Hqz4Tensor,
+    source_shape: &[usize],
+    source_dtype: DType,
+) -> Result<Tensor> {
+    if !HAVE_HQZ4_DP4A_KERNELS {
+        candle_core::bail!(
+            "HQZ4 quantized matmul was not compiled; set CUDA_COMPUTE_CAP to at least 61."
+        );
+    }
+    if activation.dtype() != DType::U8
+        || activation_scales.dtype() != DType::F32
+        || weight.dtype() != DType::U8
+        || weight_scales.dtype() != DType::F32
+    {
+        candle_core::bail!(
+            "HQZ4 quantized matmul expects signed-byte U8/F32 activations and U8/F32 weights."
+        );
+    }
+    if !(activation.is_contiguous()
+        && activation_scales.is_contiguous()
+        && weight.is_contiguous()
+        && weight_scales.is_contiguous())
+    {
+        candle_core::bail!("HQZ4 quantized matmul inputs must be contiguous.");
+    }
+    if !activation.device().same_device(activation_scales.device())
+        || !activation.device().same_device(weight.device())
+        || !activation.device().same_device(weight_scales.device())
+    {
+        candle_core::bail!(
+            "HQZ4 quantized matmul inputs must use the same CUDA device."
+        );
+    }
+    let Device::Cuda(device) = activation.device() else {
+        candle_core::bail!("HQZ4 quantized matmul requires CUDA storage.");
+    };
+    let (m, k) = activation.dims2()?;
+    let n = encoded.rows();
+    let groups_per_row = k / encoded.group_size();
+    if k != encoded.cols()
+        || activation_scales.dims() != [m, groups_per_row]
+        || weight.dims() != [n, k / 2]
+        || weight_scales.dims() != [n, groups_per_row]
+    {
+        candle_core::bail!("HQZ4 quantized matmul shape mismatch.");
+    }
+    let Some((&source_k, source_batch)) = source_shape.split_last() else {
+        candle_core::bail!("HQZ4 source activation shape cannot be empty.");
+    };
+    let source_rows = source_batch
+        .iter()
+        .try_fold(1usize, |rows, dim| rows.checked_mul(*dim))
+        .ok_or_else(|| candle_core::Error::msg("HQZ4 source activation shape overflow."))?;
+    if source_k != k || source_rows != m {
+        candle_core::bail!(
+            "HQZ4 source shape {:?} does not match quantized activation [{m}, {k}].",
+            source_shape
+        );
+    }
+
+    let stream = device.cuda_stream();
+    let (activation_storage, activation_layout) = activation.storage_and_layout();
+    let Storage::Cuda(activation_storage) = &*activation_storage else {
+        unreachable!("CUDA device returned non-CUDA storage")
+    };
+    let activation = activation_storage.as_cuda_slice::<u8>()?;
+    let (activation_ptr, activation_guard) =
+        slice_ptr_on_stream(activation, activation_layout.start_offset(), &stream);
+    let (scale_storage, scale_layout) = activation_scales.storage_and_layout();
+    let Storage::Cuda(scale_storage) = &*scale_storage else {
+        unreachable!("CUDA device returned non-CUDA storage")
+    };
+    let scales = scale_storage.as_cuda_slice::<f32>()?;
+    let (activation_scale_ptr, activation_scale_guard) =
+        slice_ptr_on_stream(scales, scale_layout.start_offset(), &stream);
+    let (weight_storage, weight_layout) = weight.storage_and_layout();
+    let Storage::Cuda(weight_storage) = &*weight_storage else {
+        unreachable!("CUDA device returned non-CUDA storage")
+    };
+    let weights = weight_storage.as_cuda_slice::<u8>()?;
+    let (weight_ptr, weight_guard) =
+        slice_ptr_on_stream(weights, weight_layout.start_offset(), &stream);
+    let (weight_scale_storage, weight_scale_layout) = weight_scales.storage_and_layout();
+    let Storage::Cuda(weight_scale_storage) = &*weight_scale_storage else {
+        unreachable!("CUDA device returned non-CUDA storage")
+    };
+    let scales = weight_scale_storage.as_cuda_slice::<f32>()?;
+    let (weight_scale_ptr, weight_scale_guard) =
+        slice_ptr_on_stream(scales, weight_scale_layout.start_offset(), &stream);
+
+    let mut output_shape = source_shape.to_vec();
+    *output_shape
+        .last_mut()
+        .expect("source activation rank checked") = n;
+    let output_elements = m
+        .checked_mul(n)
+        .ok_or_else(|| candle_core::Error::msg("HQZ4 quantized output size overflow."))?;
+    if m >= 4 {
+        crate::utils::log::once_log_info(
+            "HQZ4 CUDA: using tiled 4x4 A8/W4 DP4A prefill backend (SM61+).",
+        );
+    }
+
+    macro_rules! launch_output {
+        ($ty:ty, $dtype_code:expr) => {{
+            let mut output = unsafe { device.alloc::<$ty>(output_elements)? };
+            let (output_ptr, output_guard) =
+                slice_ptr_mut_on_stream(&mut output, 0, &stream);
+            let params = Hqz4QuantizedMatmulLaunch {
+                quantized_activation: activation_ptr as *const i8,
+                activation_scales: activation_scale_ptr as *const f32,
+                weight: weight_ptr as *const u8,
+                weight_scales: weight_scale_ptr as *const f32,
+                output: output_ptr as *mut c_void,
+                m: Hqz4Dp4aMatmul::checked_u32("quantized row count", m)?,
+                n: Hqz4Dp4aMatmul::checked_u32("quantized output width", n)?,
+                k: Hqz4Dp4aMatmul::checked_u32("quantized input width", k)?,
+                group_size: Hqz4Dp4aMatmul::checked_u32(
+                    "quantized group size",
+                    encoded.group_size(),
+                )?,
+                dtype: $dtype_code,
+                stream: stream.cu_stream(),
+            };
+            let status = {
+                #[cfg(has_hqz4_dp4a_kernels)]
+                {
+                    unsafe { launch_hqz4_dp4a_quantized(&params) }
+                }
+                #[cfg(not(has_hqz4_dp4a_kernels))]
+                {
+                    let _ = &params;
+                    unreachable!("HQZ4 DP4A availability was checked before dispatch")
+                }
+            };
+            if status != 0 {
+                candle_core::bail!(
+                    "HQZ4 prequantized DP4A CUDA launch failed with status {status}."
+                );
+            }
+            drop(output_guard);
+            Tensor::from((
+                Storage::Cuda(CudaStorage::wrap_cuda_slice(output, device.clone())),
+                Shape::from_dims(&output_shape),
+            ))
+        }};
+    }
+
+    let output = match source_dtype {
+        DType::F16 | DType::BF16 => launch_output!(f16, HQZ4_CUDA_F16),
+        DType::F32 => launch_output!(f32, HQZ4_CUDA_F32),
+        dtype => candle_core::bail!(
+            "HQZ4 prequantized output supports F16, BF16, and F32, got {dtype:?}."
+        ),
+    };
+    drop((
+        activation_guard,
+        activation_scale_guard,
+        weight_guard,
+        weight_scale_guard,
+    ));
+    if output.dtype() == source_dtype {
+        Ok(output)
+    } else {
+        output.to_dtype(source_dtype)
+    }
 }
 
 pub(super) fn embedding(
