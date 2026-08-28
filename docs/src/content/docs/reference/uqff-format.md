@@ -40,7 +40,10 @@ Because every layer self-describes, a single file may mix quantization types. Tw
 
 ## Sharding
 
-The writer splits the tensor stream into `<stem>-0.uqff`, `<stem>-1.uqff`, ... with a soft cap of 10 GiB per shard. Multiple [ISQ (in-situ quantization)](/reference/quantization-types/) types in one run produce one shard set per type (`q4k-0.uqff`, `afq4-0.uqff`, ...) sharing the residual and assets.
+The writer streams the tensor sequence into `<stem>-0.uqff`, `<stem>-1.uqff`, ... with a
+512 MiB target per shard. A layer is kept atomic, so a shard may exceed the target by one layer.
+Multiple [ISQ (in-situ quantization)](/reference/quantization-types/) types in one run produce one
+shard set per type (`q4k-0.uqff`, `afq4-0.uqff`, ...) sharing the residual and assets.
 
 ## Version compatibility
 
@@ -52,7 +55,9 @@ UQFF 1.2 stores quantized token embeddings as regular layer entries and omits th
 
 UQFF 1.3 adds the HyperQuant HQZ4 family (`weight.format = 7`). HQZ4 stores signed 4-bit
 row-major codes, F16 group scales, logical shape, group width, and the deterministic randomized
-Hadamard seed. Input-dimension shards must start and end on group boundaries.
+Hadamard seed. Input-dimension shards must start and end on group boundaries. CUDA builds targeting
+SM61 or newer use an A8/W4 DP4A inference backend; BF16 activations are dispatched through F16 on
+that backend.
 
 ## Tensor parallelism
 
