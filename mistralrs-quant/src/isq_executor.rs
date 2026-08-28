@@ -54,6 +54,7 @@ pub enum IsqKernelKind {
     Hqq,
     F8,
     Mxfp4,
+    Hqz4,
     Other,
 }
 
@@ -539,7 +540,11 @@ pub fn plan_weight_isq(
     let exclusive_device = !request.device.is_cpu()
         && matches!(
             kernel,
-            IsqKernelKind::Afq | IsqKernelKind::Hqq | IsqKernelKind::F8 | IsqKernelKind::Mxfp4
+            IsqKernelKind::Afq
+                | IsqKernelKind::Hqq
+                | IsqKernelKind::F8
+                | IsqKernelKind::Mxfp4
+                | IsqKernelKind::Hqz4
         );
     IsqPlanParams {
         kernel,
@@ -588,6 +593,7 @@ fn kernel_for(request: &IsqRequest, rank: usize) -> IsqKernelKind {
         Some(IsqType::HQQ4 | IsqType::HQQ8) => IsqKernelKind::Hqq,
         Some(IsqType::F8E4M3 | IsqType::F8Q8) => IsqKernelKind::F8,
         Some(IsqType::MXFP4) => IsqKernelKind::Mxfp4,
+        Some(IsqType::HQZ4) => IsqKernelKind::Hqz4,
         Some(_) => IsqKernelKind::Other,
     }
 }

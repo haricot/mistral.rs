@@ -11,6 +11,9 @@ use crate::{
     Shard, UqffReader, UqffTensor,
 };
 
+#[cfg(feature = "cuda")]
+mod cuda;
+
 pub const HQZ4_SCHEMA_VERSION: u32 = 1;
 pub const HQZ4_BITS: usize = 4;
 pub const HQZ4_DEFAULT_GROUP_SIZE: usize = 128;
@@ -353,17 +356,34 @@ impl Hqz4Tensor {
 pub struct HyperQuantLinear {
     weight: Hqz4Tensor,
     bias: Option<Tensor>,
+    device: Device,
+    #[cfg(feature = "cuda")]
+    cuda_weight: Option<Hqz4CudaWeight>,
+}
+
+#[cfg(feature = "cuda")]
+#[derive(Debug)]
+struct Hqz4CudaWeight {
+    codes: Tensor,
+    scales: Tensor,
 }
 
 impl HyperQuantLinear {
     fn supports_device_location(location: DeviceLocation) -> bool {
-        matches!(location, DeviceLocation::Cpu)
+        match location {
+            DeviceLocation::Cpu => true,
+            #[cfg(feature = "cuda")]
+            DeviceLocation::Cuda { .. } => cuda::HAVE_HQZ4_DP4A_KERNELS,
+            #[cfg(not(feature = "cuda"))]
+            DeviceLocation::Cuda { .. } => false,
+            DeviceLocation::Metal { .. } => false,
+        }
     }
 
     fn ensure_supported_device(device: &Device) -> Result<()> {
         if !Self::supports_device_location(device.location()) {
             candle_core::bail!(
-                "HQZ4 currently uses the CPU reference backend; CUDA support is not enabled yet."
+                "HQZ4 supports CPU and CUDA DP4A builds targeting compute capability 6.1 or newer."
             );
         }
         Ok(())
@@ -373,16 +393,29 @@ impl HyperQuantLinear {
         Self::ensure_supported_device(weight.device())?;
         let (rows, cols) = weight.dims2()?;
         let values = weight
+            .to_device(&Device::Cpu)?
             .to_dtype(DType::F32)?
             .flatten_all()?
             .to_vec1::<f32>()?;
         let encoded = Hqz4Tensor::encode(&values, rows, cols, config)?;
-        Self::from_encoded(encoded, bias)
+        Self::from_encoded_on_device(encoded, bias, weight.device())
     }
 
     pub fn from_encoded(weight: Hqz4Tensor, bias: Option<Tensor>) -> Result<Self> {
+        let device = bias
+            .as_ref()
+            .map(|bias| bias.device().clone())
+            .unwrap_or(Device::Cpu);
+        Self::from_encoded_on_device(weight, bias, &device)
+    }
+
+    fn from_encoded_on_device(
+        weight: Hqz4Tensor,
+        bias: Option<Tensor>,
+        device: &Device,
+    ) -> Result<Self> {
+        Self::ensure_supported_device(device)?;
         if let Some(bias) = &bias {
-            Self::ensure_supported_device(bias.device())?;
             if bias.dims() != [weight.rows()] {
                 candle_core::bail!(
                     "HQZ4 bias shape {:?} does not match output width {}.",
@@ -391,7 +424,31 @@ impl HyperQuantLinear {
                 );
             }
         }
-        Ok(Self { weight, bias })
+        let bias = bias.map(|bias| bias.to_device(device)).transpose()?;
+        #[cfg(feature = "cuda")]
+        let cuda_weight = if device.is_cuda() {
+            Some(Hqz4CudaWeight {
+                codes: Tensor::from_vec(
+                    weight.codes().to_vec(),
+                    (weight.rows(), weight.cols() / 2),
+                    device,
+                )?,
+                scales: Tensor::from_vec(
+                    weight.scales().to_vec(),
+                    (weight.rows(), weight.cols() / weight.group_size()),
+                    device,
+                )?,
+            })
+        } else {
+            None
+        };
+        Ok(Self {
+            weight,
+            bias,
+            device: device.clone(),
+            #[cfg(feature = "cuda")]
+            cuda_weight,
+        })
     }
 
     pub fn encoded(&self) -> &Hqz4Tensor {
@@ -503,7 +560,7 @@ impl HyperQuantLinear {
             weight = weight.shard(dim, start, len)?;
         }
         let bias = reader.load_bias(key, device, range, shape.len())?;
-        Self::from_encoded(weight, bias)
+        Self::from_encoded_on_device(weight, bias, device)
     }
 
     fn scales_tensor(&self) -> Result<Tensor> {
@@ -532,24 +589,74 @@ impl QuantMethod for HyperQuantLinear {
             (self.weight.rows(), self.weight.cols()),
             &Device::Cpu,
         )
+        .and_then(|weight| weight.to_device(&self.device))
     }
 
     fn embedding_forward_raw(&self, ids: &Tensor) -> Result<Tensor> {
         Self::ensure_supported_device(ids.device())?;
+        if !ids.device().same_device(&self.device) {
+            candle_core::bail!("HQZ4 embedding ids and weights must use the same device.");
+        }
         let mut output_shape = ids.dims().to_vec();
         output_shape.push(self.weight.cols());
-        let ids = ids.to_dtype(DType::U32)?.flatten_all()?.to_vec1::<u32>()?;
-        let mut output = Vec::with_capacity(ids.len() * self.weight.cols());
-        for id in ids {
-            output.extend(self.weight.decode_row(id as usize)?);
-        }
-        Tensor::from_vec(output, output_shape, &Device::Cpu)
+        self.dequantize_w()?
+            .index_select(&ids.to_dtype(DType::U32)?.flatten_all()?, 0)?
+            .reshape(output_shape)
     }
 
     fn forward_raw(&self, activation: &Tensor) -> Result<Tensor> {
         Self::ensure_supported_device(activation.device())?;
+        if !activation.device().same_device(&self.device) {
+            candle_core::bail!("HQZ4 activations and weights must use the same device.");
+        }
+        if activation.device().is_cuda() {
+            #[cfg(feature = "cuda")]
+            {
+                let original_dtype = activation.dtype();
+                let kernel_activation = match original_dtype {
+                    DType::F16 | DType::F32 => activation.clone(),
+                    DType::BF16 => activation.to_dtype(DType::F16)?,
+                    dtype => candle_core::bail!(
+                        "HQZ4 CUDA supports F16, BF16, and F32 activations, got {dtype:?}."
+                    ),
+                };
+                let kernel_activation = if kernel_activation.is_contiguous() {
+                    kernel_activation
+                } else {
+                    kernel_activation.contiguous()?
+                };
+                let cuda_weight = self
+                    .cuda_weight
+                    .as_ref()
+                    .expect("CUDA HQZ4 weights are initialized on CUDA devices");
+                crate::utils::log::once_log_info(
+                    "HQZ4 CUDA: using the A8/W4 DP4A backend (SM61+).",
+                );
+                let mut output = cuda::dp4a_matmul(
+                    &kernel_activation,
+                    &cuda_weight.codes,
+                    &cuda_weight.scales,
+                    &self.weight,
+                )?;
+                if let Some(bias) = &self.bias {
+                    output = output.broadcast_add(&bias.to_dtype(output.dtype())?)?;
+                }
+                return if output.dtype() == original_dtype {
+                    Ok(output)
+                } else {
+                    output.to_dtype(original_dtype)
+                };
+            }
+            #[cfg(not(feature = "cuda"))]
+            candle_core::bail!("HQZ4 CUDA support is not compiled.");
+        }
         let weight = self.dequantize_w()?.to_dtype(activation.dtype())?;
-        Linear::new(weight, self.bias.clone()).forward(activation)
+        let bias = self
+            .bias
+            .as_ref()
+            .map(|bias| bias.to_dtype(activation.dtype()))
+            .transpose()?;
+        Linear::new(weight, bias).forward(activation)
     }
 
     fn quantized_act_type(&self) -> Option<DType> {
@@ -557,13 +664,13 @@ impl QuantMethod for HyperQuantLinear {
     }
 
     fn dtype_and_device(&self) -> (DType, Device) {
-        (DType::F32, Device::Cpu)
+        (DType::F32, self.device.clone())
     }
 
     fn plan_isq(&self, request: &crate::IsqRequest) -> Result<crate::IsqPlanParams> {
         Ok(crate::plan_weight_isq(
             DType::F32,
-            Device::Cpu,
+            self.device.clone(),
             vec![self.weight.rows(), self.weight.cols()],
             request,
             true,
@@ -572,6 +679,9 @@ impl QuantMethod for HyperQuantLinear {
 
     fn add_delta_w(&self, delta: &Tensor) -> Result<Arc<dyn QuantMethod>> {
         Self::ensure_supported_device(delta.device())?;
+        if !delta.device().same_device(&self.device) {
+            candle_core::bail!("HQZ4 delta and weight must use the same device.");
+        }
         let weight = (self.dequantize_w()?.to_dtype(delta.dtype())? + delta)?;
         Ok(Arc::new(Self::from_weight(
             &weight,
@@ -593,7 +703,19 @@ impl QuantMethod for HyperQuantLinear {
     ) -> Result<Arc<dyn QuantMethod>> {
         if dtype.is_none() || (dtype == Some(IsqType::HQZ4) && imatrix_weight.is_none()) {
             Self::ensure_supported_device(&device)?;
-            return Ok(self);
+            if self.device.same_device(&device) {
+                return Ok(self);
+            }
+            let bias = self
+                .bias
+                .as_ref()
+                .map(|bias| bias.to_device(&device))
+                .transpose()?;
+            return Ok(Arc::new(Self::from_encoded_on_device(
+                self.weight.clone(),
+                bias,
+                &device,
+            )?));
         }
         if dtype == Some(IsqType::HQZ4) {
             candle_core::bail!("HQZ4 does not support imatrix.");
@@ -808,6 +930,48 @@ mod tests {
         }
     }
 
+    fn a8_matvec_reference(encoded: &Hqz4Tensor, activation: &[f32]) -> Result<Vec<f32>> {
+        let activation = encoded.transform_activation(activation)?;
+        let groups_per_row = encoded.cols() / encoded.group_size();
+        let mut quantized = vec![0i8; encoded.cols()];
+        let mut activation_scales = vec![0f32; groups_per_row];
+        for group in 0..groups_per_row {
+            let start = group * encoded.group_size();
+            let values = &activation[start..start + encoded.group_size()];
+            let max_abs = values.iter().copied().map(f32::abs).fold(0f32, f32::max);
+            let scale = if max_abs == 0.0 {
+                0.0
+            } else {
+                max_abs / 127.0
+            };
+            activation_scales[group] = scale;
+            for (offset, value) in values.iter().copied().enumerate() {
+                quantized[start + offset] = if scale == 0.0 {
+                    0
+                } else {
+                    (value / scale).round().clamp(-127.0, 127.0) as i8
+                };
+            }
+        }
+
+        let mut output = vec![0f32; encoded.rows()];
+        for (row, output) in output.iter_mut().enumerate() {
+            for group in 0..groups_per_row {
+                let start = group * encoded.group_size();
+                let dot = (0..encoded.group_size())
+                    .map(|offset| {
+                        i32::from(read_code(encoded.codes(), row * encoded.cols() + start + offset))
+                            * i32::from(quantized[start + offset])
+                    })
+                    .sum::<i32>();
+                *output += dot as f32
+                    * encoded.scales()[row * groups_per_row + group].to_f32()
+                    * activation_scales[group];
+            }
+        }
+        Ok(output)
+    }
+
     #[test]
     fn rht_round_trip_restores_values() {
         let mut values = (0..TEST_GROUP_SIZE)
@@ -929,6 +1093,55 @@ mod tests {
 
         for (actual, expected) in actual.iter().zip(expected) {
             let tolerance = 1e-4 * expected.abs().max(1.0);
+            assert!((actual - expected).abs() <= tolerance);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn dynamic_a8_reference_tracks_float_activation_path() -> Result<()> {
+        let encoded = Hqz4Tensor::encode(&test_weights(), TEST_ROWS, TEST_COLS, test_config())?;
+        let activation = (0..TEST_COLS)
+            .map(|index| (index as f32 * 0.023).cos() * 0.5)
+            .collect::<Vec<_>>();
+        let actual = a8_matvec_reference(&encoded, &activation)?;
+        let expected = encoded.matvec(&activation)?;
+
+        for (actual, expected) in actual.iter().zip(expected) {
+            let tolerance = 0.02 * expected.abs().max(1.0);
+            assert!((actual - expected).abs() <= tolerance);
+        }
+        Ok(())
+    }
+
+    #[cfg(all(feature = "cuda", has_hqz4_dp4a_kernels))]
+    #[test]
+    fn hyperquant_cuda_dp4a_matches_a8_reference() -> Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        let encoded = Hqz4Tensor::encode(&test_weights(), TEST_ROWS, TEST_COLS, test_config())?;
+        let layer = HyperQuantLinear::from_encoded_on_device(encoded.clone(), None, &device)?;
+        let activation = (0..3 * TEST_COLS)
+            .map(|index| f16::from_f32((index as f32 * 0.017).sin() * 0.5))
+            .collect::<Vec<_>>();
+        let expected = activation
+            .chunks_exact(TEST_COLS)
+            .flat_map(|row| {
+                let row = row.iter().map(|value| value.to_f32()).collect::<Vec<_>>();
+                a8_matvec_reference(&encoded, &row).expect("valid test activation")
+            })
+            .collect::<Vec<_>>();
+        let activation = Tensor::from_vec(activation, (3, TEST_COLS), &device)?;
+        let actual = layer
+            .forward(&activation)?
+            .to_device(&Device::Cpu)?
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+
+        for (actual, expected) in actual.iter().zip(expected) {
+            let tolerance = 0.02 * expected.abs().max(1.0);
             assert!((actual - expected).abs() <= tolerance);
         }
         Ok(())

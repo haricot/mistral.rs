@@ -561,9 +561,6 @@ impl QuantMethod for UnquantLinear {
             }
             Some(IsqType::HQZ4) => {
                 let _acquired_quantize_guard = guard.acquire(&device);
-                if !device.is_cpu() {
-                    candle_core::bail!("HQZ4 currently uses the CPU reference backend.");
-                }
                 if imatrix_weight.is_some() {
                     candle_core::bail!("HQZ4 does not support imatrix.");
                 }

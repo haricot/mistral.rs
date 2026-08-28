@@ -106,6 +106,7 @@ fn main() -> Result<(), String> {
     println!("cargo::rustc-check-cfg=cfg(has_vector_fp8_kernels)");
     println!("cargo::rustc-check-cfg=cfg(has_mxfp4_kernels)");
     println!("cargo::rustc-check-cfg=cfg(has_mxfp4_wmma_kernels)");
+    println!("cargo::rustc-check-cfg=cfg(has_hqz4_dp4a_kernels)");
     println!("cargo::rustc-check-cfg=cfg(has_cutlass_moe_kernels)");
     println!("cargo::rustc-check-cfg=cfg(cuda_ge_13000)");
 
@@ -178,6 +179,10 @@ fn main() -> Result<(), String> {
         }
         // MXFP4 is always enabled with CUDA (uses LUT-based dequantization)
         println!("cargo:rustc-cfg=has_mxfp4_kernels");
+        // Pascal introduced integer dot-product accumulation in SM61.
+        if compute_cap >= 61 {
+            println!("cargo:rustc-cfg=has_hqz4_dp4a_kernels");
+        }
 
         let mut excluded_files = if cc_over_80 {
             vec!["dummy_*.cu", "*_dummy.cu"]
@@ -197,6 +202,9 @@ fn main() -> Result<(), String> {
         }
         if !cutlass_fp8_sm90 {
             excluded_files.push("*_cutlass_sm90.cu");
+        }
+        if compute_cap < 61 {
+            excluded_files.push("hqz4_dp4a.cu");
         }
         builder = builder.exclude(&excluded_files);
         let cutlass_commit =
