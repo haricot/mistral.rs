@@ -20,7 +20,7 @@ enum Hqz4CudaDtype : uint32_t {
 struct Hqz4Dp4aLaunch {
   const void *input;
   const uint8_t *weight;
-  const __half *weight_scales;
+  const float *weight_scales;
   int8_t *quantized_activation;
   float *activation_scales;
   void *output;
@@ -155,7 +155,7 @@ __global__ void hqz4_dp4a_matmul(
     const int8_t *__restrict__ activation,
     const float *__restrict__ activation_scales,
     const uint8_t *__restrict__ weight,
-    const __half *__restrict__ weight_scales, T *__restrict__ output,
+    const float *__restrict__ weight_scales, T *__restrict__ output,
     uint32_t m, uint32_t n, uint32_t k, uint32_t group_size) {
   const uint32_t warp = threadIdx.x / WARP_SIZE;
   const uint32_t lane = threadIdx.x % WARP_SIZE;
@@ -189,9 +189,9 @@ __global__ void hqz4_dp4a_matmul(
     for (uint32_t delta = WARP_SIZE / 2; delta > 0; delta >>= 1)
       dot += __shfl_down_sync(0xffffffff, dot, delta);
     if (lane == 0) {
-      const float weight_scale = __half2float(
+      const float weight_scale =
           weight_scales[static_cast<uint64_t>(weight_row) * groups_per_row +
-                        group]);
+                        group];
       const float activation_scale =
           activation_scales[static_cast<uint64_t>(activation_row) *
                                 groups_per_row +

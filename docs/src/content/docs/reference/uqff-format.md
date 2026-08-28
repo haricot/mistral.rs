@@ -54,10 +54,11 @@ UQFF 1.1 adds inline unquantized linear entries (`weight.format = Unquant`) so m
 UQFF 1.2 stores quantized token embeddings as regular layer entries and omits their original dense weights from `residual.safetensors`. Readers still accept UQFF 1.1 files whose token embeddings remain in the residual file.
 
 UQFF 1.3 adds the HyperQuant HQZ4 family (`weight.format = 7`). HQZ4 stores signed 4-bit
-row-major codes, F16 group scales, logical shape, group width, and the deterministic randomized
-Hadamard seed. Input-dimension shards must start and end on group boundaries. CUDA builds targeting
-SM61 or newer use an A8/W4 DP4A inference backend; BF16 activations are dispatched through F16 on
-that backend.
+row-major codes, group scales, logical shape, group width, and the deterministic randomized
+Hadamard seed. HQZ4 schema 2 uses F32 group scales so BF16 checkpoints retain their full exponent
+range; readers remain compatible with schema 1 artifacts whose scales were F16. Input-dimension
+shards must start and end on group boundaries. CUDA builds targeting SM61 or newer use an A8/W4
+DP4A inference backend; BF16 activations are dispatched through F16 on that backend.
 
 ## Tensor parallelism
 

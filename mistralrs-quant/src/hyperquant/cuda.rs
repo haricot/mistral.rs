@@ -22,7 +22,7 @@ const CUDA_MAX_BLOCK_THREADS: usize = 1024;
 struct Hqz4Dp4aLaunch {
     input: *const c_void,
     weight: *const u8,
-    weight_scales: *const f16,
+    weight_scales: *const f32,
     quantized_activation: *mut i8,
     activation_scales: *mut f32,
     output: *mut c_void,
@@ -72,9 +72,9 @@ impl Hqz4Dp4aMatmul {
         {
             candle_core::bail!("HQZ4 CUDA inputs must be contiguous.");
         }
-        if inputs.weight.dtype() != DType::U8 || inputs.scales.dtype() != DType::F16 {
+        if inputs.weight.dtype() != DType::U8 || inputs.scales.dtype() != DType::F32 {
             candle_core::bail!(
-                "HQZ4 CUDA expects U8 packed weights and F16 scales, got {:?} and {:?}.",
+                "HQZ4 CUDA expects U8 packed weights and F32 scales, got {:?} and {:?}.",
                 inputs.weight.dtype(),
                 inputs.scales.dtype()
             );
@@ -144,7 +144,7 @@ impl Hqz4Dp4aMatmul {
         let device = inputs.input.device();
         let input_slice = inputs.input.as_cuda_slice::<T>()?;
         let weight_slice = inputs.weight.as_cuda_slice::<u8>()?;
-        let scale_slice = inputs.scales.as_cuda_slice::<f16>()?;
+        let scale_slice = inputs.scales.as_cuda_slice::<f32>()?;
         let quantized_elements = m
             .checked_mul(self.cols)
             .ok_or_else(|| candle_core::Error::Msg("HQZ4 activation size overflow.".into()))?;
@@ -173,7 +173,7 @@ impl Hqz4Dp4aMatmul {
         let params = Hqz4Dp4aLaunch {
             input: input_ptr as *const c_void,
             weight: weight_ptr as *const u8,
-            weight_scales: scale_ptr as *const f16,
+            weight_scales: scale_ptr as *const f32,
             quantized_activation: quantized_ptr as *mut i8,
             activation_scales: activation_scale_ptr as *mut f32,
             output: output_ptr as *mut c_void,

@@ -2,6 +2,7 @@ use std::sync::{atomic::AtomicUsize, Arc};
 
 use candle_core::{DType, Device, DeviceLocation, Result, Tensor};
 use candle_nn::{Linear, Module};
+#[cfg(test)]
 use half::f16;
 use safetensors::tensor::Dtype;
 
@@ -14,7 +15,8 @@ use crate::{
 #[cfg(feature = "cuda")]
 mod cuda;
 
-pub const HQZ4_SCHEMA_VERSION: u32 = 1;
+pub const HQZ4_SCHEMA_VERSION: u32 = 2;
+const HQZ4_LEGACY_SCHEMA_VERSION: u32 = 1;
 pub const HQZ4_BITS: usize = 4;
 pub const HQZ4_DEFAULT_GROUP_SIZE: usize = 128;
 pub const HQZ4_LAYOUT_ROW_MAJOR_NIBBLES: u8 = 0;
@@ -50,7 +52,7 @@ pub struct Hqz4Tensor {
     group_size: usize,
     group_offset: usize,
     seed: u64,
-    scales: Vec<f16>,
+    scales: Vec<f32>,
     codes: Vec<u8>,
 }
 
@@ -84,24 +86,23 @@ impl Hqz4Tensor {
 
                 let max_abs = rotated.iter().copied().map(f32::abs).fold(0f32, f32::max);
                 let scale = if max_abs == 0.0 {
-                    f16::ZERO
+                    0.0
                 } else {
-                    let scale = f16::from_f32(max_abs / HQZ4_MAX_LEVEL as f32);
-                    if !scale.is_finite() || scale == f16::ZERO {
+                    let scale = max_abs / HQZ4_MAX_LEVEL as f32;
+                    if !scale.is_finite() || scale == 0.0 {
                         candle_core::bail!(
-                            "HQZ4 group scale is outside the finite F16 range at row {row}, group {group}."
+                            "HQZ4 group scale is outside the finite F32 range at row {row}, group {group}."
                         );
                     }
                     scale
                 };
                 scales.push(scale);
 
-                let scale_f32 = scale.to_f32();
                 for (offset, value) in rotated.iter().copied().enumerate() {
-                    let quantized = if scale == f16::ZERO {
+                    let quantized = if scale == 0.0 {
                         0
                     } else {
-                        (value / scale_f32)
+                        (value / scale)
                             .round()
                             .clamp(-(HQZ4_MAX_LEVEL as f32), HQZ4_MAX_LEVEL as f32)
                             as i8
@@ -118,7 +119,7 @@ impl Hqz4Tensor {
         rows: usize,
         cols: usize,
         cfg: Hqz4Config,
-        scales: Vec<f16>,
+        scales: Vec<f32>,
         codes: Vec<u8>,
     ) -> Result<Self> {
         Self::from_parts_at_group_offset((rows, cols), cfg, 0, scales, codes)
@@ -128,7 +129,7 @@ impl Hqz4Tensor {
         shape: (usize, usize),
         cfg: Hqz4Config,
         group_offset: usize,
-        scales: Vec<f16>,
+        scales: Vec<f32>,
         codes: Vec<u8>,
     ) -> Result<Self> {
         let (rows, cols) = shape;
@@ -148,7 +149,7 @@ impl Hqz4Tensor {
         }
         if scales
             .iter()
-            .any(|scale| !scale.is_finite() || *scale < f16::ZERO)
+            .any(|scale| !scale.is_finite() || *scale < 0.0)
         {
             candle_core::bail!("HQZ4 scales must be finite and non-negative.");
         }
@@ -163,7 +164,7 @@ impl Hqz4Tensor {
             candle_core::bail!("HQZ4 code payload contains the reserved -8 level.");
         }
         for (group_index, scale) in scales.iter().enumerate() {
-            if *scale != f16::ZERO {
+            if *scale != 0.0 {
                 continue;
             }
             let row = group_index / (cols / cfg.group_size);
@@ -205,7 +206,7 @@ impl Hqz4Tensor {
         self.seed
     }
 
-    pub fn scales(&self) -> &[f16] {
+    pub fn scales(&self) -> &[f32] {
         &self.scales
     }
 
@@ -220,7 +221,7 @@ impl Hqz4Tensor {
         let groups_per_row = self.cols / self.group_size;
         let mut output = vec![0f32; self.cols];
         for group in 0..groups_per_row {
-            let scale = self.scales[row * groups_per_row + group].to_f32();
+            let scale = self.scales[row * groups_per_row + group];
             let start = row * self.cols + group * self.group_size;
             let output_start = group * self.group_size;
             for offset in 0..self.group_size {
@@ -475,7 +476,8 @@ impl HyperQuantLinear {
             && layer.scalar("weight.format", Dtype::U8)
             && layer.scalar("weight.group_size", Dtype::U32)
             && layer.scalar("weight.layout", Dtype::U8)
-            && layer.tensor_dtype("weight.scales", Dtype::F16)
+            && (layer.tensor_dtype("weight.scales", Dtype::F16)
+                || layer.tensor_dtype("weight.scales", Dtype::F32))
             && layer.scalar("weight.schema", Dtype::U32)
             && layer.scalar("weight.seed_hi", Dtype::U32)
             && layer.scalar("weight.seed_lo", Dtype::U32)
@@ -507,8 +509,10 @@ impl HyperQuantLinear {
         let layout = reader.load_u8_scalar(&format!("{key}.weight.layout"))?;
         let transform = reader.load_u8_scalar(&format!("{key}.weight.transform"))?;
         let bits = reader.load_u8_scalar(&format!("{key}.weight.bits"))? as usize;
-        if schema != HQZ4_SCHEMA_VERSION {
-            candle_core::bail!("Unsupported HQZ4 schema {schema}; expected {HQZ4_SCHEMA_VERSION}.");
+        if !matches!(schema, HQZ4_LEGACY_SCHEMA_VERSION | HQZ4_SCHEMA_VERSION) {
+            candle_core::bail!(
+                "Unsupported HQZ4 schema {schema}; expected {HQZ4_LEGACY_SCHEMA_VERSION} or {HQZ4_SCHEMA_VERSION}."
+            );
         }
         if layout != HQZ4_LAYOUT_ROW_MAJOR_NIBBLES {
             candle_core::bail!("Unsupported HQZ4 layout {layout}.");
@@ -549,10 +553,23 @@ impl HyperQuantLinear {
         let seed_hi = reader.load_u32_scalar(&format!("{key}.weight.seed_hi"))? as u64;
         let seed = seed_lo | seed_hi << 32;
         let codes = reader.load_raw_u8(&format!("{key}.weight"))?;
-        let scales = reader
-            .load_tensor(&format!("{key}.weight.scales"), &Device::Cpu)?
+        let scales =
+            reader.load_tensor(&format!("{key}.weight.scales"), &Device::Cpu)?;
+        let expected_scale_dtype = if schema == HQZ4_LEGACY_SCHEMA_VERSION {
+            DType::F16
+        } else {
+            DType::F32
+        };
+        if scales.dtype() != expected_scale_dtype {
+            candle_core::bail!(
+                "HQZ4 schema {schema} expects {expected_scale_dtype:?} scales, got {:?}.",
+                scales.dtype()
+            );
+        }
+        let scales = scales
+            .to_dtype(DType::F32)?
             .flatten_all()?
-            .to_vec1::<f16>()?;
+            .to_vec1::<f32>()?;
         let config = Hqz4Config { group_size, seed };
         let mut weight = Hqz4Tensor::from_parts(*rows, *cols, config, scales, codes)?;
         let range = crate::uqff::shard_range(shard, &shape)?;
@@ -965,7 +982,7 @@ mod tests {
                     })
                     .sum::<i32>();
                 *output += dot as f32
-                    * encoded.scales()[row * groups_per_row + group].to_f32()
+                    * encoded.scales()[row * groups_per_row + group]
                     * activation_scales[group];
             }
         }
@@ -1020,7 +1037,7 @@ mod tests {
                 group_size: 2,
                 seed: 0,
             },
-            vec![f16::from_f32(1.0)],
+            vec![1.0],
             vec![0x79],
         )?;
 
@@ -1183,7 +1200,7 @@ mod tests {
                 group_size: 2,
                 seed: 0,
             },
-            vec![f16::from_f32(1.0)],
+            vec![1.0],
             vec![0x08],
         )
         .unwrap_err();
@@ -1215,6 +1232,22 @@ mod tests {
         )
         .unwrap_err();
         assert!(non_finite.to_string().contains("finite"));
+    }
+
+    #[test]
+    fn f32_scales_cover_bf16_weight_range() -> Result<()> {
+        let mut weights = vec![0.0; HQZ4_DEFAULT_GROUP_SIZE];
+        weights[0] = 10_000_000.0;
+        let encoded = Hqz4Tensor::encode(
+            &weights,
+            1,
+            HQZ4_DEFAULT_GROUP_SIZE,
+            Hqz4Config::default(),
+        )?;
+
+        assert!(encoded.scales()[0] > f16::MAX.to_f32());
+        assert!(encoded.scales()[0].is_finite());
+        Ok(())
     }
 
     fn test_linear() -> Result<HyperQuantLinear> {
@@ -1299,6 +1332,54 @@ mod tests {
             &Device::Cpu,
         )?;
         assert_close(&loaded.forward(&activation)?, &layer.forward(&activation)?)?;
+        drop(reader);
+        let _ = std::fs::remove_file(path);
+        Ok(())
+    }
+
+    #[test]
+    fn uqff_schema_one_f16_scales_remain_readable() -> Result<()> {
+        const PREFIX: &str = "model.layers.0.mlp.down_proj";
+
+        let layer = test_linear()?;
+        let schema_name = format!("{PREFIX}.weight.schema");
+        let scales_name = format!("{PREFIX}.weight.scales");
+        let mut tensors = crate::uqff_version_tensors();
+        tensors.extend(
+            layer
+                .serialize_uqff(PREFIX, IsqType::HQZ4)?
+                .into_iter()
+                .filter(|tensor| {
+                    tensor.name() != schema_name.as_str()
+                        && tensor.name() != scales_name.as_str()
+                }),
+        );
+        tensors.push(UqffTensor::from_u32_scalar(
+            schema_name,
+            HQZ4_LEGACY_SCHEMA_VERSION,
+        ));
+        let legacy_scales = Tensor::from_vec(
+            layer
+                .encoded()
+                .scales()
+                .iter()
+                .copied()
+                .map(f16::from_f32)
+                .collect::<Vec<_>>(),
+            (
+                layer.encoded().rows(),
+                layer.encoded().cols() / layer.encoded().group_size(),
+            ),
+            &Device::Cpu,
+        )?;
+        tensors.push(UqffTensor::from_tensor(scales_name, &legacy_scales)?);
+
+        let path = write_uqff_tensors(&tensors, "schema-one")?;
+        let reader = UqffReader::open(std::slice::from_ref(&path))?;
+        let loaded = reader
+            .load_linear(PREFIX, &Device::Cpu, Shard::default())?
+            .expect("HQZ4 schema 1 layer must load");
+        assert_close(&loaded.dequantize_w()?, &layer.dequantize_w()?)?;
         drop(reader);
         let _ = std::fs::remove_file(path);
         Ok(())
