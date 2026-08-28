@@ -590,6 +590,38 @@ impl HyperQuantLinear {
             &Device::Cpu,
         )
     }
+
+    #[cfg(feature = "cuda")]
+    fn embedding_forward_cuda(&self, ids: &Tensor, output_dtype: DType) -> Result<Tensor> {
+        let mut output_shape = ids.dims().to_vec();
+        output_shape.push(self.weight.cols());
+        let ids = ids.to_dtype(DType::U32)?.flatten_all()?.contiguous()?;
+        let cuda_weight = self
+            .cuda_weight
+            .as_ref()
+            .expect("CUDA HQZ4 weights are initialized on CUDA devices");
+        let kernel_dtype = if output_dtype == DType::F16 {
+            DType::F16
+        } else {
+            DType::F32
+        };
+        crate::utils::log::once_log_info(
+            "HQZ4 CUDA: using direct packed embedding lookup (no full dequantization).",
+        );
+        let output = cuda::embedding(
+            &ids,
+            &cuda_weight.codes,
+            &cuda_weight.scales,
+            &self.weight,
+            kernel_dtype,
+        )?
+        .reshape(output_shape)?;
+        if output.dtype() == output_dtype {
+            Ok(output)
+        } else {
+            output.to_dtype(output_dtype)
+        }
+    }
 }
 
 impl QuantMethod for HyperQuantLinear {
@@ -609,10 +641,30 @@ impl QuantMethod for HyperQuantLinear {
         .and_then(|weight| weight.to_device(&self.device))
     }
 
+    fn embedding_forward(&self, ids: &Tensor, output_dtype: DType) -> Result<Tensor> {
+        Self::ensure_supported_device(ids.device())?;
+        if !ids.device().same_device(&self.device) {
+            candle_core::bail!("HQZ4 embedding ids and weights must use the same device.");
+        }
+        if ids.device().is_cuda() {
+            #[cfg(feature = "cuda")]
+            return self.embedding_forward_cuda(ids, output_dtype);
+            #[cfg(not(feature = "cuda"))]
+            candle_core::bail!("HQZ4 CUDA support is not compiled.");
+        }
+        self.embedding_forward_raw(ids)?.to_dtype(output_dtype)
+    }
+
     fn embedding_forward_raw(&self, ids: &Tensor) -> Result<Tensor> {
         Self::ensure_supported_device(ids.device())?;
         if !ids.device().same_device(&self.device) {
             candle_core::bail!("HQZ4 embedding ids and weights must use the same device.");
+        }
+        if ids.device().is_cuda() {
+            #[cfg(feature = "cuda")]
+            return self.embedding_forward_cuda(ids, DType::F32);
+            #[cfg(not(feature = "cuda"))]
+            candle_core::bail!("HQZ4 CUDA support is not compiled.");
         }
         let mut output_shape = ids.dims().to_vec();
         output_shape.push(self.weight.cols());
@@ -1159,6 +1211,37 @@ mod tests {
 
         for (actual, expected) in actual.iter().zip(expected) {
             let tolerance = 0.02 * expected.abs().max(1.0);
+            assert!((actual - expected).abs() <= tolerance);
+        }
+        Ok(())
+    }
+
+    #[cfg(all(feature = "cuda", has_hqz4_dp4a_kernels))]
+    #[test]
+    fn hyperquant_cuda_embedding_decodes_only_selected_rows() -> Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        let encoded = Hqz4Tensor::encode(&test_weights(), TEST_ROWS, TEST_COLS, test_config())?;
+        let expected_weights = encoded.decode()?;
+        let layer = HyperQuantLinear::from_encoded_on_device(encoded, None, &device)?;
+        let selected = [4u32, 1, 4, 0];
+        let ids = Tensor::from_vec(selected.to_vec(), (2, 2), &device)?;
+        let actual = layer
+            .embedding_forward(&ids, DType::F32)?
+            .to_device(&Device::Cpu)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let expected = selected
+            .iter()
+            .flat_map(|row| {
+                let start = *row as usize * TEST_COLS;
+                expected_weights[start..start + TEST_COLS].iter().copied()
+            })
+            .collect::<Vec<_>>();
+
+        for (actual, expected) in actual.iter().zip(expected) {
+            let tolerance = 1e-5 * expected.abs().max(1.0);
             assert!((actual - expected).abs() <= tolerance);
         }
         Ok(())

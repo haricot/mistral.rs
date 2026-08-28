@@ -3,14 +3,14 @@ use std::ffi::c_void;
 use candle_core::{
     backend::BackendStorage,
     cuda_backend::{
-        cudarc::driver::{DeviceRepr, ValidAsZeroBits},
+        cudarc::driver::DeviceRepr,
         CudaDType,
     },
     CpuStorage, CudaStorage, CustomOp3, DType, Layout, Result, Shape, Tensor,
 };
 use half::f16;
 
-use crate::utils::slice_ptr;
+use crate::utils::{slice_ptr, slice_ptr_mut_on_stream};
 
 pub(super) const HAVE_HQZ4_DP4A_KERNELS: bool = cfg!(has_hqz4_dp4a_kernels);
 
@@ -36,9 +36,26 @@ struct Hqz4Dp4aLaunch {
     stream: candle_core::cuda::cudarc::driver::sys::CUstream,
 }
 
+#[repr(C)]
+struct Hqz4EmbeddingLaunch {
+    ids: *const u32,
+    weight: *const u8,
+    weight_scales: *const f32,
+    output: *mut c_void,
+    id_count: u32,
+    rows: u32,
+    cols: u32,
+    group_size: u32,
+    group_offset: u64,
+    seed: u64,
+    dtype: u32,
+    stream: candle_core::cuda::cudarc::driver::sys::CUstream,
+}
+
 #[cfg(has_hqz4_dp4a_kernels)]
 extern "C" {
     fn launch_hqz4_dp4a(params: *const Hqz4Dp4aLaunch) -> i32;
+    fn launch_hqz4_embedding(params: *const Hqz4EmbeddingLaunch) -> i32;
 }
 
 struct Hqz4Dp4aMatmul {
@@ -56,6 +73,15 @@ struct Hqz4CudaInputs<'a> {
     weight_layout: &'a Layout,
     scales: &'a CudaStorage,
     scales_layout: &'a Layout,
+}
+
+struct Hqz4Embedding {
+    rows: usize,
+    cols: usize,
+    group_size: usize,
+    group_offset: usize,
+    seed: u64,
+    output_dtype: DType,
 }
 
 impl Hqz4Dp4aMatmul {
@@ -138,7 +164,7 @@ impl Hqz4Dp4aMatmul {
         inputs: &Hqz4CudaInputs<'_>,
     ) -> Result<(CudaStorage, Shape)>
     where
-        T: CudaDType + DeviceRepr + ValidAsZeroBits,
+        T: CudaDType + DeviceRepr,
     {
         let (m, output_shape) = self.validate_layouts(inputs)?;
         let device = inputs.input.device();
@@ -155,9 +181,11 @@ impl Hqz4Dp4aMatmul {
             .checked_mul(self.rows)
             .ok_or_else(|| candle_core::Error::Msg("HQZ4 output size overflow.".into()))?;
 
-        let quantized_activation = device.alloc_zeros::<i8>(quantized_elements)?;
-        let activation_scales = device.alloc_zeros::<f32>(activation_scale_elements)?;
-        let output = device.alloc_zeros::<T>(output_elements)?;
+        // Both kernels overwrite every element. Avoid three redundant memset
+        // launches for every HQZ4 projection.
+        let mut quantized_activation = unsafe { device.alloc::<i8>(quantized_elements)? };
+        let mut activation_scales = unsafe { device.alloc::<f32>(activation_scale_elements)? };
+        let mut output = unsafe { device.alloc::<T>(output_elements)? };
 
         let (input_ptr, _input_guard) =
             slice_ptr(input_slice, inputs.input_layout.start_offset());
@@ -165,10 +193,12 @@ impl Hqz4Dp4aMatmul {
             slice_ptr(weight_slice, inputs.weight_layout.start_offset());
         let (scale_ptr, _scale_guard) =
             slice_ptr(scale_slice, inputs.scales_layout.start_offset());
-        let (quantized_ptr, _quantized_guard) = slice_ptr(&quantized_activation, 0);
+        let stream = device.cuda_stream();
+        let (quantized_ptr, _quantized_guard) =
+            slice_ptr_mut_on_stream(&mut quantized_activation, 0, &stream);
         let (activation_scale_ptr, _activation_scale_guard) =
-            slice_ptr(&activation_scales, 0);
-        let (output_ptr, output_guard) = slice_ptr(&output, 0);
+            slice_ptr_mut_on_stream(&mut activation_scales, 0, &stream);
+        let (output_ptr, output_guard) = slice_ptr_mut_on_stream(&mut output, 0, &stream);
 
         let params = Hqz4Dp4aLaunch {
             input: input_ptr as *const c_void,
@@ -184,7 +214,7 @@ impl Hqz4Dp4aMatmul {
             group_offset: self.group_offset as u64,
             seed: self.seed,
             dtype: dtype_code,
-            stream: device.cuda_stream().cu_stream(),
+            stream: stream.cu_stream(),
         };
         let status = {
             #[cfg(has_hqz4_dp4a_kernels)]
@@ -258,6 +288,176 @@ impl CustomOp3 for Hqz4Dp4aMatmul {
     }
 }
 
+impl Hqz4Embedding {
+    fn cuda_fwd_t<T>(
+        &self,
+        dtype_code: u32,
+        ids: &CudaStorage,
+        ids_layout: &Layout,
+        weight: &CudaStorage,
+        weight_layout: &Layout,
+        scales: &CudaStorage,
+        scales_layout: &Layout,
+    ) -> Result<(CudaStorage, Shape)>
+    where
+        T: CudaDType + DeviceRepr,
+    {
+        if !(ids_layout.is_contiguous()
+            && weight_layout.is_contiguous()
+            && scales_layout.is_contiguous())
+        {
+            candle_core::bail!("HQZ4 CUDA embedding inputs must be contiguous.");
+        }
+        if ids.dtype() != DType::U32 {
+            candle_core::bail!(
+                "HQZ4 CUDA embedding expects U32 ids, got {:?}.",
+                ids.dtype()
+            );
+        }
+        if weight.dtype() != DType::U8 || scales.dtype() != DType::F32 {
+            candle_core::bail!(
+                "HQZ4 CUDA embedding expects U8 weights and F32 scales, got {:?} and {:?}.",
+                weight.dtype(),
+                scales.dtype()
+            );
+        }
+        if self.group_size < 4
+            || !self.group_size.is_power_of_two()
+            || self.group_size > CUDA_MAX_BLOCK_THREADS
+            || !self.cols.is_multiple_of(self.group_size)
+        {
+            candle_core::bail!("Invalid HQZ4 CUDA embedding group layout.");
+        }
+        if weight_layout.dims() != [self.rows, self.cols / 2]
+            || scales_layout.dims() != [self.rows, self.cols / self.group_size]
+        {
+            candle_core::bail!("HQZ4 CUDA embedding weight layout mismatch.");
+        }
+
+        let id_count = ids_layout.shape().elem_count();
+        let groups = id_count
+            .checked_mul(self.cols / self.group_size)
+            .ok_or_else(|| candle_core::Error::Msg("HQZ4 embedding grid overflow.".into()))?;
+        Hqz4Dp4aMatmul::checked_u32("embedding grid", groups)?;
+        let output_elements = id_count
+            .checked_mul(self.cols)
+            .ok_or_else(|| candle_core::Error::Msg("HQZ4 embedding size overflow.".into()))?;
+        let device = ids.device();
+        let ids_slice = ids.as_cuda_slice::<u32>()?;
+        let weight_slice = weight.as_cuda_slice::<u8>()?;
+        let scales_slice = scales.as_cuda_slice::<f32>()?;
+        let mut output = unsafe { device.alloc::<T>(output_elements)? };
+        if id_count == 0 {
+            return Ok((
+                CudaStorage::wrap_cuda_slice(output, device.clone()),
+                Shape::from_dims(&[0, self.cols]),
+            ));
+        }
+
+        let (ids_ptr, _ids_guard) = slice_ptr(ids_slice, ids_layout.start_offset());
+        let (weight_ptr, _weight_guard) =
+            slice_ptr(weight_slice, weight_layout.start_offset());
+        let (scales_ptr, _scales_guard) =
+            slice_ptr(scales_slice, scales_layout.start_offset());
+        let stream = device.cuda_stream();
+        let (output_ptr, output_guard) = slice_ptr_mut_on_stream(&mut output, 0, &stream);
+        let params = Hqz4EmbeddingLaunch {
+            ids: ids_ptr as *const u32,
+            weight: weight_ptr as *const u8,
+            weight_scales: scales_ptr as *const f32,
+            output: output_ptr as *mut c_void,
+            id_count: Hqz4Dp4aMatmul::checked_u32("embedding id count", id_count)?,
+            rows: Hqz4Dp4aMatmul::checked_u32("embedding row count", self.rows)?,
+            cols: Hqz4Dp4aMatmul::checked_u32("embedding column count", self.cols)?,
+            group_size: Hqz4Dp4aMatmul::checked_u32(
+                "embedding group size",
+                self.group_size,
+            )?,
+            group_offset: self.group_offset as u64,
+            seed: self.seed,
+            dtype: dtype_code,
+            stream: stream.cu_stream(),
+        };
+        let status = {
+            #[cfg(has_hqz4_dp4a_kernels)]
+            {
+                unsafe { launch_hqz4_embedding(&params) }
+            }
+            #[cfg(not(has_hqz4_dp4a_kernels))]
+            {
+                let _ = &params;
+                unreachable!("HQZ4 DP4A availability was checked before dispatch")
+            }
+        };
+        if status != 0 {
+            candle_core::bail!("HQZ4 embedding CUDA launch failed with status {status}.");
+        }
+        drop(output_guard);
+
+        Ok((
+            CudaStorage::wrap_cuda_slice(output, device.clone()),
+            Shape::from_dims(&[id_count, self.cols]),
+        ))
+    }
+}
+
+impl CustomOp3 for Hqz4Embedding {
+    fn name(&self) -> &'static str {
+        "hqz4-embedding"
+    }
+
+    fn cpu_fwd(
+        &self,
+        _ids: &CpuStorage,
+        _ids_layout: &Layout,
+        _weight: &CpuStorage,
+        _weight_layout: &Layout,
+        _scales: &CpuStorage,
+        _scales_layout: &Layout,
+    ) -> Result<(CpuStorage, Shape)> {
+        candle_core::bail!("HQZ4 CUDA embedding requires CUDA storage.")
+    }
+
+    fn cuda_fwd(
+        &self,
+        ids: &CudaStorage,
+        ids_layout: &Layout,
+        weight: &CudaStorage,
+        weight_layout: &Layout,
+        scales: &CudaStorage,
+        scales_layout: &Layout,
+    ) -> Result<(CudaStorage, Shape)> {
+        if !HAVE_HQZ4_DP4A_KERNELS {
+            candle_core::bail!(
+                "HQZ4 embedding CUDA kernel was not compiled; set CUDA_COMPUTE_CAP to at least 61."
+            );
+        }
+        match self.output_dtype {
+            DType::F16 => self.cuda_fwd_t::<f16>(
+                HQZ4_CUDA_F16,
+                ids,
+                ids_layout,
+                weight,
+                weight_layout,
+                scales,
+                scales_layout,
+            ),
+            DType::F32 => self.cuda_fwd_t::<f32>(
+                HQZ4_CUDA_F32,
+                ids,
+                ids_layout,
+                weight,
+                weight_layout,
+                scales,
+                scales_layout,
+            ),
+            dtype => candle_core::bail!(
+                "HQZ4 CUDA embedding supports F16 and F32 output, got {dtype:?}."
+            ),
+        }
+    }
+}
+
 pub(super) fn dp4a_matmul(
     input: &Tensor,
     weight: &Tensor,
@@ -273,6 +473,27 @@ pub(super) fn dp4a_matmul(
             group_size: encoded.group_size(),
             group_offset: encoded.group_offset(),
             seed: encoded.seed(),
+        },
+    )
+}
+
+pub(super) fn embedding(
+    ids: &Tensor,
+    weight: &Tensor,
+    scales: &Tensor,
+    encoded: &super::Hqz4Tensor,
+    output_dtype: DType,
+) -> Result<Tensor> {
+    ids.apply_op3_no_bwd(
+        weight,
+        scales,
+        &Hqz4Embedding {
+            rows: encoded.rows(),
+            cols: encoded.cols(),
+            group_size: encoded.group_size(),
+            group_offset: encoded.group_offset(),
+            seed: encoded.seed(),
+            output_dtype,
         },
     )
 }
