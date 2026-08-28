@@ -138,7 +138,6 @@ pub use afq::ops::{
 };
 pub use afq::{AfqBits, AfqGroupSize, AfqInner, AfqLayer};
 pub use bitsandbytes::{BnbLinear, BnbQuantParams, BnbQuantType};
-pub use hyperquant::{Hqz4Config, Hqz4Tensor, HyperQuantLinear};
 pub use blockwise_fp8::{
     blockwise_fp8_moe, fp8_blockwise_dequantize, fp8_blockwise_quantize, BlockwiseFP8Linear,
 };
@@ -183,6 +182,7 @@ pub use gguf::{
 };
 pub use gptq::GptqLayer;
 pub use hqq::{HqqAxis, HqqBits, HqqConfig, HqqLayer};
+pub use hyperquant::{Hqz4Config, Hqz4Tensor, HyperQuantLinear};
 pub use imatrix::{CollectedImatrixData, ImatrixLayerStats};
 pub use isq_executor::{
     conservative_plan, elem_count, estimate_output_bytes, ggml_output_bytes, plan_weight_isq,
@@ -1269,9 +1269,7 @@ impl QuantizedSerdeType {
             Self::Afq => AfqLayer::stored_label_from_uqff_tensors(tensors, prefix),
             Self::F8Q8 => F8Q8Linear::stored_label_from_uqff_tensors(tensors, prefix),
             Self::Mxfp4 => MXFP4Layer::stored_label_from_uqff_tensors(tensors, prefix),
-            Self::HyperQuant => {
-                HyperQuantLinear::stored_label_from_uqff_tensors(tensors, prefix)
-            }
+            Self::HyperQuant => HyperQuantLinear::stored_label_from_uqff_tensors(tensors, prefix),
         }
     }
 }

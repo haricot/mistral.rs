@@ -7,8 +7,8 @@ use safetensors::tensor::Dtype;
 
 use crate::uqff::{UqffHeaderMatch, UqffLayerHeaderView};
 use crate::{
-    IsqType, QuantMethod, QuantMethodConfig, QuantizeOntoGuard, QuantizedSerde,
-    QuantizedSerdeType, Shard, UqffReader, UqffTensor,
+    IsqType, QuantMethod, QuantMethodConfig, QuantizeOntoGuard, QuantizedSerde, QuantizedSerdeType,
+    Shard, UqffReader, UqffTensor,
 };
 
 pub const HQZ4_SCHEMA_VERSION: u32 = 1;
@@ -315,8 +315,7 @@ impl Hqz4Tensor {
         if dim == 0 {
             let code_bytes_per_row = self.cols / 2;
             let codes = self.codes[start * code_bytes_per_row..end * code_bytes_per_row].to_vec();
-            let scales =
-                self.scales[start * groups_per_row..end * groups_per_row].to_vec();
+            let scales = self.scales[start * groups_per_row..end * groups_per_row].to_vec();
             return Self::from_parts_at_group_offset(
                 (len, self.cols),
                 cfg,
@@ -346,13 +345,7 @@ impl Hqz4Tensor {
             .group_offset
             .checked_add(first_group)
             .ok_or_else(|| candle_core::Error::Msg("HQZ4 group offset overflow.".into()))?;
-        Self::from_parts_at_group_offset(
-            (self.rows, len),
-            cfg,
-            group_offset,
-            scales,
-            codes,
-        )
+        Self::from_parts_at_group_offset((self.rows, len), cfg, group_offset, scales, codes)
     }
 }
 
@@ -379,7 +372,10 @@ impl HyperQuantLinear {
     pub fn from_weight(weight: &Tensor, bias: Option<Tensor>, config: Hqz4Config) -> Result<Self> {
         Self::ensure_supported_device(weight.device())?;
         let (rows, cols) = weight.dims2()?;
-        let values = weight.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        let values = weight
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
         let encoded = Hqz4Tensor::encode(&values, rows, cols, config)?;
         Self::from_encoded(encoded, bias)
     }
@@ -455,9 +451,7 @@ impl HyperQuantLinear {
         let transform = reader.load_u8_scalar(&format!("{key}.weight.transform"))?;
         let bits = reader.load_u8_scalar(&format!("{key}.weight.bits"))? as usize;
         if schema != HQZ4_SCHEMA_VERSION {
-            candle_core::bail!(
-                "Unsupported HQZ4 schema {schema}; expected {HQZ4_SCHEMA_VERSION}."
-            );
+            candle_core::bail!("Unsupported HQZ4 schema {schema}; expected {HQZ4_SCHEMA_VERSION}.");
         }
         if layout != HQZ4_LAYOUT_ROW_MAJOR_NIBBLES {
             candle_core::bail!("Unsupported HQZ4 layout {layout}.");
@@ -515,7 +509,10 @@ impl HyperQuantLinear {
     fn scales_tensor(&self) -> Result<Tensor> {
         Tensor::from_vec(
             self.weight.scales().to_vec(),
-            (self.weight.rows(), self.weight.cols() / self.weight.group_size()),
+            (
+                self.weight.rows(),
+                self.weight.cols() / self.weight.group_size(),
+            ),
             &Device::Cpu,
         )
     }
@@ -648,10 +645,7 @@ impl QuantizedSerde for HyperQuantLinear {
                 format!("{prefix}.weight.format"),
                 QuantizedSerdeType::HyperQuant as u8,
             ),
-            UqffTensor::from_u32_scalar(
-                format!("{prefix}.weight.schema"),
-                HQZ4_SCHEMA_VERSION,
-            ),
+            UqffTensor::from_u32_scalar(format!("{prefix}.weight.schema"), HQZ4_SCHEMA_VERSION),
             UqffTensor::from_u8_scalar(
                 format!("{prefix}.weight.layout"),
                 HQZ4_LAYOUT_ROW_MAJOR_NIBBLES,
@@ -661,29 +655,16 @@ impl QuantizedSerde for HyperQuantLinear {
                 HQZ4_TRANSFORM_SHARED_RHT,
             ),
             UqffTensor::from_u8_scalar(format!("{prefix}.weight.bits"), HQZ4_BITS as u8),
-            UqffTensor::from_u32_scalar(
-                format!("{prefix}.weight.group_size"),
-                group_size,
-            ),
-            UqffTensor::from_u32_vec(
-                format!("{prefix}.weight.shape"),
-                vec![rows, cols],
-                vec![2],
-            ),
+            UqffTensor::from_u32_scalar(format!("{prefix}.weight.group_size"), group_size),
+            UqffTensor::from_u32_vec(format!("{prefix}.weight.shape"), vec![rows, cols], vec![2]),
             UqffTensor::from_u32_scalar(format!("{prefix}.weight.seed_lo"), seed as u32),
-            UqffTensor::from_u32_scalar(
-                format!("{prefix}.weight.seed_hi"),
-                (seed >> 32) as u32,
-            ),
+            UqffTensor::from_u32_scalar(format!("{prefix}.weight.seed_hi"), (seed >> 32) as u32),
             UqffTensor::from_raw_u8(
                 format!("{prefix}.weight"),
                 self.weight.codes().to_vec(),
                 vec![self.weight.rows(), self.weight.cols() / 2],
             ),
-            UqffTensor::from_tensor(
-                format!("{prefix}.weight.scales"),
-                &self.scales_tensor()?,
-            )?,
+            UqffTensor::from_tensor(format!("{prefix}.weight.scales"), &self.scales_tensor()?)?,
         ];
         if let Some(bias) = &self.bias {
             tensors.push(UqffTensor::from_tensor(format!("{prefix}.bias"), bias)?);
@@ -1024,11 +1005,7 @@ mod tests {
     }
 
     fn test_linear() -> Result<HyperQuantLinear> {
-        let weight = Tensor::from_vec(
-            test_weights(),
-            (TEST_ROWS, TEST_COLS),
-            &Device::Cpu,
-        )?;
+        let weight = Tensor::from_vec(test_weights(), (TEST_ROWS, TEST_COLS), &Device::Cpu)?;
         let bias = Tensor::from_vec(
             (0..TEST_ROWS)
                 .map(|row| row as f32 * 0.125 - 0.25)
@@ -1065,8 +1042,14 @@ mod tests {
 
     fn assert_close(actual: &Tensor, expected: &Tensor) -> Result<()> {
         assert_eq!(actual.dims(), expected.dims());
-        let actual = actual.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
-        let expected = expected.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        let actual = actual
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let expected = expected
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
         for (actual, expected) in actual.iter().zip(expected) {
             let tolerance = 1e-5 * expected.abs().max(1.0);
             assert!((actual - expected).abs() <= tolerance);
@@ -1128,11 +1111,10 @@ mod tests {
             .expect("HQZ4 input shard must load");
         assert!(!loaded.has_bias());
 
-        let expected_weight = layer.dequantize_w()?.narrow(
-            1,
-            TEST_GROUP_SIZE,
-            TEST_GROUP_SIZE * 2,
-        )?;
+        let expected_weight =
+            layer
+                .dequantize_w()?
+                .narrow(1, TEST_GROUP_SIZE, TEST_GROUP_SIZE * 2)?;
         assert_close(&loaded.dequantize_w()?, &expected_weight)?;
         let activation = Tensor::from_vec(
             (0..TEST_GROUP_SIZE * 2)

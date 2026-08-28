@@ -78,11 +78,7 @@ fn check_isq_gather_support() -> Result<()> {
     if let Some(ty) = params.ty {
         if matches!(
             ty,
-            IsqType::HQQ4
-                | IsqType::HQQ8
-                | IsqType::F8E4M3
-                | IsqType::F8Q8
-                | IsqType::HQZ4
+            IsqType::HQQ4 | IsqType::HQQ8 | IsqType::F8E4M3 | IsqType::F8Q8 | IsqType::HQZ4
         ) {
             candle_core::bail!("ISQ type {ty} is not supported for MoE experts.");
         }
