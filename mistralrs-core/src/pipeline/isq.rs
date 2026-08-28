@@ -325,6 +325,7 @@ pub(crate) fn format_isq_types(types: &[IsqType]) -> String {
 /// - `AFQ4`
 /// - `AFQ6`
 /// - `AFQ8`
+/// - `HQZ4`
 pub fn parse_isq_value(s: &str, device: Option<&Device>) -> Result<IsqType, String> {
     let lowered = s.to_lowercase();
 
@@ -364,10 +365,11 @@ pub fn parse_isq_value(s: &str, device: Option<&Device>) -> Result<IsqType, Stri
         "afq2" => IsqType::AFQ2,
         "f8q8" => IsqType::F8Q8,
         "mxfp4" => IsqType::MXFP4,
+        "hqz4" => IsqType::HQZ4,
         // "hqq3" => IsqType::HQQ3,
         // "hqq2" => IsqType::HQQ2,
         // "hqq1" => IsqType::HQQ1,
-        _ => return Err(format!("ISQ type {s} unknown, choose one of `2`, `3`, `4`, `5`, `6`, `8`, `Q4_0`, `Q4_1`, `Q5_0`, `Q5_1`, `Q8_0`, `Q8_1`, `Q2K`, `Q3K`, `Q4K`, `Q5K`, `Q6K`, `Q8K`, `HQQ8`, `HQQ4`, `FP8`, `AFQ8`, `AFQ6`, `AFQ4`, `AFQ3`, `AFQ2`, `F8Q8`, `MXFP4`.")),
+        _ => return Err(format!("ISQ type {s} unknown, choose one of `2`, `3`, `4`, `5`, `6`, `8`, `Q4_0`, `Q4_1`, `Q5_0`, `Q5_1`, `Q8_0`, `Q8_1`, `Q2K`, `Q3K`, `Q4K`, `Q5K`, `Q6K`, `Q8K`, `HQQ8`, `HQQ4`, `FP8`, `AFQ8`, `AFQ6`, `AFQ4`, `AFQ3`, `AFQ2`, `F8Q8`, `MXFP4`, `HQZ4`.")),
     };
     if tp == IsqType::F8Q8 && device.is_some_and(|device| !device.is_cpu()) {
         return Err("F8Q8 is CPU-only; choose `fp8` or another accelerator ISQ type.".to_string());
@@ -395,11 +397,12 @@ pub fn parse_isq_value(s: &str, device: Option<&Device>) -> Result<IsqType, Stri
                 | IsqType::AFQ6
                 | IsqType::AFQ8
                 | IsqType::F8Q8
-                | IsqType::MXFP4 // | IsqType::HQQ3
+                | IsqType::MXFP4
+                | IsqType::HQZ4 // | IsqType::HQQ3
                                  // | IsqType::HQQ2
                                  // | IsqType::HQQ1
         ) {
-            return Err("ISQ type on CUDA must be one of `Q4_0`, `Q4_1`, `Q5_0`, `Q5_1`, `Q8_0`, `Q2K`, `Q3K`, `Q4K`, `Q5K`, `Q6K`, `HQQ8`, `HQQ4`, `FP8`, `AFQ8`, `AFQ6`, `AFQ4`, `AFQ3`, `AFQ2`, `F8Q8`, `MXFP4`".to_string());
+            return Err("ISQ type on CUDA must be one of `Q4_0`, `Q4_1`, `Q5_0`, `Q5_1`, `Q8_0`, `Q2K`, `Q3K`, `Q4K`, `Q5K`, `Q6K`, `HQQ8`, `HQQ4`, `FP8`, `AFQ8`, `AFQ6`, `AFQ4`, `AFQ3`, `AFQ2`, `F8Q8`, `MXFP4`, `HQZ4`".to_string());
         }
     }
     Ok(tp)
@@ -736,7 +739,10 @@ pub(crate) struct UqffWriteRequest<'a> {
     pub imatrix: std::collections::HashMap<String, Vec<f32>>,
 }
 
-const MAX_UQFF_SIZE_BYTES: usize = 10 * 1024 * 1024 * 1024;
+/// Keep UQFF generation bounded independently of the final artifact size. A shard is flushed
+/// after the layer which reaches this limit, so a layer is never split across files and the peak
+/// serialization buffer is at most this limit plus one layer.
+const UQFF_STREAM_SHARD_BYTES: usize = 512 * 1024 * 1024;
 
 struct UqffTypeWriteContext<'a> {
     ty: IsqType,
@@ -754,6 +760,95 @@ struct UqffShardPaths<'a> {
     parent: &'a Path,
     display_parent: &'a Path,
     file_stem: &'a str,
+}
+
+struct UqffShardStream<'a> {
+    paths: UqffShardPaths<'a>,
+    shard_limit_bytes: usize,
+    shard_index: u64,
+    shards: Vec<String>,
+    current_chunk: Vec<UqffTensor>,
+    current_bytes: usize,
+    current_has_layers: bool,
+}
+
+impl<'a> UqffShardStream<'a> {
+    fn new(paths: UqffShardPaths<'a>, version_tensors: Vec<UqffTensor>) -> Self {
+        let current_bytes = version_tensors.iter().map(UqffTensor::nbytes).sum();
+        Self {
+            paths,
+            shard_limit_bytes: UQFF_STREAM_SHARD_BYTES,
+            shard_index: 0,
+            shards: Vec::new(),
+            current_chunk: version_tensors,
+            current_bytes,
+            current_has_layers: false,
+        }
+    }
+
+    fn should_flush_before_layer(&self, layer_bytes: usize) -> bool {
+        self.current_has_layers
+            && self.current_bytes.saturating_add(layer_bytes) > self.shard_limit_bytes
+    }
+
+    fn push_layer(&mut self, bar: &ProgressBar, tensors: Vec<UqffTensor>) -> Result<()> {
+        let layer_bytes = tensors.iter().try_fold(0usize, |bytes, tensor| {
+            bytes
+                .checked_add(tensor.nbytes())
+                .context("UQFF layer byte size overflow")
+        })?;
+        if self.should_flush_before_layer(layer_bytes) {
+            self.flush(bar)?;
+        }
+        self.current_bytes = self
+            .current_bytes
+            .checked_add(layer_bytes)
+            .context("UQFF shard byte size overflow")?;
+        self.current_chunk.extend(tensors);
+        self.current_has_layers = true;
+        if self.current_bytes >= self.shard_limit_bytes {
+            self.flush(bar)?;
+        }
+        Ok(())
+    }
+
+    fn finish(mut self, bar: &ProgressBar) -> Result<(u64, Vec<String>)> {
+        self.flush(bar)?;
+        Ok((self.shard_index, self.shards))
+    }
+
+    fn flush(&mut self, bar: &ProgressBar) -> Result<()> {
+        if self.current_chunk.is_empty() {
+            return Ok(());
+        }
+
+        let shard_name = format!("{}-{}.uqff", self.paths.file_stem, self.shard_index);
+        let shard_path = self.paths.parent.join(&shard_name);
+        let display_path = self.paths.display_parent.join(&shard_name);
+        bar.suspend(|| {
+            info!(
+                "Streaming shard {} ({} MiB) to `{}`",
+                self.shard_index,
+                self.current_bytes.div_ceil(1024 * 1024),
+                display_path.display()
+            );
+        });
+        safetensors::serialize_to_file(
+            self.current_chunk
+                .iter()
+                .map(|tensor| (tensor.name(), tensor)),
+            Some(uqff_safetensors_metadata()),
+            &shard_path,
+        )?;
+        if let Some(name) = shard_path.file_name().and_then(|name| name.to_str()) {
+            self.shards.push(name.to_string());
+        }
+        self.shard_index += 1;
+        self.current_chunk.clear();
+        self.current_bytes = 0;
+        self.current_has_layers = false;
+        Ok(())
+    }
 }
 
 pub(crate) fn write_uqff_artifacts(request: UqffWriteRequest<'_>) -> Result<()> {
@@ -937,18 +1032,14 @@ fn write_uqff_type(ctx: UqffTypeWriteContext<'_>) -> Result<mistralrs_quant::Uqf
     bar.tick();
 
     let mut seen = HashSet::new();
-    let mut current_chunk = Vec::new();
-    let mut current_bytes = 0usize;
-    let mut shard_index = 0u64;
-    let mut shards = Vec::new();
     let quant_report = mistralrs_quant::QuantizationReport::default();
     let mut layer_reports = Vec::with_capacity(layers.len());
 
-    for version in mistralrs_quant::uqff_version_tensors() {
+    let version_tensors = mistralrs_quant::uqff_version_tensors();
+    for version in &version_tensors {
         seen.insert(version.name().to_string());
-        current_bytes += version.nbytes();
-        current_chunk.push(version);
     }
+    let mut shard_stream = UqffShardStream::new(shard_paths, version_tensors);
 
     // Quantization runs on the pool; the writer consumes results in key order so the shard
     // layout stays deterministic while quantize-N+1 overlaps with write-N.
@@ -964,7 +1055,7 @@ fn write_uqff_type(ctx: UqffTypeWriteContext<'_>) -> Result<mistralrs_quant::Uqf
         |m| m.resolve_type(ty),
         &|key| imatrix.get(key).cloned(),
         mistralrs_quant::IsqConsumer::UqffWrite,
-        MAX_UQFF_SIZE_BYTES,
+        UQFF_STREAM_SHARD_BYTES,
         Some(quant_report.clone()),
     )?;
     let mut receivers = handles.receivers.into_iter();
@@ -974,16 +1065,27 @@ fn write_uqff_type(ctx: UqffTypeWriteContext<'_>) -> Result<mistralrs_quant::Uqf
         bar.tick();
         let quantize = uqff_should_quantize(module, quantize_predicates);
         let resolved_ty = quantize.then(|| module.resolve_type(ty));
-        let layer = if quantize {
-            receivers
-                .next()
-                .expect("requantize receiver count must match selected UQFF layers")
-                .recv()
-                .map_err(|e| anyhow::anyhow!("Requantize channel error: {e}"))??
-                .value
+        let quantized_job = if quantize {
+            Some(
+                receivers
+                    .next()
+                    .expect("requantize receiver count must match selected UQFF layers")
+                    .recv()
+                    .map_err(|e| anyhow::anyhow!("Requantize channel error: {e}"))??,
+            )
         } else {
-            module.ct.resolve()?
+            None
         };
+        let existing_layer = if quantize {
+            None
+        } else {
+            Some(module.ct.resolve()?)
+        };
+        let layer = quantized_job
+            .as_ref()
+            .map(|job| &job.value)
+            .or(existing_layer.as_ref())
+            .expect("every UQFF layer has a source");
         let serialize_ty = resolved_ty.or_else(|| layer.uqff_type()).unwrap_or(ty);
         let serialized_tensors = layer.serialize_uqff(&module.key, serialize_ty)?;
         let (stored, shape) =
@@ -995,41 +1097,19 @@ fn write_uqff_type(ctx: UqffTypeWriteContext<'_>) -> Result<mistralrs_quant::Uqf
             stored,
             shape,
         });
-        for tensor in serialized_tensors {
+        for tensor in &serialized_tensors {
             let name = tensor.name().to_string();
             if !seen.insert(name.clone()) {
                 anyhow::bail!("Duplicate UQFF tensor key `{name}`.");
             }
-            let tensor_bytes = tensor.nbytes();
-            if !current_chunk.is_empty() && current_bytes + tensor_bytes > MAX_UQFF_SIZE_BYTES {
-                flush_uqff_shard(
-                    &bar,
-                    &shard_paths,
-                    &mut shard_index,
-                    &mut shards,
-                    &mut current_chunk,
-                    &mut current_bytes,
-                )?;
-            }
-            current_bytes += tensor_bytes;
-            current_chunk.push(tensor);
-            if current_bytes >= MAX_UQFF_SIZE_BYTES {
-                flush_uqff_shard(
-                    &bar,
-                    &shard_paths,
-                    &mut shard_index,
-                    &mut shards,
-                    &mut current_chunk,
-                    &mut current_bytes,
-                )?;
-            }
         }
+        shard_stream.push_layer(&bar, serialized_tensors)?;
         if swap_runtime && quantize {
             let target = module.ct.resolve()?.dtype_and_device().1;
             let layer = if layer.dtype_and_device().1.same_device(&target) {
-                layer
+                std::sync::Arc::clone(layer)
             } else {
-                layer.apply_isq(
+                std::sync::Arc::clone(layer).apply_isq(
                     None,
                     target,
                     &std::sync::atomic::AtomicUsize::new(0),
@@ -1043,14 +1123,7 @@ fn write_uqff_type(ctx: UqffTypeWriteContext<'_>) -> Result<mistralrs_quant::Uqf
     }
     debug_assert!(receivers.next().is_none());
 
-    flush_uqff_shard(
-        &bar,
-        &shard_paths,
-        &mut shard_index,
-        &mut shards,
-        &mut current_chunk,
-        &mut current_bytes,
-    )?;
+    let (shard_index, shards) = shard_stream.finish(&bar)?;
     bar.finish_and_clear();
     let output_report = mistralrs_quant::build_output_report_from_layers(
         ty.to_string(),
@@ -1091,42 +1164,6 @@ fn uqff_should_quantize(module: &TrackedModule, predicates: Option<&[Regex]>) ->
             .iter()
             .any(|predicate| predicate.is_match(&weight_key))
     })
-}
-
-fn flush_uqff_shard(
-    bar: &ProgressBar,
-    paths: &UqffShardPaths<'_>,
-    shard_index: &mut u64,
-    shards: &mut Vec<String>,
-    current_chunk: &mut Vec<UqffTensor>,
-    current_bytes: &mut usize,
-) -> Result<()> {
-    if current_chunk.is_empty() {
-        return Ok(());
-    }
-
-    let shard_name = format!("{}-{shard_index}.uqff", paths.file_stem);
-    let shard_path = paths.parent.join(&shard_name);
-    let display_path = paths.display_parent.join(&shard_name);
-    bar.suspend(|| {
-        info!(
-            "Writing shard {} to `{}`",
-            shard_index,
-            display_path.display()
-        );
-    });
-    safetensors::serialize_to_file(
-        current_chunk.iter().map(|tensor| (tensor.name(), tensor)),
-        Some(uqff_safetensors_metadata()),
-        &shard_path,
-    )?;
-    if let Some(name) = shard_path.file_name().and_then(|name| name.to_str()) {
-        shards.push(name.to_string());
-    }
-    *shard_index += 1;
-    current_chunk.clear();
-    *current_bytes = 0;
-    Ok(())
 }
 
 fn write_uqff_metadata(
@@ -1577,6 +1614,33 @@ mod tests {
         UnquantLinear,
     };
     use std::sync::{atomic::AtomicUsize, Arc};
+
+    #[test]
+    fn explicit_hqz4_isq_parses_and_expands() -> Result<()> {
+        assert_eq!(
+            parse_isq_value("HQZ4", Some(&Device::Cpu)).map_err(anyhow::Error::msg)?,
+            IsqType::HQZ4
+        );
+        assert_eq!(expand_isq_value("hqz4")?, vec![IsqType::HQZ4]);
+        Ok(())
+    }
+
+    #[test]
+    fn uqff_stream_flushes_only_between_layers() {
+        let paths = UqffShardPaths {
+            parent: Path::new("."),
+            display_parent: Path::new("."),
+            file_stem: "test",
+        };
+        let mut stream = UqffShardStream::new(paths, Vec::new());
+        stream.shard_limit_bytes = 16;
+        stream.current_bytes = 12;
+
+        assert!(!stream.should_flush_before_layer(8));
+        stream.current_has_layers = true;
+        assert!(stream.should_flush_before_layer(8));
+        assert!(!stream.should_flush_before_layer(4));
+    }
 
     #[test]
     fn uqff_config_removes_source_quantization_metadata_recursively() -> Result<()> {
