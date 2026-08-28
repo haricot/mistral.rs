@@ -463,9 +463,13 @@ pub fn expand_uqff_shards(first_file: &str, available_files: &[String]) -> Vec<S
 /// For numeric shorthands, tries all platform variants via `IsqBits::expand()`.
 pub fn resolve_uqff_shorthand(input: &str, available_files: &[String]) -> Option<String> {
     let lowered = input.to_lowercase();
+    // Streaming UQFF output uses `<quant>-N.uqff` shard files while presenting
+    // `<quant>.uqff` as the logical output name. Accept that logical filename
+    // anywhere the bare quantization shorthand is accepted.
+    let shorthand = lowered.strip_suffix(".uqff").unwrap_or(&lowered);
 
     // Try numeric shorthand first (2/3/4/5/6/8)
-    if let Ok(bits) = IsqBits::try_from(lowered.as_str()) {
+    if let Ok(bits) = IsqBits::try_from(shorthand) {
         for isq_type in bits.expand() {
             let candidate = format!("{isq_type}-0.uqff");
             if available_files.iter().any(|f| f == &candidate) {
@@ -476,7 +480,7 @@ pub fn resolve_uqff_shorthand(input: &str, available_files: &[String]) -> Option
     }
 
     // Try explicit ISQ type name (e.g., "q4k", "afq8", "q8_0")
-    if let Ok(isq_type) = parse_isq_value(&lowered, None) {
+    if let Ok(isq_type) = parse_isq_value(shorthand, None) {
         let candidate = format!("{isq_type}-0.uqff");
         if available_files.iter().any(|f| f == &candidate) {
             return Some(candidate);
@@ -2180,7 +2184,7 @@ mod tests {
         ];
         let report = custom_named_uqff_report();
 
-        for quant in ["q8_0", "8"] {
+        for quant in ["q8_0", "q8_0.uqff", "8"] {
             let output = resolve_uqff_report_output(quant, &files, &report)
                 .unwrap()
                 .unwrap();
@@ -2283,10 +2287,12 @@ mod tests {
     fn reportless_uqff_input_keeps_filename_inference() {
         let files = vec!["q8_0-1.uqff".to_string(), "q8_0-0.uqff".to_string()];
 
-        assert_eq!(
-            resolve_uqff_input_files("q8_0", &files, None).unwrap(),
-            vec!["q8_0-0.uqff".to_string(), "q8_0-1.uqff".to_string()]
-        );
+        for input in ["q8_0", "q8_0.uqff"] {
+            assert_eq!(
+                resolve_uqff_input_files(input, &files, None).unwrap(),
+                vec!["q8_0-0.uqff".to_string(), "q8_0-1.uqff".to_string()]
+            );
+        }
         assert_eq!(
             resolve_uqff_input_files("q8_0-1.uqff", &files, None).unwrap(),
             vec!["q8_0-0.uqff".to_string(), "q8_0-1.uqff".to_string()]
