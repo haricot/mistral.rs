@@ -20,6 +20,26 @@ enum Hqz4CudaDtype : uint32_t {
   HQZ4_CUDA_F32 = 1,
 };
 
+enum Hqz4ResourceKernel : uint32_t {
+  HQZ4_RESOURCE_RHT_A8_128 = 0,
+  HQZ4_RESOURCE_LINEAR_DECODE = 1,
+  HQZ4_RESOURCE_LINEAR_PREFILL = 2,
+  HQZ4_RESOURCE_QKV_DECODE = 3,
+  HQZ4_RESOURCE_QKV_PREFILL_128 = 4,
+  HQZ4_RESOURCE_GATE_UP_DECODE = 5,
+  HQZ4_RESOURCE_GATE_UP_PREFILL = 6,
+};
+
+struct Hqz4CudaKernelResources {
+  uint32_t registers_per_thread;
+  uint32_t static_shared_bytes;
+  uint32_t local_bytes_per_thread;
+  uint32_t max_threads_per_block;
+  uint32_t launch_threads_per_block;
+  uint32_t active_blocks_per_sm;
+  uint32_t max_threads_per_sm;
+};
+
 struct Hqz4Dp4aLaunch {
   const void *input;
   const uint8_t *weight;
@@ -1103,7 +1123,99 @@ cudaError_t launch_embedding_typed(const Hqz4EmbeddingLaunch &params) {
   return cudaGetLastError();
 }
 
+template <typename T>
+cudaError_t query_kernel_resources_typed(
+    uint32_t kind, Hqz4CudaKernelResources *resources) {
+  const void *kernel = nullptr;
+  uint32_t threads = WARPS_PER_BLOCK * WARP_SIZE;
+  switch (kind) {
+  case HQZ4_RESOURCE_RHT_A8_128:
+    kernel = reinterpret_cast<const void *>(
+        transform_quantize_activation_128<T>);
+    threads = WARP_SIZE;
+    break;
+  case HQZ4_RESOURCE_LINEAR_DECODE:
+    kernel = reinterpret_cast<const void *>(hqz4_dp4a_matmul<T>);
+    break;
+  case HQZ4_RESOURCE_LINEAR_PREFILL:
+    kernel = reinterpret_cast<const void *>(hqz4_dp4a_prefill_tiled<T>);
+    break;
+  case HQZ4_RESOURCE_QKV_DECODE:
+    kernel = reinterpret_cast<const void *>(hqz4_dp4a_qkv<T>);
+    break;
+  case HQZ4_RESOURCE_QKV_PREFILL_128:
+    kernel = reinterpret_cast<const void *>(
+        hqz4_dp4a_qkv_prefill_shared_a8_128<T>);
+    break;
+  case HQZ4_RESOURCE_GATE_UP_DECODE:
+    kernel = reinterpret_cast<const void *>(hqz4_dp4a_silu_gate_up<T>);
+    break;
+  case HQZ4_RESOURCE_GATE_UP_PREFILL:
+    kernel = reinterpret_cast<const void *>(
+        hqz4_dp4a_silu_gate_up_prefill_tiled<T>);
+    break;
+  default:
+    return cudaErrorInvalidValue;
+  }
+
+  cudaFuncAttributes attributes{};
+  cudaError_t status = cudaFuncGetAttributes(&attributes, kernel);
+  if (status != cudaSuccess)
+    return status;
+
+  int active_blocks = 0;
+  status = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+      &active_blocks, kernel, static_cast<int>(threads), 0);
+  if (status != cudaSuccess)
+    return status;
+
+  int device = 0;
+  status = cudaGetDevice(&device);
+  if (status != cudaSuccess)
+    return status;
+  int max_threads_per_sm = 0;
+  status = cudaDeviceGetAttribute(&max_threads_per_sm,
+                                  cudaDevAttrMaxThreadsPerMultiProcessor,
+                                  device);
+  if (status != cudaSuccess)
+    return status;
+
+  resources->registers_per_thread =
+      static_cast<uint32_t>(attributes.numRegs);
+  resources->static_shared_bytes =
+      static_cast<uint32_t>(attributes.sharedSizeBytes);
+  resources->local_bytes_per_thread =
+      static_cast<uint32_t>(attributes.localSizeBytes);
+  resources->max_threads_per_block =
+      static_cast<uint32_t>(attributes.maxThreadsPerBlock);
+  resources->launch_threads_per_block = threads;
+  resources->active_blocks_per_sm = static_cast<uint32_t>(active_blocks);
+  resources->max_threads_per_sm =
+      static_cast<uint32_t>(max_threads_per_sm);
+  return cudaSuccess;
+}
+
 } // namespace
+
+extern "C" int hqz4_query_kernel_resources(
+    uint32_t kind, uint32_t dtype, Hqz4CudaKernelResources *resources) {
+  if (resources == nullptr)
+    return static_cast<int>(cudaErrorInvalidValue);
+  *resources = {};
+  cudaError_t status;
+  switch (dtype) {
+  case HQZ4_CUDA_F16:
+    status = query_kernel_resources_typed<__half>(kind, resources);
+    break;
+  case HQZ4_CUDA_F32:
+    status = query_kernel_resources_typed<float>(kind, resources);
+    break;
+  default:
+    status = cudaErrorInvalidValue;
+    break;
+  }
+  return static_cast<int>(status);
+}
 
 extern "C" int launch_hqz4_quantize(const Hqz4QuantizeLaunch *params) {
   if (params == nullptr || params->input == nullptr ||

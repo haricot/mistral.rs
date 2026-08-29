@@ -63,7 +63,12 @@ prefill uses a tiled kernel, and compatible related projections reuse one transf
 Group-width 128 activation transforms use a register-vectorized warp-shuffle RHT. Q/K/V prefill
 loads each A8 tile once per four projection rows. Set `MISTRALRS_HQZ4_PROFILE` to a positive report
 interval to time RHT/A8, linear DP4A, Q/K/V DP4A, and gate/up DP4A separately with CUDA events.
-Profiling synchronizes each measured launch and should not be used for end-to-end throughput results.
+The report separates decode from prefill, includes logical GB/s and GMAC/s, and emits CUDA function
+attributes plus theoretical occupancy for each HQZ4 kernel. Local bytes are a compiler-local/spill proxy,
+not a count of spill transactions. Logical bandwidth counts the minimum algorithmic data set, not physical
+DRAM transactions. Profiling synchronizes each measured launch and should not be used for end-to-end
+throughput results. This integrated resource report is also usable on Pascal GPUs, which current NVIDIA
+Nsight Compute releases no longer support.
 
 ## Tensor parallelism
 
