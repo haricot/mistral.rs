@@ -12,6 +12,8 @@ constexpr uint64_t ELEMENT_MIX = 0x8cb92baa7f3dd15bULL;
 constexpr int WARP_SIZE = 32;
 constexpr int WARPS_PER_BLOCK = 4;
 constexpr int PREFILL_M_TILE = 4;
+constexpr int HQZ4_GROUP_SIZE_128 = 128;
+constexpr int HQZ4_GROUP_WORDS_128 = HQZ4_GROUP_SIZE_128 / sizeof(int);
 
 enum Hqz4CudaDtype : uint32_t {
   HQZ4_CUDA_F16 = 0,
@@ -146,6 +148,83 @@ __device__ __forceinline__ T store_float(float value) {
 
 template <> __device__ __forceinline__ __half store_float(float value) {
   return __float2half_rn(value);
+}
+
+__device__ __forceinline__ float warp_hadamard_32(float value,
+                                                  uint32_t lane) {
+#pragma unroll
+  for (uint32_t mask = 1; mask < WARP_SIZE; mask <<= 1) {
+    const float other = __shfl_xor_sync(0xffffffff, value, mask);
+    value = (lane & mask) == 0 ? value + other : other - value;
+  }
+  return value;
+}
+
+template <typename T>
+__global__ void transform_quantize_activation_128(
+    const T *__restrict__ input, int8_t *__restrict__ quantized,
+    float *__restrict__ scales, uint32_t m, uint32_t k,
+    uint64_t group_offset, uint64_t seed) {
+  const uint32_t groups_per_row = k / HQZ4_GROUP_SIZE_128;
+  const uint64_t flat_group = blockIdx.x;
+  const uint32_t row = flat_group / groups_per_row;
+  const uint32_t group = flat_group % groups_per_row;
+  const uint32_t lane = threadIdx.x;
+  if (row >= m)
+    return;
+
+  float values[4];
+#pragma unroll
+  for (uint32_t segment = 0; segment < 4; ++segment) {
+    const uint32_t index = lane + segment * WARP_SIZE;
+    const uint64_t element =
+        static_cast<uint64_t>(row) * k +
+        static_cast<uint64_t>(group) * HQZ4_GROUP_SIZE_128 + index;
+    float value = load_float(&input[element]);
+    if (sign_is_negative(seed, group_offset + group, index))
+      value = -value;
+    values[segment] = warp_hadamard_32(value, lane);
+  }
+
+  const float sum01 = values[0] + values[1];
+  const float diff01 = values[0] - values[1];
+  const float sum23 = values[2] + values[3];
+  const float diff23 = values[2] - values[3];
+  values[0] = sum01 + sum23;
+  values[1] = diff01 + diff23;
+  values[2] = sum01 - sum23;
+  values[3] = diff01 - diff23;
+
+  const float normalization = rsqrtf(static_cast<float>(HQZ4_GROUP_SIZE_128));
+  float max_abs = 0.0f;
+#pragma unroll
+  for (uint32_t segment = 0; segment < 4; ++segment) {
+    values[segment] *= normalization;
+    max_abs = fmaxf(max_abs, fabsf(values[segment]));
+  }
+#pragma unroll
+  for (uint32_t delta = WARP_SIZE / 2; delta > 0; delta >>= 1)
+    max_abs = fmaxf(max_abs,
+                    __shfl_down_sync(0xffffffff, max_abs, delta));
+  const float group_max = __shfl_sync(0xffffffff, max_abs, 0);
+  const float scale = group_max == 0.0f ? 0.0f : group_max / 127.0f;
+  if (lane == 0)
+    scales[flat_group] = scale;
+
+#pragma unroll
+  for (uint32_t segment = 0; segment < 4; ++segment) {
+    int quantized_value =
+        scale == 0.0f ? 0 : __float2int_rn(values[segment] / scale);
+    if (quantized_value > 127)
+      quantized_value = 127;
+    if (quantized_value < -127)
+      quantized_value = -127;
+    const uint32_t index = lane + segment * WARP_SIZE;
+    const uint64_t element =
+        static_cast<uint64_t>(row) * k +
+        static_cast<uint64_t>(group) * HQZ4_GROUP_SIZE_128 + index;
+    quantized[element] = static_cast<int8_t>(quantized_value);
+  }
 }
 
 template <typename T>
@@ -591,6 +670,114 @@ __global__ void hqz4_dp4a_qkv_prefill_tiled(Hqz4QkvLaunch params) {
   }
 }
 
+template <typename T>
+__global__ void hqz4_dp4a_qkv_prefill_shared_a8_128(Hqz4QkvLaunch params) {
+  __shared__ int activation_tile[PREFILL_M_TILE][HQZ4_GROUP_WORDS_128];
+  const uint32_t warp = threadIdx.x / WARP_SIZE;
+  const uint32_t lane = threadIdx.x % WARP_SIZE;
+  const uint32_t combined_row = blockIdx.x * WARPS_PER_BLOCK + warp;
+  const uint32_t total_rows = params.q_rows + params.k_rows + params.v_rows;
+  const bool active = combined_row < total_rows;
+
+  const uint8_t *weight = params.q_weight;
+  const float *weight_scales = params.q_weight_scales;
+  T *output = static_cast<T *>(params.q_output);
+  uint32_t weight_row = combined_row;
+  uint32_t output_rows = params.q_rows;
+  if (combined_row >= params.q_rows) {
+    weight_row -= params.q_rows;
+    weight = params.k_weight;
+    weight_scales = params.k_weight_scales;
+    output = static_cast<T *>(params.k_output);
+    output_rows = params.k_rows;
+  }
+  if (combined_row >= params.q_rows + params.k_rows) {
+    weight_row -= params.k_rows;
+    weight = params.v_weight;
+    weight_scales = params.v_weight_scales;
+    output = static_cast<T *>(params.v_output);
+    output_rows = params.v_rows;
+  }
+
+  const uint32_t activation_row_base = blockIdx.y * PREFILL_M_TILE;
+  const uint32_t groups_per_row = params.k / HQZ4_GROUP_SIZE_128;
+  float results[PREFILL_M_TILE] = {0.0f, 0.0f, 0.0f, 0.0f};
+  const uint32_t tile_word = threadIdx.x;
+  const uint32_t tile_row = tile_word / HQZ4_GROUP_WORDS_128;
+  const uint32_t group_word = tile_word % HQZ4_GROUP_WORDS_128;
+
+  for (uint32_t group = 0; group < groups_per_row; ++group) {
+    const uint32_t activation_row = activation_row_base + tile_row;
+    if (activation_row < params.m) {
+      const uint64_t activation_element =
+          static_cast<uint64_t>(activation_row) * params.k +
+          static_cast<uint64_t>(group) * HQZ4_GROUP_SIZE_128 +
+          group_word * sizeof(int);
+      activation_tile[tile_row][group_word] =
+          *reinterpret_cast<const int *>(
+              &params.quantized_activation[activation_element]);
+    } else {
+      activation_tile[tile_row][group_word] = 0;
+    }
+    __syncthreads();
+
+    int dots[PREFILL_M_TILE] = {0, 0, 0, 0};
+    if (active) {
+      const uint64_t weight_element =
+          static_cast<uint64_t>(weight_row) * params.k +
+          static_cast<uint64_t>(group) * HQZ4_GROUP_SIZE_128 +
+          lane * sizeof(int);
+      const int packed_weights = pack_four_weights(
+          *reinterpret_cast<const uint16_t *>(&weight[weight_element / 2]));
+#pragma unroll
+      for (uint32_t row_in_tile = 0; row_in_tile < PREFILL_M_TILE;
+           ++row_in_tile)
+        dots[row_in_tile] =
+            dp4a_signed(packed_weights, activation_tile[row_in_tile][lane], 0);
+
+#pragma unroll
+      for (uint32_t delta = WARP_SIZE / 2; delta > 0; delta >>= 1) {
+#pragma unroll
+        for (uint32_t row_in_tile = 0; row_in_tile < PREFILL_M_TILE;
+             ++row_in_tile)
+          dots[row_in_tile] +=
+              __shfl_down_sync(0xffffffff, dots[row_in_tile], delta);
+      }
+
+      if (lane == 0) {
+        const float weight_scale =
+            weight_scales[static_cast<uint64_t>(weight_row) * groups_per_row +
+                          group];
+#pragma unroll
+        for (uint32_t row_in_tile = 0; row_in_tile < PREFILL_M_TILE;
+             ++row_in_tile) {
+          const uint32_t row = activation_row_base + row_in_tile;
+          if (row < params.m) {
+            const float activation_scale =
+                params.activation_scales[static_cast<uint64_t>(row) *
+                                             groups_per_row +
+                                         group];
+            results[row_in_tile] += static_cast<float>(dots[row_in_tile]) *
+                                    weight_scale * activation_scale;
+          }
+        }
+      }
+    }
+    __syncthreads();
+  }
+
+  if (active && lane == 0) {
+#pragma unroll
+    for (uint32_t row_in_tile = 0; row_in_tile < PREFILL_M_TILE;
+         ++row_in_tile) {
+      const uint32_t row = activation_row_base + row_in_tile;
+      if (row < params.m && weight_row < output_rows)
+        output[static_cast<uint64_t>(row) * output_rows + weight_row] =
+            store_float<T>(results[row_in_tile]);
+    }
+  }
+}
+
 __device__ __forceinline__ float hqz4_silu(float value) {
   return value / (1.0f + expf(-value));
 }
@@ -776,6 +963,15 @@ cudaError_t launch_quantize_typed(const Hqz4QuantizeLaunch &params) {
   const uint32_t groups_per_row = params.k / params.group_size;
   const uint64_t activation_groups =
       static_cast<uint64_t>(params.m) * groups_per_row;
+  if (params.group_size == HQZ4_GROUP_SIZE_128) {
+    transform_quantize_activation_128<T>
+        <<<static_cast<uint32_t>(activation_groups), WARP_SIZE, 0,
+           params.stream>>>(static_cast<const T *>(params.input),
+                            params.quantized_activation,
+                            params.activation_scales, params.m, params.k,
+                            params.group_offset, params.seed);
+    return cudaGetLastError();
+  }
   transform_quantize_activation<T>
       <<<static_cast<uint32_t>(activation_groups), params.group_size,
          params.group_size * sizeof(float), params.stream>>>(
@@ -817,7 +1013,15 @@ cudaError_t launch_qkv_typed(const Hqz4QkvLaunch &params) {
       params.q_rows > params.k_rows ? params.q_rows : params.k_rows;
   const uint32_t max_rows =
       qk_max > params.v_rows ? qk_max : params.v_rows;
-  if (params.m >= PREFILL_M_TILE) {
+  if (params.m >= PREFILL_M_TILE &&
+      params.group_size == HQZ4_GROUP_SIZE_128) {
+    const uint32_t total_rows =
+        params.q_rows + params.k_rows + params.v_rows;
+    const dim3 blocks((total_rows + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK,
+                      (params.m + PREFILL_M_TILE - 1) / PREFILL_M_TILE);
+    hqz4_dp4a_qkv_prefill_shared_a8_128<T>
+        <<<blocks, WARPS_PER_BLOCK * WARP_SIZE, 0, params.stream>>>(params);
+  } else if (params.m >= PREFILL_M_TILE) {
     const dim3 blocks((max_rows + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK,
                       (params.m + PREFILL_M_TILE - 1) / PREFILL_M_TILE, 3);
     hqz4_dp4a_qkv_prefill_tiled<T>

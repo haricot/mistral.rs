@@ -60,6 +60,10 @@ range; readers remain compatible with schema 1 artifacts whose scales were F16. 
 shards must start and end on group boundaries. CUDA builds targeting SM61 or newer use an A8/W4
 DP4A inference backend; BF16 activations are dispatched through F16 on that backend. Multi-token
 prefill uses a tiled kernel, and compatible related projections reuse one transformed A8 activation.
+Group-width 128 activation transforms use a register-vectorized warp-shuffle RHT. Q/K/V prefill
+loads each A8 tile once per four projection rows. Set `MISTRALRS_HQZ4_PROFILE` to a positive report
+interval to time RHT/A8, linear DP4A, Q/K/V DP4A, and gate/up DP4A separately with CUDA events.
+Profiling synchronizes each measured launch and should not be used for end-to-end throughput results.
 
 ## Tensor parallelism
 

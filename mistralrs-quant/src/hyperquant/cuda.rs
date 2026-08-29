@@ -1,9 +1,12 @@
-use std::ffi::c_void;
+use std::{
+    ffi::c_void,
+    sync::{LazyLock, Mutex},
+};
 
 use candle_core::{
     backend::BackendStorage,
     cuda_backend::{
-        cudarc::driver::DeviceRepr,
+        cudarc::driver::{sys, CudaStream, DeviceRepr},
         CudaDType,
     },
     CpuStorage, CudaStorage, CustomOp3, DType, Device, Layout, Result, Shape, Storage,
@@ -18,6 +21,140 @@ pub(super) const HAVE_HQZ4_DP4A_KERNELS: bool = cfg!(has_hqz4_dp4a_kernels);
 const HQZ4_CUDA_F16: u32 = 0;
 const HQZ4_CUDA_F32: u32 = 1;
 const CUDA_MAX_BLOCK_THREADS: usize = 1024;
+const HQZ4_WARP_RHT_GROUP_SIZE: usize = 128;
+const HQZ4_PROFILE_ENV: &str = "MISTRALRS_HQZ4_PROFILE";
+const HQZ4_PROFILE_DEFAULT_INTERVAL: u64 = 256;
+
+static HQZ4_PROFILE_INTERVAL: LazyLock<Option<u64>> = LazyLock::new(|| {
+    let Ok(value) = std::env::var(HQZ4_PROFILE_ENV) else {
+        return None;
+    };
+    if value == "0" || value.eq_ignore_ascii_case("off") {
+        return None;
+    }
+    Some(
+        value
+            .parse()
+            .ok()
+            .filter(|interval| *interval != 0)
+            .unwrap_or(HQZ4_PROFILE_DEFAULT_INTERVAL),
+    )
+});
+
+#[derive(Clone, Copy)]
+enum Hqz4ProfilePhase {
+    RhtA8,
+    Dp4aLinear,
+    Dp4aQkv,
+    Dp4aGateUp,
+}
+
+impl Hqz4ProfilePhase {
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct Hqz4PhaseStats {
+    calls: u64,
+    total_ms: f64,
+}
+
+impl Hqz4PhaseStats {
+    fn average_us(self) -> f64 {
+        if self.calls == 0 {
+            0.0
+        } else {
+            self.total_ms * 1_000.0 / self.calls as f64
+        }
+    }
+}
+
+#[derive(Default)]
+struct Hqz4ProfileWindow {
+    phases: [Hqz4PhaseStats; 4],
+    launches: u64,
+}
+
+static HQZ4_PROFILE_WINDOW: LazyLock<Mutex<Hqz4ProfileWindow>> =
+    LazyLock::new(|| Mutex::new(Hqz4ProfileWindow::default()));
+
+fn hqz4_profile_enabled() -> bool {
+    HQZ4_PROFILE_INTERVAL.is_some()
+}
+
+fn hqz4_profiled_launch(
+    stream: &CudaStream,
+    phase: Hqz4ProfilePhase,
+    launch: impl FnOnce() -> i32,
+) -> i32 {
+    let Some(report_interval) = *HQZ4_PROFILE_INTERVAL else {
+        return launch();
+    };
+    crate::utils::log::once_log_info(format!(
+        "HQZ4 CUDA profiling enabled via {HQZ4_PROFILE_ENV}; event timing synchronizes profiled launches."
+    ));
+    let start = match stream.record_event(Some(sys::CUevent_flags::CU_EVENT_DEFAULT)) {
+        Ok(event) => event,
+        Err(error) => {
+            crate::utils::log::once_log_warn(format!(
+                "HQZ4 CUDA profiling could not create a start event: {error}"
+            ));
+            return launch();
+        }
+    };
+    let status = launch();
+    if status != 0 {
+        return status;
+    }
+    let end = match stream.record_event(Some(sys::CUevent_flags::CU_EVENT_DEFAULT)) {
+        Ok(event) => event,
+        Err(error) => {
+            crate::utils::log::once_log_warn(format!(
+                "HQZ4 CUDA profiling could not create an end event: {error}"
+            ));
+            return status;
+        }
+    };
+    let elapsed_ms = match start.elapsed_ms(&end) {
+        Ok(elapsed_ms) => f64::from(elapsed_ms),
+        Err(error) => {
+            crate::utils::log::once_log_warn(format!(
+                "HQZ4 CUDA profiling could not measure an event pair: {error}"
+            ));
+            return status;
+        }
+    };
+
+    let mut window = HQZ4_PROFILE_WINDOW.lock().expect("HQZ4 profile lock poisoned");
+    let stats = &mut window.phases[phase.index()];
+    stats.calls += 1;
+    stats.total_ms += elapsed_ms;
+    window.launches += 1;
+    if window.launches >= report_interval {
+        let [rht, linear, qkv, gate_up] = window.phases;
+        let launches = window.launches;
+        *window = Hqz4ProfileWindow::default();
+        drop(window);
+        tracing::info!(
+            "HQZ4 CUDA profile: launches={launches} rht_a8={:.3}ms/{}({:.2}us) dp4a_linear={:.3}ms/{}({:.2}us) dp4a_qkv={:.3}ms/{}({:.2}us) dp4a_gate_up={:.3}ms/{}({:.2}us)",
+            rht.total_ms,
+            rht.calls,
+            rht.average_us(),
+            linear.total_ms,
+            linear.calls,
+            linear.average_us(),
+            qkv.total_ms,
+            qkv.calls,
+            qkv.average_us(),
+            gate_up.total_ms,
+            gate_up.calls,
+            gate_up.average_us(),
+        );
+    }
+    status
+}
 
 #[repr(C)]
 struct Hqz4Dp4aLaunch {
@@ -293,7 +430,49 @@ impl Hqz4Dp4aMatmul {
         let status = {
             #[cfg(has_hqz4_dp4a_kernels)]
             {
-                unsafe { launch_hqz4_dp4a(&params) }
+                if hqz4_profile_enabled() {
+                    let quantize = Hqz4QuantizeLaunch {
+                        input: params.input,
+                        quantized_activation: params.quantized_activation,
+                        activation_scales: params.activation_scales,
+                        m: params.m,
+                        k: params.k,
+                        group_size: params.group_size,
+                        group_offset: params.group_offset,
+                        seed: params.seed,
+                        dtype: params.dtype,
+                        stream: params.stream,
+                    };
+                    let quantize_status = hqz4_profiled_launch(
+                        &stream,
+                        Hqz4ProfilePhase::RhtA8,
+                        || unsafe { launch_hqz4_quantize(&quantize) },
+                    );
+                    if quantize_status != 0 {
+                        quantize_status
+                    } else {
+                        let matmul = Hqz4QuantizedMatmulLaunch {
+                            quantized_activation: params.quantized_activation,
+                            activation_scales: params.activation_scales,
+                            weight: params.weight,
+                            weight_scales: params.weight_scales,
+                            output: params.output,
+                            m: params.m,
+                            n: params.n,
+                            k: params.k,
+                            group_size: params.group_size,
+                            dtype: params.dtype,
+                            stream: params.stream,
+                        };
+                        hqz4_profiled_launch(
+                            &stream,
+                            Hqz4ProfilePhase::Dp4aLinear,
+                            || unsafe { launch_hqz4_dp4a_quantized(&matmul) },
+                        )
+                    }
+                } else {
+                    unsafe { launch_hqz4_dp4a(&params) }
+                }
             }
             #[cfg(not(has_hqz4_dp4a_kernels))]
             {
@@ -601,6 +780,11 @@ pub(super) fn quantize_activation(
     let Storage::Cuda(input_storage) = &*input_storage else {
         unreachable!("CUDA device returned non-CUDA storage")
     };
+    if encoded.group_size() == HQZ4_WARP_RHT_GROUP_SIZE {
+        crate::utils::log::once_log_info(
+            "HQZ4 CUDA: using the register-vectorized warp-shuffle RHT/A8 kernel.",
+        );
+    }
 
     let status = match input.dtype() {
         DType::F16 => {
@@ -625,7 +809,9 @@ pub(super) fn quantize_activation(
             let status = {
                 #[cfg(has_hqz4_dp4a_kernels)]
                 {
-                    unsafe { launch_hqz4_quantize(&params) }
+                    hqz4_profiled_launch(&stream, Hqz4ProfilePhase::RhtA8, || unsafe {
+                        launch_hqz4_quantize(&params)
+                    })
                 }
                 #[cfg(not(has_hqz4_dp4a_kernels))]
                 {
@@ -658,7 +844,9 @@ pub(super) fn quantize_activation(
             let status = {
                 #[cfg(has_hqz4_dp4a_kernels)]
                 {
-                    unsafe { launch_hqz4_quantize(&params) }
+                    hqz4_profiled_launch(&stream, Hqz4ProfilePhase::RhtA8, || unsafe {
+                        launch_hqz4_quantize(&params)
+                    })
                 }
                 #[cfg(not(has_hqz4_dp4a_kernels))]
                 {
@@ -823,7 +1011,11 @@ pub(super) fn dp4a_matmul_quantized(
             let status = {
                 #[cfg(has_hqz4_dp4a_kernels)]
                 {
-                    unsafe { launch_hqz4_dp4a_quantized(&params) }
+                    hqz4_profiled_launch(
+                        &stream,
+                        Hqz4ProfilePhase::Dp4aLinear,
+                        || unsafe { launch_hqz4_dp4a_quantized(&params) },
+                    )
                 }
                 #[cfg(not(has_hqz4_dp4a_kernels))]
                 {
@@ -1039,6 +1231,11 @@ pub(super) fn qkv_matmul_quantized(
         crate::utils::log::once_log_info(
             "HQZ4 CUDA: using tiled 4x4 A8/W4 DP4A prefill backend (SM61+).",
         );
+        if group_size == HQZ4_WARP_RHT_GROUP_SIZE {
+            crate::utils::log::once_log_info(
+                "HQZ4 CUDA: Q/K/V prefill shares each A8 tile across four projection rows.",
+            );
+        }
     }
 
     macro_rules! launch_qkv {
@@ -1079,7 +1276,9 @@ pub(super) fn qkv_matmul_quantized(
             let status = {
                 #[cfg(has_hqz4_dp4a_kernels)]
                 {
-                    unsafe { launch_hqz4_qkv_quantized(&params) }
+                    hqz4_profiled_launch(&stream, Hqz4ProfilePhase::Dp4aQkv, || unsafe {
+                        launch_hqz4_qkv_quantized(&params)
+                    })
                 }
                 #[cfg(not(has_hqz4_dp4a_kernels))]
                 {
@@ -1255,7 +1454,11 @@ pub(super) fn silu_gate_up_matmul_quantized(
             let status = {
                 #[cfg(has_hqz4_dp4a_kernels)]
                 {
-                    unsafe { launch_hqz4_silu_gate_up_quantized(&params) }
+                    hqz4_profiled_launch(
+                        &stream,
+                        Hqz4ProfilePhase::Dp4aGateUp,
+                        || unsafe { launch_hqz4_silu_gate_up_quantized(&params) },
+                    )
                 }
                 #[cfg(not(has_hqz4_dp4a_kernels))]
                 {
