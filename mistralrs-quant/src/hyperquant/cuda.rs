@@ -67,6 +67,46 @@ struct Hqz4QuantizedMatmulLaunch {
 }
 
 #[repr(C)]
+struct Hqz4QkvLaunch {
+    quantized_activation: *const i8,
+    activation_scales: *const f32,
+    q_weight: *const u8,
+    q_weight_scales: *const f32,
+    q_output: *mut c_void,
+    q_rows: u32,
+    k_weight: *const u8,
+    k_weight_scales: *const f32,
+    k_output: *mut c_void,
+    k_rows: u32,
+    v_weight: *const u8,
+    v_weight_scales: *const f32,
+    v_output: *mut c_void,
+    v_rows: u32,
+    m: u32,
+    k: u32,
+    group_size: u32,
+    dtype: u32,
+    stream: candle_core::cuda::cudarc::driver::sys::CUstream,
+}
+
+#[repr(C)]
+struct Hqz4SiluGateUpLaunch {
+    quantized_activation: *const i8,
+    activation_scales: *const f32,
+    gate_weight: *const u8,
+    gate_weight_scales: *const f32,
+    up_weight: *const u8,
+    up_weight_scales: *const f32,
+    output: *mut c_void,
+    m: u32,
+    n: u32,
+    k: u32,
+    group_size: u32,
+    dtype: u32,
+    stream: candle_core::cuda::cudarc::driver::sys::CUstream,
+}
+
+#[repr(C)]
 struct Hqz4EmbeddingLaunch {
     ids: *const u32,
     weight: *const u8,
@@ -87,6 +127,8 @@ extern "C" {
     fn launch_hqz4_dp4a(params: *const Hqz4Dp4aLaunch) -> i32;
     fn launch_hqz4_quantize(params: *const Hqz4QuantizeLaunch) -> i32;
     fn launch_hqz4_dp4a_quantized(params: *const Hqz4QuantizedMatmulLaunch) -> i32;
+    fn launch_hqz4_qkv_quantized(params: *const Hqz4QkvLaunch) -> i32;
+    fn launch_hqz4_silu_gate_up_quantized(params: *const Hqz4SiluGateUpLaunch) -> i32;
     fn launch_hqz4_embedding(params: *const Hqz4EmbeddingLaunch) -> i32;
 }
 
@@ -820,6 +862,434 @@ pub(super) fn dp4a_matmul_quantized(
     } else {
         output.to_dtype(source_dtype)
     }
+}
+
+fn validate_multi_projection_inputs(
+    activation: &Tensor,
+    activation_scales: &Tensor,
+    weights: &[&super::Hqz4CudaInner],
+    source_shape: &[usize],
+) -> Result<(usize, usize, usize)> {
+    if !HAVE_HQZ4_DP4A_KERNELS {
+        candle_core::bail!(
+            "HQZ4 multi-projection matmul was not compiled; set CUDA_COMPUTE_CAP to at least 61."
+        );
+    }
+    if activation.dtype() != DType::U8 || activation_scales.dtype() != DType::F32 {
+        candle_core::bail!(
+            "HQZ4 multi-projection matmul expects signed-byte U8/F32 activations."
+        );
+    }
+    if !activation.is_contiguous() || !activation_scales.is_contiguous() {
+        candle_core::bail!("HQZ4 multi-projection activations must be contiguous.");
+    }
+    let (m, k) = activation.dims2()?;
+    let Some(first) = weights.first() else {
+        candle_core::bail!("HQZ4 multi-projection matmul requires at least one weight.");
+    };
+    let group_size = first.group_size;
+    if m == 0 || k == 0 || group_size == 0 || !k.is_multiple_of(group_size) {
+        candle_core::bail!("HQZ4 multi-projection activation shape is invalid.");
+    }
+    let groups_per_row = k / group_size;
+    if activation_scales.dims() != [m, groups_per_row] {
+        candle_core::bail!("HQZ4 multi-projection activation scale shape mismatch.");
+    }
+    if weights.iter().any(|weight| {
+        weight.cols != k
+            || weight.group_size != group_size
+            || weight.codes.dtype() != DType::U8
+            || weight.scales.dtype() != DType::F32
+            || !weight.codes.is_contiguous()
+            || !weight.scales.is_contiguous()
+            || weight.codes.dims() != [weight.rows, k / 2]
+            || weight.scales.dims() != [weight.rows, groups_per_row]
+            || !activation.device().same_device(weight.codes.device())
+            || !activation.device().same_device(weight.scales.device())
+    }) {
+        candle_core::bail!("HQZ4 multi-projection weight metadata mismatch.");
+    }
+    if !activation.device().same_device(activation_scales.device()) {
+        candle_core::bail!("HQZ4 multi-projection inputs must use the same CUDA device.");
+    }
+    let Some((&source_k, source_batch)) = source_shape.split_last() else {
+        candle_core::bail!("HQZ4 source activation shape cannot be empty.");
+    };
+    let source_rows = source_batch
+        .iter()
+        .try_fold(1usize, |rows, dim| rows.checked_mul(*dim))
+        .ok_or_else(|| candle_core::Error::msg("HQZ4 source activation shape overflow."))?;
+    if source_k != k || source_rows != m {
+        candle_core::bail!(
+            "HQZ4 source shape {:?} does not match quantized activation [{m}, {k}].",
+            source_shape
+        );
+    }
+    Ok((m, k, group_size))
+}
+
+pub(super) fn qkv_matmul_quantized(
+    activation: &Tensor,
+    activation_scales: &Tensor,
+    q: &super::Hqz4CudaInner,
+    key: &super::Hqz4CudaInner,
+    value: &super::Hqz4CudaInner,
+    source_shape: &[usize],
+    source_dtype: DType,
+) -> Result<(Tensor, Tensor, Tensor)> {
+    let (m, k, group_size) = validate_multi_projection_inputs(
+        activation,
+        activation_scales,
+        &[q, key, value],
+        source_shape,
+    )?;
+    if !matches!(source_dtype, DType::F16 | DType::BF16 | DType::F32) {
+        candle_core::bail!(
+            "HQZ4 Q/K/V output supports F16, BF16, and F32, got {source_dtype:?}."
+        );
+    }
+    let Device::Cuda(device) = activation.device() else {
+        candle_core::bail!("HQZ4 Q/K/V fusion requires CUDA storage.");
+    };
+    let stream = device.cuda_stream();
+
+    let (activation_storage, activation_layout) = activation.storage_and_layout();
+    let Storage::Cuda(activation_storage) = &*activation_storage else {
+        unreachable!("CUDA device returned non-CUDA storage")
+    };
+    let activation_slice = activation_storage.as_cuda_slice::<u8>()?;
+    let (activation_ptr, activation_guard) =
+        slice_ptr_on_stream(activation_slice, activation_layout.start_offset(), &stream);
+    let (scale_storage, scale_layout) = activation_scales.storage_and_layout();
+    let Storage::Cuda(scale_storage) = &*scale_storage else {
+        unreachable!("CUDA device returned non-CUDA storage")
+    };
+    let activation_scale_slice = scale_storage.as_cuda_slice::<f32>()?;
+    let (activation_scale_ptr, activation_scale_guard) = slice_ptr_on_stream(
+        activation_scale_slice,
+        scale_layout.start_offset(),
+        &stream,
+    );
+
+    let (q_weight_storage, q_weight_layout) = q.codes.storage_and_layout();
+    let Storage::Cuda(q_weight_storage) = &*q_weight_storage else {
+        unreachable!("CUDA device returned non-CUDA storage")
+    };
+    let q_weight_slice = q_weight_storage.as_cuda_slice::<u8>()?;
+    let (q_weight_ptr, q_weight_guard) =
+        slice_ptr_on_stream(q_weight_slice, q_weight_layout.start_offset(), &stream);
+    let (q_scale_storage, q_scale_layout) = q.scales.storage_and_layout();
+    let Storage::Cuda(q_scale_storage) = &*q_scale_storage else {
+        unreachable!("CUDA device returned non-CUDA storage")
+    };
+    let q_scale_slice = q_scale_storage.as_cuda_slice::<f32>()?;
+    let (q_scale_ptr, q_scale_guard) =
+        slice_ptr_on_stream(q_scale_slice, q_scale_layout.start_offset(), &stream);
+
+    let (k_weight_storage, k_weight_layout) = key.codes.storage_and_layout();
+    let Storage::Cuda(k_weight_storage) = &*k_weight_storage else {
+        unreachable!("CUDA device returned non-CUDA storage")
+    };
+    let k_weight_slice = k_weight_storage.as_cuda_slice::<u8>()?;
+    let (k_weight_ptr, k_weight_guard) =
+        slice_ptr_on_stream(k_weight_slice, k_weight_layout.start_offset(), &stream);
+    let (k_scale_storage, k_scale_layout) = key.scales.storage_and_layout();
+    let Storage::Cuda(k_scale_storage) = &*k_scale_storage else {
+        unreachable!("CUDA device returned non-CUDA storage")
+    };
+    let k_scale_slice = k_scale_storage.as_cuda_slice::<f32>()?;
+    let (k_scale_ptr, k_scale_guard) =
+        slice_ptr_on_stream(k_scale_slice, k_scale_layout.start_offset(), &stream);
+
+    let (v_weight_storage, v_weight_layout) = value.codes.storage_and_layout();
+    let Storage::Cuda(v_weight_storage) = &*v_weight_storage else {
+        unreachable!("CUDA device returned non-CUDA storage")
+    };
+    let v_weight_slice = v_weight_storage.as_cuda_slice::<u8>()?;
+    let (v_weight_ptr, v_weight_guard) =
+        slice_ptr_on_stream(v_weight_slice, v_weight_layout.start_offset(), &stream);
+    let (v_scale_storage, v_scale_layout) = value.scales.storage_and_layout();
+    let Storage::Cuda(v_scale_storage) = &*v_scale_storage else {
+        unreachable!("CUDA device returned non-CUDA storage")
+    };
+    let v_scale_slice = v_scale_storage.as_cuda_slice::<f32>()?;
+    let (v_scale_ptr, v_scale_guard) =
+        slice_ptr_on_stream(v_scale_slice, v_scale_layout.start_offset(), &stream);
+
+    let q_elements = m
+        .checked_mul(q.rows)
+        .ok_or_else(|| candle_core::Error::msg("HQZ4 Q output size overflow."))?;
+    let k_elements = m
+        .checked_mul(key.rows)
+        .ok_or_else(|| candle_core::Error::msg("HQZ4 K output size overflow."))?;
+    let v_elements = m
+        .checked_mul(value.rows)
+        .ok_or_else(|| candle_core::Error::msg("HQZ4 V output size overflow."))?;
+    let mut q_shape = source_shape.to_vec();
+    *q_shape.last_mut().expect("source rank checked") = q.rows;
+    let mut k_shape = source_shape.to_vec();
+    *k_shape.last_mut().expect("source rank checked") = key.rows;
+    let mut v_shape = source_shape.to_vec();
+    *v_shape.last_mut().expect("source rank checked") = value.rows;
+
+    crate::utils::log::once_log_info(
+        "HQZ4 CUDA: fusing Q/K/V into one multi-projection DP4A launch.",
+    );
+    if m >= 4 {
+        crate::utils::log::once_log_info(
+            "HQZ4 CUDA: using tiled 4x4 A8/W4 DP4A prefill backend (SM61+).",
+        );
+    }
+
+    macro_rules! launch_qkv {
+        ($ty:ty, $dtype_code:expr) => {{
+            let mut q_output = unsafe { device.alloc::<$ty>(q_elements)? };
+            let mut k_output = unsafe { device.alloc::<$ty>(k_elements)? };
+            let mut v_output = unsafe { device.alloc::<$ty>(v_elements)? };
+            let (q_output_ptr, q_output_guard) =
+                slice_ptr_mut_on_stream(&mut q_output, 0, &stream);
+            let (k_output_ptr, k_output_guard) =
+                slice_ptr_mut_on_stream(&mut k_output, 0, &stream);
+            let (v_output_ptr, v_output_guard) =
+                slice_ptr_mut_on_stream(&mut v_output, 0, &stream);
+            let params = Hqz4QkvLaunch {
+                quantized_activation: activation_ptr as *const i8,
+                activation_scales: activation_scale_ptr as *const f32,
+                q_weight: q_weight_ptr as *const u8,
+                q_weight_scales: q_scale_ptr as *const f32,
+                q_output: q_output_ptr as *mut c_void,
+                q_rows: Hqz4Dp4aMatmul::checked_u32("Q output width", q.rows)?,
+                k_weight: k_weight_ptr as *const u8,
+                k_weight_scales: k_scale_ptr as *const f32,
+                k_output: k_output_ptr as *mut c_void,
+                k_rows: Hqz4Dp4aMatmul::checked_u32("K output width", key.rows)?,
+                v_weight: v_weight_ptr as *const u8,
+                v_weight_scales: v_scale_ptr as *const f32,
+                v_output: v_output_ptr as *mut c_void,
+                v_rows: Hqz4Dp4aMatmul::checked_u32("V output width", value.rows)?,
+                m: Hqz4Dp4aMatmul::checked_u32("Q/K/V row count", m)?,
+                k: Hqz4Dp4aMatmul::checked_u32("Q/K/V input width", k)?,
+                group_size: Hqz4Dp4aMatmul::checked_u32(
+                    "Q/K/V group size",
+                    group_size,
+                )?,
+                dtype: $dtype_code,
+                stream: stream.cu_stream(),
+            };
+            let status = {
+                #[cfg(has_hqz4_dp4a_kernels)]
+                {
+                    unsafe { launch_hqz4_qkv_quantized(&params) }
+                }
+                #[cfg(not(has_hqz4_dp4a_kernels))]
+                {
+                    let _ = &params;
+                    unreachable!("HQZ4 DP4A availability was checked before dispatch")
+                }
+            };
+            if status != 0 {
+                candle_core::bail!(
+                    "HQZ4 Q/K/V DP4A CUDA launch failed with status {status}."
+                );
+            }
+            drop((q_output_guard, k_output_guard, v_output_guard));
+            (
+                Tensor::from((
+                    Storage::Cuda(CudaStorage::wrap_cuda_slice(q_output, device.clone())),
+                    Shape::from_dims(&q_shape),
+                )),
+                Tensor::from((
+                    Storage::Cuda(CudaStorage::wrap_cuda_slice(k_output, device.clone())),
+                    Shape::from_dims(&k_shape),
+                )),
+                Tensor::from((
+                    Storage::Cuda(CudaStorage::wrap_cuda_slice(v_output, device.clone())),
+                    Shape::from_dims(&v_shape),
+                )),
+            )
+        }};
+    }
+
+    let outputs = match source_dtype {
+        DType::F16 | DType::BF16 => launch_qkv!(f16, HQZ4_CUDA_F16),
+        DType::F32 => launch_qkv!(f32, HQZ4_CUDA_F32),
+        _ => unreachable!("source dtype checked"),
+    };
+    drop((
+        activation_guard,
+        activation_scale_guard,
+        q_weight_guard,
+        q_scale_guard,
+        k_weight_guard,
+        k_scale_guard,
+        v_weight_guard,
+        v_scale_guard,
+    ));
+    if source_dtype == DType::BF16 {
+        Ok((
+            outputs.0.to_dtype(DType::BF16)?,
+            outputs.1.to_dtype(DType::BF16)?,
+            outputs.2.to_dtype(DType::BF16)?,
+        ))
+    } else {
+        Ok(outputs)
+    }
+}
+
+pub(super) fn silu_gate_up_matmul_quantized(
+    activation: &Tensor,
+    activation_scales: &Tensor,
+    gate: &super::Hqz4CudaInner,
+    up: &super::Hqz4CudaInner,
+    source_shape: &[usize],
+    source_dtype: DType,
+) -> Result<Tensor> {
+    let (m, k, group_size) = validate_multi_projection_inputs(
+        activation,
+        activation_scales,
+        &[gate, up],
+        source_shape,
+    )?;
+    if gate.rows != up.rows {
+        candle_core::bail!("HQZ4 fused gate/up projections must have equal output widths.");
+    }
+    if !matches!(source_dtype, DType::F16 | DType::F32) {
+        candle_core::bail!("HQZ4 fused gate/up supports F16 and F32 outputs.");
+    }
+    let Device::Cuda(device) = activation.device() else {
+        candle_core::bail!("HQZ4 gate/up fusion requires CUDA storage.");
+    };
+    let stream = device.cuda_stream();
+
+    let (activation_storage, activation_layout) = activation.storage_and_layout();
+    let Storage::Cuda(activation_storage) = &*activation_storage else {
+        unreachable!("CUDA device returned non-CUDA storage")
+    };
+    let activation_slice = activation_storage.as_cuda_slice::<u8>()?;
+    let (activation_ptr, activation_guard) =
+        slice_ptr_on_stream(activation_slice, activation_layout.start_offset(), &stream);
+    let (scale_storage, scale_layout) = activation_scales.storage_and_layout();
+    let Storage::Cuda(scale_storage) = &*scale_storage else {
+        unreachable!("CUDA device returned non-CUDA storage")
+    };
+    let activation_scale_slice = scale_storage.as_cuda_slice::<f32>()?;
+    let (activation_scale_ptr, activation_scale_guard) = slice_ptr_on_stream(
+        activation_scale_slice,
+        scale_layout.start_offset(),
+        &stream,
+    );
+
+    let (gate_weight_storage, gate_weight_layout) = gate.codes.storage_and_layout();
+    let Storage::Cuda(gate_weight_storage) = &*gate_weight_storage else {
+        unreachable!("CUDA device returned non-CUDA storage")
+    };
+    let gate_weight_slice = gate_weight_storage.as_cuda_slice::<u8>()?;
+    let (gate_weight_ptr, gate_weight_guard) = slice_ptr_on_stream(
+        gate_weight_slice,
+        gate_weight_layout.start_offset(),
+        &stream,
+    );
+    let (gate_scale_storage, gate_scale_layout) = gate.scales.storage_and_layout();
+    let Storage::Cuda(gate_scale_storage) = &*gate_scale_storage else {
+        unreachable!("CUDA device returned non-CUDA storage")
+    };
+    let gate_scale_slice = gate_scale_storage.as_cuda_slice::<f32>()?;
+    let (gate_scale_ptr, gate_scale_guard) = slice_ptr_on_stream(
+        gate_scale_slice,
+        gate_scale_layout.start_offset(),
+        &stream,
+    );
+
+    let (up_weight_storage, up_weight_layout) = up.codes.storage_and_layout();
+    let Storage::Cuda(up_weight_storage) = &*up_weight_storage else {
+        unreachable!("CUDA device returned non-CUDA storage")
+    };
+    let up_weight_slice = up_weight_storage.as_cuda_slice::<u8>()?;
+    let (up_weight_ptr, up_weight_guard) =
+        slice_ptr_on_stream(up_weight_slice, up_weight_layout.start_offset(), &stream);
+    let (up_scale_storage, up_scale_layout) = up.scales.storage_and_layout();
+    let Storage::Cuda(up_scale_storage) = &*up_scale_storage else {
+        unreachable!("CUDA device returned non-CUDA storage")
+    };
+    let up_scale_slice = up_scale_storage.as_cuda_slice::<f32>()?;
+    let (up_scale_ptr, up_scale_guard) =
+        slice_ptr_on_stream(up_scale_slice, up_scale_layout.start_offset(), &stream);
+
+    let output_elements = m
+        .checked_mul(gate.rows)
+        .ok_or_else(|| candle_core::Error::msg("HQZ4 gate/up output size overflow."))?;
+    let mut output_shape = source_shape.to_vec();
+    *output_shape.last_mut().expect("source rank checked") = gate.rows;
+    crate::utils::log::once_log_info(
+        "HQZ4 CUDA: fusing gate/up and SiLU*up into one DP4A launch.",
+    );
+    if m >= 4 {
+        crate::utils::log::once_log_info(
+            "HQZ4 CUDA: using tiled 4x4 A8/W4 DP4A prefill backend (SM61+).",
+        );
+    }
+
+    macro_rules! launch_gate_up {
+        ($ty:ty, $dtype_code:expr) => {{
+            let mut output = unsafe { device.alloc::<$ty>(output_elements)? };
+            let (output_ptr, output_guard) =
+                slice_ptr_mut_on_stream(&mut output, 0, &stream);
+            let params = Hqz4SiluGateUpLaunch {
+                quantized_activation: activation_ptr as *const i8,
+                activation_scales: activation_scale_ptr as *const f32,
+                gate_weight: gate_weight_ptr as *const u8,
+                gate_weight_scales: gate_scale_ptr as *const f32,
+                up_weight: up_weight_ptr as *const u8,
+                up_weight_scales: up_scale_ptr as *const f32,
+                output: output_ptr as *mut c_void,
+                m: Hqz4Dp4aMatmul::checked_u32("gate/up row count", m)?,
+                n: Hqz4Dp4aMatmul::checked_u32("gate/up output width", gate.rows)?,
+                k: Hqz4Dp4aMatmul::checked_u32("gate/up input width", k)?,
+                group_size: Hqz4Dp4aMatmul::checked_u32(
+                    "gate/up group size",
+                    group_size,
+                )?,
+                dtype: $dtype_code,
+                stream: stream.cu_stream(),
+            };
+            let status = {
+                #[cfg(has_hqz4_dp4a_kernels)]
+                {
+                    unsafe { launch_hqz4_silu_gate_up_quantized(&params) }
+                }
+                #[cfg(not(has_hqz4_dp4a_kernels))]
+                {
+                    let _ = &params;
+                    unreachable!("HQZ4 DP4A availability was checked before dispatch")
+                }
+            };
+            if status != 0 {
+                candle_core::bail!(
+                    "HQZ4 gate/up SiLU DP4A CUDA launch failed with status {status}."
+                );
+            }
+            drop(output_guard);
+            Tensor::from((
+                Storage::Cuda(CudaStorage::wrap_cuda_slice(output, device.clone())),
+                Shape::from_dims(&output_shape),
+            ))
+        }};
+    }
+
+    let output = match source_dtype {
+        DType::F16 => launch_gate_up!(f16, HQZ4_CUDA_F16),
+        DType::F32 => launch_gate_up!(f32, HQZ4_CUDA_F32),
+        _ => unreachable!("source dtype checked"),
+    };
+    drop((
+        activation_guard,
+        activation_scale_guard,
+        gate_weight_guard,
+        gate_scale_guard,
+        up_weight_guard,
+        up_scale_guard,
+    ));
+    Ok(output)
 }
 
 pub(super) fn embedding(

@@ -1659,6 +1659,11 @@ impl QuantMethod for ColumnParallelLayer {
         self.weight.end_track_stats()
     }
 
+    #[cfg(feature = "cuda")]
+    fn hqz4_cuda_inner(&self) -> Option<crate::hyperquant::Hqz4CudaInner> {
+        self.weight.hqz4_cuda_inner()
+    }
+
     fn activation_quantization_scheme(&self) -> Option<ActivationQuantizationScheme> {
         self.weight.activation_quantization_scheme()
     }
@@ -2205,6 +2210,11 @@ impl QuantMethod for ReplicatedLayer {
 
     fn end_track_stats(&self) -> Result<Tensor> {
         self.0.end_track_stats()
+    }
+
+    #[cfg(feature = "cuda")]
+    fn hqz4_cuda_inner(&self) -> Option<crate::hyperquant::Hqz4CudaInner> {
+        self.0.hqz4_cuda_inner()
     }
 
     fn activation_quantization_scheme(&self) -> Option<ActivationQuantizationScheme> {

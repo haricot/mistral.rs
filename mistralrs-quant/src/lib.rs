@@ -1622,6 +1622,12 @@ pub trait QuantMethod: Send + Sync + Debug + QuantizedSerde {
         None
     }
 
+    #[cfg(feature = "cuda")]
+    #[doc(hidden)]
+    fn hqz4_cuda_inner(&self) -> Option<crate::hyperquant::Hqz4CudaInner> {
+        None
+    }
+
     fn activation_quantization_scheme(&self) -> Option<ActivationQuantizationScheme> {
         None
     }
@@ -1711,12 +1717,12 @@ pub trait QuantMethod: Send + Sync + Debug + QuantizedSerde {
     }
 }
 
-pub fn try_forward_with_shared_quantized_activation(
+fn try_shared_quantized_activation(
     a: &Tensor,
     methods: &[&dyn QuantMethod],
-) -> Result<Option<Vec<Tensor>>> {
+) -> Result<Option<QuantizedActivation>> {
     let Some(first) = methods.first() else {
-        return Ok(Some(Vec::new()));
+        return Ok(None);
     };
     if !matches!(a.dtype(), DType::F16 | DType::BF16) {
         return Ok(None);
@@ -1740,11 +1746,79 @@ pub fn try_forward_with_shared_quantized_activation(
             scheme
         );
     }
+    Ok(Some(activation))
+}
+
+pub fn try_forward_with_shared_quantized_activation(
+    a: &Tensor,
+    methods: &[&dyn QuantMethod],
+) -> Result<Option<Vec<Tensor>>> {
+    if methods.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+    let Some(activation) = try_shared_quantized_activation(a, methods)? else {
+        return Ok(None);
+    };
     methods
         .iter()
         .map(|method| method.forward_quantized(&activation))
         .collect::<Result<Vec<_>>>()
         .map(Some)
+}
+
+#[cfg(feature = "cuda")]
+fn try_fused_hqz4_qkv(
+    xs: &Tensor,
+    q: &dyn QuantMethod,
+    k: &dyn QuantMethod,
+    v: &dyn QuantMethod,
+) -> Result<Option<(Tensor, Tensor, Tensor)>> {
+    let Some(q_inner) = q.hqz4_cuda_inner() else {
+        return Ok(None);
+    };
+    let Some(k_inner) = k.hqz4_cuda_inner() else {
+        return Ok(None);
+    };
+    let Some(v_inner) = v.hqz4_cuda_inner() else {
+        return Ok(None);
+    };
+    let Some(activation) = try_shared_quantized_activation(xs, &[q, k, v])? else {
+        return Ok(None);
+    };
+    hyperquant::try_fused_qkv_quantized(
+        &activation,
+        &q_inner,
+        &k_inner,
+        &v_inner,
+    )
+}
+
+#[cfg(feature = "cuda")]
+fn try_fused_hqz4_silu_gate_up(
+    xs: &Tensor,
+    gate: &dyn QuantMethod,
+    up: &dyn QuantMethod,
+    activation_type: GluActivationType,
+) -> Result<Option<Tensor>> {
+    if !matches!(activation_type, GluActivationType::Silu)
+        || !matches!(xs.dtype(), DType::F16 | DType::F32)
+    {
+        return Ok(None);
+    }
+    let Some(gate_inner) = gate.hqz4_cuda_inner() else {
+        return Ok(None);
+    };
+    let Some(up_inner) = up.hqz4_cuda_inner() else {
+        return Ok(None);
+    };
+    let Some(activation) = try_shared_quantized_activation(xs, &[gate, up])? else {
+        return Ok(None);
+    };
+    hyperquant::try_fused_silu_gate_up_quantized(
+        &activation,
+        &gate_inner,
+        &up_inner,
+    )
 }
 
 impl Module for dyn QuantMethod {
@@ -1779,6 +1853,12 @@ pub fn try_fused_quantized_ffn(
     }
     if !matches!(xs.dtype(), DType::BF16 | DType::F16 | DType::F32) {
         return Ok(None);
+    }
+
+    if let Some(intermediate) =
+        try_fused_hqz4_silu_gate_up(xs, gate, up, activation)?
+    {
+        return Ok(Some(down.forward(&intermediate)?));
     }
 
     if let Some(outputs) = try_forward_with_shared_quantized_activation(xs, &[gate, up])? {
@@ -1880,6 +1960,10 @@ pub fn try_fused_quantized_gate_up(
     }
     if !matches!(xs.dtype(), DType::BF16 | DType::F16 | DType::F32) {
         return Ok(None);
+    }
+
+    if let Some(output) = try_fused_hqz4_silu_gate_up(xs, gate, up, activation)? {
+        return Ok(Some(output));
     }
 
     if let Some(outputs) = try_forward_with_shared_quantized_activation(xs, &[gate, up])? {
@@ -1991,6 +2075,10 @@ pub fn try_fused_quantized_qkv(
     }
     if !matches!(xs.dtype(), DType::BF16 | DType::F16 | DType::F32) {
         return Ok(None);
+    }
+
+    if let Some(outputs) = try_fused_hqz4_qkv(xs, q, k, v)? {
+        return Ok(Some(outputs));
     }
 
     if let Some(outputs) = try_forward_with_shared_quantized_activation(xs, &[q, k, v])? {

@@ -365,10 +365,80 @@ pub struct HyperQuantLinear {
 }
 
 #[cfg(feature = "cuda")]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Hqz4CudaWeight {
     codes: Tensor,
     scales: Tensor,
+}
+
+#[cfg(feature = "cuda")]
+#[derive(Clone, Debug)]
+#[doc(hidden)]
+pub struct Hqz4CudaInner {
+    codes: Tensor,
+    scales: Tensor,
+    rows: usize,
+    cols: usize,
+    group_size: usize,
+}
+
+#[cfg(feature = "cuda")]
+pub(crate) fn try_fused_qkv_quantized(
+    activation: &QuantizedActivation,
+    q: &Hqz4CudaInner,
+    key: &Hqz4CudaInner,
+    value: &Hqz4CudaInner,
+) -> Result<Option<(Tensor, Tensor, Tensor)>> {
+    let Ok((_, input_width)) = activation.quantized().dims2() else {
+        return Ok(None);
+    };
+    if [q, key, value].iter().any(|weight| {
+        weight.cols != input_width
+            || weight.group_size != q.group_size
+            || !activation.quantized().device().same_device(weight.codes.device())
+            || !activation.quantized().device().same_device(weight.scales.device())
+    }) {
+        return Ok(None);
+    }
+    Ok(Some(cuda::qkv_matmul_quantized(
+        activation.quantized(),
+        activation.scales(),
+        q,
+        key,
+        value,
+        activation.source_shape(),
+        activation.source_dtype(),
+    )?))
+}
+
+#[cfg(feature = "cuda")]
+pub(crate) fn try_fused_silu_gate_up_quantized(
+    activation: &QuantizedActivation,
+    gate: &Hqz4CudaInner,
+    up: &Hqz4CudaInner,
+) -> Result<Option<Tensor>> {
+    let Ok((_, input_width)) = activation.quantized().dims2() else {
+        return Ok(None);
+    };
+    if gate.rows != up.rows
+        || gate.cols != input_width
+        || up.cols != input_width
+        || gate.group_size != up.group_size
+        || !activation.quantized().device().same_device(gate.codes.device())
+        || !activation.quantized().device().same_device(gate.scales.device())
+        || !activation.quantized().device().same_device(up.codes.device())
+        || !activation.quantized().device().same_device(up.scales.device())
+    {
+        return Ok(None);
+    }
+    Ok(Some(cuda::silu_gate_up_matmul_quantized(
+        activation.quantized(),
+        activation.scales(),
+        gate,
+        up,
+        activation.source_shape(),
+        activation.source_dtype(),
+    )?))
 }
 
 impl HyperQuantLinear {
@@ -749,6 +819,18 @@ impl QuantMethod for HyperQuantLinear {
             });
         }
         None
+    }
+
+    #[cfg(feature = "cuda")]
+    fn hqz4_cuda_inner(&self) -> Option<Hqz4CudaInner> {
+        let cuda_weight = self.cuda_weight.as_ref()?;
+        Some(Hqz4CudaInner {
+            codes: cuda_weight.codes.clone(),
+            scales: cuda_weight.scales.clone(),
+            rows: self.weight.rows(),
+            cols: self.weight.cols(),
+            group_size: self.weight.group_size(),
+        })
     }
 
     fn quantize_activation(&self, activation: &Tensor) -> Result<QuantizedActivation> {

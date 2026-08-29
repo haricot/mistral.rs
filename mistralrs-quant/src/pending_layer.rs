@@ -170,6 +170,11 @@ impl QuantMethod for PendingIsqLayer {
         self.resolve().ok()?.afq_inner()
     }
 
+    #[cfg(feature = "cuda")]
+    fn hqz4_cuda_inner(&self) -> Option<crate::hyperquant::Hqz4CudaInner> {
+        self.resolve().ok()?.hqz4_cuda_inner()
+    }
+
     fn activation_quantization_scheme(&self) -> Option<ActivationQuantizationScheme> {
         self.resolve().ok()?.activation_quantization_scheme()
     }
