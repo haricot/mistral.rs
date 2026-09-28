@@ -1,12 +1,10 @@
 name: Mistral ASD Integration
 on:
-  push:
-    branches: [asd_runner]
   workflow_dispatch:
     inputs:
       expected_seed_sha:
-        description: Exact current asd_runner seed SHA, empty to use workflow HEAD
-        required: false
+        description: Immutable 40-character commit SHA of the existing asd_runner branch
+        required: true
         type: string
 permissions:
   contents: read
@@ -16,7 +14,7 @@ concurrency:
 
 jobs:
   prepare:
-    if: github.ref == 'refs/heads/asd_runner'
+    if: github.ref == 'refs/heads/mirror_orch'
     runs-on: ubuntu-26.04
     timeout-minutes: 60
     permissions:
@@ -29,6 +27,7 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # Node24
         with:
+          ref: asd_runner
           fetch-depth: 0
           persist-credentials: true
       - name: Resolve immutable source set and Cargo.lock
@@ -39,9 +38,12 @@ jobs:
         run: |
           set -euo pipefail
           seed="$(git rev-parse HEAD)"
-          if [[ -n "${EXPECTED_SEED}" && "${EXPECTED_SEED}" != "${seed}" ]]; then
+          [[ "${EXPECTED_SEED}" =~ ^[0-9a-f]{40}$ ]] || { echo '::error::Expected exactly one full seed SHA'; exit 2; }
+          if [[ "${EXPECTED_SEED}" != "${seed}" ]]; then
             echo "::error::The requested asd_runner ref has moved"; exit 3
           fi
+          remote_seed="$(git ls-remote origin refs/heads/asd_runner | cut -f1)"
+          [[ "$remote_seed" == "$seed" ]] || { echo '::error::Source moved during checkout'; exit 3; }
           jq -e --arg candle "ac983d16750a136a8563def01926ee83a7831d22" \
             --arg base "20f607a77abd4738aa5594ee93a393a9fd284605" \
             --arg sm61 "d3813494903e5cfca01e12df596f3fe14a5d22ba" \

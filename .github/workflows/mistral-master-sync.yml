@@ -1,0 +1,82 @@
+name: Mistral Master Sync
+on:
+  workflow_dispatch:
+    inputs:
+      master_sha:
+        description: Optional exact 40-character source master SHA, empty to use its current tip
+        required: false
+        type: string
+  schedule:
+    - cron: '23 4 * * 1'
+permissions:
+  contents: read
+concurrency:
+  group: mistral-master-to-mirror
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.ref == 'refs/heads/mirror_orch'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # Node24
+        with:
+          ref: mirror_orch
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Merge pinned master into orchestration without changing master
+        shell: bash
+        env:
+          EXPECTED_MASTER: ${{ inputs.master_sha }}
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/mistral-master-sync"
+          mkdir -p "$report"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          mirror="$(git rev-parse HEAD)"
+          git fetch --no-tags origin +refs/heads/master:refs/remotes/origin/master
+          master="$(git rev-parse refs/remotes/origin/master)"
+          [[ -z "$EXPECTED_MASTER" || "$EXPECTED_MASTER" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::Invalid master SHA"; exit 2;
+          }
+          [[ -z "$EXPECTED_MASTER" || "$EXPECTED_MASTER" == "$master" ]] || {
+            echo "::error::master moved from requested SHA"; exit 3;
+          }
+          jq -n --arg mirror "$mirror" --arg master "$master"             '{schema_version:1,source:"master",destination:"mirror_orch",
+              before_sha:$mirror,source_sha:$master,status:"PREPARING"}' > "$report/report.json"
+          if git merge-base --is-ancestor "$master" HEAD; then
+            echo "::notice::mirror_orch already includes master"
+            jq '.status="UP_TO_DATE" | .result_sha=.before_sha' "$report/report.json" > "$report/report.tmp"
+            mv "$report/report.tmp" "$report/report.json"
+            exit 0
+          fi
+          if ! git merge --no-ff --no-edit "$master" > "$report/merge.log" 2>&1; then
+            git diff --name-only --diff-filter=U > "$report/conflicts.txt"
+            git ls-files -u > "$report/index-stages.txt"
+            git merge --abort || true
+            jq '.status="CONFLICT" ' "$report/report.json" > "$report/report.tmp"
+            mv "$report/report.tmp" "$report/report.json"
+            echo "::error::Master sync needs review; mirror_orch remains unchanged"
+            exit 1
+          fi
+          result="$(git rev-parse HEAD)"
+          remote_mirror="$(git ls-remote origin refs/heads/mirror_orch | cut -f1)"
+          [[ "$remote_mirror" == "$mirror" ]] || {
+            echo "::error::mirror_orch moved; refuse stale push"; exit 3;
+          }
+          git push --force-with-lease="refs/heads/mirror_orch:$mirror"             origin "HEAD:refs/heads/mirror_orch"
+          jq --arg result "$result" '.status="SYNCED" | .result_sha=$result'             "$report/report.json" > "$report/report.tmp"
+          mv "$report/report.tmp" "$report/report.json"
+          echo "Merged master $master into mirror_orch $result; master unchanged" >> "$GITHUB_STEP_SUMMARY"
+      - name: Preserve exact master sync and conflict report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # Node24
+        with:
+          name: mistral-master-sync-${{ github.run_id }}
+          path: ${{ runner.temp }}/mistral-master-sync/
+          if-no-files-found: warn
+          retention-days: 30
