@@ -1318,12 +1318,8 @@ mod tests {
         assert_eq!(dtype.type_size(), Some(17));
         assert_eq!(dtype.candle_dtype()?, GgmlDType::Mxfp4);
         assert_eq!(ggml_dtype_alignment(GgmlDType::Mxfp4), 1);
-        let tensor = qtensor_from_gguf_data(
-            GgmlDType::Mxfp4,
-            &[0u8; 17],
-            vec![1, 32],
-            &Device::Cpu,
-        )?;
+        let tensor =
+            qtensor_from_gguf_data(GgmlDType::Mxfp4, &[0u8; 17], vec![1, 32], &Device::Cpu)?;
         assert_eq!(tensor.dtype(), GgmlDType::Mxfp4);
         Ok(())
     }
