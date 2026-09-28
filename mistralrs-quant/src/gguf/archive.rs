@@ -12,8 +12,8 @@ use candle_core::{
     quantized::{
         gguf_file::Value,
         k_quants::{
-            BlockQ2K, BlockQ3K, BlockQ4K, BlockQ4_0, BlockQ4_1, BlockQ5K, BlockQ5_0, BlockQ5_1,
-            BlockQ6K, BlockQ8K, BlockQ8_0, BlockQ8_1,
+            BlockMxfp4, BlockQ2K, BlockQ3K, BlockQ4K, BlockQ4_0, BlockQ4_1, BlockQ5K, BlockQ5_0,
+            BlockQ5_1, BlockQ6K, BlockQ8K, BlockQ8_0, BlockQ8_1,
         },
         GgmlDType, QStorage, QTensor,
     },
@@ -176,6 +176,7 @@ impl GgufDType {
             14 => GgmlDType::Q6K,
             15 => GgmlDType::Q8K,
             30 => GgmlDType::BF16,
+            39 => GgmlDType::Mxfp4,
             raw => candle_core::bail!("GGUF dtype {raw} is not supported by Candle"),
         };
         Ok(dtype)
@@ -627,6 +628,7 @@ const fn ggml_dtype_alignment(dtype: GgmlDType) -> usize {
         GgmlDType::Q6K => align_of::<BlockQ6K>(),
         GgmlDType::Q8K => align_of::<BlockQ8K>(),
         GgmlDType::BF16 => align_of::<bf16>(),
+        GgmlDType::Mxfp4 => align_of::<BlockMxfp4>(),
     }
 }
 
@@ -1308,6 +1310,23 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::*;
+
+    #[test]
+    fn mxfp4_gguf_dtype_matches_candle_block_layout() -> candle_core::Result<()> {
+        let dtype = GgufDType::new(39);
+        assert_eq!(dtype.block_size(), Some(32));
+        assert_eq!(dtype.type_size(), Some(17));
+        assert_eq!(dtype.candle_dtype()?, GgmlDType::Mxfp4);
+        assert_eq!(ggml_dtype_alignment(GgmlDType::Mxfp4), 1);
+        let tensor = qtensor_from_gguf_data(
+            GgmlDType::Mxfp4,
+            &[0u8; 17],
+            vec![1, 32],
+            &Device::Cpu,
+        )?;
+        assert_eq!(tensor.dtype(), GgmlDType::Mxfp4);
+        Ok(())
+    }
 
     struct TestTensor {
         name: &'static str,

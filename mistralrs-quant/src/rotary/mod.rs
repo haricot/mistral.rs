@@ -283,12 +283,12 @@ fn typed_slice<'a, T>(xs: &'a [T], layout: &Layout, name: &'static str) -> Resul
 }
 
 fn cpu_positions<'a>(
-    storage_and_layout: &'a Option<(std::sync::RwLockReadGuard<'a, Storage>, &'a Layout)>,
+    storage_and_layout: Option<(&'a Storage, &'a Layout)>,
 ) -> Result<Option<&'a [u32]>> {
     let Some((storage, layout)) = storage_and_layout else {
         return Ok(None);
     };
-    let Storage::Cpu(CpuStorage::U32(positions)) = &**storage else {
+    let Storage::Cpu(CpuStorage::U32(positions)) = storage else {
         candle_core::bail!("RoPE positions must be CPU u32");
     };
     Ok(Some(typed_slice(positions, layout, "positions")?))
@@ -413,7 +413,11 @@ fn cpu_apply_rotary_q(
     let sin = sin.contiguous()?;
     let positions = positions.map(Tensor::contiguous).transpose()?;
     let position_storage_and_layout = positions.as_ref().map(Tensor::storage_and_layout);
-    let positions = cpu_positions(&position_storage_and_layout)?;
+    let positions = cpu_positions(
+        position_storage_and_layout
+            .as_ref()
+            .map(|(storage, layout)| (&**storage, *layout)),
+    )?;
 
     let (q_s, q_l) = q.storage_and_layout();
     let (cos_s, cos_l) = cos.storage_and_layout();
