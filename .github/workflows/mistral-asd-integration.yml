@@ -55,7 +55,14 @@ jobs:
             grep -E "^${crate} = " Cargo.toml | \
               grep -Fq 'rev = "ac983d16750a136a8563def01926ee83a7831d22"' || exit 3
           done
-          rustup toolchain install stable --profile minimal
+          rustup toolchain install stable --profile minimal --component rustfmt
+          report="$RUNNER_TEMP/mistral-asd-preflight"
+          mkdir -p "$report"
+          if ! cargo +stable fmt --all -- --check > "$report/fmt.log" 2>&1; then
+            echo "::error::Rustfmt preflight failed on the exact asd_runner seed"
+            cat "$report/fmt.log"
+            exit 1
+          fi
           cargo +stable update --workspace
           cargo +stable metadata --locked --format-version 1 > "$RUNNER_TEMP/asd-metadata.json"
           ! grep -Fq '267c4d8fa8f0f1d2e01c0365875eaedd98414c1e' Cargo.lock
@@ -76,6 +83,15 @@ jobs:
           echo "lock=${lock}" >> "$GITHUB_OUTPUT"
           printf 'Candidate %s, lock %s, Candle %s\n' \
             "$candidate" "$lock" "ac983d16750a136a8563def01926ee83a7831d22" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Preserve preflight diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # Node24
+        with:
+          name: mistral-asd-preflight-${{ github.run_id }}
+          path: ${{ runner.temp }}/mistral-asd-preflight/
+          if-no-files-found: ignore
+          retention-days: 21
 
   cpu:
     needs: prepare
