@@ -1,0 +1,293 @@
+name: Mistral ASD Integration
+on:
+  push:
+    branches: [asd_runner]
+  workflow_dispatch:
+    inputs:
+      expected_seed_sha:
+        description: Exact current asd_runner seed SHA, empty to use workflow HEAD
+        required: false
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: mistral-asd-integration
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.ref == 'refs/heads/asd_runner'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    outputs:
+      seed: ${{ steps.pin.outputs.seed }}
+      candidate: ${{ steps.pin.outputs.candidate }}
+      candidate_ref: ${{ steps.pin.outputs.candidate_ref }}
+      lock: ${{ steps.pin.outputs.lock }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # Node24
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Resolve immutable source set and Cargo.lock
+        id: pin
+        shell: bash
+        env:
+          EXPECTED_SEED: ${{ inputs.expected_seed_sha }}
+        run: |
+          set -euo pipefail
+          seed="$(git rev-parse HEAD)"
+          if [[ -n "${EXPECTED_SEED}" && "${EXPECTED_SEED}" != "${seed}" ]]; then
+            echo "::error::The requested asd_runner ref has moved"; exit 3
+          fi
+          jq -e --arg candle "ac983d16750a136a8563def01926ee83a7831d22" \
+            --arg base "20f607a77abd4738aa5594ee93a393a9fd284605" \
+            --arg sm61 "d3813494903e5cfca01e12df596f3fe14a5d22ba" \
+            '.schema_version==1 and .candle_sha==$candle and .base_master_sha==$base and .sm61_source_sha==$sm61' \
+            mistral-integration/sources.json >/dev/null
+          git merge-base --is-ancestor "20f607a77abd4738aa5594ee93a393a9fd284605" HEAD
+          git merge-base --is-ancestor "d3813494903e5cfca01e12df596f3fe14a5d22ba" HEAD
+          for crate in candle-core candle-nn candle-flash-attn-v3 candle-metal-kernels; do
+            grep -E "^${crate} = " Cargo.toml | \
+              grep -Fq 'rev = "ac983d16750a136a8563def01926ee83a7831d22"' || exit 3
+          done
+          rustup toolchain install stable --profile minimal
+          cargo +stable update --workspace
+          cargo +stable metadata --locked --format-version 1 > "$RUNNER_TEMP/asd-metadata.json"
+          ! grep -Fq '267c4d8fa8f0f1d2e01c0365875eaedd98414c1e' Cargo.lock
+          grep -Fq 'ac983d16750a136a8563def01926ee83a7831d22' Cargo.lock
+          lock="$(sha256sum Cargo.lock | cut -d' ' -f1)"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Cargo.lock
+          if ! git diff --cached --quiet; then
+            git commit -m 'build(asd): resolve exact pinned Candle v2 lockfile'
+          fi
+          candidate="$(git rev-parse HEAD)"
+          ref="integration/asd_runner-${GITHUB_RUN_ID}"
+          git push origin "HEAD:refs/heads/${ref}"
+          echo "seed=${seed}" >> "$GITHUB_OUTPUT"
+          echo "candidate=${candidate}" >> "$GITHUB_OUTPUT"
+          echo "candidate_ref=${ref}" >> "$GITHUB_OUTPUT"
+          echo "lock=${lock}" >> "$GITHUB_OUTPUT"
+          printf 'Candidate %s, lock %s, Candle %s\n' \
+            "$candidate" "$lock" "ac983d16750a136a8563def01926ee83a7831d22" >> "$GITHUB_STEP_SUMMARY"
+
+  cpu:
+    needs: prepare
+    runs-on: ubuntu-26.04
+    timeout-minutes: 100
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ needs.prepare.outputs.candidate }}
+          persist-credentials: false
+      - name: Check CPU, formatting and exact lock
+        shell: bash
+        env:
+          LOCK: ${{ needs.prepare.outputs.lock }}
+          SHA: ${{ needs.prepare.outputs.candidate }}
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/mistral-asd-cpu"
+          mkdir -p "$report"
+          test "$(git rev-parse HEAD)" = "$SHA"
+          test "$(sha256sum Cargo.lock | cut -d' ' -f1)" = "$LOCK"
+          rustup toolchain install stable --profile minimal --component rustfmt
+          cargo +stable fmt --all -- --check > "$report/fmt.log" 2>&1
+          cargo +stable check --locked -p mistralrs-core -p mistralrs-quant \
+            -p mistralrs-paged-attn > "$report/check.log" 2>&1
+          cargo +stable test --locked -p mistralrs-quant --lib \
+            > "$report/tests.log" 2>&1
+          cp Cargo.lock "$report/Cargo.lock"
+          jq -n --arg sha "$SHA" --arg lock "$LOCK" \
+            '{schema_version:1,candidate_sha:$sha,lock_sha256:$lock,status:"CPU_PASSED"}' \
+            > "$report/report.json"
+      - name: Preserve CPU proof
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7 / Node24
+        with:
+          name: mistral-asd-cpu-${{ github.run_id }}
+          path: ${{ runner.temp }}/mistral-asd-cpu/
+          if-no-files-found: warn
+          retention-days: 90
+
+  cuda_compile:
+    needs: [prepare, cpu]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 150
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ needs.prepare.outputs.candidate }}
+          persist-credentials: false
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: haricot/candle
+          ref: c565a96bd05374706bd13951f6d126f331f749ae
+          path: .ci-tools
+          persist-credentials: false
+      - name: Build same hosted SM61 compiler image as Candle
+        run: |
+          set -euo pipefail
+          docker build --pull \
+            -f .ci-tools/.github/container/Containerfile.cuda1292-ubuntu2604 \
+            -t mistral-asd-cuda1292 .ci-tools/.github/container
+      - name: Compile Mistral.rs BF16 and FP8 for sm_61 without GPU execution
+        shell: bash
+        env:
+          SHA: ${{ needs.prepare.outputs.candidate }}
+          LOCK: ${{ needs.prepare.outputs.lock }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/mistral-asd-cuda" "$RUNNER_TEMP/asd-home" "$RUNNER_TEMP/asd-cargo"
+          report="$RUNNER_TEMP/mistral-asd-cuda"
+          test "$(git rev-parse HEAD)" = "$SHA"
+          test "$(sha256sum Cargo.lock | cut -d' ' -f1)" = "$LOCK"
+          docker run --rm --user "$(id -u):$(id -g)" \
+            --security-opt=no-new-privileges \
+            --volume "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE:rw" \
+            --volume "$RUNNER_TEMP:$RUNNER_TEMP:rw" \
+            --workdir "$GITHUB_WORKSPACE" \
+            --env "HOME=$RUNNER_TEMP/asd-home" \
+            --env "CARGO_HOME=$RUNNER_TEMP/asd-cargo" \
+            --env "RUSTUP_HOME=/opt/rustup" \
+            --env "PATH=/usr/local/cuda-12.9/bin:/opt/cargo/bin:/usr/bin:/bin" \
+            --env CUDA_HOME=/usr/local/cuda-12.9 \
+            --env NVCC_CCBIN=/usr/bin/g++-14 \
+            --env CC=/usr/bin/gcc-14 --env CXX=/usr/bin/g++-14 \
+            --env CUDA_COMPUTE_CAP=61 \
+            mistral-asd-cuda1292 bash -euc '
+              git config --global --add safe.directory "$PWD"
+              nvcc --version
+              cargo check --locked -p mistralrs-cli --no-default-features \
+                --features cuda-legacy-bf16,cuda-legacy-fp8
+              cargo test --locked -p mistralrs-core --no-default-features \
+                --features cuda-legacy-bf16,cuda-legacy-fp8 \
+                --test asd_sm61_smoke --no-run
+            ' > "$report/compile.log" 2>&1 || {
+              tail -n 100 "$report/compile.log"; exit 1;
+            }
+          cp Cargo.lock "$report/Cargo.lock"
+          jq -n --arg sha "$SHA" --arg lock "$LOCK" \
+            '{schema_version:1,candidate_sha:$sha,lock_sha256:$lock,
+              target:"sm_61",cuda:"12.9.2",gpu_executed:false,status:"CUDA_COMPILE_PASSED"}' \
+            > "$report/report.json"
+      - name: Preserve hosted CUDA proof
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: mistral-asd-cuda-${{ github.run_id }}
+          path: ${{ runner.temp }}/mistral-asd-cuda/
+          if-no-files-found: warn
+          retention-days: 90
+
+  gpu:
+    needs: [prepare, cpu, cuda_compile]
+    runs-on: [self-hosted, linux, x64, cuda, sm61]
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ needs.prepare.outputs.candidate }}
+          persist-credentials: false
+      - name: Execute model-free physical Pascal smoke test
+        shell: bash
+        env:
+          SHA: ${{ needs.prepare.outputs.candidate }}
+          LOCK: ${{ needs.prepare.outputs.lock }}
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/mistral-asd-gpu"
+          mkdir -p "$report"
+          test "$(git rev-parse HEAD)" = "$SHA"
+          test "$(sha256sum Cargo.lock | cut -d' ' -f1)" = "$LOCK"
+          nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader > "$report/gpu.txt"
+          grep -Eq ',[[:space:]]*6\.1([[:space:]]|$)' "$report/gpu.txt"
+          if test -x /opt/cuda129/bin/nvcc; then
+            export CUDA_HOME=/opt/cuda129 CUDA_ROOT=/opt/cuda129
+            export PATH="/opt/cuda129/bin:$PATH"
+          fi
+          export CUDA_COMPUTE_CAP=61
+          export NVCC_CCBIN=/usr/bin/g++-14
+          rustup toolchain install stable --profile minimal
+          nvcc --version > "$report/nvcc.txt"
+          cargo +stable test --locked -p mistralrs-core --no-default-features \
+            --features cuda-legacy-bf16,cuda-legacy-fp8 \
+            --test asd_sm61_smoke -- --nocapture > "$report/smoke.log" 2>&1 || {
+              tail -n 100 "$report/smoke.log"; exit 1;
+            }
+          jq -n --arg sha "$SHA" --arg lock "$LOCK" \
+            '{schema_version:1,candidate_sha:$sha,lock_sha256:$lock,
+              target:"sm_61",gpu_executed:true,status:"GPU_PASSED"}' > "$report/report.json"
+      - name: Preserve physical GPU proof
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: mistral-asd-gpu-${{ github.run_id }}
+          path: ${{ runner.temp }}/mistral-asd-gpu/
+          if-no-files-found: warn
+          retention-days: 90
+
+  promote:
+    needs: [prepare, cpu, cuda_compile, gpu]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ needs.prepare.outputs.candidate }}
+          fetch-depth: 0
+          persist-credentials: true
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # Node24
+        with:
+          pattern: mistral-asd-*-${{ github.run_id }}
+          path: ${{ runner.temp }}/asd-proof
+          merge-multiple: false
+      - name: Gate on three matching SHA and lock proofs; fast-forward only
+        shell: bash
+        env:
+          SEED: ${{ needs.prepare.outputs.seed }}
+          SHA: ${{ needs.prepare.outputs.candidate }}
+          TEMP_REF: ${{ needs.prepare.outputs.candidate_ref }}
+          LOCK: ${{ needs.prepare.outputs.lock }}
+        run: |
+          set -euo pipefail
+          for gate in cpu cuda gpu; do
+            report="$RUNNER_TEMP/asd-proof/mistral-asd-${gate}-${GITHUB_RUN_ID}/report.json"
+            test -s "$report"
+            jq -e --arg sha "$SHA" --arg lock "$LOCK" --arg gate "$gate" \
+              '.candidate_sha==$sha and .lock_sha256==$lock and
+              (( $gate=="cpu" and .status=="CPU_PASSED" ) or
+               ( $gate=="cuda" and .status=="CUDA_COMPILE_PASSED" and .gpu_executed==false ) or
+               ( $gate=="gpu" and .status=="GPU_PASSED" and .gpu_executed==true ))' \
+              "$report" >/dev/null
+          done
+          test "$(git rev-parse HEAD)" = "$SHA"
+          test "$(sha256sum Cargo.lock | cut -d' ' -f1)" = "$LOCK"
+          remote="$(git ls-remote origin refs/heads/asd_runner | cut -f1)"
+          test "$remote" = "$SEED" || { echo "::error::asd_runner moved; no promotion"; exit 3; }
+          git merge-base --is-ancestor "$SEED" "$SHA"
+          git push origin "$SHA:refs/heads/asd_runner"
+          tag="promoted/asd_runner/${SHA:0:12}-${GITHUB_RUN_ID}"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git tag -a "$tag" "$SHA" \
+            -m "Mistral.rs ASD CPU + hosted sm61 CUDA + physical Pascal proof, run ${GITHUB_RUN_ID}"
+          git push origin "refs/tags/$tag"
+          current="$(git ls-remote origin "refs/heads/$TEMP_REF" | cut -f1)"
+          if test "$current" = "$SHA"; then
+            git push origin ":refs/heads/$TEMP_REF"
+          fi
+          echo "PROMOTED asd_runner $SHA after three matching proofs; tag $tag" >> "$GITHUB_STEP_SUMMARY"
