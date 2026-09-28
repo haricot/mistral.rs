@@ -1,6 +1,6 @@
-use candle_core::{Result, Tensor};
 #[cfg(has_fa3_fp8_paged)]
 use candle_core::DType;
+use candle_core::{Result, Tensor};
 
 pub const USE_FA3_FP8_PAGED: bool = cfg!(has_fa3_fp8_paged);
 pub const FA3_DECODE_MAX_QUERY_LEN: usize = 128;
