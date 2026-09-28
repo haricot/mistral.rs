@@ -117,10 +117,18 @@ jobs:
           test "$(sha256sum Cargo.lock | cut -d' ' -f1)" = "$LOCK"
           rustup toolchain install stable --profile minimal --component rustfmt
           cargo +stable fmt --all -- --check > "$report/fmt.log" 2>&1
-          cargo +stable check --locked -p mistralrs-core -p mistralrs-quant \
-            -p mistralrs-paged-attn > "$report/check.log" 2>&1
-          cargo +stable test --locked -p mistralrs-quant --lib \
-            > "$report/tests.log" 2>&1
+          if ! cargo +stable check --locked -p mistralrs-core -p mistralrs-quant \
+            -p mistralrs-paged-attn > "$report/check.log" 2>&1; then
+            echo "::error::CPU check failed; final diagnostics:"
+            tail -n 120 "$report/check.log"
+            exit 1
+          fi
+          if ! cargo +stable test --locked -p mistralrs-quant --lib \
+            > "$report/tests.log" 2>&1; then
+            echo "::error::CPU unit tests failed; final diagnostics:"
+            tail -n 120 "$report/tests.log"
+            exit 1
+          fi
           cp Cargo.lock "$report/Cargo.lock"
           jq -n --arg sha "$SHA" --arg lock "$LOCK" \
             '{schema_version:1,candidate_sha:$sha,lock_sha256:$lock,status:"CPU_PASSED"}' \
