@@ -176,6 +176,17 @@ jobs:
           report="$RUNNER_TEMP/mistral-asd-cuda"
           test "$(git rev-parse HEAD)" = "$SHA"
           test "$(sha256sum Cargo.lock | cut -d' ' -f1)" = "$LOCK"
+          # Keep compiler progress visible, including during slow CUDA kernel builds.
+          # This only changes future runs: the active run uses its pinned workflow SHA.
+          touch "$report/compile.log"
+          (
+            while sleep 180; do
+              printf 'CUDA build heartbeat: %s UTC; recent compiler output:\n' "$(date -u +%FT%TZ)"
+              tail -n 6 "$report/compile.log" || true
+            done
+          ) &
+          heartbeat_pid=$!
+          trap 'kill "$heartbeat_pid" 2>/dev/null || true' EXIT
           docker run --rm --user "$(id -u):$(id -g)" \
             --security-opt=no-new-privileges \
             --volume "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE:rw" \
@@ -197,9 +208,9 @@ jobs:
               cargo test --locked -p mistralrs-core --no-default-features \
                 --features cuda-legacy-bf16,cuda-legacy-fp8 \
                 --test asd_sm61_smoke --no-run
-            ' > "$report/compile.log" 2>&1 || {
-              tail -n 100 "$report/compile.log"; exit 1;
-            }
+            ' 2>&1 | tee "$report/compile.log"
+          kill "$heartbeat_pid" 2>/dev/null || true
+          trap - EXIT
           cp Cargo.lock "$report/Cargo.lock"
           jq -n --arg sha "$SHA" --arg lock "$LOCK" \
             '{schema_version:1,candidate_sha:$sha,lock_sha256:$lock,
