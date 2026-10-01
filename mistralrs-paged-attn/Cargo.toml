@@ -35,6 +35,7 @@ cuda = [
 ]
 cuda-legacy-bf16 = ["cuda", "candle-core/cuda-legacy-bf16"]
 cuda-legacy-fp8 = ["cuda", "candle-core/cuda-legacy-fp8"]
+cuda-legacy-fp4 = ["cuda", "candle-core/cuda-legacy-fp4"]
 metal = [
     "candle-core/metal",
     "dep:objc2-metal",

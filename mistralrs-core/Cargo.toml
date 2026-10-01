@@ -140,6 +140,12 @@ cuda-legacy-fp8 = [
     "mistralrs-quant/cuda-legacy-fp8",
     "mistralrs-paged-attn/cuda-legacy-fp8",
 ]
+cuda-legacy-fp4 = [
+    "cuda",
+    "candle-core/cuda-legacy-fp4",
+    "mistralrs-quant/cuda-legacy-fp4",
+    "mistralrs-paged-attn/cuda-legacy-fp4",
+]
 cudnn = ["candle-core/cudnn"]
 cutile = ["cuda", "mistralrs-quant/cutile"]
 metal = [

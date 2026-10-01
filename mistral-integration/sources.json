@@ -3,15 +3,16 @@
   "base_master_sha": "20f607a77abd4738aa5594ee93a393a9fd284605",
   "sm61_source_sha": "d3813494903e5cfca01e12df596f3fe14a5d22ba",
   "candle_repository": "haricot/candle",
-  "candle_branch": "cuda_asd_runner_v2",
-  "candle_sha": "ac983d16750a136a8563def01926ee83a7831d22",
+  "candle_branch": "candle_asd_cuda",
+  "candle_sha": "89adbfa5b8af544f65ad33c7d2facf389e58704e",
   "features": [
     "cuda-legacy-bf16",
-    "cuda-legacy-fp8"
+    "cuda-legacy-fp8",
+    "cuda-legacy-fp4"
   ],
   "deferred": [
     "cpu_moe_expert",
     "cuda_asd_runner_extended"
   ],
-  "comment": "Physical Pascal gate must use exact candidate SHA and CPU-resolved Cargo.lock"
+  "comment": "Physical Pascal gate must use exact candidate SHA, candle_asd_cuda provenance, and CPU-resolved Cargo.lock"
 }

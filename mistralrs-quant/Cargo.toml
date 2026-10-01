@@ -58,6 +58,7 @@ cuda = [
 ]
 cuda-legacy-bf16 = ["cuda", "candle-core/cuda-legacy-bf16"]
 cuda-legacy-fp8 = ["cuda", "candle-core/cuda-legacy-fp8"]
+cuda-legacy-fp4 = ["cuda", "candle-core/cuda-legacy-fp4"]
 cutile = [
     "cuda",
     "dep:cutile",
