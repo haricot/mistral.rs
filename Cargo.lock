@@ -643,7 +643,7 @@ checksum = "ade8366b8bd5ba243f0a58f036cc0ca8a2f069cff1a2351ef1cac6b083e16fc0"
 [[package]]
 name = "candle-core"
 version = "0.11.0"
-source = "git+https://github.com/haricot/candle.git?rev=ac983d16750a136a8563def01926ee83a7831d22#ac983d16750a136a8563def01926ee83a7831d22"
+source = "git+https://github.com/haricot/candle.git?rev=89adbfa5b8af544f65ad33c7d2facf389e58704e#89adbfa5b8af544f65ad33c7d2facf389e58704e"
 dependencies = [
  "accelerate-src",
  "byteorder",
@@ -676,7 +676,7 @@ dependencies = [
 [[package]]
 name = "candle-flash-attn-v3"
 version = "0.11.0"
-source = "git+https://github.com/haricot/candle.git?rev=ac983d16750a136a8563def01926ee83a7831d22#ac983d16750a136a8563def01926ee83a7831d22"
+source = "git+https://github.com/haricot/candle.git?rev=89adbfa5b8af544f65ad33c7d2facf389e58704e#89adbfa5b8af544f65ad33c7d2facf389e58704e"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -689,7 +689,7 @@ dependencies = [
 [[package]]
 name = "candle-kernels"
 version = "0.11.0"
-source = "git+https://github.com/haricot/candle.git?rev=ac983d16750a136a8563def01926ee83a7831d22#ac983d16750a136a8563def01926ee83a7831d22"
+source = "git+https://github.com/haricot/candle.git?rev=89adbfa5b8af544f65ad33c7d2facf389e58704e#89adbfa5b8af544f65ad33c7d2facf389e58704e"
 dependencies = [
  "cudaforge",
 ]
@@ -697,7 +697,7 @@ dependencies = [
 [[package]]
 name = "candle-metal-kernels"
 version = "0.11.0"
-source = "git+https://github.com/haricot/candle.git?rev=ac983d16750a136a8563def01926ee83a7831d22#ac983d16750a136a8563def01926ee83a7831d22"
+source = "git+https://github.com/haricot/candle.git?rev=89adbfa5b8af544f65ad33c7d2facf389e58704e#89adbfa5b8af544f65ad33c7d2facf389e58704e"
 dependencies = [
  "block2",
  "half",
@@ -712,7 +712,7 @@ dependencies = [
 [[package]]
 name = "candle-nn"
 version = "0.11.0"
-source = "git+https://github.com/haricot/candle.git?rev=ac983d16750a136a8563def01926ee83a7831d22#ac983d16750a136a8563def01926ee83a7831d22"
+source = "git+https://github.com/haricot/candle.git?rev=89adbfa5b8af544f65ad33c7d2facf389e58704e#89adbfa5b8af544f65ad33c7d2facf389e58704e"
 dependencies = [
  "accelerate-src",
  "candle-core",
