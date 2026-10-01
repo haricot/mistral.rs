@@ -381,4 +381,4 @@ jobs:
           gh release create "$TAG" "$pkg#Linux x86_64 SM61 binary" "$sum#SHA-256" \
             --verify-tag --prerelease \
             --title "mistral.rs ASD SM61 ${SHA:0:12}" \
-            --notes "Promoted asd_runner candidate `$SHA`, validated on CPU, hosted CUDA 12.9.2 SM61 compilation, and a physical Pascal SM61 GPU. Candle: `89adbfa5b8af544f65ad33c7d2facf389e58704e`. Features: cuda-legacy-bf16, cuda-legacy-fp8, cuda-legacy-fp4."
+            --notes "Promoted asd_runner candidate $SHA, validated on CPU, hosted CUDA 12.9.2 SM61 compilation, and a physical Pascal SM61 GPU. Candle: 89adbfa5b8af544f65ad33c7d2facf389e58704e. Features: cuda-legacy-bf16, cuda-legacy-fp8, cuda-legacy-fp4."
