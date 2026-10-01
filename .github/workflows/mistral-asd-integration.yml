@@ -3,8 +3,9 @@ on:
   workflow_dispatch:
     inputs:
       expected_seed_sha:
-        description: Immutable 40-character commit SHA of the existing asd_runner branch
-        required: true
+        description: Optional expected asd_runner SHA; leave empty to pin the current asd_runner head automatically
+        required: false
+        default: ""
         type: string
       publish_binary:
         description: Build and publish a downloadable Linux x86_64 SM61 binary after promotion
@@ -43,9 +44,11 @@ jobs:
         run: |
           set -euo pipefail
           seed="$(git rev-parse HEAD)"
-          [[ "${EXPECTED_SEED}" =~ ^[0-9a-f]{40}$ ]] || { echo '::error::Expected exactly one full seed SHA'; exit 2; }
-          if [[ "${EXPECTED_SEED}" != "${seed}" ]]; then
-            echo "::error::The requested asd_runner ref has moved"; exit 3
+          if [[ -n "${EXPECTED_SEED}" ]]; then
+            [[ "${EXPECTED_SEED}" =~ ^[0-9a-f]{40}$ ]] || { echo '::error::expected_seed_sha must be empty or exactly one full 40-character SHA'; exit 2; }
+            if [[ "${EXPECTED_SEED}" != "${seed}" ]]; then
+              echo "::error::expected_seed_sha is not the current asd_runner head (actual: $seed)"; exit 3
+            fi
           fi
           remote_seed="$(git ls-remote origin refs/heads/asd_runner | cut -f1)"
           [[ "$remote_seed" == "$seed" ]] || { echo '::error::Source moved during checkout'; exit 3; }
