@@ -6,6 +6,11 @@ on:
         description: Immutable 40-character commit SHA of the existing asd_runner branch
         required: true
         type: string
+      publish_binary:
+        description: Build and publish a downloadable Linux x86_64 SM61 binary after promotion
+        required: false
+        default: false
+        type: boolean
 permissions:
   contents: read
 concurrency:
@@ -44,16 +49,23 @@ jobs:
           fi
           remote_seed="$(git ls-remote origin refs/heads/asd_runner | cut -f1)"
           [[ "$remote_seed" == "$seed" ]] || { echo '::error::Source moved during checkout'; exit 3; }
-          jq -e --arg candle "ac983d16750a136a8563def01926ee83a7831d22" \
+          jq -e --arg candle "89adbfa5b8af544f65ad33c7d2facf389e58704e" \
+            --arg candle_branch "candle_asd_cuda" \
             --arg base "20f607a77abd4738aa5594ee93a393a9fd284605" \
             --arg sm61 "d3813494903e5cfca01e12df596f3fe14a5d22ba" \
-            '.schema_version==1 and .candle_sha==$candle and .base_master_sha==$base and .sm61_source_sha==$sm61' \
+            '.schema_version==1 and
+             .candle_repository=="haricot/candle" and
+             .candle_branch==$candle_branch and
+             .candle_sha==$candle and
+             .base_master_sha==$base and
+             .sm61_source_sha==$sm61 and
+             (.features | sort) == (["cuda-legacy-bf16","cuda-legacy-fp8","cuda-legacy-fp4"] | sort)' \
             mistral-integration/sources.json >/dev/null
           git merge-base --is-ancestor "20f607a77abd4738aa5594ee93a393a9fd284605" HEAD
           git merge-base --is-ancestor "d3813494903e5cfca01e12df596f3fe14a5d22ba" HEAD
           for crate in candle-core candle-nn candle-flash-attn-v3 candle-metal-kernels; do
             grep -E "^${crate} = " Cargo.toml | \
-              grep -Fq 'rev = "ac983d16750a136a8563def01926ee83a7831d22"' || exit 3
+              grep -Fq 'rev = "89adbfa5b8af544f65ad33c7d2facf389e58704e"' || exit 3
           done
           rustup toolchain install stable --profile minimal --component rustfmt
           report="$RUNNER_TEMP/mistral-asd-preflight"
@@ -66,7 +78,7 @@ jobs:
           cargo +stable update --workspace
           cargo +stable metadata --locked --format-version 1 > "$RUNNER_TEMP/asd-metadata.json"
           ! grep -Fq '267c4d8fa8f0f1d2e01c0365875eaedd98414c1e' Cargo.lock
-          grep -Fq 'ac983d16750a136a8563def01926ee83a7831d22' Cargo.lock
+          grep -Fq '89adbfa5b8af544f65ad33c7d2facf389e58704e' Cargo.lock
           lock="$(sha256sum Cargo.lock | cut -d' ' -f1)"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
@@ -82,7 +94,7 @@ jobs:
           echo "candidate_ref=${ref}" >> "$GITHUB_OUTPUT"
           echo "lock=${lock}" >> "$GITHUB_OUTPUT"
           printf 'Candidate %s, lock %s, Candle %s\n' \
-            "$candidate" "$lock" "ac983d16750a136a8563def01926ee83a7831d22" >> "$GITHUB_STEP_SUMMARY"
+            "$candidate" "$lock" "89adbfa5b8af544f65ad33c7d2facf389e58704e" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Preserve preflight diagnostics
         if: always()
@@ -156,7 +168,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: haricot/candle
-          ref: c565a96bd05374706bd13951f6d126f331f749ae
+          ref: 89adbfa5b8af544f65ad33c7d2facf389e58704e
           path: .ci-tools
           persist-credentials: false
       - name: Build same hosted SM61 compiler image as Candle
@@ -165,11 +177,12 @@ jobs:
           docker build --pull \
             -f .ci-tools/.github/container/Containerfile.cuda1292-ubuntu2604 \
             -t mistral-asd-cuda1292 .ci-tools/.github/container
-      - name: Compile Mistral.rs BF16 and FP8 for sm_61 without GPU execution
+      - name: Compile Mistral.rs BF16, FP8 and FP4 for sm_61 without GPU execution
         shell: bash
         env:
           SHA: ${{ needs.prepare.outputs.candidate }}
           LOCK: ${{ needs.prepare.outputs.lock }}
+          PUBLISH_BINARY: ${{ inputs.publish_binary }}
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/mistral-asd-cuda" "$RUNNER_TEMP/asd-home" "$RUNNER_TEMP/asd-cargo"
@@ -200,17 +213,38 @@ jobs:
             --env NVCC_CCBIN=/usr/bin/g++-14 \
             --env CC=/usr/bin/gcc-14 --env CXX=/usr/bin/g++-14 \
             --env CUDA_COMPUTE_CAP=61 \
+            --env "PUBLISH_BINARY=$PUBLISH_BINARY" \
             mistral-asd-cuda1292 bash -euc '
               git config --global --add safe.directory "$PWD"
               nvcc --version
               cargo check --locked -p mistralrs-cli --no-default-features \
-                --features cuda-legacy-bf16,cuda-legacy-fp8
+                --features cuda-legacy-bf16,cuda-legacy-fp8,cuda-legacy-fp4
               cargo test --locked -p mistralrs-core --no-default-features \
-                --features cuda-legacy-bf16,cuda-legacy-fp8 \
+                --features cuda-legacy-bf16,cuda-legacy-fp8,cuda-legacy-fp4 \
                 --test asd_sm61_smoke --no-run
+              if [[ "${PUBLISH_BINARY:-false}" == "true" ]]; then
+                cargo build --locked --release -p mistralrs-cli --no-default-features \
+                  --features cuda-legacy-bf16,cuda-legacy-fp8,cuda-legacy-fp4
+              fi
             ' 2>&1 | tee "$report/compile.log"
           kill "$heartbeat_pid" 2>/dev/null || true
           trap - EXIT
+          if [[ "$PUBLISH_BINARY" == "true" ]]; then
+            test -x target/release/mistralrs
+            pkgdir="$report/package"
+            mkdir -p "$pkgdir"
+            cp target/release/mistralrs "$pkgdir/mistralrs"
+            jq -n --arg sha "$SHA" --arg lock "$LOCK" --arg candle "89adbfa5b8af544f65ad33c7d2facf389e58704e" \
+              '{schema_version:1,candidate_sha:$sha,lock_sha256:$lock,candle_sha:$candle,
+                target:"linux-x86_64-sm61",cuda:"12.9.2",
+                features:["cuda-legacy-bf16","cuda-legacy-fp8","cuda-legacy-fp4"]}' \
+              > "$pkgdir/BUILD-METADATA.json"
+            tar -C "$pkgdir" -czf "$report/mistralrs-linux-x86_64-sm61.tar.gz" \
+              mistralrs BUILD-METADATA.json
+            sha256sum "$report/mistralrs-linux-x86_64-sm61.tar.gz" \
+              > "$report/mistralrs-linux-x86_64-sm61.tar.gz.sha256"
+            rm -rf "$pkgdir"
+          fi
           cp Cargo.lock "$report/Cargo.lock"
           jq -n --arg sha "$SHA" --arg lock "$LOCK" \
             '{schema_version:1,candidate_sha:$sha,lock_sha256:$lock,
@@ -258,7 +292,7 @@ jobs:
           rustup toolchain install stable --profile minimal
           nvcc --version > "$report/nvcc.txt"
           cargo +stable test --locked -p mistralrs-core --no-default-features \
-            --features cuda-legacy-bf16,cuda-legacy-fp8 \
+            --features cuda-legacy-bf16,cuda-legacy-fp8,cuda-legacy-fp4 \
             --test asd_sm61_smoke -- --nocapture > "$report/smoke.log" 2>&1 || {
               tail -n 100 "$report/smoke.log"; exit 1;
             }
@@ -293,6 +327,7 @@ jobs:
           path: ${{ runner.temp }}/asd-proof
           merge-multiple: false
       - name: Gate on three matching SHA and lock proofs; fast-forward only
+        id: promote
         shell: bash
         env:
           SEED: ${{ needs.prepare.outputs.seed }}
@@ -327,4 +362,23 @@ jobs:
           if test "$current" = "$SHA"; then
             git push origin ":refs/heads/$TEMP_REF"
           fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "PROMOTED asd_runner $SHA after three matching proofs; tag $tag" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish promoted SM61 binary release
+        if: ${{ inputs.publish_binary }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.promote.outputs.tag }}
+          SHA: ${{ needs.prepare.outputs.candidate }}
+        run: |
+          set -euo pipefail
+          pkg="$RUNNER_TEMP/asd-proof/mistral-asd-cuda-${GITHUB_RUN_ID}/mistralrs-linux-x86_64-sm61.tar.gz"
+          sum="${pkg}.sha256"
+          test -s "$pkg"
+          test -s "$sum"
+          gh release create "$TAG" "$pkg#Linux x86_64 SM61 binary" "$sum#SHA-256" \
+            --verify-tag --prerelease \
+            --title "mistral.rs ASD SM61 ${SHA:0:12}" \
+            --notes "Promoted asd_runner candidate `$SHA`, validated on CPU, hosted CUDA 12.9.2 SM61 compilation, and a physical Pascal SM61 GPU. Candle: `89adbfa5b8af544f65ad33c7d2facf389e58704e`. Features: cuda-legacy-bf16, cuda-legacy-fp8, cuda-legacy-fp4."
