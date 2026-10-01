@@ -217,14 +217,18 @@ jobs:
             mistral-asd-cuda1292 bash -euc '
               git config --global --add safe.directory "$PWD"
               nvcc --version
-              cargo check --locked -p mistralrs-cli --no-default-features \
-                --features cuda-legacy-bf16,cuda-legacy-fp8,cuda-legacy-fp4
-              cargo test --locked -p mistralrs-core --no-default-features \
-                --features cuda-legacy-bf16,cuda-legacy-fp8,cuda-legacy-fp4 \
-                --test asd_sm61_smoke --no-run
               if [[ "${PUBLISH_BINARY:-false}" == "true" ]]; then
                 cargo build --locked --release -p mistralrs-cli --no-default-features \
                   --features cuda-legacy-bf16,cuda-legacy-fp8,cuda-legacy-fp4
+                cargo test --locked --release -p mistralrs-core --no-default-features \
+                  --features cuda-legacy-bf16,cuda-legacy-fp8,cuda-legacy-fp4 \
+                  --test asd_sm61_smoke --no-run
+              else
+                cargo check --locked -p mistralrs-cli --no-default-features \
+                  --features cuda-legacy-bf16,cuda-legacy-fp8,cuda-legacy-fp4
+                cargo test --locked -p mistralrs-core --no-default-features \
+                  --features cuda-legacy-bf16,cuda-legacy-fp8,cuda-legacy-fp4 \
+                  --test asd_sm61_smoke --no-run
               fi
             ' 2>&1 | tee "$report/compile.log"
           kill "$heartbeat_pid" 2>/dev/null || true
