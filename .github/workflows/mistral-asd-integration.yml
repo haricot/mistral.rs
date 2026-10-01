@@ -168,7 +168,10 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: haricot/candle
-          ref: 89adbfa5b8af544f65ad33c7d2facf389e58704e
+          # Tooling-only pin: this commit contains the CUDA 12.9.2/Ubuntu 26.04
+          # compiler container. It is intentionally independent from the
+          # candle_asd_cuda source pin validated by prepare/Cargo.lock.
+          ref: c565a96bd05374706bd13951f6d126f331f749ae
           path: .ci-tools
           persist-credentials: false
       - name: Build same hosted SM61 compiler image as Candle
