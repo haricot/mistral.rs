@@ -51,6 +51,9 @@ jobs:
       - name: Verify provenance and pin exact Candle commit
         id: pin
         shell: bash
+        env:
+          SOURCE_REF: ${{ inputs.source_ref }}
+          BUILD_MODE: ${{ inputs.build_mode }}
         run: |
           set -euo pipefail
           src="$(git -C mistral rev-parse HEAD)"
@@ -70,7 +73,7 @@ jobs:
           fi
           mkdir -p "$RUNNER_TEMP/mistral-cuda-legacy"
           jq -n --arg src "$src" --arg candle "$candle" \
-            --arg ref "${{ inputs.source_ref }}" --arg mode "${{ inputs.build_mode }}" \
+            --arg ref "$SOURCE_REF" --arg mode "$BUILD_MODE" \
             '{schema_version:1,mistral_source_ref:$ref,mistral_sha:$src,
               candle_repository:"haricot/candle",candle_branch:"cuda_legacy",
               candle_sha:$candle,cuda:"12.9.2",compute_capability:"sm_61",
