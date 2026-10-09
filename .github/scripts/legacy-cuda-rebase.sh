@@ -281,6 +281,7 @@ RS
 git diff --check
 rustup toolchain install stable --profile minimal --component rustfmt
 rustfmt --edition 2021 mistralrs-core/tests/legacy_sm61_runtime.rs
+rustfmt --edition 2021 mistralrs-core/src/cuda/moe.rs
 cargo +stable update --workspace > "$report/cargo-update.log" 2>&1 || {
   tail -n 100 "$report/cargo-update.log"; exit 1;
 }
