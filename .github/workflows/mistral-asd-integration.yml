@@ -7,6 +7,11 @@ on:
         required: false
         default: ""
         type: string
+      expected_candle_sha:
+        description: Optional expected haricot/candle:extended SHA; leave empty to pin the current validated extended head
+        required: false
+        default: ""
+        type: string
       publish_binary:
         description: Build and publish a downloadable Linux x86_64 SM61 binary after promotion
         required: false
@@ -30,6 +35,8 @@ jobs:
       candidate: ${{ steps.pin.outputs.candidate }}
       candidate_ref: ${{ steps.pin.outputs.candidate_ref }}
       lock: ${{ steps.pin.outputs.lock }}
+      candle: ${{ steps.pin.outputs.candle }}
+      candle_validation_ref: ${{ steps.pin.outputs.candle_validation_ref }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # Node24
         with:
@@ -41,6 +48,7 @@ jobs:
         shell: bash
         env:
           EXPECTED_SEED: ${{ inputs.expected_seed_sha }}
+          EXPECTED_CANDLE: ${{ inputs.expected_candle_sha }}
         run: |
           set -euo pipefail
           seed="$(git rev-parse HEAD)"
@@ -52,24 +60,90 @@ jobs:
           fi
           remote_seed="$(git ls-remote origin refs/heads/asd_runner | cut -f1)"
           [[ "$remote_seed" == "$seed" ]] || { echo '::error::Source moved during checkout'; exit 3; }
-          jq -e --arg candle "89adbfa5b8af544f65ad33c7d2facf389e58704e" \
-            --arg candle_branch "candle_asd_cuda" \
+
+          candle_repo="https://github.com/haricot/candle.git"
+          candle_branch="extended"
+          candle="$(git ls-remote --heads "$candle_repo" "refs/heads/$candle_branch" | cut -f1)"
+          [[ "$candle" =~ ^[0-9a-f]{40}$ ]] || { echo '::error::Cannot resolve haricot/candle:extended'; exit 3; }
+          if [[ -n "${EXPECTED_CANDLE}" ]]; then
+            [[ "${EXPECTED_CANDLE}" =~ ^[0-9a-f]{40}$ ]] || { echo '::error::expected_candle_sha must be empty or exactly one full 40-character SHA'; exit 2; }
+            [[ "${EXPECTED_CANDLE}" == "$candle" ]] || {
+              echo "::error::haricot/candle:extended moved from requested SHA (actual: $candle)"; exit 3;
+            }
+          fi
+
+          candle_validation_ref="$(
+            git ls-remote --heads "$candle_repo" 'refs/heads/archive/extended/sm61-validated-*' |
+              awk -v sha="$candle" '$1 == sha { print $2; exit }'
+          )"
+          [[ -n "$candle_validation_ref" ]] || {
+            echo "::error::haricot/candle:extended $candle has no physical SM61 validation archive"; exit 3;
+          }
+
+          candle_checkout="$RUNNER_TEMP/candle-extended"
+          rm -rf "$candle_checkout"
+          git clone --quiet --no-tags --filter=blob:none --single-branch --branch "$candle_branch" \
+            "$candle_repo" "$candle_checkout"
+          [[ "$(git -C "$candle_checkout" rev-parse HEAD)" == "$candle" ]] || {
+            echo '::error::Candle extended moved during checkout'; exit 3;
+          }
+          jq -e '
+            .schema_version==1 and
+            .kind=="extended-six" and
+            .integration_target=="extended" and
+            ([.features[].feature] | sort) ==
+              (["asd_core_v3_standalone","bf16_candle","cudnn_fallback_candle","fp4_candle","fp8_candle","moe_simt_f16_candle"] | sort)
+          ' "$candle_checkout/candle-integration/extended.json" >/dev/null
+
+          git merge-base --is-ancestor "20f607a77abd4738aa5594ee93a393a9fd284605" HEAD
+          git merge-base --is-ancestor "d3813494903e5cfca01e12df596f3fe14a5d22ba" HEAD
+
+          python3 - "$candle" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          candle = sys.argv[1]
+          path = Path("Cargo.toml")
+          text = path.read_text()
+          crates = ("candle-core", "candle-nn", "candle-flash-attn-v3", "candle-metal-kernels")
+          for crate in crates:
+              pattern = re.compile(
+                  rf'(?m)^({re.escape(crate)}\s*=\s*\{{[^\n}}]*git\s*=\s*"https://github.com/haricot/candle\.git"[^\n}}]*rev\s*=\s*")[0-9a-f]{{40}}("[^\n}}]*\}}\s*)$'
+              )
+              text, count = pattern.subn(rf'\g<1>{candle}\g<2>', text)
+              if count != 1:
+                  raise SystemExit(f"expected exactly one pinned haricot/candle dependency for {crate}, got {count}")
+          path.write_text(text)
+          PY
+
+          tmp_sources="$(mktemp)"
+          jq \
+            --arg candle "$candle" \
+            --arg candle_branch "$candle_branch" \
+            --arg validation_ref "$candle_validation_ref" \
+            '.candle_repository="haricot/candle"
+             | .candle_branch=$candle_branch
+             | .candle_sha=$candle
+             | .candle_validation_ref=$validation_ref
+             | .comment="Physical Pascal gate uses the exact validated haricot/candle:extended SHA, CPU-resolved Cargo.lock, hosted SM61 compile, and physical SM61 runtime proof"' \
+            mistral-integration/sources.json > "$tmp_sources"
+          mv "$tmp_sources" mistral-integration/sources.json
+
+          jq -e --arg candle "$candle" \
+            --arg candle_branch "$candle_branch" \
+            --arg validation_ref "$candle_validation_ref" \
             --arg base "20f607a77abd4738aa5594ee93a393a9fd284605" \
             --arg sm61 "d3813494903e5cfca01e12df596f3fe14a5d22ba" \
             '.schema_version==1 and
              .candle_repository=="haricot/candle" and
              .candle_branch==$candle_branch and
              .candle_sha==$candle and
+             .candle_validation_ref==$validation_ref and
              .base_master_sha==$base and
              .sm61_source_sha==$sm61 and
              (.features | sort) == (["cuda-legacy-bf16","cuda-legacy-fp8","cuda-legacy-fp4"] | sort)' \
             mistral-integration/sources.json >/dev/null
-          git merge-base --is-ancestor "20f607a77abd4738aa5594ee93a393a9fd284605" HEAD
-          git merge-base --is-ancestor "d3813494903e5cfca01e12df596f3fe14a5d22ba" HEAD
-          for crate in candle-core candle-nn candle-flash-attn-v3 candle-metal-kernels; do
-            grep -E "^${crate} = " Cargo.toml | \
-              grep -Fq 'rev = "89adbfa5b8af544f65ad33c7d2facf389e58704e"' || exit 3
-          done
           rustup toolchain install stable --profile minimal --component rustfmt
           report="$RUNNER_TEMP/mistral-asd-preflight"
           mkdir -p "$report"
@@ -80,24 +154,25 @@ jobs:
           fi
           cargo +stable update --workspace
           cargo +stable metadata --locked --format-version 1 > "$RUNNER_TEMP/asd-metadata.json"
-          ! grep -Fq '267c4d8fa8f0f1d2e01c0365875eaedd98414c1e' Cargo.lock
-          grep -Fq '89adbfa5b8af544f65ad33c7d2facf389e58704e' Cargo.lock
+          grep -Fq "$candle" Cargo.lock
           lock="$(sha256sum Cargo.lock | cut -d' ' -f1)"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add Cargo.lock
+          git add Cargo.toml Cargo.lock mistral-integration/sources.json
           if ! git diff --cached --quiet; then
-            git commit -m 'build(asd): resolve exact pinned Candle v2 lockfile'
+            git commit -m "build(asd): pin validated Candle extended ${candle:0:12}"
           fi
           candidate="$(git rev-parse HEAD)"
-          ref="integration/asd_runner-${GITHUB_RUN_ID}"
+          ref="integration/asd_runner-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           git push origin "HEAD:refs/heads/${ref}"
           echo "seed=${seed}" >> "$GITHUB_OUTPUT"
           echo "candidate=${candidate}" >> "$GITHUB_OUTPUT"
           echo "candidate_ref=${ref}" >> "$GITHUB_OUTPUT"
           echo "lock=${lock}" >> "$GITHUB_OUTPUT"
-          printf 'Candidate %s, lock %s, Candle %s\n' \
-            "$candidate" "$lock" "89adbfa5b8af544f65ad33c7d2facf389e58704e" >> "$GITHUB_STEP_SUMMARY"
+          echo "candle=${candle}" >> "$GITHUB_OUTPUT"
+          echo "candle_validation_ref=${candle_validation_ref}" >> "$GITHUB_OUTPUT"
+          printf 'Candidate %s, lock %s, Candle extended %s (%s)\n' \
+            "$candidate" "$lock" "$candle" "$candle_validation_ref" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Preserve preflight diagnostics
         if: always()
@@ -171,10 +246,9 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: haricot/candle
-          # Tooling-only pin: this commit contains the CUDA 12.9.2/Ubuntu 26.04
-          # compiler container. It is intentionally independent from the
-          # candle_asd_cuda source pin validated by prepare/Cargo.lock.
-          ref: c565a96bd05374706bd13951f6d126f331f749ae
+          # Use the exact physically validated Candle Extended commit for both
+          # source dependencies and the hosted CUDA 12.9.2 compiler tooling.
+          ref: ${{ needs.prepare.outputs.candle }}
           path: .ci-tools
           persist-credentials: false
       - name: Build same hosted SM61 compiler image as Candle
