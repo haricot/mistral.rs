@@ -23,9 +23,13 @@ def require(test, message):
 
 require(git("rev-parse", "REBASE_HEAD") == COMMIT, "Unexpected paged-attn commit")
 conflicts = set(git("diff", "--name-only", "--diff-filter=U").splitlines())
-require(conflicts == PATHS, f"Unexpected paged-attn conflicts: {sorted(conflicts)}")
+require(bool(conflicts) and conflicts <= PATHS,
+        f"Unexpected conflict set: {sorted(conflicts)}")
+# Use the last committed rebase state for ALL files: it includes modern
+# upstream plus earlier ports. This also resets a cleanly auto-merged portion
+# of the historical patch before semantic replay, avoiding duplicate flags.
 for path in sorted(PATHS):
-    Path(path).write_text(subprocess.check_output(["git", "show", f":2:{path}"], text=True))
+    Path(path).write_text(subprocess.check_output(["git", "show", f"HEAD:{path}"], text=True))
 
 header = Path("mistralrs-paged-attn/src/cuda/attention/dtype_bfloat16.cuh")
 text = header.read_text()
