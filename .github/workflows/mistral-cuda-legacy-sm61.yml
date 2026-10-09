@@ -355,13 +355,13 @@ jobs:
           # GIT_ASKPASS avoids embedding the secret in a push URL.
           umask 077
           cat > "$RUNNER_TEMP/legacy-workflow-askpass.sh" <<'AUTH'
-#!/bin/sh
-case "$1" in
-  *Username*) printf '%s\n' x-access-token ;;
-  *Password*) printf '%s\n' "$WORKFLOW_TOKEN" ;;
-  *) exit 1 ;;
-esac
-AUTH
+          #!/bin/sh
+          case "$1" in
+            *Username*) printf '%s\n' x-access-token ;;
+            *Password*) printf '%s\n' "$WORKFLOW_TOKEN" ;;
+            *) exit 1 ;;
+          esac
+          AUTH
           chmod 700 "$RUNNER_TEMP/legacy-workflow-askpass.sh"
           export GIT_ASKPASS="$RUNNER_TEMP/legacy-workflow-askpass.sh"
           export GIT_TERMINAL_PROMPT=0
