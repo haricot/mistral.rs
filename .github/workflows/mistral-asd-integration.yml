@@ -263,6 +263,8 @@ jobs:
           SHA: ${{ needs.prepare.outputs.candidate }}
           LOCK: ${{ needs.prepare.outputs.lock }}
           PUBLISH_BINARY: ${{ inputs.publish_binary }}
+          CANDLE_SHA: ${{ needs.prepare.outputs.candle }}
+          CANDLE_VALIDATION_REF: ${{ needs.prepare.outputs.candle_validation_ref }}
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/mistral-asd-cuda" "$RUNNER_TEMP/asd-home" "$RUNNER_TEMP/asd-cargo"
@@ -318,8 +320,10 @@ jobs:
             pkgdir="$report/package"
             mkdir -p "$pkgdir"
             cp target/release/mistralrs "$pkgdir/mistralrs"
-            jq -n --arg sha "$SHA" --arg lock "$LOCK" --arg candle "89adbfa5b8af544f65ad33c7d2facf389e58704e" \
+            jq -n --arg sha "$SHA" --arg lock "$LOCK" --arg candle "$CANDLE_SHA" \
+              --arg candle_validation_ref "$CANDLE_VALIDATION_REF" \
               '{schema_version:1,candidate_sha:$sha,lock_sha256:$lock,candle_sha:$candle,
+                candle_validation_ref:$candle_validation_ref,candle_branch:"extended",
                 target:"linux-x86_64-sm61",cuda:"12.9.2",
                 features:["cuda-legacy-bf16","cuda-legacy-fp8","cuda-legacy-fp4"]}' \
               > "$pkgdir/BUILD-METADATA.json"
@@ -410,7 +414,7 @@ jobs:
           pattern: mistral-asd-*-${{ github.run_id }}
           path: ${{ runner.temp }}/asd-proof
           merge-multiple: false
-      - name: Gate on three matching SHA and lock proofs; fast-forward only
+      - name: Gate on matching proofs, archive, and force-with-lease promote
         id: promote
         shell: bash
         env:
@@ -418,6 +422,8 @@ jobs:
           SHA: ${{ needs.prepare.outputs.candidate }}
           TEMP_REF: ${{ needs.prepare.outputs.candidate_ref }}
           LOCK: ${{ needs.prepare.outputs.lock }}
+          CANDLE_SHA: ${{ needs.prepare.outputs.candle }}
+          CANDLE_VALIDATION_REF: ${{ needs.prepare.outputs.candle_validation_ref }}
         run: |
           set -euo pipefail
           for gate in cpu cuda gpu; do
@@ -432,22 +438,52 @@ jobs:
           done
           test "$(git rev-parse HEAD)" = "$SHA"
           test "$(sha256sum Cargo.lock | cut -d' ' -f1)" = "$LOCK"
+          test "$(jq -r '.candle_sha' mistral-integration/sources.json)" = "$CANDLE_SHA"
+          test "$(jq -r '.candle_branch' mistral-integration/sources.json)" = "extended"
+          test "$(jq -r '.candle_validation_ref' mistral-integration/sources.json)" = "$CANDLE_VALIDATION_REF"
+
           remote="$(git ls-remote origin refs/heads/asd_runner | cut -f1)"
-          test "$remote" = "$SEED" || { echo "::error::asd_runner moved; no promotion"; exit 3; }
+          if test "$remote" != "$SEED" && test "$remote" != "$SHA"; then
+            echo "::error::asd_runner moved unexpectedly ($remote); no promotion"; exit 3
+          fi
           git merge-base --is-ancestor "$SEED" "$SHA"
-          git push origin "$SHA:refs/heads/asd_runner"
-          tag="promoted/asd_runner/${SHA:0:12}-${GITHUB_RUN_ID}"
+
+          before_ref="archive/asd_runner/pre-promote-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          validated_ref="archive/asd_runner/sm61-validated-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          for spec in "$SEED:$before_ref" "$SHA:$validated_ref"; do
+            value="${spec%%:*}"
+            ref="${spec#*:}"
+            current="$(git ls-remote origin "refs/heads/$ref" | cut -f1)"
+            if test -n "$current"; then
+              test "$current" = "$value" || {
+                echo "::error::archive $ref already exists at unexpected SHA $current"; exit 3;
+              }
+            else
+              git push origin "$value:refs/heads/$ref"
+            fi
+          done
+
+          if test "$remote" = "$SEED"; then
+            git push --force-with-lease="refs/heads/asd_runner:$SEED" \
+              origin "$SHA:refs/heads/asd_runner"
+          fi
+          test "$(git ls-remote origin refs/heads/asd_runner | cut -f1)" = "$SHA"
+
+          tag="promoted/asd_runner/${SHA:0:12}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git tag -a "$tag" "$SHA" \
-            -m "Mistral.rs ASD CPU + hosted sm61 CUDA + physical Pascal proof, run ${GITHUB_RUN_ID}"
-          git push origin "refs/tags/$tag"
+          if ! git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            git tag -a "$tag" "$SHA" \
+              -m "Mistral.rs ASD CPU + hosted SM61 CUDA + physical Pascal proof, run ${GITHUB_RUN_ID} attempt ${GITHUB_RUN_ATTEMPT}; Candle extended $CANDLE_SHA"
+            git push origin "refs/tags/$tag"
+          fi
+
           current="$(git ls-remote origin "refs/heads/$TEMP_REF" | cut -f1)"
           if test "$current" = "$SHA"; then
             git push origin ":refs/heads/$TEMP_REF"
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "PROMOTED asd_runner $SHA after three matching proofs; tag $tag" >> "$GITHUB_STEP_SUMMARY"
+          echo "PROMOTED asd_runner $SHA after CPU + hosted CUDA + physical SM61 proofs; Candle extended $CANDLE_SHA; archives $before_ref and $validated_ref; tag $tag" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish promoted SM61 binary release
         if: ${{ inputs.publish_binary }}
@@ -456,6 +492,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.promote.outputs.tag }}
           SHA: ${{ needs.prepare.outputs.candidate }}
+          CANDLE_SHA: ${{ needs.prepare.outputs.candle }}
         run: |
           set -euo pipefail
           pkg="$RUNNER_TEMP/asd-proof/mistral-asd-cuda-${GITHUB_RUN_ID}/mistralrs-linux-x86_64-sm61.tar.gz"
@@ -465,4 +502,4 @@ jobs:
           gh release create "$TAG" "$pkg#Linux x86_64 SM61 binary" "$sum#SHA-256" \
             --verify-tag --prerelease \
             --title "mistral.rs ASD SM61 ${SHA:0:12}" \
-            --notes "Promoted asd_runner candidate $SHA, validated on CPU, hosted CUDA 12.9.2 SM61 compilation, and a physical Pascal SM61 GPU. Candle: 89adbfa5b8af544f65ad33c7d2facf389e58704e. Features: cuda-legacy-bf16, cuda-legacy-fp8, cuda-legacy-fp4."
+            --notes "Promoted asd_runner candidate $SHA, validated on CPU, hosted CUDA 12.9.2 SM61 compilation, and a physical Pascal SM61 GPU. Candle extended: $CANDLE_SHA. Features: cuda-legacy-bf16, cuda-legacy-fp8, cuda-legacy-fp4."
