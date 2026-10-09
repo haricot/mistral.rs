@@ -37,7 +37,9 @@ def enable_pascal_fp8_sources(src):
 
     block = src[begin:end]
     lines = block.splitlines(keepends=True)
-    filters = ('"*_fp8.cu",', '"*_fp8_gemm.cu",', '"*_fp8_mma.cu",')
+    # FP8 MMA requires tensor cores (SM80+); never enable it for Pascal.
+    # Only the scalar/vector FP8 source families are conditionally enabled.
+    filters = ('"*_fp8.cu",', '"*_fp8_gemm.cu",')
     for pattern in filters:
         hits = [i for i, line in enumerate(lines) if pattern in line]
         require(len(hits) == 1,
@@ -45,7 +47,7 @@ def enable_pascal_fp8_sources(src):
         del lines[hits[0]]
 
     guard = '''        if !cc_over_80 && !allow_legacy_fp8 {
-            excluded_files.extend(["*_fp8.cu", "*_fp8_gemm.cu", "*_fp8_mma.cu"]);
+            excluded_files.extend(["*_fp8.cu", "*_fp8_gemm.cu"]);
         }
 '''
     require(guard not in src, "FP8 source inclusion: conditional filter guard already present")
