@@ -45,14 +45,119 @@ base="$(git merge-base "$old" "$master")"
 echo "base=$base old_pr=$old upstream=$master" > "$report/rebase.log"
 git switch --detach "$old"
 git switch -c "rebased-allow-old-card-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-if ! git rebase --onto "$master" "$base" >> "$report/rebase.log" 2>&1; then
+# Preserve the upstream build script and semantically replay ONLY the
+# independently reviewed legacy BF16 flag from historical commit 37007f62.
+# Never select "ours" wholesale for arbitrary conflicts: that can silently
+# drop the PR's CUDA kernels.
+resolve_first_bf16_conflict() {
+  local current conflicted path="mistralrs-core/build.rs"
+  current="$(git rev-parse REBASE_HEAD 2>/dev/null)" || return 1
+  conflicted="$(git diff --name-only --diff-filter=U)"
+  [[ "$current" == 37007f62b22dce109ddad5920dc128e46cbb0a47 ]] || return 1
+  [[ "$conflicted" == "$path" ]] || return 1
+  git show ":2:$path" > "$path" || return 1
+  python3 - "$path" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+text = path.read_text()
+rerun = '        println!("cargo:rerun-if-changed=build.rs");\n'
+if text.count(rerun) != 1:
+    raise SystemExit("Unexpected current upstream build.rs rerun hook")
+text = text.replace(
+    rerun,
+    rerun + '        println!("cargo:rerun-if-env-changed=ALLOW_LEGACY");\n',
+    1,
+)
+pin = '        let compute_cap = builder.get_compute_cap().unwrap_or(80);\n'
+if text.count(pin) != 1:
+    raise SystemExit("Unexpected modern CUDA capability handling")
+legacy = '''
+        let allow_legacy = std::env::var("ALLOW_LEGACY").unwrap_or_default();
+        let allow_legacy_bf16 = allow_legacy == "all"
+            || allow_legacy
+                .split(',')
+                .map(str::trim)
+                .any(|value| value == "bf16");
+'''
+text = text.replace(pin, pin + legacy + '\n', 1)
+old = '''        if compute_cap < 80 {
+            builder = builder.arg("-DNO_BF16_KERNEL");
+        }
+'''
+new = '''        if compute_cap < 80 && !allow_legacy_bf16 {
+            builder = builder.arg("-DNO_BF16_KERNEL");
+        }
+        if allow_legacy_bf16 {
+            builder = builder.arg("-DALLOW_LEGACY_BF16");
+        }
+'''
+if text.count(old) != 1:
+    raise SystemExit("Unexpected SM80/BF16 kernel gate; not safe to auto-resolve")
+text = text.replace(old, new, 1)
+path.write_text(text)
+PY
+  git diff --check && git add "$path"
+  echo "Resolved exact commit $current / $path using current upstream implementation" \
+    >> "$report/rebase.log"
+}
+
+# This pin-only historical commit targets Candle 0.10.2 and becomes obsolete
+# when this workflow pins all four modern 0.11.0 workspace dependencies to the
+# validated cuda_legacy SHA. We can skip it ONLY when it conflicts, and only
+# after verifying its exact commit SHA and the two dependency-only files.
+skip_obsolete_0102_pin_conflict() {
+  local current conflicted changed
+  current="$(git rev-parse REBASE_HEAD 2>/dev/null)" || return 1
+  [[ "$current" == a56ae7eeeed6469265c5b1659f2c4251f3074302 ]] || return 1
+  changed="$(git diff-tree --no-commit-id --name-only -r "$current" | sort)"
+  [[ "$changed" == "$(printf 'Cargo.lock\nCargo.toml')" ]] || return 1
+  conflicted="$(git diff --name-only --diff-filter=U)"
+  [[ -n "$conflicted" ]] || return 1
+  while IFS= read -r item; do
+    [[ "$item" == "Cargo.toml" || "$item" == "Cargo.lock" ]] || return 1
+  done <<< "$conflicted"
+  echo "Skipping historical 0.10.2-only Candle pin $current; replaced with 0.11.0 cuda_legacy after rebase" \
+    >> "$report/rebase.log"
+}
+
+rebased=false
+if git rebase --onto "$master" "$base" >> "$report/rebase.log" 2>&1; then
+  rebased=true
+else
+  # Each resolver verifies the precise commit, conflicted files, and upstream
+  # code shape. Stop immediately on any new, unreviewed conflict.
+  for ((attempt=0; attempt<6; attempt++)); do
+    if resolve_first_bf16_conflict; then
+      echo "::notice::Ported opt-in BF16 gate onto current upstream build.rs"
+      if GIT_EDITOR=true git rebase --continue >> "$report/rebase.log" 2>&1; then
+        rebased=true
+        break
+      fi
+    elif skip_obsolete_0102_pin_conflict; then
+      echo "::notice::Replacing obsolete Candle 0.10.2-only pin with current cuda_legacy"
+      if git rebase --skip >> "$report/rebase.log" 2>&1; then
+        rebased=true
+        break
+      fi
+    else
+      break
+    fi
+  done
+fi
+if [[ "$rebased" != true ]]; then
   git diff --name-only --diff-filter=U > "$report/conflicts.txt" || true
   git ls-files -u > "$report/unmerged-index.txt" || true
   git status --short > "$report/status.txt" || true
+  git rev-parse REBASE_HEAD > "$report/failed-commit.sha" 2>/dev/null || true
+  echo "::group::Unresolved CUDA PR rebase conflict"
+  cat "$report/failed-commit.sha" "$report/conflicts.txt" 2>/dev/null || true
+  tail -n 55 "$report/rebase.log"
+  echo "::endgroup::"
   git rebase --abort || true
   jq '.status="REBASE_CONFLICT"' "$report/provenance.json" > "$report/temp.json"
   mv "$report/temp.json" "$report/provenance.json"
-  echo "::error::Old PR requires manual conflict resolution; PR branch unchanged."
+  echo "::error::Unreviewed conflict; PR branch unchanged. Inspect the archived conflict proof."
   exit 1
 fi
 git merge-base --is-ancestor "$master" HEAD || exit 3
