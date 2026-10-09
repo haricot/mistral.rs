@@ -306,6 +306,7 @@ git diff --check
 rustup toolchain install stable --profile minimal --component rustfmt
 rustfmt --edition 2021 mistralrs-core/tests/legacy_sm61_runtime.rs
 rustfmt --edition 2021 mistralrs-core/src/cuda/moe.rs
+rustfmt --edition 2021 mistralrs-core/src/cuda/ffi.rs
 rustfmt --edition 2021 mistralrs-quant/src/unquantized/mod.rs
 rustfmt --edition 2021 mistralrs-paged-attn/src/cuda/backend/paged_attention.rs
 rustfmt --edition 2021 mistralrs-quant/build.rs
