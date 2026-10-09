@@ -45,6 +45,7 @@ base="$(git merge-base "$old" "$master")"
 echo "base=$base old_pr=$old upstream=$master" > "$report/rebase.log"
 cp .github/scripts/legacy-cuda-port-moe.py "$RUNNER_TEMP/legacy-cuda-port-moe.py"
 cp .github/scripts/legacy-cuda-port-quant.py "$RUNNER_TEMP/legacy-cuda-port-quant.py"
+cp .github/scripts/legacy-cuda-port-paged.py "$RUNNER_TEMP/legacy-cuda-port-paged.py"
 git switch --detach "$old"
 git switch -c "rebased-allow-old-card-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
 # Preserve the upstream build script and semantically replay ONLY the
@@ -146,6 +147,13 @@ else
     elif [[ "$(git rev-parse REBASE_HEAD 2>/dev/null || true)" == 30f21d8f79f2209f8a6fa74edb57a350e9ad017c ]] &&
          python3 "$RUNNER_TEMP/legacy-cuda-port-quant.py" >> "$report/rebase.log" 2>&1; then
       echo "::notice::Ported quant BF16 dispatch; AFQ modern source preserved"
+      if GIT_EDITOR=true git rebase --continue >> "$report/rebase.log" 2>&1; then
+        rebased=true
+        break
+      fi
+    elif [[ "$(git rev-parse REBASE_HEAD 2>/dev/null || true)" == adc54c5bdbd69b0e738241b78357919af9b0c6e0 ]] &&
+         python3 "$RUNNER_TEMP/legacy-cuda-port-paged.py" >> "$report/rebase.log" 2>&1; then
+      echo "::notice::Ported paged BF16 helpers and FP8 scale guards onto modern sources"
       if GIT_EDITOR=true git rebase --continue >> "$report/rebase.log" 2>&1; then
         rebased=true
         break
@@ -291,6 +299,7 @@ rustup toolchain install stable --profile minimal --component rustfmt
 rustfmt --edition 2021 mistralrs-core/tests/legacy_sm61_runtime.rs
 rustfmt --edition 2021 mistralrs-core/src/cuda/moe.rs
 rustfmt --edition 2021 mistralrs-quant/src/unquantized/mod.rs
+rustfmt --edition 2021 mistralrs-paged-attn/src/cuda/backend/paged_attention.rs
 cargo +stable update --workspace > "$report/cargo-update.log" 2>&1 || {
   tail -n 100 "$report/cargo-update.log"; exit 1;
 }
