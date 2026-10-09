@@ -292,6 +292,7 @@ git add Cargo.toml Cargo.lock \
   mistralrs-cli/Cargo.toml mistralrs-core/Cargo.toml \
   mistralrs-server-core/Cargo.toml mistralrs-quant/Cargo.toml \
   mistralrs-paged-attn/Cargo.toml \
+  mistralrs-core/src/cuda/moe.rs \
   mistralrs-core/tests/legacy_sm61_runtime.rs
 git commit -m "build(cuda): pin Candle cuda_legacy and add Pascal runtime check"
 candidate="$(git rev-parse HEAD)"
