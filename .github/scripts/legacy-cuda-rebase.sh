@@ -43,6 +43,7 @@ jq -n --arg old "$old" --arg master "$master" --arg candle "$candle" \
     physical_gpu_validated:false}' > "$report/provenance.json"
 base="$(git merge-base "$old" "$master")"
 echo "base=$base old_pr=$old upstream=$master" > "$report/rebase.log"
+cp .github/scripts/legacy-cuda-port-moe.py "$RUNNER_TEMP/legacy-cuda-port-moe.py"
 git switch --detach "$old"
 git switch -c "rebased-allow-old-card-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
 # Preserve the upstream build script and semantically replay ONLY the
@@ -130,6 +131,13 @@ else
   for ((attempt=0; attempt<6; attempt++)); do
     if resolve_first_bf16_conflict; then
       echo "::notice::Ported opt-in BF16 gate onto current upstream build.rs"
+      if GIT_EDITOR=true git rebase --continue >> "$report/rebase.log" 2>&1; then
+        rebased=true
+        break
+      fi
+    elif [[ "$(git rev-parse REBASE_HEAD 2>/dev/null || true)" == 251963b32a10195fad344a182fb37e935b14ca1c ]] &&
+         python3 "$RUNNER_TEMP/legacy-cuda-port-moe.py" >> "$report/rebase.log" 2>&1; then
+      echo "::notice::Semantically ported historical CUDA MoE via maintained ABI and Pascal SIMT"
       if GIT_EDITOR=true git rebase --continue >> "$report/rebase.log" 2>&1; then
         rebased=true
         break
