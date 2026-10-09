@@ -64,7 +64,7 @@ candle = os.environ["CANDLE_SHA"]
 manifest = Path("Cargo.toml")
 text = manifest.read_text()
 for name in ("candle-core", "candle-nn", "candle-flash-attn-v3", "candle-metal-kernels"):
-    pat = re.compile(rf"(?m)^{re.escape(name)}\s*=\s*\{{[^\n]*\}}\s*$")
+    pat = re.compile(rf"(?m)^{re.escape(name)}[ \t]*=[ \t]*\{{[^\n]*\}}[ \t]*$")
     value = f'{name} = {{ git = "https://github.com/haricot/candle.git", version = "0.11.0", rev = "{candle}" }}'
     text, hits = pat.subn(value, text)
     if hits != 1:
