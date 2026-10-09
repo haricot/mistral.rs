@@ -273,6 +273,12 @@ jobs:
           test "$(git ls-remote origin refs/heads/allow_old_card | cut -f1)" = "$ORIGINAL" || {
             echo "::error::PR head moved. Refusing to overwrite changes"; exit 3;
           }
+          # Keep an immutable rollback ref before the guarded PR-head rewrite.
+          archive="archive/allow_old_card/pre-promotion-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          git fetch --no-tags origin "$ORIGINAL"
+          git push origin "$ORIGINAL:refs/heads/$archive"
+          test "$(git ls-remote origin "refs/heads/$archive" | cut -f1)" = "$ORIGINAL"
           git push --force-with-lease="refs/heads/allow_old_card:$ORIGINAL" \
             origin "$CANDIDATE:refs/heads/allow_old_card"
+          echo "Archived old PR at $archive" >> "$GITHUB_STEP_SUMMARY"
           echo "Promoted $CANDIDATE to allow_old_card after physical SM61 gate" >> "$GITHUB_STEP_SUMMARY"
