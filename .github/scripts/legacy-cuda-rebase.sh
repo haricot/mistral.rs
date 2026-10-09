@@ -330,20 +330,29 @@ git add Cargo.toml Cargo.lock \
   mistralrs-core/tests/legacy_sm61_runtime.rs
 git commit -m "build(cuda): pin Candle cuda_legacy and add Pascal runtime check"
 candidate="$(git rev-parse HEAD)"
-ref="integration/rebased_allow_old_card-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+# GitHub Actions' default GitHub App token cannot push a branch introducing
+# upstream workflow files without Workflows:write. Transport the exact Git
+# objects as an immutable Git bundle instead. No remote branch is mutated
+# until final promotion, after CPU/CUDA/physical SM61 proof.
+git bundle create "$report/candidate.bundle" HEAD "^$master"
+git bundle verify "$report/candidate.bundle"
+bundle_sha="$(sha256sum "$report/candidate.bundle" | cut -d' ' -f1)"
+ref="artifact://mistral-legacy-prep-$GITHUB_RUN_ID/candidate.bundle"
 test "$(git ls-remote origin refs/heads/allow_old_card | cut -f1)" = "$old"
 test "$(git ls-remote upstream refs/heads/master | cut -f1)" = "$master"
-git push origin "HEAD:refs/heads/$ref"
 jq --arg candidate "$candidate" --arg lock "$lock" --arg ref "$ref" \
+   --arg bundle "$bundle_sha" \
   '.status="CANDIDATE_STAGED" | .candidate_sha=$candidate |
-   .lock_sha256=$lock | .candidate_ref=$ref' \
+   .lock_sha256=$lock | .candidate_ref=$ref |
+   .bundle_sha256=$bundle' \
   "$report/provenance.json" > "$report/temp.json"
 mv "$report/temp.json" "$report/provenance.json"
 cp Cargo.lock "$report/Cargo.lock"
 echo "candidate=$candidate" >> "$GITHUB_OUTPUT"
 echo "candidate_ref=$ref" >> "$GITHUB_OUTPUT"
+echo "bundle_sha256=$bundle_sha" >> "$GITHUB_OUTPUT"
 echo "pr_sha=$old" >> "$GITHUB_OUTPUT"
 echo "upstream_sha=$master" >> "$GITHUB_OUTPUT"
 echo "candle_sha=$candle" >> "$GITHUB_OUTPUT"
 echo "lock_sha256=$lock" >> "$GITHUB_OUTPUT"
-echo "Candidate $candidate staged at $ref; PR unchanged" >> "$GITHUB_STEP_SUMMARY"
+echo "Candidate $candidate transported in Git bundle $bundle_sha; PR unchanged" >> "$GITHUB_STEP_SUMMARY"
