@@ -34,7 +34,7 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 90
     permissions:
-      contents: write
+      contents: read
     outputs:
       candidate: ${{ steps.stage.outputs.candidate }}
       candidate_ref: ${{ steps.stage.outputs.candidate_ref }}
@@ -42,6 +42,7 @@ jobs:
       upstream_sha: ${{ steps.stage.outputs.upstream_sha }}
       candle_sha: ${{ steps.stage.outputs.candle_sha }}
       lock_sha256: ${{ steps.stage.outputs.lock_sha256 }}
+      bundle_sha256: ${{ steps.stage.outputs.bundle_sha256 }}
     steps:
       - name: Checkout orchestration source and full Git history
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
@@ -76,8 +77,22 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          ref: ${{ needs.prepare.outputs.candidate }}
+          ref: mirror_orch
           persist-credentials: false
+      - name: Download immutable candidate Git bundle
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with:
+          name: mistral-legacy-prep-${{ github.run_id }}
+          path: ${{ runner.temp }}/legacy-candidate
+      - name: Restore and verify exact candidate from bundle
+        shell: bash
+        env:
+          CANDIDATE: ${{ needs.prepare.outputs.candidate }}
+          MASTER: ${{ needs.prepare.outputs.upstream_sha }}
+          LOCK: ${{ needs.prepare.outputs.lock_sha256 }}
+          BUNDLE_SHA: ${{ needs.prepare.outputs.bundle_sha256 }}
+          CANDIDATE_BUNDLE: ${{ runner.temp }}/legacy-candidate/candidate.bundle
+        run: bash .github/scripts/legacy-cuda-load-candidate.sh
       - name: Validate CPU and candidate identity
         shell: bash
         env:
@@ -117,8 +132,22 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          ref: ${{ needs.prepare.outputs.candidate }}
+          ref: mirror_orch
           persist-credentials: false
+      - name: Download immutable candidate Git bundle
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with:
+          name: mistral-legacy-prep-${{ github.run_id }}
+          path: ${{ runner.temp }}/legacy-candidate
+      - name: Restore and verify exact candidate from bundle
+        shell: bash
+        env:
+          CANDIDATE: ${{ needs.prepare.outputs.candidate }}
+          MASTER: ${{ needs.prepare.outputs.upstream_sha }}
+          LOCK: ${{ needs.prepare.outputs.lock_sha256 }}
+          BUNDLE_SHA: ${{ needs.prepare.outputs.bundle_sha256 }}
+          CANDIDATE_BUNDLE: ${{ runner.temp }}/legacy-candidate/candidate.bundle
+        run: bash .github/scripts/legacy-cuda-load-candidate.sh
       - name: Compile complete CUDA feature set and smoke test (no execution)
         shell: bash
         env:
@@ -177,8 +206,22 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          ref: ${{ needs.prepare.outputs.candidate }}
+          ref: mirror_orch
           persist-credentials: false
+      - name: Download immutable candidate Git bundle
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with:
+          name: mistral-legacy-prep-${{ github.run_id }}
+          path: ${{ runner.temp }}/legacy-candidate
+      - name: Restore and verify exact candidate from bundle
+        shell: bash
+        env:
+          CANDIDATE: ${{ needs.prepare.outputs.candidate }}
+          MASTER: ${{ needs.prepare.outputs.upstream_sha }}
+          LOCK: ${{ needs.prepare.outputs.lock_sha256 }}
+          BUNDLE_SHA: ${{ needs.prepare.outputs.bundle_sha256 }}
+          CANDIDATE_BUNDLE: ${{ runner.temp }}/legacy-candidate/candidate.bundle
+        run: bash .github/scripts/legacy-cuda-load-candidate.sh
       - name: Validate BF16 / FP8 and F32 operations on actual GPU
         shell: bash
         env:
@@ -233,19 +276,33 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
-      contents: write
+      contents: read
       actions: read
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          ref: ${{ needs.prepare.outputs.candidate }}
+          ref: mirror_orch
           fetch-depth: 0
-          persist-credentials: true
+          persist-credentials: false
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
         with:
           pattern: mistral-legacy-*-${{ github.run_id }}
           path: ${{ runner.temp }}/legacy-proof
           merge-multiple: false
+      - name: Download immutable candidate Git bundle
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with:
+          name: mistral-legacy-prep-${{ github.run_id }}
+          path: ${{ runner.temp }}/legacy-candidate
+      - name: Restore and verify exact candidate from bundle
+        shell: bash
+        env:
+          CANDIDATE: ${{ needs.prepare.outputs.candidate }}
+          MASTER: ${{ needs.prepare.outputs.upstream_sha }}
+          LOCK: ${{ needs.prepare.outputs.lock_sha256 }}
+          BUNDLE_SHA: ${{ needs.prepare.outputs.bundle_sha256 }}
+          CANDIDATE_BUNDLE: ${{ runner.temp }}/legacy-candidate/candidate.bundle
+        run: bash .github/scripts/legacy-cuda-load-candidate.sh
       - name: Check exact proofs, source freshness, protected PR head
         shell: bash
         env:
@@ -255,6 +312,8 @@ jobs:
           MASTER: ${{ needs.prepare.outputs.upstream_sha }}
           CANDLE: ${{ needs.prepare.outputs.candle_sha }}
           LOCK: ${{ needs.prepare.outputs.lock_sha256 }}
+          BUNDLE_SHA: ${{ needs.prepare.outputs.bundle_sha256 }}
+          WORKFLOW_TOKEN: ${{ secrets.LEGACY_CUDA_WORKFLOW_TOKEN }}
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$CANDIDATE"
@@ -274,21 +333,38 @@ jobs:
           test -s "$prep"
           jq -e --arg sha "$CANDIDATE" --arg old "$ORIGINAL" \
             --arg master "$MASTER" --arg candle "$CANDLE" --arg lock "$LOCK" \
-            --arg ref "$REF" '
+            --arg ref "$REF" --arg bundle "$BUNDLE_SHA" '
               .candidate_sha==$sha and .original_pr_sha==$old and
               .upstream_master_sha==$master and .candle_sha==$candle and
               .candle_branch=="cuda_legacy" and .lock_sha256==$lock and
-              .candidate_ref==$ref and .status=="CANDIDATE_STAGED"' "$prep" >/dev/null
-          git remote add upstream https://github.com/EricLBuehler/mistral.rs.git
+              .candidate_ref==$ref and .bundle_sha256==$bundle and .status=="CANDIDATE_STAGED"' "$prep" >/dev/null
           git fetch --no-tags upstream +refs/heads/master:refs/remotes/upstream/master
           git merge-base --is-ancestor "$MASTER" HEAD
           test "$(git ls-remote upstream refs/heads/master | cut -f1)" = "$MASTER" || {
             echo "::error::Upstream moved; prepare a fresh rebase"; exit 3;
           }
-          test "$(git ls-remote origin "refs/heads/$REF" | cut -f1)" = "$CANDIDATE"
+          test "$REF" = "artifact://mistral-legacy-prep-$GITHUB_RUN_ID/candidate.bundle"
           test "$(git ls-remote origin refs/heads/allow_old_card | cut -f1)" = "$ORIGINAL" || {
             echo "::error::PR head moved. Refusing to overwrite changes"; exit 3;
           }
+          if test -z "$WORKFLOW_TOKEN"; then
+            echo "::error::Configure LEGACY_CUDA_WORKFLOW_TOKEN (fine-grained PAT: Contents:write and Workflows:write) before PR promotion."
+            exit 3
+          fi
+          # Authentication is withheld from all earlier jobs and commands.
+          # GIT_ASKPASS avoids embedding the secret in a push URL.
+          umask 077
+          cat > "$RUNNER_TEMP/legacy-workflow-askpass.sh" <<'AUTH'
+#!/bin/sh
+case "$1" in
+  *Username*) printf '%s\n' x-access-token ;;
+  *Password*) printf '%s\n' "$WORKFLOW_TOKEN" ;;
+  *) exit 1 ;;
+esac
+AUTH
+          chmod 700 "$RUNNER_TEMP/legacy-workflow-askpass.sh"
+          export GIT_ASKPASS="$RUNNER_TEMP/legacy-workflow-askpass.sh"
+          export GIT_TERMINAL_PROMPT=0
           # Keep an immutable rollback ref before the guarded PR-head rewrite.
           archive="archive/allow_old_card/pre-promotion-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           git fetch --no-tags origin "$ORIGINAL"
