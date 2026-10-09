@@ -310,6 +310,7 @@ rustfmt --edition 2021 mistralrs-quant/src/unquantized/mod.rs
 rustfmt --edition 2021 mistralrs-paged-attn/src/cuda/backend/paged_attention.rs
 rustfmt --edition 2021 mistralrs-quant/build.rs
 rustfmt --edition 2021 mistralrs-paged-attn/build.rs
+rustfmt --edition 2021 mistralrs-core/build.rs
 cargo +stable update --workspace > "$report/cargo-update.log" 2>&1 || {
   tail -n 100 "$report/cargo-update.log"; exit 1;
 }
@@ -321,6 +322,11 @@ git add Cargo.toml Cargo.lock \
   mistralrs-server-core/Cargo.toml mistralrs-quant/Cargo.toml \
   mistralrs-paged-attn/Cargo.toml \
   mistralrs-core/src/cuda/moe.rs \
+  mistralrs-core/build.rs \
+  mistralrs-quant/build.rs \
+  mistralrs-quant/src/unquantized/mod.rs \
+  mistralrs-paged-attn/build.rs \
+  mistralrs-paged-attn/src/cuda/backend/paged_attention.rs \
   mistralrs-core/tests/legacy_sm61_runtime.rs
 git commit -m "build(cuda): pin Candle cuda_legacy and add Pascal runtime check"
 candidate="$(git rev-parse HEAD)"
