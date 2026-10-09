@@ -46,6 +46,7 @@ echo "base=$base old_pr=$old upstream=$master" > "$report/rebase.log"
 cp .github/scripts/legacy-cuda-port-moe.py "$RUNNER_TEMP/legacy-cuda-port-moe.py"
 cp .github/scripts/legacy-cuda-port-quant.py "$RUNNER_TEMP/legacy-cuda-port-quant.py"
 cp .github/scripts/legacy-cuda-port-paged.py "$RUNNER_TEMP/legacy-cuda-port-paged.py"
+cp .github/scripts/legacy-cuda-port-fp8.py "$RUNNER_TEMP/legacy-cuda-port-fp8.py"
 git switch --detach "$old"
 git switch -c "rebased-allow-old-card-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
 # Preserve the upstream build script and semantically replay ONLY the
@@ -161,6 +162,13 @@ else
     elif skip_obsolete_0102_pin_conflict; then
       echo "::notice::Replacing obsolete Candle 0.10.2-only pin with current cuda_legacy"
       if git rebase --skip >> "$report/rebase.log" 2>&1; then
+        rebased=true
+        break
+      fi
+    elif [[ "$(git rev-parse REBASE_HEAD 2>/dev/null || true)" == bd7e8d43bc680f8e3a5d4d291a076dffe1e8d3b3 ]] &&
+         python3 "$RUNNER_TEMP/legacy-cuda-port-fp8.py" >> "$report/rebase.log" 2>&1; then
+      echo "::notice::Ported legacy FP8 to modern quant and paged-attention builds"
+      if GIT_EDITOR=true git rebase --continue >> "$report/rebase.log" 2>&1; then
         rebased=true
         break
       fi
@@ -300,6 +308,8 @@ rustfmt --edition 2021 mistralrs-core/tests/legacy_sm61_runtime.rs
 rustfmt --edition 2021 mistralrs-core/src/cuda/moe.rs
 rustfmt --edition 2021 mistralrs-quant/src/unquantized/mod.rs
 rustfmt --edition 2021 mistralrs-paged-attn/src/cuda/backend/paged_attention.rs
+rustfmt --edition 2021 mistralrs-quant/build.rs
+rustfmt --edition 2021 mistralrs-paged-attn/build.rs
 cargo +stable update --workspace > "$report/cargo-update.log" 2>&1 || {
   tail -n 100 "$report/cargo-update.log"; exit 1;
 }
