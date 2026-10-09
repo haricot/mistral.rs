@@ -150,6 +150,9 @@ jobs:
               cargo +stable test --locked -p mistralrs-core --no-default-features \
                 --features cuda-legacy-bf16,cuda-legacy-fp8,cuda-legacy-fp4 \
                 --test legacy_sm61_runtime --no-run
+              cargo +stable test --locked -p mistralrs-core --no-default-features \
+                --features cuda-legacy-bf16,cuda-legacy-fp8,cuda-legacy-fp4 \
+                --lib legacy_sm61_moe --no-run
             ' 2>&1 | tee "$report/compile.log"
           jq -n --arg sha "$SHA" --arg lock "$LOCK" \
             '{schema_version:1,candidate_sha:$sha,lock_sha256:$lock,
@@ -199,9 +202,14 @@ jobs:
             --test legacy_sm61_runtime -- --nocapture > "$report/smoke.log" 2>&1 || {
               tail -n 120 "$report/smoke.log"; exit 1;
             }
+          cargo +stable test --locked -p mistralrs-core --no-default-features \
+            --features cuda-legacy-bf16,cuda-legacy-fp8,cuda-legacy-fp4 \
+            --lib legacy_sm61_moe -- --nocapture > "$report/moe-smoke.log" 2>&1 || {
+              tail -n 120 "$report/moe-smoke.log"; exit 1;
+            }
           jq -n --arg sha "$SHA" --arg lock "$LOCK" \
             '{schema_version:1,candidate_sha:$sha,lock_sha256:$lock,
-              target:"sm_61",gpu_executed:true,tests:["f32","bf16","fp8-e4m3"],
+              target:"sm_61",gpu_executed:true,tests:["f32","bf16","fp8-e4m3","moe-f16-bf16-prefill"],
               status:"GPU_PASSED"}' > "$report/report.json"
       - name: Archive physical GPU proof
         if: always()
@@ -253,7 +261,7 @@ jobs:
                ( $gate=="cuda" and .status=="CUDA_COMPILE_PASSED" and .gpu_executed==false ) or
                ( $gate=="gpu" and .status=="GPU_PASSED" and .gpu_executed==true and
                  .target=="sm_61" and
-                 ((.tests|sort)==(["f32","bf16","fp8-e4m3"]|sort))))' "$file" >/dev/null
+                 ((.tests|sort)==(["f32","bf16","fp8-e4m3","moe-f16-bf16-prefill"]|sort))))' "$file" >/dev/null
           done
           prep="$RUNNER_TEMP/legacy-proof/mistral-legacy-prep-$GITHUB_RUN_ID/provenance.json"
           test -s "$prep"
