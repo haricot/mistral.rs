@@ -24,6 +24,33 @@ def edit_one(src, needle, replacement, label):
             f"{label}: expected one exact anchor, got {src.count(needle)}")
     return src.replace(needle, replacement, 1)
 
+def enable_pascal_fp8_sources(src):
+    """Edit only the FP8 filters inside the modern excluded_files block."""
+    start = '        let mut excluded_files = if cc_over_80 {\n'
+    require(src.count(start) == 1,
+            f"FP8 source inclusion: expected one excluded_files assignment, got {src.count(start)}")
+    begin = src.index(start)
+    end_marker = '        };\n'
+    end = src.find(end_marker, begin)
+    require(end != -1, "FP8 source inclusion: excluded_files block has no terminator")
+    end += len(end_marker)
+
+    block = src[begin:end]
+    lines = block.splitlines(keepends=True)
+    filters = ('"*_fp8.cu",', '"*_fp8_gemm.cu",', '"*_fp8_mma.cu",')
+    for pattern in filters:
+        hits = [i for i, line in enumerate(lines) if pattern in line]
+        require(len(hits) == 1,
+                f"FP8 source inclusion: expected one {pattern} filter, got {len(hits)}")
+        del lines[hits[0]]
+
+    guard = '''        if !cc_over_80 && !allow_legacy_fp8 {
+            excluded_files.extend(["*_fp8.cu", "*_fp8_gemm.cu", "*_fp8_mma.cu"]);
+        }
+'''
+    require(guard not in src, "FP8 source inclusion: conditional filter guard already present")
+    return src[:begin] + ''.join(lines) + guard + src[end:]
+
 require(git("rev-parse", "REBASE_HEAD") == EXPECTED, "Wrong FP8 commit")
 conflicts = set(git("diff", "--name-only", "--diff-filter=U").splitlines())
 require(bool(conflicts) and conflicts <= PATHS,
@@ -91,40 +118,7 @@ portable = '''        if cc_over_80 {
         }
 '''
 quant = edit_one(quant, fast, portable, "keep WMMA disabled on Pascal")
-exclude = '''        } else {
-            vec![
-                "marlin_*.cu",
-                "*_fp8.cu",
-                "*_fp8_gemm.cu",
-                "*_fp8_mma.cu",
-                "*_wmma.cu",
-                "moe_data.cu",
-                "grouped_mm_*.cu",
-            ]
-        };
-'''
-legacy = '''        } else if allow_legacy_fp8 {
-            // Keep tensor-core FP8 MMA, WMMA and SM80+ MoE unavailable on Pascal.
-            vec![
-                "marlin_*.cu",
-                "*_fp8_mma.cu",
-                "*_wmma.cu",
-                "moe_data.cu",
-                "grouped_mm_*.cu",
-            ]
-        } else {
-            vec![
-                "marlin_*.cu",
-                "*_fp8.cu",
-                "*_fp8_gemm.cu",
-                "*_fp8_mma.cu",
-                "*_wmma.cu",
-                "moe_data.cu",
-                "grouped_mm_*.cu",
-            ]
-        };
-'''
-quant = edit_one(quant, exclude, legacy, "FP8 source inclusion")
+quant = enable_pascal_fp8_sources(quant)
 qpath.write_text(quant)
 
 path = Path("mistralrs-paged-attn/build.rs")
@@ -181,4 +175,4 @@ path.write_text(fp8)
 for path in sorted(PATHS):
     subprocess.run(["git", "add", path], check=True)
 subprocess.run(["git", "diff", "--cached", "--check"], check=True)
-print("PORT_FP8_R6_READY: 0.11 FP8 enabled with SM61 software kernels only")
+print("PORT_FP8_R7_READY: semantic source exclusions + SM61 software FP8")
