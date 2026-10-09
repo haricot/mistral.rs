@@ -1,0 +1,176 @@
+name: Mistral CUDA Legacy (Candle cuda_legacy)
+
+# Independent, opt-in proof-of-concept lane. The existing ASD promotion
+# workflow remains unchanged. No GPU is attached to the hosted runner.
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: "mistral.rs source branch (0.11.x API; normally asd_runner)"
+        required: true
+        default: "asd_runner"
+        type: string
+      build_mode:
+        description: "SM61 CUDA compilation only (not a physical GPU runtime test)"
+        required: true
+        default: "check"
+        type: choice
+        options:
+          - check
+          - release
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mistral-cuda-legacy-${{ github.ref }}-${{ inputs.source_ref }}
+  cancel-in-progress: false
+
+jobs:
+  sm61-compile:
+    if: github.ref == 'refs/heads/mirror_orch'
+    name: CUDA 12.9.2 / sm_61 / Candle cuda_legacy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Checkout selected mistral.rs source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v4/Node24
+        with:
+          ref: ${{ inputs.source_ref }}
+          path: mistral
+          persist-credentials: false
+
+      - name: Checkout Candle cuda_legacy
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: haricot/candle
+          ref: cuda_legacy
+          path: candle-legacy
+          persist-credentials: false
+
+      - name: Verify provenance and pin exact Candle commit
+        id: pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          src="$(git -C mistral rev-parse HEAD)"
+          candle="$(git -C candle-legacy rev-parse HEAD)"
+          remote="$(git ls-remote https://github.com/haricot/candle.git refs/heads/cuda_legacy | cut -f1)"
+          test "$candle" = "$remote" || { echo "::error::cuda_legacy moved during checkout"; exit 1; }
+          jq -e '
+            .schema_version == 1 and
+            .kind == "legacy-cuda-five" and
+            .integration_target == "legacy-cuda" and
+            ([.features[].feature] | sort) ==
+              (["bf16_candle","fp8_candle","fp4_candle","cudnn_fallback_candle","moe_simt_f16_candle"] | sort)
+          ' candle-legacy/candle-integration/legacy-cuda.json > /dev/null
+          if jq -e '.validation_state == "UNVALIDATED_CANDIDATE"' \
+              candle-legacy/candle-integration/legacy-cuda.json > /dev/null; then
+            echo "::warning::Candle cuda_legacy is an UNVALIDATED_CANDIDATE, not physical SM61 proof"
+          fi
+          mkdir -p "$RUNNER_TEMP/mistral-cuda-legacy"
+          jq -n --arg src "$src" --arg candle "$candle" \
+            --arg ref "${{ inputs.source_ref }}" --arg mode "${{ inputs.build_mode }}" \
+            '{schema_version:1,mistral_source_ref:$ref,mistral_sha:$src,
+              candle_repository:"haricot/candle",candle_branch:"cuda_legacy",
+              candle_sha:$candle,cuda:"12.9.2",compute_capability:"sm_61",
+              build_mode:$mode,physical_gpu_validated:false}' \
+            > "$RUNNER_TEMP/mistral-cuda-legacy/provenance.json"
+          echo "candle=$candle" >> "$GITHUB_OUTPUT"
+          echo "mistral=$src" >> "$GITHUB_OUTPUT"
+
+      - name: Pin Candle workspace dependencies in ephemeral build checkout
+        shell: bash
+        env:
+          CANDLE_SHA: ${{ steps.pin.outputs.candle }}
+        run: |
+          set -euo pipefail
+          cd mistral
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+          candle = os.environ["CANDLE_SHA"]
+          manifest = Path("Cargo.toml")
+          data = manifest.read_text()
+          crates = ("candle-core", "candle-nn", "candle-flash-attn-v3", "candle-metal-kernels")
+          for crate in crates:
+              regex = re.compile(
+                  rf'(?m)^({re.escape(crate)}\s*=\s*\{{[^\n]*git\s*=\s*"https://github.com/haricot/candle\.git"[^\n]*rev\s*=\s*")[0-9a-f]{{40}}("[^\n]*\}}\s*)$'
+              )
+              data, found = regex.subn(lambda m: m[1] + candle + m[2], data)
+              if found != 1:
+                  raise SystemExit(f"Expected exactly one pinned dependency for {crate}, got {found}; use a 0.11.x source_ref")
+          manifest.write_text(data)
+          PY
+          git diff --check
+          git diff -- Cargo.toml
+
+      - name: Compile CUDA for Pascal (hosted runner, no GPU execution)
+        shell: bash
+        env:
+          MODE: ${{ inputs.build_mode }}
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/mistral-cuda-legacy"
+          docker run --rm --network=bridge \
+            --security-opt=no-new-privileges \
+            -v "$GITHUB_WORKSPACE/mistral:/workspace:rw" \
+            -v "$report:/report:rw" \
+            -w /workspace \
+            -e CUDA_COMPUTE_CAP=61 \
+            -e CUDA_HOME=/usr/local/cuda \
+            -e CUDA_PATH=/usr/local/cuda \
+            -e CARGO_BUILD_JOBS=2 \
+            -e CARGO_INCREMENTAL=0 \
+            -e "MODE=$MODE" \
+            nvidia/cuda:12.9.2-devel-ubuntu24.04 \
+            bash -c '
+              set -euo pipefail
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -qq
+              apt-get install -y --no-install-recommends \
+                ca-certificates curl git python3 pkg-config build-essential \
+                libssl-dev protobuf-compiler cmake
+              curl --proto "=https" --tlsv1.2 -fsSL https://sh.rustup.rs \
+                | sh -s -- -y --profile minimal --default-toolchain stable
+              . "$HOME/.cargo/env"
+              rustc --version
+              nvcc --version
+              cargo +stable update --workspace
+              cargo +stable metadata --locked --format-version 1 > /dev/null
+              if [ "$MODE" = "release" ]; then
+                cargo +stable build --locked --release -p mistralrs-cli \
+                  --no-default-features \
+                  --features cuda-legacy-bf16,cuda-legacy-fp8,cuda-legacy-fp4
+              elif [ "$MODE" = "check" ]; then
+                cargo +stable check --locked -p mistralrs-cli \
+                  --no-default-features \
+                  --features cuda-legacy-bf16,cuda-legacy-fp8,cuda-legacy-fp4
+              else
+                echo "Unknown build mode" >&2; exit 2
+              fi
+              cp Cargo.lock /report/Cargo.lock
+              sha256sum Cargo.lock > /report/Cargo.lock.sha256
+            ' 2>&1 | tee "$report/build.log"
+
+      - name: Summarize tested sources and limitations
+        if: always()
+        shell: bash
+        run: |
+          echo "## Mistral CUDA legacy compilation experiment" >> "$GITHUB_STEP_SUMMARY"
+          echo "Candle: haricot/candle `cuda_legacy`" >> "$GITHUB_STEP_SUMMARY"
+          echo "Target: NVIDIA Pascal sm_61, CUDA 12.9.2" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Hosted compilation only. No physical GPU runtime validation is claimed.**" >> "$GITHUB_STEP_SUMMARY"
+          if test -f "$RUNNER_TEMP/mistral-cuda-legacy/provenance.json"; then
+            cat "$RUNNER_TEMP/mistral-cuda-legacy/provenance.json" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Archive provenance and build diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7/Node24
+        with:
+          name: mistral-cuda-legacy-sm61-${{ github.run_id }}
+          path: ${{ runner.temp }}/mistral-cuda-legacy/
+          if-no-files-found: warn
+          retention-days: 30
