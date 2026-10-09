@@ -312,6 +312,13 @@ rustfmt --edition 2021 mistralrs-paged-attn/src/cuda/backend/paged_attention.rs
 rustfmt --edition 2021 mistralrs-quant/build.rs
 rustfmt --edition 2021 mistralrs-paged-attn/build.rs
 rustfmt --edition 2021 mistralrs-core/build.rs
+# Fail here instead of producing a candidate that would fail the CPU fmt gate.
+# This validates the complete workspace without rewriting unrelated files.
+cargo +stable fmt --all -- --check > "$report/fmt.log" 2>&1 || {
+  tail -n 100 "$report/fmt.log"
+  echo "::error::Prepared candidate does not pass workspace rustfmt"
+  exit 1
+}
 cargo +stable update --workspace > "$report/cargo-update.log" 2>&1 || {
   tail -n 100 "$report/cargo-update.log"; exit 1;
 }
