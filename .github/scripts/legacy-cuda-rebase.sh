@@ -161,6 +161,59 @@ if [[ "$rebased" != true ]]; then
   exit 1
 fi
 git merge-base --is-ancestor "$master" HEAD || exit 3
+# The original PR was written before the current Cargo feature graph existed.
+# Forward-wire explicit Candle 0.11 BF16/FP8/FP4 features rather than compiling
+# a no-op "legacy" build. Leave all unrelated features untouched.
+python3 - <<'PY'
+from pathlib import Path
+wiring = {
+    "mistralrs-cli": {
+        "cuda-legacy-bf16": ["cuda", "mistralrs-core/cuda-legacy-bf16", "mistralrs-server-core/cuda-legacy-bf16"],
+        "cuda-legacy-fp8": ["cuda", "mistralrs-core/cuda-legacy-fp8", "mistralrs-server-core/cuda-legacy-fp8"],
+        "cuda-legacy-fp4": ["cuda", "mistralrs-core/cuda-legacy-fp4", "mistralrs-server-core/cuda-legacy-fp4"],
+    },
+    "mistralrs-server-core": {
+        "cuda-legacy-bf16": ["cuda", "mistralrs-core/cuda-legacy-bf16"],
+        "cuda-legacy-fp8": ["cuda", "mistralrs-core/cuda-legacy-fp8"],
+        "cuda-legacy-fp4": ["cuda", "mistralrs-core/cuda-legacy-fp4"],
+    },
+    "mistralrs-core": {
+        "cuda-legacy-bf16": ["cuda", "candle-core/cuda-legacy-bf16", "mistralrs-quant/cuda-legacy-bf16", "mistralrs-paged-attn/cuda-legacy-bf16"],
+        "cuda-legacy-fp8": ["cuda", "candle-core/cuda-legacy-fp8", "mistralrs-quant/cuda-legacy-fp8", "mistralrs-paged-attn/cuda-legacy-fp8"],
+        "cuda-legacy-fp4": ["cuda", "candle-core/cuda-legacy-fp4", "mistralrs-quant/cuda-legacy-fp4", "mistralrs-paged-attn/cuda-legacy-fp4"],
+    },
+    "mistralrs-quant": {
+        "cuda-legacy-bf16": ["cuda", "candle-core/cuda-legacy-bf16"],
+        "cuda-legacy-fp8": ["cuda", "candle-core/cuda-legacy-fp8"],
+        "cuda-legacy-fp4": ["cuda", "candle-core/cuda-legacy-fp4"],
+    },
+    "mistralrs-paged-attn": {
+        "cuda-legacy-bf16": ["cuda", "candle-core/cuda-legacy-bf16"],
+        "cuda-legacy-fp8": ["cuda", "candle-core/cuda-legacy-fp8"],
+        "cuda-legacy-fp4": ["cuda", "candle-core/cuda-legacy-fp4"],
+    },
+}
+for crate, flags in wiring.items():
+    path = Path(crate) / "Cargo.toml"
+    text = path.read_text()
+    anchor = "[features]\n"
+    if text.count(anchor) != 1:
+        raise SystemExit(f"{crate}: expected exactly one [features] table")
+    active = text.split("[features]\n", 1)[1].split("\n[", 1)[0]
+    lines = []
+    for feature, dependencies in flags.items():
+        existing = [line for line in active.splitlines() if line.startswith(feature + " =")]
+        if existing:
+            # Already-ported sources must agree with the expected feature graph.
+            if len(existing) != 1 or not all(f'"{d}"' in existing[0] for d in dependencies):
+                raise SystemExit(f"{crate}: incompatible existing feature {feature}")
+            continue
+        rendered = ", ".join(f'"{d}"' for d in dependencies)
+        lines.append(f"{feature} = [{rendered}]")
+    if lines:
+        text = text.replace(anchor, anchor + "\n".join(lines) + "\n", 1)
+        path.write_text(text)
+PY
 CANDLE_SHA="$candle" python3 - <<'PY'
 import os
 import re
@@ -174,6 +227,21 @@ for name in ("candle-core", "candle-nn", "candle-flash-attn-v3", "candle-metal-k
     text, hits = pat.subn(value, text)
     if hits != 1:
         raise SystemExit(f"{name}: expected one modern 0.11 dependency, found {hits}")
+# The 2026-01 PR patch pointed at Candle 0.10.2, which must not leak into
+# the 0.11.0 dependency graph. Remove only the known exact historical pin.
+import re as _re
+legacy_section = _re.compile(
+    r"(?ms)^\[patch\.crates-io\]\n"
+    r"((?:candle-(?:core|nn|flash-attn-v3|flash-attn|metal-kernels|kernels) = "
+    r"\{ git = \"https://github.com/haricot/candle\.git\", rev = \"e1f418a\" \}\n){6})"
+)
+if "[patch.crates-io]" in text:
+    # We can only discard exactly the original pin-only patch block; keep
+    # any unrelated overrides or customizations for manual review.
+    text, hits = legacy_section.subn("", text)
+    if hits != 1:
+        raise SystemExit("Unexpected legacy [patch.crates-io] block; refusing implicit removal")
+    text = text.replace("\n\n\n[profile.release-with-debug]", "\n\n[profile.release-with-debug]")
 manifest.write_text(text)
 PY
 mkdir -p mistralrs-core/tests
