@@ -96,6 +96,7 @@ exclude = '''        } else {
                 "marlin_*.cu",
                 "*_fp8.cu",
                 "*_fp8_gemm.cu",
+                "*_fp8_mma.cu",
                 "*_wmma.cu",
                 "moe_data.cu",
                 "grouped_mm_*.cu",
@@ -103,9 +104,10 @@ exclude = '''        } else {
         };
 '''
 legacy = '''        } else if allow_legacy_fp8 {
-            // Keep WMMA and SM80+ CUTLASS MoE unavailable on Pascal.
+            // Keep tensor-core FP8 MMA, WMMA and SM80+ MoE unavailable on Pascal.
             vec![
                 "marlin_*.cu",
+                "*_fp8_mma.cu",
                 "*_wmma.cu",
                 "moe_data.cu",
                 "grouped_mm_*.cu",
@@ -115,6 +117,7 @@ legacy = '''        } else if allow_legacy_fp8 {
                 "marlin_*.cu",
                 "*_fp8.cu",
                 "*_fp8_gemm.cu",
+                "*_fp8_mma.cu",
                 "*_wmma.cu",
                 "moe_data.cu",
                 "grouped_mm_*.cu",
