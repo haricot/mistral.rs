@@ -279,7 +279,11 @@ cargo +stable update --workspace > "$report/cargo-update.log" 2>&1 || {
 cargo +stable metadata --locked --format-version 1 > "$report/metadata.json"
 grep -Fq "$candle" Cargo.lock
 lock="$(sha256sum Cargo.lock | cut -d' ' -f1)"
-git add Cargo.toml Cargo.lock mistralrs-core/tests/legacy_sm61_runtime.rs
+git add Cargo.toml Cargo.lock \
+  mistralrs-cli/Cargo.toml mistralrs-core/Cargo.toml \
+  mistralrs-server-core/Cargo.toml mistralrs-quant/Cargo.toml \
+  mistralrs-paged-attn/Cargo.toml \
+  mistralrs-core/tests/legacy_sm61_runtime.rs
 git commit -m "build(cuda): pin Candle cuda_legacy and add Pascal runtime check"
 candidate="$(git rev-parse HEAD)"
 ref="integration/rebased_allow_old_card-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
