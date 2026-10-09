@@ -134,6 +134,7 @@ jobs:
             -v "$GITHUB_WORKSPACE:/workspace:rw" \
             -v "$report:/report:rw" -w /workspace \
             -e CUDA_COMPUTE_CAP=61 -e CUDA_HOME=/usr/local/cuda \
+            -e ALLOW_LEGACY=bf16,fp8 \
             -e CARGO_BUILD_JOBS=2 -e CARGO_INCREMENTAL=0 \
             nvidia/cuda:12.9.2-devel-ubuntu24.04 bash -euc '
               export DEBIAN_FRONTEND=noninteractive
@@ -190,7 +191,7 @@ jobs:
             export CUDA_HOME=/opt/cuda129 CUDA_PATH=/opt/cuda129
             export PATH="/opt/cuda129/bin:$PATH"
           fi
-          export CUDA_COMPUTE_CAP=61 NVCC_CCBIN=/usr/bin/g++-14
+          export CUDA_COMPUTE_CAP=61 NVCC_CCBIN=/usr/bin/g++-14 ALLOW_LEGACY=bf16,fp8
           rustup toolchain install stable --profile minimal
           nvcc --version > "$report/nvcc.txt"
           cargo +stable test --locked -p mistralrs-core --no-default-features \
