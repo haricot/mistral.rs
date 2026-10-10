@@ -47,6 +47,7 @@ cp .github/scripts/legacy-cuda-port-moe.py "$RUNNER_TEMP/legacy-cuda-port-moe.py
 cp .github/scripts/legacy-cuda-port-quant.py "$RUNNER_TEMP/legacy-cuda-port-quant.py"
 cp .github/scripts/legacy-cuda-port-paged.py "$RUNNER_TEMP/legacy-cuda-port-paged.py"
 cp .github/scripts/legacy-cuda-port-fp8.py "$RUNNER_TEMP/legacy-cuda-port-fp8.py"
+cp .github/scripts/legacy-cuda-port-mxfp4.py "$RUNNER_TEMP/legacy-cuda-port-mxfp4.py"
 git switch --detach "$old"
 git switch -c "rebased-allow-old-card-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
 # Preserve the upstream build script and semantically replay ONLY the
@@ -193,6 +194,9 @@ if [[ "$rebased" != true ]]; then
   exit 1
 fi
 git merge-base --is-ancestor "$master" HEAD || exit 3
+# Candle cuda_legacy expands GgmlDType with MXFP4. Apply the reviewed,
+# fail-closed compatibility shim on top of the fully rebased upstream tree.
+python3 "$RUNNER_TEMP/legacy-cuda-port-mxfp4.py"
 # The original PR was written before the current Cargo feature graph existed.
 # Forward-wire explicit Candle 0.11 BF16/FP8/FP4 features rather than compiling
 # a no-op "legacy" build. Leave all unrelated features untouched.
@@ -308,6 +312,9 @@ rustfmt --edition 2021 mistralrs-core/tests/legacy_sm61_runtime.rs
 rustfmt --edition 2021 mistralrs-core/src/cuda/moe.rs
 rustfmt --edition 2021 mistralrs-core/src/cuda/ffi.rs
 rustfmt --edition 2021 mistralrs-quant/src/unquantized/mod.rs
+rustfmt --edition 2021 mistralrs-quant/src/gguf/archive.rs
+rustfmt --edition 2021 mistralrs-quant/src/gguf/mod.rs
+rustfmt --edition 2021 mistralrs-quant/src/lib.rs
 rustfmt --edition 2021 mistralrs-paged-attn/src/cuda/backend/paged_attention.rs
 rustfmt --edition 2021 mistralrs-quant/build.rs
 rustfmt --edition 2021 mistralrs-paged-attn/build.rs
@@ -334,6 +341,9 @@ git add Cargo.toml Cargo.lock \
   mistralrs-core/build.rs \
   mistralrs-quant/build.rs \
   mistralrs-quant/src/unquantized/mod.rs \
+  mistralrs-quant/src/gguf/archive.rs \
+  mistralrs-quant/src/gguf/mod.rs \
+  mistralrs-quant/src/lib.rs \
   mistralrs-paged-attn/build.rs \
   mistralrs-paged-attn/src/cuda/backend/paged_attention.rs \
   mistralrs-core/tests/legacy_sm61_runtime.rs
