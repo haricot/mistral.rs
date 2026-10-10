@@ -330,6 +330,7 @@ git add Cargo.toml Cargo.lock \
   mistralrs-server-core/Cargo.toml mistralrs-quant/Cargo.toml \
   mistralrs-paged-attn/Cargo.toml \
   mistralrs-core/src/cuda/moe.rs \
+  mistralrs-core/src/cuda/ffi.rs \
   mistralrs-core/build.rs \
   mistralrs-quant/build.rs \
   mistralrs-quant/src/unquantized/mod.rs \
@@ -337,6 +338,16 @@ git add Cargo.toml Cargo.lock \
   mistralrs-paged-attn/src/cuda/backend/paged_attention.rs \
   mistralrs-core/tests/legacy_sm61_runtime.rs
 git commit -m "build(cuda): pin Candle cuda_legacy and add Pascal runtime check"
+# The candidate MUST include all rustfmt changes. The old candidate silently
+# dropped ffi.rs: fmt passed in the working tree, but failed after bundle restore.
+# Fail closed on any uncommitted or untracked file before exporting the bundle.
+if test -n "$(git status --porcelain --untracked-files=normal)"; then
+  echo "::error::Candidate differs from its working tree after commit"
+  git status --short
+  git diff --stat
+  git diff --cached --stat
+  exit 1
+fi
 candidate="$(git rev-parse HEAD)"
 # GitHub Actions' default GitHub App token cannot push a branch introducing
 # upstream workflow files without Workflows:write. Transport the exact Git
