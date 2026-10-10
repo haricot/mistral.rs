@@ -47,6 +47,7 @@ cp .github/scripts/legacy-cuda-port-moe.py "$RUNNER_TEMP/legacy-cuda-port-moe.py
 cp .github/scripts/legacy-cuda-port-quant.py "$RUNNER_TEMP/legacy-cuda-port-quant.py"
 cp .github/scripts/legacy-cuda-port-paged.py "$RUNNER_TEMP/legacy-cuda-port-paged.py"
 cp .github/scripts/legacy-cuda-port-fp8.py "$RUNNER_TEMP/legacy-cuda-port-fp8.py"
+cp .github/scripts/legacy-cuda-port-fp8-mma-guard.py "$RUNNER_TEMP/legacy-cuda-port-fp8-mma-guard.py"
 cp .github/scripts/legacy-cuda-port-mxfp4.py "$RUNNER_TEMP/legacy-cuda-port-mxfp4.py"
 cp .github/scripts/legacy-cuda-port-flashinfer-math.py "$RUNNER_TEMP/legacy-cuda-port-flashinfer-math.py"
 git switch --detach "$old"
@@ -199,6 +200,8 @@ git merge-base --is-ancestor "$master" HEAD || exit 3
 # fail-closed compatibility shim on top of the fully rebased upstream tree.
 python3 "$RUNNER_TEMP/legacy-cuda-port-mxfp4.py"
 python3 "$RUNNER_TEMP/legacy-cuda-port-flashinfer-math.py"
+# The modern MMA Rust facade must not link excluded Tensor Core kernels on SM61.
+python3 "$RUNNER_TEMP/legacy-cuda-port-fp8-mma-guard.py"
 # The original PR was written before the current Cargo feature graph existed.
 # Forward-wire explicit Candle 0.11 BF16/FP8/FP4 features rather than compiling
 # a no-op "legacy" build. Leave all unrelated features untouched.
@@ -316,6 +319,8 @@ rustfmt --edition 2021 mistralrs-core/src/cuda/ffi.rs
 rustfmt --edition 2021 mistralrs-quant/src/unquantized/mod.rs
 rustfmt --edition 2021 mistralrs-quant/src/gguf/archive.rs
 rustfmt --edition 2021 mistralrs-quant/src/gguf/mod.rs
+rustfmt --edition 2021 mistralrs-quant/src/blockwise_fp8/mod.rs
+rustfmt --edition 2021 mistralrs-quant/src/blockwise_fp8/ffi.rs
 rustfmt --edition 2021 mistralrs-quant/src/lib.rs
 rustfmt --edition 2021 mistralrs-paged-attn/src/cuda/backend/paged_attention.rs
 rustfmt --edition 2021 mistralrs-quant/build.rs
@@ -345,6 +350,8 @@ git add Cargo.toml Cargo.lock \
   mistralrs-quant/src/unquantized/mod.rs \
   mistralrs-quant/src/gguf/archive.rs \
   mistralrs-quant/src/gguf/mod.rs \
+  mistralrs-quant/src/blockwise_fp8/mod.rs \
+  mistralrs-quant/src/blockwise_fp8/ffi.rs \
   mistralrs-quant/src/lib.rs \
   mistralrs-paged-attn/build.rs \
   mistralrs-paged-attn/src/cuda/backend/paged_attention.rs \
