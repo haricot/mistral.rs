@@ -258,7 +258,17 @@ jobs:
             export PATH="/opt/cuda129/bin:$PATH"
           fi
           export CUDA_COMPUTE_CAP=61 NVCC_CCBIN=/usr/bin/g++-14 ALLOW_LEGACY=bf16,fp8
-          rustup toolchain install stable --profile minimal
+          # The ephemeral rootless runner image preinstalls the stable toolchain.
+          # Never run "rustup toolchain install stable" during a GPU job: the
+          # Rustup component-replacement transaction crosses overlay mounts
+          # (EXDEV: Invalid cross-device link) and fails before CUDA tests.
+          # Verify the preinstalled toolchain without updating or modifying it.
+          if ! cargo +stable --version > "$report/cargo-version.txt" 2>&1 ||
+             ! rustc +stable --version > "$report/rustc-version.txt" 2>&1; then
+            cat "$report/cargo-version.txt" "$report/rustc-version.txt" 2>/dev/null || true
+            echo "::error::Stable Rust toolchain missing or unusable in GPU runner image; rebuild the runner image with stable preinstalled."
+            exit 3
+          fi
           nvcc --version > "$report/nvcc.txt"
           cargo +stable test --locked -p mistralrs-core --no-default-features \
             --features cuda-legacy-bf16,cuda-legacy-fp8,cuda-legacy-fp4 \
