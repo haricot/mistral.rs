@@ -48,6 +48,7 @@ cp .github/scripts/legacy-cuda-port-quant.py "$RUNNER_TEMP/legacy-cuda-port-quan
 cp .github/scripts/legacy-cuda-port-paged.py "$RUNNER_TEMP/legacy-cuda-port-paged.py"
 cp .github/scripts/legacy-cuda-port-fp8.py "$RUNNER_TEMP/legacy-cuda-port-fp8.py"
 cp .github/scripts/legacy-cuda-port-mxfp4.py "$RUNNER_TEMP/legacy-cuda-port-mxfp4.py"
+cp .github/scripts/legacy-cuda-port-flashinfer-math.py "$RUNNER_TEMP/legacy-cuda-port-flashinfer-math.py"
 git switch --detach "$old"
 git switch -c "rebased-allow-old-card-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
 # Preserve the upstream build script and semantically replay ONLY the
@@ -197,6 +198,7 @@ git merge-base --is-ancestor "$master" HEAD || exit 3
 # Candle cuda_legacy expands GgmlDType with MXFP4. Apply the reviewed,
 # fail-closed compatibility shim on top of the fully rebased upstream tree.
 python3 "$RUNNER_TEMP/legacy-cuda-port-mxfp4.py"
+python3 "$RUNNER_TEMP/legacy-cuda-port-flashinfer-math.py"
 # The original PR was written before the current Cargo feature graph existed.
 # Forward-wire explicit Candle 0.11 BF16/FP8/FP4 features rather than compiling
 # a no-op "legacy" build. Leave all unrelated features untouched.
@@ -346,6 +348,7 @@ git add Cargo.toml Cargo.lock \
   mistralrs-quant/src/lib.rs \
   mistralrs-paged-attn/build.rs \
   mistralrs-paged-attn/src/cuda/backend/paged_attention.rs \
+  mistralrs-paged-attn/src/cuda/flashinfer/math.cuh \
   mistralrs-core/tests/legacy_sm61_runtime.rs
 git commit -m "build(cuda): pin Candle cuda_legacy and add Pascal runtime check"
 # The candidate MUST include all rustfmt changes. The old candidate silently
