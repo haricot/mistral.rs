@@ -1,7 +1,8 @@
 name: Mistral CUDA Legacy (rebase PR then validate SM61)
 
 # Orchestrated from mirror_orch; source comes from upstream master, not asd_runner.
-# Only all-green CPU, hosted CUDA and physical Pascal proofs can replace the PR head.
+# All-green CPU/Clippy, hosted CUDA and physical Pascal proofs certify a candidate.
+# Publication is a separate, locally authorized run-once.sh promote operation.
 on:
   workflow_dispatch:
     inputs:
@@ -306,7 +307,7 @@ jobs:
 
   promote:
     needs: [prepare, cpu, cuda_compile, gpu]
-    name: Lease-promote only after all physical proofs pass
+    name: Verify all proofs before manual local promotion
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
@@ -347,7 +348,6 @@ jobs:
           CANDLE: ${{ needs.prepare.outputs.candle_sha }}
           LOCK: ${{ needs.prepare.outputs.lock_sha256 }}
           BUNDLE_SHA: ${{ needs.prepare.outputs.bundle_sha256 }}
-          WORKFLOW_TOKEN: ${{ secrets.LEGACY_CUDA_WORKFLOW_TOKEN }}
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$CANDIDATE"
@@ -381,30 +381,11 @@ jobs:
           test "$(git ls-remote origin refs/heads/allow_old_card | cut -f1)" = "$ORIGINAL" || {
             echo "::error::PR head moved. Refusing to overwrite changes"; exit 3;
           }
-          if test -z "$WORKFLOW_TOKEN"; then
-            echo "::error::Configure LEGACY_CUDA_WORKFLOW_TOKEN (fine-grained PAT: Contents:write and Workflows:write) before PR promotion."
-            exit 3
-          fi
-          # Authentication is withheld from all earlier jobs and commands.
-          # GIT_ASKPASS avoids embedding the secret in a push URL.
-          umask 077
-          cat > "$RUNNER_TEMP/legacy-workflow-askpass.sh" <<'AUTH'
-          #!/bin/sh
-          case "$1" in
-            *Username*) printf '%s\n' x-access-token ;;
-            *Password*) printf '%s\n' "$WORKFLOW_TOKEN" ;;
-            *) exit 1 ;;
-          esac
-          AUTH
-          chmod 700 "$RUNNER_TEMP/legacy-workflow-askpass.sh"
-          export GIT_ASKPASS="$RUNNER_TEMP/legacy-workflow-askpass.sh"
-          export GIT_TERMINAL_PROMPT=0
-          # Keep an immutable rollback ref before the guarded PR-head rewrite.
-          archive="archive/allow_old_card/pre-promotion-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          git fetch --no-tags origin "$ORIGINAL"
-          git push origin "$ORIGINAL:refs/heads/$archive"
-          test "$(git ls-remote origin "refs/heads/$archive" | cut -f1)" = "$ORIGINAL"
-          git push --force-with-lease="refs/heads/allow_old_card:$ORIGINAL" \
-            origin "$CANDIDATE:refs/heads/allow_old_card"
-          echo "Archived old PR at $archive" >> "$GITHUB_STEP_SUMMARY"
-          echo "Promoted $CANDIDATE to allow_old_card after physical SM61 gate" >> "$GITHUB_STEP_SUMMARY"
+          # CI is intentionally read-only. The local V8.4 promote command
+          # rechecks these artifacts and authorizes a guarded push with gh auth.
+          echo "::notice::READY_FOR_LOCAL_PROMOTION candidate=$CANDIDATE run=$GITHUB_RUN_ID"
+          {
+            echo "All CPU/Clippy, CUDA and physical SM61 reports verified."
+            echo "READY_FOR_LOCAL_PROMOTION candidate=$CANDIDATE run=$GITHUB_RUN_ID"
+            echo "Use locally authorized run-once.sh promote to publish."
+          } >> "$GITHUB_STEP_SUMMARY"
