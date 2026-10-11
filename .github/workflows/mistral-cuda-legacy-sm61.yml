@@ -6,6 +6,14 @@ name: Mistral CUDA Legacy (rebase PR then validate SM61)
 on:
   workflow_dispatch:
     inputs:
+      validation_scope:
+        description: Run the complete SM61 campaign or CPU-only Clippy preflight
+        required: true
+        default: full
+        type: choice
+        options:
+          - full
+          - clippy_only
       expected_pr_sha:
         description: Optional pinned SHA of haricot/mistral.rs allow_old_card
         required: false
@@ -29,8 +37,28 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  clippy_only:
+    if: github.ref == 'refs/heads/mirror_orch' && inputs.validation_scope == 'clippy_only'
+    name: Clippy preflight on promoted allow_old_card (CPU only)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: allow_old_card
+          persist-credentials: false
+      - name: Strict upstream-equivalent Clippy without CUDA or GPU jobs
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "TARGET_CANDIDATE_SHA=$(git rev-parse HEAD)"
+          rustup toolchain install stable --profile minimal --component clippy
+          cargo +stable clippy --locked --workspace --tests --examples -- -D warnings
+
   prepare:
-    if: github.ref == 'refs/heads/mirror_orch'
+    if: github.ref == 'refs/heads/mirror_orch' && inputs.validation_scope != 'clippy_only'
     name: Rebase historical PR and stage immutable candidate
     runs-on: ubuntu-26.04
     timeout-minutes: 90
