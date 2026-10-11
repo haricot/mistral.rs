@@ -43,6 +43,50 @@ jq -n --arg old "$old" --arg master "$master" --arg candle "$candle" \
     physical_gpu_validated:false}' > "$report/provenance.json"
 base="$(git merge-base "$old" "$master")"
 echo "base=$base old_pr=$old upstream=$master" > "$report/rebase.log"
+# When the PR head was already promoted from a previous physically validated
+# candidate and no source SHA moved, do not replay the one-shot compatibility
+# shims on that already-ported tree. Stage its *exact* immutable commit again.
+# Check the complete expected markers; any drift falls back to the normal
+# fail-closed rebase path rather than silently accepting partial integration.
+if git merge-base --is-ancestor "$master" "$old" &&
+   git grep -Fq -- "rev = \"$candle\"" "$old" -- Cargo.toml &&
+   git grep -Fq -- "$candle" "$old" -- Cargo.lock &&
+   git grep -Fq -- "GgmlDType::Mxfp4 => 39" "$old" -- mistralrs-quant/src/gguf/mod.rs &&
+   git grep -Fq -- "GgmlDType::Mxfp4 => align_of::<BlockMxfp4>()" "$old" -- mistralrs-quant/src/gguf/archive.rs &&
+   git grep -Fq -- "(__CUDA_ARCH__ < 750)" "$old" -- mistralrs-paged-attn/src/cuda/flashinfer/math.cuh &&
+   git grep -Fq -- "has_fp8_mma_kernels" "$old" -- mistralrs-quant/src/blockwise_fp8/ffi.rs &&
+   git grep -Fq -- "legacy_sm61_f32_bf16_fp8_roundtrip" "$old" -- mistralrs-core/tests/legacy_sm61_runtime.rs; then
+  echo "::notice::ALREADY_PROMOTED_CANDIDATE: reusing exact commit $old; no patch replay"
+  echo "Already-promoted candidate re-use: old=$old master=$master candle=$candle" >> "$report/rebase.log"
+  git switch --detach "$old"
+  test "$(git rev-parse HEAD)" = "$old"
+  test -z "$(git status --porcelain --untracked-files=normal)"
+  lock="$(sha256sum Cargo.lock | cut -d' ' -f1)"
+  git bundle create "$report/candidate.bundle" HEAD "^$master"
+  git bundle verify "$report/candidate.bundle"
+  bundle_sha="$(sha256sum "$report/candidate.bundle" | cut -d' ' -f1)"
+  candidate="$(git rev-parse HEAD)"
+  ref="artifact://mistral-legacy-prep-$GITHUB_RUN_ID/candidate.bundle"
+  test "$(git ls-remote origin refs/heads/allow_old_card | cut -f1)" = "$old"
+  test "$(git ls-remote upstream refs/heads/master | cut -f1)" = "$master"
+  jq --arg candidate "$candidate" --arg lock "$lock" --arg ref "$ref" \
+     --arg bundle "$bundle_sha" \
+    '.status="CANDIDATE_STAGED" | .candidate_sha=$candidate |
+     .lock_sha256=$lock | .candidate_ref=$ref |
+     .bundle_sha256=$bundle' \
+    "$report/provenance.json" > "$report/temp.json"
+  mv "$report/temp.json" "$report/provenance.json"
+  cp Cargo.lock "$report/Cargo.lock"
+  echo "candidate=$candidate" >> "$GITHUB_OUTPUT"
+  echo "candidate_ref=$ref" >> "$GITHUB_OUTPUT"
+  echo "bundle_sha256=$bundle_sha" >> "$GITHUB_OUTPUT"
+  echo "pr_sha=$old" >> "$GITHUB_OUTPUT"
+  echo "upstream_sha=$master" >> "$GITHUB_OUTPUT"
+  echo "candle_sha=$candle" >> "$GITHUB_OUTPUT"
+  echo "lock_sha256=$lock" >> "$GITHUB_OUTPUT"
+  echo "ALREADY_PROMOTED_CANDIDATE: staged exact $candidate without rebase or repatching" >> "$GITHUB_STEP_SUMMARY"
+  exit 0
+fi
 cp .github/scripts/legacy-cuda-port-moe.py "$RUNNER_TEMP/legacy-cuda-port-moe.py"
 cp .github/scripts/legacy-cuda-port-quant.py "$RUNNER_TEMP/legacy-cuda-port-quant.py"
 cp .github/scripts/legacy-cuda-port-paged.py "$RUNNER_TEMP/legacy-cuda-port-paged.py"
