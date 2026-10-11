@@ -104,10 +104,16 @@ jobs:
           mkdir -p "$report"
           test "$(git rev-parse HEAD)" = "$SHA"
           test "$(sha256sum Cargo.lock | cut -d' ' -f1)" = "$LOCK"
-          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
           cargo +stable fmt --all -- --check > "$report/fmt.log" 2>&1 || {
             tail -n 90 "$report/fmt.log"; exit 1;
           }
+          # Match the upstream PR's strict Clippy gate before any hosted CUDA compile.
+          # The immutable candidate is checked, not the mirror_orch orchestrator.
+          cargo +stable clippy --locked --workspace --tests --examples -- -D warnings \
+            > "$report/clippy.log" 2>&1 || {
+              tail -n 120 "$report/clippy.log"; exit 1;
+            }
           cargo +stable check --locked -p mistralrs-core -p mistralrs-quant \
             -p mistralrs-paged-attn > "$report/check.log" 2>&1 || {
               tail -n 100 "$report/check.log"; exit 1;
