@@ -40,6 +40,24 @@ hfma_path = Path("mistralrs-core/src/cuda/moe_gemm_hfma2.cu")
 require(hfma_path.is_file() and "mistralrs_moe_gemm_hfma2" in hfma_path.read_text(),
         "Historical SIMT kernel was not brought forward intact")
 
+# GPU SM61 evidence (run 38058338080): F16 yields 19456 rather than 16.
+# 19456 == 0x4c00, the IEEE binary16 *bit pattern* for 16.0. The shared
+# moe_utils.h helper calls static_cast<half>(uint16_bits), which does a numeric
+# conversion of the integer 19456, NOT a bit cast. Do not change maintained
+# upstream utilities: repair only the carried-forward Pascal SIMT kernel's F16
+# output store. BF16 keeps its existing __float2bfloat16 conversion.
+hfma = hfma_path.read_text()
+bad_store = "        vllm::from_float(output[(size_t)token_index * size_n + n_global], val);"
+good_store = """        if constexpr (std::is_same_v<T, half>) {
+          // Convert the float value, never the raw 16-bit encoding as an integer.
+          output[(size_t)token_index * size_n + n_global] = __float2half_rn(val);
+        } else {
+          vllm::from_float(output[(size_t)token_index * size_n + n_global], val);
+        }"""
+hfma = replace_once(hfma, bad_store, good_store, "Pascal MoE FP16 output conversion")
+hfma_path.write_text(hfma)
+
+
 # The upstream FFI has no old transposed-weights ABI. Preserve that contract.
 ffi_path = Path("mistralrs-core/src/cuda/ffi.rs")
 ffi = ffi_path.read_text()
@@ -222,5 +240,6 @@ moe_path.write_text(moe + "\n" + fallback)
 for path in sorted(conflicts):
     subprocess.run(["git", "add", path], check=True)
 subprocess.run(["git", "add", "mistralrs-core/build.rs"], check=True)
+subprocess.run(["git", "add", str(hfma_path)], check=True)
 subprocess.run(["git", "diff", "--check", "--cached"], check=True)
-print("PORT_MOE_R2_READY: preserved upstream and added Pascal SIMT fallback + F16/BF16 MoE test")
+print("PORT_MOE_R3_READY: Pascal SIMT F16 value conversion corrected; BF16 path unchanged; physical MoE gate retained")
