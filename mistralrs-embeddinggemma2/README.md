@@ -29,8 +29,9 @@ prompt policy explicitly. Only text input is supported; one sequence per call.
 - No image/audio towers, quantization or GPU SM61 qualification.
 - Never mix these 128/256/512/768-dimensional vectors with older embedding
   indexes without model revision and prompt-policy metadata.
-- Cargo.lock must be reconciled against the pinned Candle source before
-  calling this branch build-ready.
+- Cargo.lock has been regenerated against the pinned Candle graph by
+  candidate CI run `38237724116` (`cargo metadata --locked` passed). It still
+  requires CPU test/typecheck qualification before this branch is build-ready.
 
 The base `master`, `mirror_orch`, `asd_runner` and Candle branches are
 unchanged. Promotion requires separate CPU, parity, CUDA and SM61 evidence.
