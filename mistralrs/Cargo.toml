@@ -61,6 +61,10 @@ path = "examples/getting_started/gguf_locally/main.rs"
 name = "embedding"
 path = "examples/getting_started/embedding/main.rs"
 
+[[example]]
+name = "embedding_gemma2_native_smoke"
+path = "examples/getting_started/embedding_gemma2_native_smoke/main.rs"
+
 # ========== Models ==========
 
 [[example]]
