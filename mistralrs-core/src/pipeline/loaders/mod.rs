@@ -40,7 +40,7 @@ pub use multimodal_loaders::{
 };
 
 pub use embedding_loaders::{
-    AutoEmbeddingLoader, EmbeddingGemmaLoader, EmbeddingLoaderType, EmbeddingModel,
+    AutoEmbeddingLoader, EmbeddingGemmaLoader, EmbeddingGemma2Loader, EmbeddingLoaderType, EmbeddingModel,
     EmbeddingModelLoader, EmbeddingModule, EmbeddingModulePaths, EmbeddingModuleType,
     Qwen3EmbeddingLoader,
 };
