@@ -254,9 +254,14 @@ impl Loader for EmbeddingLoader {
             }
             // Single-device native Candle path: never claim support for
             // automatic multi-device placement or distributed layers.
-            if matches!(mapper, DeviceMapSetting::Auto(_)) {
-                mapper = DeviceMapSetting::dummy();
-            }
+            // Native Candle's text tower is deliberately single-device.
+            // An explicit mapping or distributed dummy must never be
+            // silently downgraded to single-device operation.
+            anyhow::ensure!(
+                matches!(mapper, DeviceMapSetting::Auto(_)),
+                "EmbeddingGemma 2 native loading does not accept explicit device mappings"
+            );
+            mapper = DeviceMapSetting::dummy();
         }
 
         if paged_attn_config.is_some() {
@@ -274,6 +279,10 @@ impl Loader for EmbeddingLoader {
             write_uqff,
         )?;
         let use_distributed = tensor_parallelism.is_enabled();
+        anyhow::ensure!(
+            !native_pooled || !use_distributed,
+            "EmbeddingGemma 2 native loading does not support distributed execution"
+        );
 
         let available_devices = if let Ok(payload) = env::var(distributed::IS_DAEMON_FLAG) {
             let payload: WorkerTransferData = serde_json::from_str(&payload)?;
