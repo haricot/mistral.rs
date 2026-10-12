@@ -9,6 +9,7 @@ use crate::{
     attention::ATTENTION_CHUNK_SIZE,
     embedding_models::{
         embedding_gemma::{EmbeddingGemma, EmbeddingGemmaConfig},
+        embedding_gemma2::EmbeddingGemma2,
         qwen3_embedding::{Config as Qwen3EmbeddingConfig, Model as Qwen3EmbeddingModel},
     },
     matformer::MatformerSliceConfig,
@@ -24,6 +25,7 @@ use crate::{
 };
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
+use candle_transformers::models::embedding_gemma2::Config as EmbeddingGemma2Config;
 use mistralrs_quant::log::once_log_debug;
 
 use mistralrs_quant::ShardedVarBuilder;
@@ -91,6 +93,8 @@ pub trait EmbeddingModelLoader: IsqModelLoader + Send + Sync + DeviceMappedModel
 pub enum EmbeddingLoaderType {
     #[serde(rename = "embeddinggemma")]
     EmbeddingGemma,
+    #[serde(rename = "embeddinggemma2")]
+    EmbeddingGemma2,
     #[serde(rename = "qwen3embedding")]
     Qwen3Embedding,
 }
@@ -100,6 +104,7 @@ impl EmbeddingLoaderType {
     pub fn from_causal_lm_name(name: &str) -> Result<Self> {
         match name {
             "Gemma3TextModel" => Ok(Self::EmbeddingGemma),
+            "EmbeddingGemma2Model" => Ok(Self::EmbeddingGemma2),
             "Qwen3ForCausalLM" => Ok(Self::Qwen3Embedding),
             other => anyhow::bail!(
                 "Unsupported Hugging Face Transformers model class `{other}`. Please raise an issue."
@@ -113,9 +118,10 @@ impl FromStr for EmbeddingLoaderType {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "embeddinggemma" => Ok(Self::EmbeddingGemma),
+            "embeddinggemma2" => Ok(Self::EmbeddingGemma2),
             "qwen3embedding" => Ok(Self::Qwen3Embedding),
             a => Err(format!(
-                "Unknown architecture `{a}`. Possible architectures: `embeddinggemma`, `qwen3embedding`."
+                "Unknown architecture `{a}`. Possible architectures: `embeddinggemma`, `embeddinggemma2`, `qwen3embedding`."
             )),
         }
     }
@@ -125,6 +131,7 @@ impl Display for EmbeddingLoaderType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::EmbeddingGemma => write!(f, "embeddinggemma"),
+            Self::EmbeddingGemma2 => write!(f, "embeddinggemma2"),
             Self::Qwen3Embedding => write!(f, "qwen3embedding"),
         }
     }
@@ -279,6 +286,7 @@ impl AutoEmbeddingLoader {
 
         match tp {
             EmbeddingLoaderType::EmbeddingGemma => Ok(Box::new(EmbeddingGemmaLoader)),
+            EmbeddingLoaderType::EmbeddingGemma2 => Ok(Box::new(EmbeddingGemma2Loader)),
             EmbeddingLoaderType::Qwen3Embedding => Ok(Box::new(Qwen3EmbeddingLoader)),
         }
     }
@@ -749,6 +757,95 @@ impl DeviceMappedModelLoader for Qwen3EmbeddingLoader {
         };
 
         Ok(Box::new(cfg))
+    }
+}
+
+
+//// Native EmbeddingGemma 2 uses its own checkpoint layout, complete text
+//// pooling and L2 normalization. No legacy Gemma3TextModel shortcuts.
+pub struct EmbeddingGemma2Loader;
+
+impl EmbeddingModelLoader for EmbeddingGemma2Loader {
+    fn load(
+        &self,
+        config: &str,
+        vb: ShardedVarBuilder,
+        normal_loading_metadata: NormalLoadingMetadata,
+        attention_mechanism: AttentionImplementation,
+    ) -> Result<Box<dyn EmbeddingModel + Send + Sync>> {
+        if !matches!(attention_mechanism, AttentionImplementation::Eager) {
+            anyhow::bail!("EmbeddingGemma 2 only supports eager, bidirectional attention")
+        }
+        let cfg: EmbeddingGemma2Config = serde_json::from_str(config)?;
+        Ok(Box::new(EmbeddingGemma2::new(&cfg, vb, normal_loading_metadata)?))
+    }
+
+    fn is_gptx(&self, _config: &str) -> Result<bool> {
+        Ok(false)
+    }
+    fn has_causal_attention(&self, _config: &str) -> Result<bool> {
+        Ok(false)
+    }
+    fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
+        Ok(Box::new(serde_json::from_str::<EmbeddingGemma2Config>(config)?))
+    }
+}
+
+impl IsqModelLoader for EmbeddingGemma2Loader {
+    fn promoted_isq_predicates(&self, _config: &str) -> Result<Vec<Regex>> {
+        Ok(Vec::new())
+    }
+}
+
+impl DeviceMappedModelLoader for EmbeddingGemma2Loader {
+    fn mapped_max_act_size_elems(
+        &self,
+        _config: &str,
+        _params: &AutoDeviceMapParams,
+    ) -> Result<usize> {
+        anyhow::bail!("EmbeddingGemma 2 does not support automatic layer sharding")
+    }
+
+    fn non_mapped_size_in_bytes(
+        &self,
+        _config: &str,
+        _dtype: DType,
+        _weight_pack_factor: usize,
+        _quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
+        _matformer_config: Option<&MatformerSliceConfig>,
+    ) -> Result<usize> {
+        anyhow::bail!("EmbeddingGemma 2 does not support automatic layer sharding")
+    }
+
+    fn layer_sizes_in_bytes(
+        &self,
+        _config: &str,
+        _dtype: DType,
+        _weight_pack_factor: usize,
+        _matformer_config: Option<&MatformerSliceConfig>,
+    ) -> Result<Vec<usize>> {
+        anyhow::bail!("EmbeddingGemma 2 does not support automatic layer sharding")
+    }
+
+    fn num_layers(&self, config: &str) -> Result<usize> {
+        Ok(serde_json::from_str::<EmbeddingGemma2Config>(config)?
+            .text_config.num_hidden_layers)
+    }
+
+    fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
+        let config: EmbeddingGemma2Config = serde_json::from_str(config)?;
+        let t = config.text_config;
+        Ok(Box::new(ModelConfigMetadata {
+            max_seq_len: 8192,
+            num_layers: t.num_hidden_layers,
+            hidden_size: t.hidden_size,
+            num_kv_heads: t.num_key_value_heads,
+            num_attn_heads: t.num_attention_heads,
+            sliding_window: None,
+            k_head_dim: t.head_dim,
+            v_head_dim: t.head_dim,
+            kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
+        }))
     }
 }
 
