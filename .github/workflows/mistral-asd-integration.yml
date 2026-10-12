@@ -87,13 +87,30 @@ jobs:
           [[ "$(git -C "$candle_checkout" rev-parse HEAD)" == "$candle" ]] || {
             echo '::error::Candle extended moved during checkout'; exit 3;
           }
-          jq -e '
-            .schema_version==1 and
-            .kind=="extended-six" and
-            .integration_target=="extended" and
-            ([.features[].feature] | sort) ==
-              (["asd_core_v3_standalone","bf16_candle","cudnn_fallback_candle","fp4_candle","fp8_candle","moe_simt_f16_candle"] | sort)
-          ' "$candle_checkout/candle-integration/extended.json" >/dev/null
+          # The manifest contains a variable number of features. Do not
+          # compare it with a frozen extended-six/seven/eight inventory.
+          # Load the consumer's validator from the exact trusted workflow
+          # commit rather than from the older asd_runner checkout.
+          validator="$RUNNER_TEMP/validate-candle-extended.py"
+          git fetch --quiet --no-tags origin "$GITHUB_SHA"
+          git show "$GITHUB_SHA:.github/scripts/validate-candle-extended.py" > "$validator"
+          python3 "$validator" "$candle_checkout/candle-integration/extended.json" \
+            > "$RUNNER_TEMP/candle-extended-contract-report.json"
+
+          # A candidate may still say UNVALIDATED_CANDIDATE in the immutable
+          # source manifest. Validation is supplied by the promotion archive
+          # at this *same SHA*, not by rewriting that field.
+          [[ "$candle_validation_ref" =~ ^refs/heads/archive/extended/sm61-validated-[A-Za-z0-9_-]+$ ]] || {
+            echo "::error::Invalid SM61 archive ref"; exit 3;
+          }
+          archive_sha="$(git ls-remote --heads "$candle_repo" "$candle_validation_ref" |
+            awk -v ref="$candle_validation_ref" '$2==ref {print $1; exit}')"
+          [[ "$archive_sha" == "$candle" ]] || {
+            echo "::error::Candle validation archive has moved or no longer matches $candle"; exit 3;
+          }
+          printf 'Candle manifest features: %s; validated archive: %s at %s\\n' \
+            "$(jq -r '.feature_count' "$RUNNER_TEMP/candle-extended-contract-report.json")" \
+            "$candle_validation_ref" "$archive_sha" >> "$GITHUB_STEP_SUMMARY"
 
           git merge-base --is-ancestor "20f607a77abd4738aa5594ee93a393a9fd284605" HEAD
           git merge-base --is-ancestor "d3813494903e5cfca01e12df596f3fe14a5d22ba" HEAD
