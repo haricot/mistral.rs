@@ -1,0 +1,39 @@
+name: MEXT G1 — Candle Extended Contract
+
+on:
+  pull_request:
+    paths:
+      - '.github/scripts/validate-candle-extended.py'
+      - '.github/scripts/tests/test_validate_candle_extended.py'
+      - '.github/workflows/mistral-asd-integration.yml'
+      - '.github/workflows/mistral-candle-contract-ci.yml'
+  push:
+    branches:
+      - integration/mext-g1-dynamic-candle-manifest
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Unit tests — six, seven, eight and nine sources
+        run: python3 -m unittest discover -s .github/scripts/tests -p 'test_validate_candle_extended.py' -v
+      - name: Verify the current pinned seven-feature Candle manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          candle_sha=66c4651cc83f9a43e79a4aa09302aac9bc763d2c
+          curl --fail --location --silent --show-error --retry 2 \
+            "https://raw.githubusercontent.com/haricot/candle/${candle_sha}/candle-integration/extended.json" \
+            --output "$RUNNER_TEMP/extended.json"
+          python3 .github/scripts/validate-candle-extended.py "$RUNNER_TEMP/extended.json" \
+            | tee "$RUNNER_TEMP/contract-report.json"
+          test "$(jq -r '.feature_count' "$RUNNER_TEMP/contract-report.json")" = 7
+          test "$(jq -r '.validated_by_this_check' "$RUNNER_TEMP/contract-report.json")" = false
