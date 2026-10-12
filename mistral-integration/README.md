@@ -16,12 +16,17 @@ repository and not on `mirror_orch`.
   `archive/extended/sm61-validated-38064926957-1`.
 
 ## IMPORTANT: qualification pending
-This is a candidate, NOT a verified standalone release. The `Cargo.lock`
-git-source SHA entries were switched mechanically to the Candle extended
-commit. They require independent Cargo metadata/lock resolution against the
-actual Candle source, followed by CPU/format/Clippy checks, hosted CUDA
-12.9.2 sm_61 compilation and physical Pascal SM61 execution. Do not promote
-or publish a binary based solely on this source reconstruction.
+This is a candidate, NOT a verified standalone release. The initial
+`Cargo.lock` git-source SHA entries were switched mechanically. The dedicated
+candidate-only workflow then resolved the real Candle extended dependency
+graph with Cargo and verified `cargo metadata --locked` (run 38236964253,
+lock commit `aa3087a4fc6ef2e42380d734b2a61e969a664cfe`). Only four
+lockfile lines were added by this resolution.
+
+CPU typechecks/format/Clippy, hosted CUDA 12.9.2 sm_61 compilation,
+physical Pascal SM61 execution and quantitative ASD qualification remain
+separate gates. Do not promote or publish a binary based solely on lock
+resolution.
 
 The original `asd_runner` branch, its proofs and any archive refs remain
 unchanged. Future composition/promotion is managed by `mirror_orch`.
