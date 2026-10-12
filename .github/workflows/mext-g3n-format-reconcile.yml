@@ -35,7 +35,10 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           cargo +stable fmt --all
-          bad="$(git diff --name-only | grep -Ev '^(mistralrs-core/src/embedding_models/embedding_gemma2.rs|mistralrs-core/src/pipeline/(embedding.rs|macros.rs|mod.rs|loaders/(embedding_loaders.rs|mod.rs)))$' || true)"
+          # Resolve the full dependency graph changed by native candle-transformers.
+          cargo +stable metadata --format-version 1 > "$RUNNER_TEMP/metadata.json"
+          cargo +stable metadata --locked --format-version 1 > /dev/null
+          bad="$(git diff --name-only | grep -Ev '^(Cargo.lock|mistralrs/src/model_builder_trait.rs|mistralrs-core/src/embedding_models/embedding_gemma2.rs|mistralrs-core/src/pipeline/(embedding.rs|macros.rs|mod.rs|loaders/(embedding_loaders.rs|mod.rs)))$' || true)"
           test -z "$bad" || { echo "::error::Unexpected Rustfmt modifications: $bad"; exit 3; }
           if git diff --quiet; then
             echo 'G3N Rustfmt clean' >> "$GITHUB_STEP_SUMMARY"
@@ -47,12 +50,12 @@ jobs:
           }
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add mistralrs-core/src/embedding_models/embedding_gemma2.rs \
+          git add Cargo.lock mistralrs/src/model_builder_trait.rs mistralrs-core/src/embedding_models/embedding_gemma2.rs \
             mistralrs-core/src/pipeline/embedding.rs \
             mistralrs-core/src/pipeline/macros.rs \
             mistralrs-core/src/pipeline/mod.rs \
             mistralrs-core/src/pipeline/loaders/embedding_loaders.rs \
             mistralrs-core/src/pipeline/loaders/mod.rs
-          git commit -m 'style(g3n): format native EmbeddingGemma 2 implementation'
+          git commit -m 'build(g3n): resolve Candle lockfile and format native Gemma2'
           git push origin HEAD:refs/heads/integration/mext-g3n-native-embeddinggemma2
           echo 'Formatting only; neither CPU nor GPU nor parity proof' >> "$GITHUB_STEP_SUMMARY"
