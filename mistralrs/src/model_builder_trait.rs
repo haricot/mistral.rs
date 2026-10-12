@@ -1288,7 +1288,7 @@ pub async fn build_embedding_pipeline(
     // sequence per Candle forward. Avoid scheduling concurrent sequences
     // for explicitly selected EmbeddingGemma 2 models.
     let embedding_max_num_seqs = if matches!(
-        builder.loader_type,
+        builder.loader_type.as_ref(),
         Some(EmbeddingLoaderType::EmbeddingGemma2)
     ) {
         1
