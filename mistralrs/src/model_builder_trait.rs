@@ -1284,7 +1284,18 @@ pub async fn build_embedding_pipeline(
         None,
     )?;
 
-    let scheduler_config = default_scheduler_config(builder.max_num_seqs)?;
+    // The first native EmbeddingGemma 2 release supports exactly one
+    // sequence per Candle forward. Avoid scheduling concurrent sequences
+    // for explicitly selected EmbeddingGemma 2 models.
+    let embedding_max_num_seqs = if matches!(
+        builder.loader_type,
+        Some(EmbeddingLoaderType::EmbeddingGemma2)
+    ) {
+        1
+    } else {
+        builder.max_num_seqs
+    };
+    let scheduler_config = default_scheduler_config(embedding_max_num_seqs)?;
 
     let engine_config = EngineConfig {
         throughput_logging_enabled: builder.throughput_logging,
