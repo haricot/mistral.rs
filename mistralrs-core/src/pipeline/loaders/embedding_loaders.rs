@@ -879,6 +879,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn official_gemma2_sentence_transformers_metadata_parses() {
+        // Exact module type strings published in the official HF repository:
+        // https://huggingface.co/google/embeddinggemma-2/blob/main/modules.json
+        let official = r#"[
+          {"idx":0,"name":"0","path":"","type":"sentence_transformers.base.modules.transformer.Transformer"},
+          {"idx":1,"name":"1","path":"1_Pooling","type":"sentence_transformers.sentence_transformer.modules.pooling.Pooling"},
+          {"idx":2,"name":"2","path":"2_Normalize","type":"sentence_transformers.base.modules.normalize.Normalize"}
+        ]"#;
+        let modules: Vec<EmbeddingModule> = serde_json::from_str(official).unwrap();
+        assert_eq!(modules.len(), 3);
+        assert_eq!(modules[0].ty, EmbeddingModuleType::Transformer);
+        assert_eq!(modules[1].ty, EmbeddingModuleType::Pooling);
+        assert_eq!(modules[2].ty, EmbeddingModuleType::Normalize);
+        assert_eq!(modules[1].path, "1_Pooling");
+        assert_eq!(modules[2].path, "2_Normalize");
+    }
+
+    #[test]
     fn embedding_gemma2_routes_to_a_distinct_native_family() {
         assert_eq!(
             EmbeddingLoaderType::from_causal_lm_name("EmbeddingGemma2Model")
