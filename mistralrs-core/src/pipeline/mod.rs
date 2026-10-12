@@ -64,7 +64,7 @@ pub use loaders::{
     AdapterKind, AutoDeviceMapParams, AutoDeviceMapQuantization, AutoEmbeddingLoader,
     AutoMultimodalLoader, AutoNormalLoader, DeepSeekV2Loader, DeepSeekV3Loader,
     DeviceMappedModelLoader, DiffusionGemmaLoader, DiffusionLoaderType, DiffusionModel,
-    DiffusionModelLoader, EmbeddingGemmaLoader, EmbeddingLoaderType, EmbeddingModel,
+    DiffusionModelLoader, EmbeddingGemmaLoader, EmbeddingGemma2Loader, EmbeddingLoaderType, EmbeddingModel,
     EmbeddingModelLoader, EmbeddingModelPaths, EmbeddingModule, EmbeddingModulePaths,
     EmbeddingModuleType, FluxLoader, GLM4Loader, GLM4MoeLiteLoader, GLM4MoeLoader, Gemma2Loader,
     Gemma3Loader, Gemma3nLoader, Gemma4Loader, GemmaLoader, GptOssLoader, GraniteMoeHybridLoader,
