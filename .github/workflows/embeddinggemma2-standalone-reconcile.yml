@@ -1,0 +1,59 @@
+name: MEXT G3 — Reconcile Candidate
+
+on:
+  push:
+    branches:
+      - embeddinggemma2_standalone
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mext-g3-reconcile
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    if: github.ref == 'refs/heads/embeddinggemma2_standalone'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: true
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          toolchain: stable
+          components: rustfmt
+      - name: Rustfmt new crate; resolve exact dependency lock
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          candle=66c4651cc83f9a43e79a4aa09302aac9bc763d2c
+          test "$(grep -Fc "rev = \"$candle\"" Cargo.toml)" = 5
+          cargo +stable fmt --manifest-path mistralrs-embeddinggemma2/Cargo.toml
+          cargo +stable metadata --format-version 1 > "$RUNNER_TEMP/metadata.json"
+          cargo +stable metadata --locked --format-version 1 > /dev/null
+          git status --short
+          # Never silently reformat unrelated source files.
+          bad="$(git diff --name-only | grep -Ev '^(Cargo.lock|mistralrs-embeddinggemma2/src/.*[.]rs)$' || true)"
+          test -z "$bad" || { echo "::error::Unexpected modified paths: $bad"; exit 3; }
+          if git diff --quiet; then
+            echo 'Fmt and Cargo.lock were already coherent' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          test "$(git ls-remote origin refs/heads/embeddinggemma2_standalone | cut -f1)" = "$GITHUB_SHA" || {
+            echo "::error::Candidate branch moved; no stale push"; exit 3;
+          }
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Cargo.lock mistralrs-embeddinggemma2/src
+          git commit -m "build(embeddinggemma2): resolve Candle lock and format standalone"
+          git push origin HEAD:refs/heads/embeddinggemma2_standalone
+          echo 'Cargo and formatter resolution is not model parity or GPU validation.' >> "$GITHUB_STEP_SUMMARY"
