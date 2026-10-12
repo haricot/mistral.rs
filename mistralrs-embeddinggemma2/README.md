@@ -20,6 +20,48 @@ Requires `config.json`, `tokenizer.json` and safetensors shards. The wrapper
 uses **F32** and the native Candle model; the caller supplies the query/document
 prompt policy explicitly. Only text input is supported; one sequence per call.
 
+
+## G3-P — numerical/reference qualification (Rust-only)
+
+The local embedding JSON now includes `token_ids` (exact tokenization) and
+the normalized `vector`. Use an **independently generated** reference JSON:
+
+```json
+{
+  "schema_version": 1,
+  "model_revision": "<explicit pinned Google model revision>",
+  "tokenizer_revision": "<explicit pinned tokenizer revision>",
+  "prompt_policy": "document: Passage: prefix",
+  "dimensions": 256,
+  "token_ids": [/* exact reference token IDs */],
+  "vector": [/* 256 reference floats */]
+}
+```
+
+This is a **schema example**, not a measured or validated reference. Create
+the full reference with a separately pinned implementation and exact matching
+input; never use the observed vector as a reference.
+
+```bash
+cargo run --release --locked -p mistralrs-embeddinggemma2 \
+  --bin embeddinggemma2-text -- \
+  --local-dir /path/to/embeddinggemma-2 \
+  --text 'Passage: Mémoire persistante Haricot.' --dims 256 --json \
+  > observed.json
+
+cargo run --release --locked -p mistralrs-embeddinggemma2 \
+  --bin embeddinggemma2-qualify -- \
+  --observed observed.json --reference reference.json \
+  --min-cosine 0.999 --max-abs 0.01
+```
+
+The comparison requires exact token IDs and token counts, matches the
+embedding dimension, checks finite values, unit L2 norm and the supplied
+cosine/max-absolute-error thresholds. The report **always** records
+`reference_origin_independently_verified: false`; the tool cannot authenticate
+where the provided reference came from. Real Google parity has not yet been
+performed. A CPU test with synthetic fixtures is not a real checkpoint proof.
+
 ## Not yet complete
 
 - This is **not yet wired into** Mistral.rs's `EmbeddingLoaderType`,
