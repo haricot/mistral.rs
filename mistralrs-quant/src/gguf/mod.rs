@@ -68,6 +68,7 @@ fn ggml_dtype_to_uqff_code(dtype: GgmlDType) -> u32 {
         GgmlDType::Q6K => 14,
         GgmlDType::Q8K => 15,
         GgmlDType::BF16 => 30,
+        GgmlDType::Mxfp4 => 39,
     }
 }
 
