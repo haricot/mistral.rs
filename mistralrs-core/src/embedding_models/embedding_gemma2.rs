@@ -4,7 +4,8 @@
 //! Initial contract: text-only, F32, one sequence, 768-dimensional pooled
 //! normalized result, one device, no ISQ/UQFF or tensor parallelism.
 use candle_core::{DType, Device, Result, Shape, Tensor};
-use candle_nn::{Init, SimpleBackend, VarBuilder};
+use candle_nn::{Init, VarBuilder};
+use candle_nn::var_builder::SimpleBackend;
 use candle_transformers::models::embedding_gemma2::{
     Config as EmbeddingGemma2Config, Model as CandleEmbeddingGemma2,
 };
