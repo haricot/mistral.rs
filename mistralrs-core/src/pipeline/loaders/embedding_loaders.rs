@@ -809,6 +809,14 @@ impl IsqModelLoader for EmbeddingGemma2Loader {
 }
 
 impl DeviceMappedModelLoader for EmbeddingGemma2Loader {
+    fn non_mapped_max_act_size_elems(
+        &self,
+        _config: &str,
+        _params: &AutoDeviceMapParams,
+    ) -> Result<usize> {
+        Ok(0)
+    }
+
     fn mapped_max_act_size_elems(
         &self,
         _config: &str,
