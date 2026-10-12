@@ -49,3 +49,20 @@ jobs:
         run: cargo +stable fmt --all -- --check
       - name: CPU typecheck (not a GPU validation)
         run: cargo +stable check --locked --no-default-features -p mistralrs-core
+      - name: Regression guard — workspace async-trait version and resolved lock
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import tomllib
+          from pathlib import Path
+          workspace = tomllib.loads(Path("Cargo.toml").read_text())
+          lock = tomllib.loads(Path("Cargo.lock").read_text())
+          mcp = tomllib.loads(Path("mistralrs-mcp/Cargo.toml").read_text())
+          assert workspace["workspace"]["dependencies"]["async-trait"] == "0.1.92"
+          assert mcp["dependencies"]["async-trait"]["workspace"] is True
+          versions = [pkg["version"] for pkg in lock["package"] if pkg["name"] == "async-trait"]
+          assert versions == ["0.1.92"], f"Unexpected resolved async-trait: {versions}"
+          print("MEXT_G2_ASYNC_TRAIT_0_1_92=PASS")
+          PY
+      - name: Targeted MCP Clippy with warnings denied
+        run: cargo +stable clippy --locked -p mistralrs-mcp --tests --examples -- -D warnings
