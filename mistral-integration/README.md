@@ -1,10 +1,27 @@
-# Mistral.rs mirror orchestration
+# ASD Runner Standalone — Haricot Mistral.rs
 
-The default branch is `mirror_orch`. `master` remains the Mistral.rs code baseline.
-`.github/workflows/mistral-master-sync.yml` fetches the current `master` SHA (or a supplied exact SHA) and merges it into `mirror_orch` without changing `master`; scheduling is weekly, with manual dispatch supported. Conflicts stop synchronization and are saved as an artifact. No force rewrite of source history is allowed.
+This branch is based on the fork's canonical `haricot/mistral.rs:master`
+(`20f607a77abd4738aa5594ee93a393a9fd284605`), **not** on the external upstream
+repository and not on `mirror_orch`.
 
-The permanent feature integration branch is `asd_runner`. Its initial source is the existing Pascal adaptation `cuda_sm61_runner` (`d3813494903e5cfca01e12df596f3fe14a5d22ba`), plus pinned Candle `cuda_asd_runner_v2` (`ac983d16750a136a8563def01926ee83a7831d22`). The original PR #5 remains intact.
+## Code provenance
+- Functional delta reconstructed from `haricot/mistral.rs:asd_runner` at
+  `080fdd5ccf1ff8b6bcb0df9e2dbc189763770588`.
+- The snapshot changes 29 files including the Pascal CUDA fallbacks and the
+  model-free `asd_sm61_smoke` test. No merge of orchestration workflows.
+- `candle-core`, `candle-nn`, `candle-flash-attn-v3`, and
+  `candle-metal-kernels` are pinned to `haricot/candle:extended`
+  commit `66c4651cc83f9a43e79a4aa09302aac9bc763d2c`.
+- Candle's matching physical validation archive is
+  `archive/extended/sm61-validated-38064926957-1`.
 
-From Actions on the default `mirror_orch` branch, run **Mistral ASD Integration** via `workflow_dispatch` and supply the current full `asd_runner` HEAD SHA as `expected_seed_sha`. That pin prevents ambiguous campaigns and stale branch checkouts. The workflow resolves `Cargo.lock` and publishes a temporary `integration/asd_runner-<run_id>` ref. It then runs CPU checks, hosted CUDA 12.9.2 `sm_61` compilation, and the physical Pascal GPU smoke test. All three reports must match the same candidate and lock hash before it fast-forwards `asd_runner`, publishes a proof tag and removes the temporary ref. The CUDA compilation gate is not a GPU execution gate.
+## IMPORTANT: qualification pending
+This is a candidate, NOT a verified standalone release. The `Cargo.lock`
+git-source SHA entries were switched mechanically to the Candle extended
+commit. They require independent Cargo metadata/lock resolution against the
+actual Candle source, followed by CPU/format/Clippy checks, hosted CUDA
+12.9.2 sm_61 compilation and physical Pascal SM61 execution. Do not promote
+or publish a binary based solely on this source reconstruction.
 
-Do not enable implicit GPU dispatch on ordinary `master` syncs. Do not silently advance the pinned Candle SHA when `master` changes. Future `cuda_asd_runner_extended` and `cpu_moe_expert` integration require their own explicit source manifests and coverage. The smoke test proves basic device operation, not ASD policy or latency; expand the runtime proof before claiming performance improvements.
+The original `asd_runner` branch, its proofs and any archive refs remain
+unchanged. Future composition/promotion is managed by `mirror_orch`.
