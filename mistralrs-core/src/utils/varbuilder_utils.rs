@@ -293,10 +293,15 @@ trait LoadTensors {
 struct Common {}
 impl LoadTensors for Common {}
 
-#[derive(new)]
 struct XLora {
     // Matches the associated path instance for reference in `get_name_key_pairs()`
     adapter_index: usize,
+}
+
+impl XLora {
+    fn new(adapter_index: usize) -> Self {
+        Self { adapter_index }
+    }
 }
 
 impl LoadTensors for XLora {
