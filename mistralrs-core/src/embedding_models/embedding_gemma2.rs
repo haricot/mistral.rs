@@ -13,8 +13,7 @@ use mistralrs_quant::ShardedVarBuilder;
 use crate::{
     amoe::AnyMoeBaseModelMixin,
     pipeline::{
-        text_models_inputs_processor::FlashParams, EmbeddingModel, IsqModel,
-        NormalLoadingMetadata,
+        text_models_inputs_processor::FlashParams, EmbeddingModel, IsqModel, NormalLoadingMetadata,
     },
 };
 
@@ -78,9 +77,7 @@ impl EmbeddingGemma2 {
             candle_core::bail!("EmbeddingGemma 2 does not support ISQ/UQFF loading yet")
         }
         if config.text_config.embedding_dim < 768 {
-            candle_core::bail!(
-                "EmbeddingGemma 2 requires a model with >=768 embedding dimensions"
-            )
+            candle_core::bail!("EmbeddingGemma 2 requires a model with >=768 embedding dimensions")
         }
         let device = loading.real_device.clone();
         // The first native release intentionally does not shard layers across

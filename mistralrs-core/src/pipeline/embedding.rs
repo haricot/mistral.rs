@@ -24,7 +24,7 @@ use crate::pipeline::EmbeddingModel;
 use crate::pipeline::EmbeddingModelLoader;
 use crate::pipeline::{AutoEmbeddingLoader, EmbeddingModulePaths};
 use crate::pipeline::{ChatTemplate, EmbeddingModelPaths, IsqOrganization, Processor};
-use crate::pipeline::{EmbeddingGemmaLoader, EmbeddingGemma2Loader, Qwen3EmbeddingLoader};
+use crate::pipeline::{EmbeddingGemma2Loader, EmbeddingGemmaLoader, Qwen3EmbeddingLoader};
 use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::sequence::Sequence;
 use crate::utils::tokenizer::get_tokenizer;
@@ -511,7 +511,9 @@ impl Loader for EmbeddingLoader {
             // Matryoshka truncation and normalization. Do not apply an
             // additional sentence-transformers module stack.
             if paths.get_modules().is_some_and(|modules| {
-                modules.iter().any(|m| !matches!(m, EmbeddingModulePaths::Transformer { .. }))
+                modules
+                    .iter()
+                    .any(|m| !matches!(m, EmbeddingModulePaths::Transformer { .. }))
             }) {
                 anyhow::bail!(
                     "EmbeddingGemma 2 forbids extra sentence-transformers pooling, dense or normalization modules"
@@ -524,7 +526,10 @@ impl Loader for EmbeddingLoader {
                 .context("Embedding models require the `modules.json` file.")?
                 .to_vec();
             anyhow::ensure!(
-                matches!(modules.first(), Some(EmbeddingModulePaths::Transformer { .. })),
+                matches!(
+                    modules.first(),
+                    Some(EmbeddingModulePaths::Transformer { .. })
+                ),
                 "Embedding models require a Transformer first module"
             );
             modules

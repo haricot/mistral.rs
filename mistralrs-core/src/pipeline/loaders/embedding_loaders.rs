@@ -768,7 +768,6 @@ impl DeviceMappedModelLoader for Qwen3EmbeddingLoader {
     }
 }
 
-
 //// Native EmbeddingGemma 2 uses its own checkpoint layout, complete text
 //// pooling and L2 normalization. No legacy Gemma3TextModel shortcuts.
 pub struct EmbeddingGemma2Loader;
@@ -788,7 +787,11 @@ impl EmbeddingModelLoader for EmbeddingGemma2Loader {
             anyhow::bail!("EmbeddingGemma 2 only supports eager, bidirectional attention")
         }
         let cfg: EmbeddingGemma2Config = serde_json::from_str(config)?;
-        Ok(Box::new(EmbeddingGemma2::new(&cfg, vb, normal_loading_metadata)?))
+        Ok(Box::new(EmbeddingGemma2::new(
+            &cfg,
+            vb,
+            normal_loading_metadata,
+        )?))
     }
 
     fn is_gptx(&self, _config: &str) -> Result<bool> {
@@ -798,7 +801,9 @@ impl EmbeddingModelLoader for EmbeddingGemma2Loader {
         Ok(false)
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        Ok(Box::new(serde_json::from_str::<EmbeddingGemma2Config>(config)?))
+        Ok(Box::new(serde_json::from_str::<EmbeddingGemma2Config>(
+            config,
+        )?))
     }
 }
 
@@ -848,7 +853,8 @@ impl DeviceMappedModelLoader for EmbeddingGemma2Loader {
 
     fn num_layers(&self, config: &str) -> Result<usize> {
         Ok(serde_json::from_str::<EmbeddingGemma2Config>(config)?
-            .text_config.num_hidden_layers)
+            .text_config
+            .num_hidden_layers)
     }
 
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
@@ -883,7 +889,10 @@ mod tests {
             "embeddinggemma2".parse::<EmbeddingLoaderType>().unwrap(),
             EmbeddingLoaderType::EmbeddingGemma2
         );
-        assert_eq!(EmbeddingLoaderType::EmbeddingGemma2.to_string(), "embeddinggemma2");
+        assert_eq!(
+            EmbeddingLoaderType::EmbeddingGemma2.to_string(),
+            "embeddinggemma2"
+        );
         assert_eq!(
             EmbeddingLoaderType::from_causal_lm_name("Gemma3TextModel").unwrap(),
             EmbeddingLoaderType::EmbeddingGemma
@@ -894,7 +903,10 @@ mod tests {
         assert!(!AutoEmbeddingLoader
             .returns_pooled_embeddings(r#"{"architectures":["Gemma3TextModel"]}"#)
             .unwrap());
-        assert!(EmbeddingGemma2Loader.promoted_isq_predicates("{}").unwrap().is_empty());
+        assert!(EmbeddingGemma2Loader
+            .promoted_isq_predicates("{}")
+            .unwrap()
+            .is_empty());
     }
 
     fn assert_promotes_only_embedding_weight(predicates: &[Regex]) {

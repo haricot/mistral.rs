@@ -3653,6 +3653,7 @@ dependencies = [
  "candle-flash-attn-v3",
  "candle-metal-kernels",
  "candle-nn",
+ "candle-transformers",
  "cfgrammar",
  "chrono",
  "clap",
