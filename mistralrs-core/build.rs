@@ -11,6 +11,7 @@ fn main() {
     set_git_revision();
 
     println!("cargo::rustc-check-cfg=cfg(has_flashinfer_gdn_sm90_kernel)");
+    println!("cargo::rustc-check-cfg=cfg(has_moe_wmma)");
 
     #[cfg(feature = "cudnn")]
     add_cudnn_link_search();
@@ -44,6 +45,12 @@ fn main() {
             .arg("-fPIC");
 
         let compute_cap = builder.get_compute_cap().unwrap_or(80);
+
+        if compute_cap >= 70 {
+            println!("cargo:rustc-cfg=has_moe_wmma");
+        } else {
+            builder = builder.exclude(&["moe_gemm_wmma.cu"]);
+        }
 
         // Check if CUDA_COMPUTE_CAP < 80 and disable bf16 kernels if so.
         // bf16 WMMA operations and certain bf16 intrinsics are only available on sm_80+.
@@ -111,6 +118,7 @@ fn main() {
                     "https://github.com/flashinfer-ai/flashinfer.git",
                     FLASHINFER_GDN_COMMIT,
                     vec!["include"],
+                    vec![],
                     false,
                 );
             if let Some(cuda_nvcc_flags_env) = CUDA_NVCC_FLAGS {

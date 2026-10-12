@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "base_master_sha": "20f607a77abd4738aa5594ee93a393a9fd284605",
+  "sm61_source_sha": "d3813494903e5cfca01e12df596f3fe14a5d22ba",
+  "candle_repository": "haricot/candle",
+  "candle_branch": "extended",
+  "candle_sha": "66c4651cc83f9a43e79a4aa09302aac9bc763d2c",
+  "features": [
+    "cuda-legacy-bf16",
+    "cuda-legacy-fp8",
+    "cuda-legacy-fp4"
+  ],
+  "deferred": [
+    "cpu_moe_expert"
+  ],
+  "comment": "Reconstructed exact functional delta from legacy asd_runner on fork master. Candle extended is pinned to the physically promoted SHA, but this NEW Mistral standalone needs fresh Cargo.lock resolution, CPU, CUDA and physical SM61 runtime proof before promotion.",
+  "candle_validation_ref": "refs/heads/archive/extended/sm61-validated-38064926957-1",
+  "asd_functional_source_sha": "080fdd5ccf1ff8b6bcb0df9e2dbc189763770588",
+  "standalone_baseline": "haricot/mistral.rs:master",
+  "standalone_status": "UNVALIDATED_STANDALONE_CANDIDATE"
+}
