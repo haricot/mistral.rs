@@ -49,11 +49,13 @@ impl TextEmbedder {
             .map_err(|e| anyhow!("unable to load tokenizer.json: {e}"))?;
         let paths = safetensors_shards(root)?;
         // SAFETY: Candle owns the memory-mapped weights via its tensor backend.
-        let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(&paths, DType::F32, &device)?
-        };
+        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&paths, DType::F32, &device)? };
         let model = Model::load(&config, vb)?;
-        Ok(Self { tokenizer, model, device })
+        Ok(Self {
+            tokenizer,
+            model,
+            device,
+        })
     }
 
     pub fn embed(&self, text: &str, dimensions: usize) -> Result<EmbeddingResult> {
@@ -63,18 +65,30 @@ impl TextEmbedder {
         );
         // Task instructions (Query:/Passage:) belong to the caller's
         // embedding policy; do not silently prepend or modify them.
-        let encoding = self.tokenizer.encode(text, true)
+        let encoding = self
+            .tokenizer
+            .encode(text, true)
             .map_err(|e| anyhow!("tokenization failed: {e}"))?;
         let ids = encoding.get_ids();
-        ensure!(!ids.is_empty() && ids.len() <= MAX_TOKENS, "token count out of bounds");
+        ensure!(
+            !ids.is_empty() && ids.len() <= MAX_TOKENS,
+            "token count out of bounds"
+        );
         let input = Tensor::new(ids, &self.device)?.unsqueeze(0)?;
-        let mut rows = self.model.embed(&input, dimensions)?
+        let mut rows = self
+            .model
+            .embed(&input, dimensions)?
             .to_device(&Device::Cpu)?
             .to_dtype(DType::F32)?
             .to_vec2::<f32>()?;
-        let vector = rows.pop().ok_or_else(|| anyhow!("encoder returned no embeddings"))?;
+        let vector = rows
+            .pop()
+            .ok_or_else(|| anyhow!("encoder returned no embeddings"))?;
         ensure!(vector.len() == dimensions, "wrong embedding width");
-        ensure!(vector.iter().all(|v| v.is_finite()), "non-finite embeddings");
+        ensure!(
+            vector.iter().all(|v| v.is_finite()),
+            "non-finite embeddings"
+        );
         Ok(EmbeddingResult {
             architecture: "EmbeddingGemma2Model",
             dtype: "f32",
@@ -91,21 +105,35 @@ pub fn safetensors_shards(root: &Path) -> Result<Vec<PathBuf>> {
     let index = root.join("model.safetensors.index.json");
     if !index.is_file() {
         let one = root.join("model.safetensors");
-        ensure!(one.is_file(), "missing safetensors checkpoint in {}", root.display());
+        ensure!(
+            one.is_file(),
+            "missing safetensors checkpoint in {}",
+            root.display()
+        );
         return Ok(vec![one]);
     }
     let body: serde_json::Value = serde_json::from_slice(&std::fs::read(&index)?)?;
-    let weights = body.get("weight_map").and_then(|v| v.as_object())
+    let weights = body
+        .get("weight_map")
+        .and_then(|v| v.as_object())
         .context("missing safetensors weight_map")?;
     ensure!(!weights.is_empty(), "empty safetensors weight_map");
     let mut shards = BTreeSet::new();
     for value in weights.values() {
         let filename = value.as_str().context("invalid weight_map filename")?;
-        if filename.is_empty() || !Path::new(filename).components().all(|c| matches!(c, Component::Normal(_))) {
+        if filename.is_empty()
+            || !Path::new(filename)
+                .components()
+                .all(|c| matches!(c, Component::Normal(_)))
+        {
             bail!("invalid or escaping safetensors shard name: {filename}");
         }
         let path = root.join(filename);
-        ensure!(path.is_file(), "missing safetensors shard {}", path.display());
+        ensure!(
+            path.is_file(),
+            "missing safetensors shard {}",
+            path.display()
+        );
         shards.insert(path);
     }
     Ok(shards.into_iter().collect())
@@ -141,7 +169,8 @@ mod tests {
             dir.path().join("model.safetensors.index.json"),
             r#"{"weight_map":{"b":"shard-b.safetensors","a":"shard-a.safetensors","c":"shard-a.safetensors"}}"#,
         ).unwrap();
-        let names: Vec<_> = safetensors_shards(dir.path()).unwrap()
+        let names: Vec<_> = safetensors_shards(dir.path())
+            .unwrap()
             .into_iter()
             .map(|p| p.file_name().unwrap().to_str().unwrap().to_owned())
             .collect();
