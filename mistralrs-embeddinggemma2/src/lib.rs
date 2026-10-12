@@ -13,6 +13,8 @@ use candle_transformers::models::embedding_gemma2::{Config, Model};
 use serde::Serialize;
 use tokenizers::Tokenizer;
 
+pub mod parity;
+
 pub const MAX_TOKENS: usize = 8192;
 pub const SUPPORTED_DIMENSIONS: [usize; 4] = [128, 256, 512, 768];
 
@@ -24,6 +26,8 @@ pub struct EmbeddingResult {
     pub dtype: &'static str,
     pub dimensions: usize,
     pub token_count: usize,
+    /// Exact tokenizer IDs for model/tokenizer revision parity evidence.
+    pub token_ids: Vec<u32>,
     pub vector: Vec<f32>,
 }
 
@@ -94,6 +98,7 @@ impl TextEmbedder {
             dtype: "f32",
             dimensions,
             token_count: ids.len(),
+            token_ids: ids.to_vec(),
             vector,
         })
     }
