@@ -6,9 +6,7 @@
 //!
 //! Remote HF model use requires MEXT_G3V_REV=<full model commit>.
 use anyhow::{bail, Context, Result};
-use mistralrs::{
-    core::EmbeddingLoaderType, EmbeddingModelBuilder, EmbeddingRequest, ModelDType,
-};
+use mistralrs::{core::EmbeddingLoaderType, EmbeddingModelBuilder, EmbeddingRequest, ModelDType};
 
 const SENTENCE: &str = "Passage: Haricot Memory Dynamics conserve les preuves par document.";
 const EXPECTED_DIMENSIONS: usize = 768;
@@ -20,8 +18,9 @@ async fn main() -> Result<()> {
         .context("Set MEXT_G3V_MODEL to a local google/embeddinggemma-2 checkpoint")?;
     let revision = std::env::var("MEXT_G3V_REV").ok();
     if !std::path::Path::new(&model_id).exists()
-        && revision.as_ref().is_none_or(|rev| rev.trim().len() != 40
-            || !rev.bytes().all(|c| c.is_ascii_hexdigit()))
+        && revision
+            .as_ref()
+            .is_none_or(|rev| rev.trim().len() != 40 || !rev.bytes().all(|c| c.is_ascii_hexdigit()))
     {
         bail!("Remote models require MEXT_G3V_REV=<full 40-character immutable HF commit>");
     }
@@ -35,7 +34,10 @@ async fn main() -> Result<()> {
     if let Some(rev) = revision {
         builder = builder.with_hf_revision(rev);
     }
-    let model = builder.build().await.context("native EmbeddingGemma 2 load failed")?;
+    let model = builder
+        .build()
+        .await
+        .context("native EmbeddingGemma 2 load failed")?;
 
     let vectors = model
         .generate_embeddings(EmbeddingRequest::builder().add_prompt(SENTENCE))
