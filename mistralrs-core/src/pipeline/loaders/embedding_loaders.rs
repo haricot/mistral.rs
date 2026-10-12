@@ -48,6 +48,11 @@ pub trait EmbeddingModel: IsqModel + AnyMoeBaseModelMixin {
 }
 
 pub trait EmbeddingModelLoader: IsqModelLoader + Send + Sync + DeviceMappedModelLoader {
+    /// The model has already pooled and normalized its embeddings. Do not
+    /// apply sentence-transformers modules a second time.
+    fn returns_pooled_embeddings(&self, _config: &str) -> Result<bool> {
+        Ok(false)
+    }
     fn load(
         &self,
         config: &str,
@@ -293,6 +298,9 @@ impl AutoEmbeddingLoader {
 }
 
 impl EmbeddingModelLoader for AutoEmbeddingLoader {
+    fn returns_pooled_embeddings(&self, config: &str) -> Result<bool> {
+        Self::get_loader(config)?.returns_pooled_embeddings(config)
+    }
     fn load(
         &self,
         config: &str,
@@ -766,6 +774,9 @@ impl DeviceMappedModelLoader for Qwen3EmbeddingLoader {
 pub struct EmbeddingGemma2Loader;
 
 impl EmbeddingModelLoader for EmbeddingGemma2Loader {
+    fn returns_pooled_embeddings(&self, _config: &str) -> Result<bool> {
+        Ok(true)
+    }
     fn load(
         &self,
         config: &str,
