@@ -42,12 +42,7 @@ hf-hub.workspace = true
 tokio.workspace = true
 futures.workspace = true
 sysinfo.workspace = true
-cutile = { workspace = true, optional = true }
-cutile-compiler = { workspace = true, optional = true }
-cutile-ir = { workspace = true, optional = true }
-cuda-core = { workspace = true, optional = true }
-cuda-async = { workspace = true, optional = true }
-cuda-bindings = { workspace = true, optional = true }
+cutile = { workspace = true, optional = true, features = ["experimental-tune"] }
 mistralrs-metal-compile = { workspace = true, optional = true, features = ["metal"] }
 
 [features]
@@ -59,11 +54,6 @@ cuda = [
 cutile = [
     "cuda",
     "dep:cutile",
-    "dep:cutile-compiler",
-    "dep:cutile-ir",
-    "dep:cuda-core",
-    "dep:cuda-async",
-    "dep:cuda-bindings",
 ]
 nccl = ["cuda", "candle-core/nccl"]
 metal = [
@@ -97,6 +87,7 @@ cuda-13000 = []
 cuda-13010 = []
 cuda-13020 = []
 cuda-13030 = []
+cuda-13040 = []
 
 [build-dependencies]
 cudaforge = { workspace = true, optional = true }
@@ -104,3 +95,7 @@ mistralrs-metal-compile = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[[example]]
+name = "nvfp4_bench"
+required-features = ["cuda", "cutile"]

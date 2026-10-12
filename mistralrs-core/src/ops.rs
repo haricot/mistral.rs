@@ -25,7 +25,9 @@ pub(crate) const CUDA_TOP1_PACKED_WIDTH: usize = 2;
 #[cfg(feature = "cuda")]
 pub(crate) const CUDA_TOP1_INVALID_TOKEN: u32 = u32::MAX;
 #[cfg(feature = "cuda")]
-const CUDA_TOP1_RING_SLOTS: usize = 2;
+const CUDA_ASYNC_TOKEN_RING_SLOTS: usize = 2;
+#[cfg(feature = "cuda")]
+const CUDA_TOPK_SAMPLING_PARAM_WIDTH: usize = 5;
 #[cfg(feature = "cuda")]
 pub(crate) const CUDA_DFLASH_SELECTOR_MAX_K: usize = 128;
 #[cfg(all(feature = "cuda", test))]
@@ -935,6 +937,88 @@ impl CudaTopKLogitsPackedWorkspace {
 }
 
 #[cfg(feature = "cuda")]
+pub(crate) struct CudaRankedTopKPackedWorkspace {
+    location: candle_core::DeviceLocation,
+    stream: Arc<candle_core::cuda_backend::cudarc::driver::CudaStream>,
+    capacity_rows: usize,
+    vocab: usize,
+    capacity_k: usize,
+    nblocks: usize,
+    block_values: Tensor,
+    block_indices: Tensor,
+    radix_state: Tensor,
+    packed: Tensor,
+}
+
+#[cfg(feature = "cuda")]
+impl CudaRankedTopKPackedWorkspace {
+    fn new(
+        dev: &candle_core::CudaDevice,
+        rows: usize,
+        vocab: usize,
+        k: usize,
+        nblocks: usize,
+    ) -> Result<Self> {
+        use candle_core::backend::BackendDevice;
+
+        let capacity_rows = rows
+            .checked_next_power_of_two()
+            .ok_or_else(|| candle_core::Error::msg("CUDA ranked top-k row capacity overflow"))?;
+        let capacity_k = k
+            .checked_next_power_of_two()
+            .ok_or_else(|| candle_core::Error::msg("CUDA ranked top-k width capacity overflow"))?;
+        let candidate_elems = capacity_rows
+            .checked_mul(nblocks)
+            .and_then(|elems| elems.checked_mul(capacity_k))
+            .ok_or_else(|| candle_core::Error::msg("CUDA ranked top-k workspace overflow"))?;
+        let radix_state_elems = capacity_rows
+            .checked_mul(unsafe { ffi::topk_large_ranked_state_words_per_row() })
+            .ok_or_else(|| candle_core::Error::msg("CUDA ranked top-k radix overflow"))?;
+        let index_elems = capacity_rows
+            .checked_mul(nblocks)
+            .and_then(|elems| elems.checked_mul(capacity_k))
+            .ok_or_else(|| candle_core::Error::msg("CUDA ranked top-k index overflow"))?;
+        let packed_elems = capacity_rows
+            .checked_mul(capacity_k)
+            .and_then(|elems| elems.checked_mul(2))
+            .ok_or_else(|| candle_core::Error::msg("CUDA ranked top-k packed overflow"))?;
+        let device = candle_core::Device::Cuda(dev.clone());
+        Ok(Self {
+            location: dev.location(),
+            stream: dev.cuda_stream(),
+            capacity_rows,
+            vocab,
+            capacity_k,
+            nblocks,
+            block_values: Tensor::zeros(candidate_elems, DType::F32, &device)?,
+            block_indices: Tensor::zeros(index_elems, DType::U32, &device)?,
+            radix_state: Tensor::zeros(radix_state_elems, DType::U32, &device)?,
+            packed: Tensor::zeros(packed_elems, DType::F32, &device)?,
+        })
+    }
+
+    fn can_hold(
+        &self,
+        dev: &candle_core::CudaDevice,
+        rows: usize,
+        vocab: usize,
+        k: usize,
+        nblocks: usize,
+    ) -> bool {
+        use candle_core::backend::BackendDevice;
+
+        let stream = dev.cuda_stream();
+        self.location == dev.location()
+            && Arc::ptr_eq(self.stream.context(), stream.context())
+            && self.stream.cu_stream() == stream.cu_stream()
+            && self.capacity_rows >= rows
+            && self.vocab == vocab
+            && self.capacity_k >= k
+            && self.nblocks == nblocks
+    }
+}
+
+#[cfg(feature = "cuda")]
 pub(crate) fn cuda_topk_logits_packed_batched(
     input: &Tensor,
     k: usize,
@@ -1079,8 +1163,8 @@ pub(crate) fn cuda_topk_logits_packed_batched_with_workspace(
         _ => candle_core::bail!("{OP} logits dtype mismatch"),
     };
     let (temperature_ptr, temperature_guard) = temperature_slice.device_ptr(&stream);
-    let (block_values_storage, block_values_layout) = block_values.storage_and_layout();
-    let candle_core::Storage::Cuda(block_values_storage) = &*block_values_storage else {
+    let (block_values_storage_guard, block_values_layout) = block_values.storage_and_layout();
+    let candle_core::Storage::Cuda(block_values_storage) = &*block_values_storage_guard else {
         unreachable!("CUDA top-k workspace values are CUDA")
     };
     let CudaStorageSlice::F32(block_values_slice) = &block_values_storage.slice else {
@@ -1089,8 +1173,8 @@ pub(crate) fn cuda_topk_logits_packed_batched_with_workspace(
     let (block_values_ptr, block_values_guard) = block_values_slice.device_ptr(&stream);
     let block_values_ptr =
         unsafe { (block_values_ptr as *mut f32).add(block_values_layout.start_offset()) };
-    let (block_indices_storage, block_indices_layout) = block_indices.storage_and_layout();
-    let candle_core::Storage::Cuda(block_indices_storage) = &*block_indices_storage else {
+    let (block_indices_storage_guard, block_indices_layout) = block_indices.storage_and_layout();
+    let candle_core::Storage::Cuda(block_indices_storage) = &*block_indices_storage_guard else {
         unreachable!("CUDA top-k workspace indices are CUDA")
     };
     let CudaStorageSlice::U32(block_indices_slice) = &block_indices_storage.slice else {
@@ -1119,8 +1203,8 @@ pub(crate) fn cuda_topk_logits_packed_batched_with_workspace(
     let (block_sums_ptr, block_sums_guard) = block_sums_slice.device_ptr(&stream);
     let block_sums_ptr =
         unsafe { (block_sums_ptr as *mut f32).add(block_sums_layout.start_offset()) };
-    let (packed_storage, packed_layout) = packed_dst.storage_and_layout();
-    let candle_core::Storage::Cuda(packed_storage) = &*packed_storage else {
+    let (packed_storage_guard, packed_layout) = packed_dst.storage_and_layout();
+    let candle_core::Storage::Cuda(packed_storage) = &*packed_storage_guard else {
         unreachable!("CUDA top-k packed workspace is CUDA")
     };
     let CudaStorageSlice::F32(packed_slice) = &packed_storage.slice else {
@@ -1183,8 +1267,18 @@ pub(crate) fn cuda_topk_ranked_packed_batched(
     input: &Tensor,
     k: usize,
 ) -> Result<RankedTopKPackedOutput> {
+    let mut workspace = None;
+    cuda_topk_ranked_packed_batched_with_workspace(input, k, &mut workspace)
+}
+
+#[cfg(feature = "cuda")]
+pub(crate) fn cuda_topk_ranked_packed_batched_with_workspace(
+    input: &Tensor,
+    k: usize,
+    cache: &mut Option<CudaRankedTopKPackedWorkspace>,
+) -> Result<RankedTopKPackedOutput> {
     use candle_core::backend::BackendStorage;
-    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
+    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
     use candle_core::cuda_backend::CudaStorageSlice;
     use std::ffi::c_void;
 
@@ -1237,7 +1331,6 @@ pub(crate) fn cuda_topk_ranked_packed_batched(
     let radix_state_elems = batch
         .checked_mul(radix_state_words_per_row)
         .ok_or_else(|| candle_core::Error::Msg(format!("{OP} radix workspace overflow")))?;
-    let value_workspace_elems = workspace_elems.max(radix_state_elems);
     let packed_width = k
         .checked_mul(2)
         .ok_or_else(|| candle_core::Error::Msg(format!("{OP} packed width overflow")))?;
@@ -1258,9 +1351,21 @@ pub(crate) fn cuda_topk_ranked_packed_batched(
     };
     let dev = input_storage.device();
     let stream = dev.cuda_stream();
-    let mut block_values = dev.alloc_zeros::<f32>(value_workspace_elems)?;
-    let mut block_indices = unsafe { dev.alloc::<u32>(workspace_elems) }?;
-    let mut packed_dst = unsafe { dev.alloc::<f32>(packed_elems) }?;
+    let needs_alloc = cache
+        .as_ref()
+        .is_none_or(|workspace| !workspace.can_hold(dev, batch, vocab, k, nblocks));
+    if needs_alloc {
+        *cache = Some(CudaRankedTopKPackedWorkspace::new(
+            dev, batch, vocab, k, nblocks,
+        )?);
+    }
+    let workspace = cache
+        .as_ref()
+        .expect("CUDA ranked top-k workspace was allocated above");
+    let block_values = workspace.block_values.narrow(0, 0, workspace_elems)?;
+    let block_indices = workspace.block_indices.narrow(0, 0, workspace_elems)?;
+    let radix_state = workspace.radix_state.narrow(0, 0, radix_state_elems)?;
+    let packed_dst = workspace.packed.narrow(0, 0, packed_elems)?;
 
     macro_rules! input_ptr {
         ($slice:expr, $ty:ty) => {{
@@ -1276,18 +1381,54 @@ pub(crate) fn cuda_topk_ranked_packed_batched(
         CudaStorageSlice::F16(slice) => input_ptr!(slice, half::f16),
         _ => candle_core::bail!("{OP} logits dtype mismatch"),
     };
-    let (block_values_ptr, block_values_guard) = block_values.device_ptr_mut(&stream);
-    let (block_indices_ptr, block_indices_guard) = block_indices.device_ptr_mut(&stream);
-    let (packed_ptr, packed_guard) = packed_dst.device_ptr_mut(&stream);
+    let (block_values_storage_guard, block_values_layout) = block_values.storage_and_layout();
+    let candle_core::Storage::Cuda(block_values_storage) = &*block_values_storage_guard else {
+        unreachable!("CUDA ranked top-k workspace values are CUDA")
+    };
+    let CudaStorageSlice::F32(block_values_slice) = &block_values_storage.slice else {
+        unreachable!("CUDA ranked top-k workspace values are F32")
+    };
+    let (block_values_ptr, block_values_guard) = block_values_slice.device_ptr(&stream);
+    let block_values_ptr =
+        unsafe { (block_values_ptr as *mut f32).add(block_values_layout.start_offset()) };
+    let (block_indices_storage_guard, block_indices_layout) = block_indices.storage_and_layout();
+    let candle_core::Storage::Cuda(block_indices_storage) = &*block_indices_storage_guard else {
+        unreachable!("CUDA ranked top-k workspace indices are CUDA")
+    };
+    let CudaStorageSlice::U32(block_indices_slice) = &block_indices_storage.slice else {
+        unreachable!("CUDA ranked top-k workspace indices are U32")
+    };
+    let (block_indices_ptr, block_indices_guard) = block_indices_slice.device_ptr(&stream);
+    let block_indices_ptr =
+        unsafe { (block_indices_ptr as *mut u32).add(block_indices_layout.start_offset()) };
+    let (packed_storage_guard, packed_layout) = packed_dst.storage_and_layout();
+    let candle_core::Storage::Cuda(packed_storage) = &*packed_storage_guard else {
+        unreachable!("CUDA ranked top-k packed workspace is CUDA")
+    };
+    let CudaStorageSlice::F32(packed_slice) = &packed_storage.slice else {
+        unreachable!("CUDA ranked top-k packed workspace is F32")
+    };
+    let (packed_ptr, packed_guard) = packed_slice.device_ptr(&stream);
+    let packed_ptr = unsafe { (packed_ptr as *mut f32).add(packed_layout.start_offset()) };
+    let (radix_storage_guard, radix_layout) = radix_state.storage_and_layout();
+    let candle_core::Storage::Cuda(radix_storage) = &*radix_storage_guard else {
+        unreachable!("CUDA ranked top-k radix workspace is CUDA")
+    };
+    let CudaStorageSlice::U32(radix_slice) = &radix_storage.slice else {
+        unreachable!("CUDA ranked top-k radix workspace is U32")
+    };
+    let (radix_ptr, radix_guard) = radix_slice.device_ptr(&stream);
+    let radix_ptr = unsafe { (radix_ptr as *mut u32).add(radix_layout.start_offset()) };
 
     macro_rules! launch {
         ($kernel:path, $input:expr) => {{
             unsafe {
                 $kernel(
                     $input,
-                    block_values_ptr as *mut f32,
-                    block_indices_ptr as *mut u32,
-                    packed_ptr as *mut f32,
+                    block_values_ptr,
+                    block_indices_ptr,
+                    packed_ptr,
+                    radix_ptr.cast::<c_void>(),
                     nrows_i32,
                     ncols_i32,
                     k_i32,
@@ -1312,38 +1453,19 @@ pub(crate) fn cuda_topk_ranked_packed_batched(
     drop(block_values_guard);
     drop(block_indices_guard);
     drop(packed_guard);
+    drop(radix_guard);
+    drop(block_values_storage_guard);
+    drop(block_indices_storage_guard);
+    drop(packed_storage_guard);
+    drop(radix_storage_guard);
     if status != 0 {
         candle_core::bail!("{OP} CUDA launch failed with status {status}");
     }
 
-    let workspace = vec![
-        Tensor::from((
-            candle_core::Storage::Cuda(candle_core::cuda_backend::CudaStorage {
-                slice: CudaStorageSlice::F32(block_values),
-                device: dev.clone(),
-            }),
-            Shape::from_dims(&[value_workspace_elems]),
-        )),
-        Tensor::from((
-            candle_core::Storage::Cuda(candle_core::cuda_backend::CudaStorage {
-                slice: CudaStorageSlice::U32(block_indices),
-                device: dev.clone(),
-            }),
-            Shape::from_dims(&[batch, nblocks, k]),
-        )),
-    ];
-    let packed_storage = candle_core::cuda_backend::CudaStorage {
-        slice: CudaStorageSlice::F32(packed_dst),
-        device: dev.clone(),
-    };
-
     Ok(RankedTopKPackedOutput {
-        packed: Tensor::from((
-            candle_core::Storage::Cuda(packed_storage),
-            Shape::from_dims(&[batch, packed_width]),
-        )),
+        packed: packed_dst.reshape((batch, packed_width))?,
         k,
-        _workspace: workspace,
+        _workspace: vec![block_values, block_indices, radix_state],
     })
 }
 
@@ -2146,14 +2268,11 @@ pub(crate) fn cuda_categorical_logits_f32_packed_batched(
 
 #[cfg(feature = "cuda")]
 pub struct CudaTop1LogitsWorkspace {
-    nrows: usize,
     capacity_rows: usize,
     ncols: usize,
     nblocks: usize,
     location: candle_core::DeviceLocation,
-    id: u64,
-    next_slot: usize,
-    next_generation: u64,
+    token_ring: CudaAsyncTokenRing,
     slots: Vec<CudaTop1LogitsSlot>,
 }
 
@@ -2163,6 +2282,18 @@ struct CudaTop1LogitsSlot {
     block_indices: candle_core::cuda_backend::cudarc::driver::CudaSlice<u32>,
     packed: candle_core::cuda_backend::cudarc::driver::CudaSlice<f32>,
     packed_host: candle_core::cuda_backend::cudarc::driver::PinnedHostSlice<f32>,
+}
+
+#[cfg(feature = "cuda")]
+struct CudaAsyncTokenRing {
+    id: u64,
+    next_slot: usize,
+    next_generation: u64,
+    slots: Vec<CudaAsyncTokenSlot>,
+}
+
+#[cfg(feature = "cuda")]
+struct CudaAsyncTokenSlot {
     owned_token_ids: Tensor,
     token_ids_host: candle_core::cuda_backend::cudarc::driver::PinnedHostSlice<u32>,
     device_ready: std::sync::Arc<candle_core::cuda_backend::cudarc::driver::CudaEvent>,
@@ -2170,14 +2301,13 @@ struct CudaTop1LogitsSlot {
     consumer_complete: candle_core::cuda_backend::cudarc::driver::CudaEvent,
     reuse_ready: candle_core::cuda_backend::cudarc::driver::CudaEvent,
     reuse_pending: bool,
-    pending: Option<CudaTop1Pending>,
+    pending: Option<CudaAsyncTokenPending>,
 }
 
 #[cfg(feature = "cuda")]
-struct CudaTop1Pending {
+struct CudaAsyncTokenPending {
     generation: u64,
     nrows: usize,
-    copy_packed: bool,
     producer_stream: std::sync::Arc<candle_core::cuda_backend::cudarc::driver::CudaStream>,
     consumer_stream: Option<std::sync::Arc<candle_core::cuda_backend::cudarc::driver::CudaStream>>,
     token_ptr: u64,
@@ -2186,31 +2316,88 @@ struct CudaTop1Pending {
 }
 
 #[cfg(feature = "cuda")]
-pub(crate) struct CudaTop1Submission {
+struct CudaAsyncTokenReservation {
     workspace_id: u64,
     slot: usize,
     generation: u64,
     nrows: usize,
-    _device_tokens: Tensor,
+    device_tokens: Tensor,
+}
+
+#[cfg(feature = "cuda")]
+struct CudaAsyncTokenSubmission {
+    reservation: CudaAsyncTokenReservation,
     device_ready: std::sync::Arc<candle_core::cuda_backend::cudarc::driver::CudaEvent>,
     host_complete: std::sync::Arc<candle_core::cuda_backend::cudarc::driver::CudaEvent>,
+}
+
+#[cfg(feature = "cuda")]
+struct CudaPinnedHostPrefix<'a, T> {
+    inner: &'a mut candle_core::cuda_backend::cudarc::driver::PinnedHostSlice<T>,
+    len: usize,
+}
+
+#[cfg(feature = "cuda")]
+impl<T> candle_core::cuda_backend::cudarc::driver::HostSlice<T> for CudaPinnedHostPrefix<'_, T> {
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    unsafe fn stream_synced_slice<'a>(
+        &'a self,
+        stream: &'a candle_core::cuda_backend::cudarc::driver::CudaStream,
+    ) -> (
+        &'a [T],
+        candle_core::cuda_backend::cudarc::driver::SyncOnDrop<'a>,
+    ) {
+        let (slice, guard) = unsafe { self.inner.stream_synced_slice(stream) };
+        (&slice[..self.len], guard)
+    }
+
+    unsafe fn stream_synced_mut_slice<'a>(
+        &'a mut self,
+        stream: &'a candle_core::cuda_backend::cudarc::driver::CudaStream,
+    ) -> (
+        &'a mut [T],
+        candle_core::cuda_backend::cudarc::driver::SyncOnDrop<'a>,
+    ) {
+        let (slice, guard) = unsafe { self.inner.stream_synced_mut_slice(stream) };
+        (&mut slice[..self.len], guard)
+    }
+}
+
+#[cfg(feature = "cuda")]
+impl CudaAsyncTokenSubmission {
+    fn batch_size(&self) -> usize {
+        self.reservation.nrows
+    }
+
+    fn wait(&self) -> Result<()> {
+        self.host_complete
+            .synchronize()
+            .map_err(candle_core::Error::wrap)
+    }
+}
+
+#[cfg(feature = "cuda")]
+pub(crate) struct CudaTop1Submission {
+    token: CudaAsyncTokenSubmission,
+    copy_packed: bool,
 }
 
 #[cfg(feature = "cuda")]
 impl CudaTop1Submission {
     #[cfg(test)]
     pub(crate) fn device_tokens(&self) -> &Tensor {
-        &self._device_tokens
+        &self.token.reservation.device_tokens
     }
 
     pub(crate) fn batch_size(&self) -> usize {
-        self.nrows
+        self.token.batch_size()
     }
 
     pub(crate) fn wait(&self) -> Result<()> {
-        self.host_complete
-            .synchronize()
-            .map_err(candle_core::Error::wrap)
+        self.token.wait()
     }
 }
 
@@ -2262,7 +2449,7 @@ fn final_logits_row(input: &Tensor) -> Result<Tensor> {
 }
 
 #[cfg(feature = "cuda")]
-fn cuda_top1_workspace_id() -> u64 {
+fn cuda_async_token_ring_id() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -2278,18 +2465,16 @@ fn same_cuda_stream(
 }
 
 #[cfg(feature = "cuda")]
-fn new_cuda_top1_slot(
+fn new_cuda_async_token_slot(
     dev: &candle_core::CudaDevice,
-    nrows: usize,
-    workspace_elems: usize,
-    packed_elems: usize,
-) -> Result<CudaTop1LogitsSlot> {
+    capacity_rows: usize,
+) -> Result<CudaAsyncTokenSlot> {
     use candle_core::cuda_backend::cudarc::driver::{sys, DevicePtrMut};
     use candle_core::cuda_backend::{CudaStorage, CudaStorageSlice};
 
     let stream = dev.cuda_stream();
     let context = stream.context();
-    let mut token_ids = unsafe { dev.alloc::<u32>(nrows) }?;
+    let mut token_ids = unsafe { dev.alloc::<u32>(capacity_rows) }?;
     let (_, token_ids_guard) = token_ids.device_ptr_mut(&stream);
     drop(token_ids_guard);
     let owned_token_ids = Tensor::from((
@@ -2297,18 +2482,12 @@ fn new_cuda_top1_slot(
             slice: CudaStorageSlice::U32(token_ids),
             device: dev.clone(),
         }),
-        Shape::from_dims(&[nrows, 1]),
+        Shape::from_dims(&[capacity_rows, 1]),
     ));
     let event_flags = Some(sys::CUevent_flags::CU_EVENT_BLOCKING_SYNC);
-
-    Ok(CudaTop1LogitsSlot {
-        block_values: unsafe { dev.alloc::<f32>(workspace_elems) }?,
-        block_indices: unsafe { dev.alloc::<u32>(workspace_elems) }?,
-        packed: unsafe { dev.alloc::<f32>(packed_elems) }?,
-        packed_host: unsafe { context.alloc_pinned::<f32>(packed_elems) }
-            .map_err(candle_core::Error::wrap)?,
+    Ok(CudaAsyncTokenSlot {
         owned_token_ids,
-        token_ids_host: unsafe { context.alloc_pinned::<u32>(nrows) }
+        token_ids_host: unsafe { context.alloc_pinned::<u32>(capacity_rows) }
             .map_err(candle_core::Error::wrap)?,
         device_ready: std::sync::Arc::new(
             context
@@ -2332,6 +2511,335 @@ fn new_cuda_top1_slot(
 }
 
 #[cfg(feature = "cuda")]
+fn new_cuda_async_token_ring(
+    dev: &candle_core::CudaDevice,
+    capacity_rows: usize,
+) -> Result<CudaAsyncTokenRing> {
+    let mut slots = Vec::with_capacity(CUDA_ASYNC_TOKEN_RING_SLOTS);
+    for _ in 0..CUDA_ASYNC_TOKEN_RING_SLOTS {
+        slots.push(new_cuda_async_token_slot(dev, capacity_rows)?);
+    }
+    Ok(CudaAsyncTokenRing {
+        id: cuda_async_token_ring_id(),
+        next_slot: 0,
+        next_generation: 1,
+        slots,
+    })
+}
+
+#[cfg(feature = "cuda")]
+impl CudaAsyncTokenRing {
+    fn has_pending(&self) -> bool {
+        self.slots.iter().any(|slot| slot.pending.is_some())
+    }
+
+    fn validate(&self, submission: &CudaAsyncTokenSubmission, op: &'static str) -> Result<()> {
+        let reservation = &submission.reservation;
+        if reservation.workspace_id != self.id {
+            candle_core::bail!("{op} received a submission from a different workspace");
+        }
+        let slot = self.slots.get(reservation.slot).ok_or_else(|| {
+            candle_core::Error::msg(format!("{op} received an invalid ring slot"))
+        })?;
+        let Some(pending) = &slot.pending else {
+            candle_core::bail!("{op} received an inactive submission");
+        };
+        if pending.generation != reservation.generation {
+            candle_core::bail!("{op} received a stale submission");
+        }
+        Ok(())
+    }
+
+    fn reserve(
+        &mut self,
+        input: &Tensor,
+        token_ids_dst: Option<&Tensor>,
+        nrows: usize,
+        op: &'static str,
+    ) -> Result<CudaAsyncTokenReservation> {
+        use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+        use candle_core::cuda_backend::CudaStorageSlice;
+
+        let stream = input.device().as_cuda_device()?.cuda_stream();
+        let slot_index = (0..CUDA_ASYNC_TOKEN_RING_SLOTS)
+            .map(|offset| (self.next_slot + offset) % CUDA_ASYNC_TOKEN_RING_SLOTS)
+            .find(|&index| self.slots[index].pending.is_none())
+            .ok_or_else(|| candle_core::Error::msg(format!("{op} submission ring is full")))?;
+        self.next_slot = (slot_index + 1) % CUDA_ASYNC_TOKEN_RING_SLOTS;
+        let generation = self.next_generation;
+        self.next_generation = self.next_generation.wrapping_add(1).max(1);
+        let device_tokens = token_ids_dst
+            .cloned()
+            .map(Ok)
+            .unwrap_or_else(|| self.slots[slot_index].owned_token_ids.narrow(0, 0, nrows))?;
+        let destination_capacity = match device_tokens.dims() {
+            [capacity, 1] => *capacity,
+            _ => 0,
+        };
+        if device_tokens.dtype() != DType::U32
+            || destination_capacity < nrows
+            || !device_tokens.is_contiguous()
+            || !device_tokens.device().same_device(input.device())
+        {
+            candle_core::bail!(
+                "{op} token destination must be contiguous CUDA U32 [capacity, 1] with capacity >= {nrows}"
+            );
+        }
+
+        let (token_ptr, token_end_ptr) = {
+            let (token_storage, token_layout) = device_tokens.storage_and_layout();
+            let candle_core::Storage::Cuda(token_storage) = &*token_storage else {
+                unreachable!("token destination device was checked above")
+            };
+            let CudaStorageSlice::U32(token_slice) = &token_storage.slice else {
+                unreachable!("token destination dtype was checked above")
+            };
+            let (token_ptr, token_guard) = token_slice.device_ptr(&stream);
+            let token_ptr = unsafe { (token_ptr as *mut u32).add(token_layout.start_offset()) };
+            let token_end_ptr = token_ptr as u64 + (nrows * std::mem::size_of::<u32>()) as u64;
+            drop(token_guard);
+            (token_ptr, token_end_ptr)
+        };
+        for other in &self.slots {
+            let Some(pending) = &other.pending else {
+                continue;
+            };
+            if pending.token_ptr >= token_end_ptr || token_ptr as u64 >= pending.token_end_ptr {
+                continue;
+            }
+            if !pending.token_released {
+                candle_core::bail!(
+                    "{op} token destination is already leased by another submission"
+                );
+            }
+            if other.reuse_pending {
+                stream
+                    .wait(&other.reuse_ready)
+                    .map_err(candle_core::Error::wrap)?;
+            }
+        }
+        let slot = &mut self.slots[slot_index];
+        if slot.reuse_pending {
+            stream
+                .wait(&slot.reuse_ready)
+                .map_err(candle_core::Error::wrap)?;
+            slot.reuse_pending = false;
+        }
+        slot.pending = Some(CudaAsyncTokenPending {
+            generation,
+            nrows,
+            producer_stream: stream,
+            consumer_stream: None,
+            token_ptr: token_ptr as u64,
+            token_end_ptr,
+            token_released: false,
+        });
+        Ok(CudaAsyncTokenReservation {
+            workspace_id: self.id,
+            slot: slot_index,
+            generation,
+            nrows,
+            device_tokens,
+        })
+    }
+
+    fn abort(&mut self, reservation: &CudaAsyncTokenReservation) {
+        if reservation.workspace_id == self.id {
+            if let Some(slot) = self.slots.get_mut(reservation.slot) {
+                if slot
+                    .pending
+                    .as_ref()
+                    .is_some_and(|pending| pending.generation == reservation.generation)
+                {
+                    slot.pending = None;
+                }
+            }
+        }
+    }
+
+    fn finish_launch(
+        &mut self,
+        reservation: CudaAsyncTokenReservation,
+    ) -> Result<CudaAsyncTokenSubmission> {
+        use candle_core::cuda_backend::CudaStorageSlice;
+
+        let launch = (|| {
+            let slot = &mut self.slots[reservation.slot];
+            let pending = slot
+                .pending
+                .as_ref()
+                .filter(|pending| pending.generation == reservation.generation)
+                .expect("token reservation remains active through its producer launch");
+            let stream = pending.producer_stream.clone();
+            let dev = reservation.device_tokens.device().as_cuda_device()?;
+            slot.device_ready
+                .record(&stream)
+                .map_err(candle_core::Error::wrap)?;
+            let (token_storage, token_layout) = reservation.device_tokens.storage_and_layout();
+            let candle_core::Storage::Cuda(token_storage) = &*token_storage else {
+                unreachable!("reserved token destination is CUDA")
+            };
+            let CudaStorageSlice::U32(token_slice) = &token_storage.slice else {
+                unreachable!("reserved token destination is U32")
+            };
+            let token_copy = token_slice.slice(
+                token_layout.start_offset()
+                    ..token_layout
+                        .start_offset()
+                        .saturating_add(reservation.nrows),
+            );
+            let mut host_prefix = CudaPinnedHostPrefix {
+                inner: &mut slot.token_ids_host,
+                len: reservation.nrows,
+            };
+            dev.memcpy_dtoh(&token_copy, &mut host_prefix)?;
+            slot.host_complete
+                .record(&stream)
+                .map_err(candle_core::Error::wrap)?;
+            Result::<()>::Ok(())
+        })();
+        if let Err(error) = launch {
+            self.abort(&reservation);
+            return Err(error);
+        }
+        let slot = &self.slots[reservation.slot];
+        Ok(CudaAsyncTokenSubmission {
+            reservation,
+            device_ready: slot.device_ready.clone(),
+            host_complete: slot.host_complete.clone(),
+        })
+    }
+
+    fn wait_on(
+        &mut self,
+        submission: &CudaAsyncTokenSubmission,
+        consumer_stream: &std::sync::Arc<candle_core::cuda_backend::cudarc::driver::CudaStream>,
+        op: &'static str,
+    ) -> Result<()> {
+        self.validate(submission, op)?;
+        let slot = &mut self.slots[submission.reservation.slot];
+        let pending = slot.pending.as_mut().expect("submission validated above");
+        if same_cuda_stream(&pending.producer_stream, consumer_stream) {
+            slot.reuse_ready
+                .record(&pending.producer_stream)
+                .map_err(candle_core::Error::wrap)?;
+            slot.reuse_pending = true;
+            pending.token_released = true;
+            return Ok(());
+        }
+        if let Some(current) = &pending.consumer_stream {
+            if same_cuda_stream(current, consumer_stream) {
+                return Ok(());
+            }
+            candle_core::bail!("{op} only supports one cross-stream consumer per submission");
+        }
+        consumer_stream
+            .wait(&submission.device_ready)
+            .map_err(candle_core::Error::wrap)?;
+        pending.consumer_stream = Some(consumer_stream.clone());
+        Ok(())
+    }
+
+    fn release_after(
+        &mut self,
+        submission: &CudaAsyncTokenSubmission,
+        consumer_stream: &std::sync::Arc<candle_core::cuda_backend::cudarc::driver::CudaStream>,
+        op: &'static str,
+    ) -> Result<()> {
+        self.validate(submission, op)?;
+        let slot = &mut self.slots[submission.reservation.slot];
+        let pending = slot.pending.as_mut().expect("submission validated above");
+        if same_cuda_stream(&pending.producer_stream, consumer_stream) {
+            return Ok(());
+        }
+        let Some(current) = &pending.consumer_stream else {
+            candle_core::bail!("{op} requires wait_on before release_after");
+        };
+        if !same_cuda_stream(current, consumer_stream) {
+            candle_core::bail!("{op} consumer stream does not match wait_on");
+        }
+        slot.consumer_complete
+            .record(consumer_stream)
+            .map_err(candle_core::Error::wrap)?;
+        pending
+            .producer_stream
+            .wait(&slot.consumer_complete)
+            .map_err(candle_core::Error::wrap)?;
+        slot.reuse_ready
+            .record(&pending.producer_stream)
+            .map_err(candle_core::Error::wrap)?;
+        slot.reuse_pending = true;
+        pending.consumer_stream = None;
+        pending.token_released = true;
+        Ok(())
+    }
+
+    fn complete<'a>(
+        &'a mut self,
+        submission: &CudaAsyncTokenSubmission,
+        op: &'static str,
+    ) -> Result<&'a [u32]> {
+        self.validate(submission, op)?;
+        let slot = &mut self.slots[submission.reservation.slot];
+        let pending = slot.pending.as_ref().expect("submission validated above");
+        if pending.consumer_stream.is_some() {
+            candle_core::bail!("{op} requires release_after for the cross-stream consumer");
+        }
+        slot.host_complete
+            .synchronize()
+            .map_err(candle_core::Error::wrap)?;
+        let nrows = pending.nrows;
+        slot.pending = None;
+        Ok(&slot
+            .token_ids_host
+            .as_slice()
+            .map_err(candle_core::Error::wrap)?[..nrows])
+    }
+
+    fn cancel(&mut self, submission: &CudaAsyncTokenSubmission, op: &'static str) -> Result<()> {
+        self.validate(submission, op)?;
+        let slot = &mut self.slots[submission.reservation.slot];
+        let pending = slot.pending.as_mut().expect("submission validated above");
+        if let Some(consumer_stream) = pending.consumer_stream.take() {
+            slot.consumer_complete
+                .record(&consumer_stream)
+                .map_err(candle_core::Error::wrap)?;
+            pending
+                .producer_stream
+                .wait(&slot.consumer_complete)
+                .map_err(candle_core::Error::wrap)?;
+            slot.reuse_ready
+                .record(&pending.producer_stream)
+                .map_err(candle_core::Error::wrap)?;
+            slot.reuse_pending = true;
+        }
+        slot.host_complete
+            .synchronize()
+            .map_err(candle_core::Error::wrap)?;
+        slot.pending = None;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "cuda")]
+fn new_cuda_top1_slot(
+    dev: &candle_core::CudaDevice,
+    workspace_elems: usize,
+    packed_elems: usize,
+) -> Result<CudaTop1LogitsSlot> {
+    let stream = dev.cuda_stream();
+    let context = stream.context();
+
+    Ok(CudaTop1LogitsSlot {
+        block_values: unsafe { dev.alloc::<f32>(workspace_elems) }?,
+        block_indices: unsafe { dev.alloc::<u32>(workspace_elems) }?,
+        packed: unsafe { dev.alloc::<f32>(packed_elems) }?,
+        packed_host: unsafe { context.alloc_pinned::<f32>(packed_elems) }
+            .map_err(candle_core::Error::wrap)?,
+    })
+}
+
+#[cfg(feature = "cuda")]
 fn new_cuda_top1_workspace(
     dev: &candle_core::CudaDevice,
     nrows: usize,
@@ -2346,24 +2854,16 @@ fn new_cuda_top1_workspace(
     let packed_elems = nrows
         .checked_mul(CUDA_TOP1_PACKED_WIDTH)
         .ok_or_else(|| candle_core::Error::Msg("CUDA top-1 output overflow".to_string()))?;
-    let mut slots = Vec::with_capacity(CUDA_TOP1_RING_SLOTS);
-    for _ in 0..CUDA_TOP1_RING_SLOTS {
-        slots.push(new_cuda_top1_slot(
-            dev,
-            nrows,
-            workspace_elems,
-            packed_elems,
-        )?);
+    let mut slots = Vec::with_capacity(CUDA_ASYNC_TOKEN_RING_SLOTS);
+    for _ in 0..CUDA_ASYNC_TOKEN_RING_SLOTS {
+        slots.push(new_cuda_top1_slot(dev, workspace_elems, packed_elems)?);
     }
     Ok(CudaTop1LogitsWorkspace {
-        nrows,
         capacity_rows: nrows,
         ncols,
         nblocks,
         location: dev.location(),
-        id: cuda_top1_workspace_id(),
-        next_slot: 0,
-        next_generation: 1,
+        token_ring: new_cuda_async_token_ring(dev, nrows)?,
         slots,
     })
 }
@@ -2374,19 +2874,12 @@ fn validate_cuda_top1_submission<'a>(
     submission: &CudaTop1Submission,
     op: &'static str,
 ) -> Result<&'a CudaTop1LogitsSlot> {
-    if submission.workspace_id != workspace.id {
-        candle_core::bail!("{op} received a submission from a different workspace");
-    }
+    workspace.token_ring.validate(&submission.token, op)?;
+    let slot_index = submission.token.reservation.slot;
     let slot = workspace
         .slots
-        .get(submission.slot)
+        .get(slot_index)
         .ok_or_else(|| candle_core::Error::Msg(format!("{op} received an invalid ring slot")))?;
-    let Some(pending) = &slot.pending else {
-        candle_core::bail!("{op} received an inactive submission");
-    };
-    if pending.generation != submission.generation {
-        candle_core::bail!("{op} received a stale submission");
-    }
     Ok(slot)
 }
 
@@ -2453,7 +2946,7 @@ fn cuda_top1_logits_submit_inner(
     if needs_alloc {
         if cache
             .as_ref()
-            .is_some_and(|workspace| workspace.slots.iter().any(|slot| slot.pending.is_some()))
+            .is_some_and(|workspace| workspace.token_ring.has_pending())
         {
             candle_core::bail!("{op} cannot resize while submissions are pending");
         }
@@ -2477,80 +2970,21 @@ fn cuda_top1_logits_submit_inner(
     let workspace = cache
         .as_mut()
         .expect("CUDA top-1 workspace was allocated above");
-    workspace.nrows = nrows;
-    let slot_index = (0..CUDA_TOP1_RING_SLOTS)
-        .map(|offset| (workspace.next_slot + offset) % CUDA_TOP1_RING_SLOTS)
-        .find(|&index| workspace.slots[index].pending.is_none())
-        .ok_or_else(|| candle_core::Error::Msg(format!("{op} submission ring is full")))?;
-    workspace.next_slot = (slot_index + 1) % CUDA_TOP1_RING_SLOTS;
-    let generation = workspace.next_generation;
-    workspace.next_generation = workspace.next_generation.wrapping_add(1).max(1);
-    let device_tokens = token_ids_dst.cloned().map(Ok).unwrap_or_else(|| {
-        workspace.slots[slot_index]
-            .owned_token_ids
-            .narrow(0, 0, nrows)
-    })?;
-    let destination_capacity = match device_tokens.dims() {
-        [capacity, 1] => *capacity,
-        _ => 0,
-    };
-    if device_tokens.dtype() != DType::U32
-        || destination_capacity < nrows
-        || !device_tokens.is_contiguous()
-    {
-        candle_core::bail!(
-            "{op} token destination must be contiguous U32 with shape [capacity, 1], capacity >= {nrows}"
-        );
-    }
-    if !device_tokens.device().same_device(input.device()) {
-        candle_core::bail!("{op} token destination and logits must be on the same CUDA device");
-    }
-
-    let device_tokens_storage = device_tokens.clone();
+    let reservation = workspace
+        .token_ring
+        .reserve(input, token_ids_dst, nrows, op)?;
+    let slot_index = reservation.slot;
+    let device_tokens_storage = reservation.device_tokens.clone();
     let (token_storage, token_layout) = device_tokens_storage.storage_and_layout();
-    let token_storage = match &*token_storage {
-        candle_core::Storage::Cuda(storage) => storage,
-        _ => candle_core::bail!("{op} token destination must be on CUDA"),
+    let candle_core::Storage::Cuda(token_storage) = &*token_storage else {
+        unreachable!("reserved token destination is CUDA")
     };
     let CudaStorageSlice::U32(token_slice) = &token_storage.slice else {
-        candle_core::bail!("{op} token destination must use U32 storage");
+        unreachable!("reserved token destination is U32")
     };
     let (token_ptr, token_guard) = token_slice.device_ptr(&stream);
     let token_ptr = unsafe { (token_ptr as *mut u32).add(token_layout.start_offset()) };
-    let token_end_ptr = token_ptr as u64 + (nrows * std::mem::size_of::<u32>()) as u64;
-    for other in &workspace.slots {
-        let Some(pending) = &other.pending else {
-            continue;
-        };
-        if pending.token_ptr >= token_end_ptr || token_ptr as u64 >= pending.token_end_ptr {
-            continue;
-        }
-        if !pending.token_released {
-            candle_core::bail!("{op} token destination is already leased by another submission");
-        }
-        if other.reuse_pending {
-            stream
-                .wait(&other.reuse_ready)
-                .map_err(candle_core::Error::wrap)?;
-        }
-    }
     let slot = &mut workspace.slots[slot_index];
-    if slot.reuse_pending {
-        stream
-            .wait(&slot.reuse_ready)
-            .map_err(candle_core::Error::wrap)?;
-        slot.reuse_pending = false;
-    }
-    slot.pending = Some(CudaTop1Pending {
-        generation,
-        nrows,
-        copy_packed,
-        producer_stream: stream.clone(),
-        consumer_stream: None,
-        token_ptr: token_ptr as u64,
-        token_end_ptr,
-        token_released: false,
-    });
 
     let result = (|| {
         let (block_values_ptr, block_values_guard) = slot.block_values.device_ptr_mut(&stream);
@@ -2623,35 +3057,24 @@ fn cuda_top1_logits_submit_inner(
         drop(block_indices_guard);
         drop(packed_guard);
         drop(token_guard);
-
-        slot.device_ready
-            .record(&stream)
-            .map_err(candle_core::Error::wrap)?;
-        let token_copy = token_slice
-            .slice(token_layout.start_offset()..token_layout.start_offset().saturating_add(nrows));
-        dev.memcpy_dtoh(&token_copy, &mut slot.token_ids_host)?;
         if copy_packed {
             dev.memcpy_dtoh(&slot.packed, &mut slot.packed_host)?;
         }
-        slot.host_complete
-            .record(&stream)
-            .map_err(candle_core::Error::wrap)?;
         Result::<()>::Ok(())
     })();
     if let Err(error) = result {
         let _ = stream.synchronize();
-        slot.pending = None;
+        workspace.token_ring.abort(&reservation);
         return Err(error);
     }
-    Ok(CudaTop1Submission {
-        workspace_id: workspace.id,
-        slot: slot_index,
-        generation,
-        nrows,
-        _device_tokens: device_tokens,
-        device_ready: slot.device_ready.clone(),
-        host_complete: slot.host_complete.clone(),
-    })
+    let token = match workspace.token_ring.finish_launch(reservation) {
+        Ok(token) => token,
+        Err(error) => {
+            let _ = stream.synchronize();
+            return Err(error);
+        }
+    };
+    Ok(CudaTop1Submission { token, copy_packed })
 }
 
 #[cfg(feature = "cuda")]
@@ -2729,27 +3152,9 @@ pub(crate) fn cuda_top1_device_tokens_wait_on(
 ) -> Result<()> {
     const OP: &str = "cuda_top1_device_tokens_wait_on";
     validate_cuda_top1_submission(workspace, submission, OP)?;
-    let slot = &mut workspace.slots[submission.slot];
-    let pending = slot.pending.as_mut().expect("submission validated above");
-    if same_cuda_stream(&pending.producer_stream, consumer_stream) {
-        slot.reuse_ready
-            .record(&pending.producer_stream)
-            .map_err(candle_core::Error::wrap)?;
-        slot.reuse_pending = true;
-        pending.token_released = true;
-        return Ok(());
-    }
-    if let Some(current) = &pending.consumer_stream {
-        if same_cuda_stream(current, consumer_stream) {
-            return Ok(());
-        }
-        candle_core::bail!("{OP} only supports one cross-stream consumer per submission");
-    }
-    consumer_stream
-        .wait(&submission.device_ready)
-        .map_err(candle_core::Error::wrap)?;
-    pending.consumer_stream = Some(consumer_stream.clone());
-    Ok(())
+    workspace
+        .token_ring
+        .wait_on(&submission.token, consumer_stream, OP)
 }
 
 #[cfg(feature = "cuda")]
@@ -2760,31 +3165,9 @@ pub(crate) fn cuda_top1_device_tokens_release_after(
 ) -> Result<()> {
     const OP: &str = "cuda_top1_device_tokens_release_after";
     validate_cuda_top1_submission(workspace, submission, OP)?;
-    let slot = &mut workspace.slots[submission.slot];
-    let pending = slot.pending.as_mut().expect("submission validated above");
-    if same_cuda_stream(&pending.producer_stream, consumer_stream) {
-        return Ok(());
-    }
-    let Some(current) = &pending.consumer_stream else {
-        candle_core::bail!("{OP} requires wait_on before release_after");
-    };
-    if !same_cuda_stream(current, consumer_stream) {
-        candle_core::bail!("{OP} consumer stream does not match wait_on");
-    }
-    slot.consumer_complete
-        .record(consumer_stream)
-        .map_err(candle_core::Error::wrap)?;
-    pending
-        .producer_stream
-        .wait(&slot.consumer_complete)
-        .map_err(candle_core::Error::wrap)?;
-    slot.reuse_ready
-        .record(&pending.producer_stream)
-        .map_err(candle_core::Error::wrap)?;
-    slot.reuse_pending = true;
-    pending.consumer_stream = None;
-    pending.token_released = true;
-    Ok(())
+    workspace
+        .token_ring
+        .release_after(&submission.token, consumer_stream, OP)
 }
 
 #[cfg(feature = "cuda")]
@@ -2794,24 +3177,12 @@ pub(crate) fn cuda_top1_submission_complete<'a>(
 ) -> Result<CudaTop1Completion<'a>> {
     const OP: &str = "cuda_top1_submission_complete";
     validate_cuda_top1_submission(workspace, submission, OP)?;
-    let slot = &mut workspace.slots[submission.slot];
-    let pending = slot.pending.as_ref().expect("submission validated above");
-    if pending.consumer_stream.is_some() {
-        candle_core::bail!("{OP} requires release_after for the cross-stream consumer");
-    }
-    slot.host_complete
-        .synchronize()
-        .map_err(candle_core::Error::wrap)?;
-    let copy_packed = pending.copy_packed;
-    let nrows = pending.nrows;
-    slot.pending = None;
-    let token_ids = &slot
-        .token_ids_host
-        .as_slice()
-        .map_err(candle_core::Error::wrap)?[..nrows];
-    let packed = if copy_packed {
+    let slot_index = submission.token.reservation.slot;
+    let nrows = submission.token.reservation.nrows;
+    let token_ids = workspace.token_ring.complete(&submission.token, OP)?;
+    let packed = if submission.copy_packed {
         Some(
-            &slot
+            &workspace.slots[slot_index]
                 .packed_host
                 .as_slice()
                 .map_err(candle_core::Error::wrap)?[..nrows * CUDA_TOP1_PACKED_WIDTH],
@@ -2829,26 +3200,7 @@ pub(crate) fn cuda_top1_submission_cancel(
 ) -> Result<()> {
     const OP: &str = "cuda_top1_submission_cancel";
     validate_cuda_top1_submission(workspace, submission, OP)?;
-    let slot = &mut workspace.slots[submission.slot];
-    let pending = slot.pending.as_mut().expect("submission validated above");
-    if let Some(consumer_stream) = pending.consumer_stream.take() {
-        slot.consumer_complete
-            .record(&consumer_stream)
-            .map_err(candle_core::Error::wrap)?;
-        pending
-            .producer_stream
-            .wait(&slot.consumer_complete)
-            .map_err(candle_core::Error::wrap)?;
-        slot.reuse_ready
-            .record(&pending.producer_stream)
-            .map_err(candle_core::Error::wrap)?;
-        slot.reuse_pending = true;
-    }
-    slot.host_complete
-        .synchronize()
-        .map_err(candle_core::Error::wrap)?;
-    slot.pending = None;
-    Ok(())
+    workspace.token_ring.cancel(&submission.token, OP)
 }
 
 #[cfg(feature = "cuda")]
@@ -2906,9 +3258,363 @@ pub(crate) fn cuda_top1_logits_f32_packed_batched_cached(
     let (batch, vocab) = (*batch, *vocab);
     let packed = cuda_top1_logits_f32_packed_cached_inner(input, batch, vocab, cache, OP)?;
     Ok(packed
-        .chunks_exact(CUDA_TOP1_PACKED_WIDTH)
+        .as_chunks::<CUDA_TOP1_PACKED_WIDTH>()
+        .0
+        .iter()
         .map(|row| [row[0], row[1]])
         .collect())
+}
+
+#[cfg(feature = "cuda")]
+#[derive(Clone, Copy)]
+pub(crate) struct CudaTopKSamplingParams {
+    pub(crate) inverse_temperature: f32,
+    pub(crate) top_k: usize,
+    pub(crate) top_p: f32,
+    pub(crate) min_p: f32,
+    pub(crate) uniform: f32,
+}
+
+#[cfg(feature = "cuda")]
+pub struct CudaTopKSamplingWorkspace {
+    capacity_rows: usize,
+    capacity_k: usize,
+    vocab: usize,
+    location: candle_core::DeviceLocation,
+    ranked: Option<CudaRankedTopKPackedWorkspace>,
+    token_ring: CudaAsyncTokenRing,
+    slots: Vec<CudaTopKSamplingSlot>,
+}
+
+#[cfg(feature = "cuda")]
+struct CudaTopKSamplingSlot {
+    params: candle_core::cuda_backend::cudarc::driver::CudaSlice<f32>,
+    params_host: candle_core::cuda_backend::cudarc::driver::PinnedHostSlice<f32>,
+}
+
+#[cfg(feature = "cuda")]
+pub(crate) struct CudaTopKSamplingSubmission {
+    token: CudaAsyncTokenSubmission,
+}
+
+#[cfg(feature = "cuda")]
+impl CudaTopKSamplingSubmission {
+    pub(crate) fn batch_size(&self) -> usize {
+        self.token.batch_size()
+    }
+
+    pub(crate) fn wait(&self) -> Result<()> {
+        self.token.wait()
+    }
+}
+
+#[cfg(feature = "cuda")]
+pub(crate) struct CudaTopKSamplingCompletion<'a> {
+    token_ids: &'a [u32],
+}
+
+#[cfg(feature = "cuda")]
+impl<'a> CudaTopKSamplingCompletion<'a> {
+    pub(crate) fn token_ids(&self) -> &'a [u32] {
+        self.token_ids
+    }
+}
+
+#[cfg(feature = "cuda")]
+fn new_cuda_topk_sampling_slot(
+    dev: &candle_core::CudaDevice,
+    capacity_rows: usize,
+) -> Result<CudaTopKSamplingSlot> {
+    let stream = dev.cuda_stream();
+    let context = stream.context();
+    let param_elems = capacity_rows
+        .checked_mul(CUDA_TOPK_SAMPLING_PARAM_WIDTH)
+        .ok_or_else(|| candle_core::Error::msg("CUDA top-k sampling parameter overflow"))?;
+    let mut params_host =
+        unsafe { context.alloc_pinned::<f32>(param_elems) }.map_err(candle_core::Error::wrap)?;
+    params_host
+        .as_mut_slice()
+        .map_err(candle_core::Error::wrap)?
+        .fill(0.0);
+
+    Ok(CudaTopKSamplingSlot {
+        params: unsafe { dev.alloc::<f32>(param_elems) }?,
+        params_host,
+    })
+}
+
+#[cfg(feature = "cuda")]
+fn new_cuda_topk_sampling_workspace(
+    dev: &candle_core::CudaDevice,
+    rows: usize,
+    vocab: usize,
+    k: usize,
+) -> Result<CudaTopKSamplingWorkspace> {
+    use candle_core::backend::BackendDevice;
+
+    let capacity_rows = rows
+        .checked_next_power_of_two()
+        .ok_or_else(|| candle_core::Error::msg("CUDA top-k sampling row capacity overflow"))?;
+    let capacity_k = k
+        .checked_next_power_of_two()
+        .ok_or_else(|| candle_core::Error::msg("CUDA top-k sampling width capacity overflow"))?;
+    let mut slots = Vec::with_capacity(CUDA_ASYNC_TOKEN_RING_SLOTS);
+    for _ in 0..CUDA_ASYNC_TOKEN_RING_SLOTS {
+        slots.push(new_cuda_topk_sampling_slot(dev, capacity_rows)?);
+    }
+    Ok(CudaTopKSamplingWorkspace {
+        capacity_rows,
+        capacity_k,
+        vocab,
+        location: dev.location(),
+        ranked: None,
+        token_ring: new_cuda_async_token_ring(dev, capacity_rows)?,
+        slots,
+    })
+}
+
+#[cfg(feature = "cuda")]
+fn validate_cuda_topk_sampling_params(
+    params: &[CudaTopKSamplingParams],
+    rows: usize,
+    vocab: usize,
+    op: &'static str,
+) -> Result<usize> {
+    if params.len() != rows {
+        candle_core::bail!("{op} expected {rows} sampling parameter rows");
+    }
+    let mut max_k = 0usize;
+    for params in params {
+        if !params.inverse_temperature.is_finite() || params.inverse_temperature <= 0.0 {
+            candle_core::bail!("{op} requires positive finite inverse temperatures");
+        }
+        if params.top_k == 0 || params.top_k > CUDA_TOPK_MAX_K {
+            candle_core::bail!("{op} top-k must be in [1, {CUDA_TOPK_MAX_K}]");
+        }
+        if !params.top_p.is_finite() || !params.min_p.is_finite() {
+            candle_core::bail!("{op} requires finite top-p and min-p values");
+        }
+        if !(0.0..1.0).contains(&params.uniform) {
+            candle_core::bail!("{op} requires uniforms in [0, 1)");
+        }
+        max_k = max_k.max(params.top_k.min(vocab));
+    }
+    Ok(max_k)
+}
+
+#[cfg(feature = "cuda")]
+fn copy_cuda_topk_sampling_params(
+    dev: &candle_core::CudaDevice,
+    slot: &mut CudaTopKSamplingSlot,
+    params: &[CudaTopKSamplingParams],
+) -> Result<()> {
+    let host = slot
+        .params_host
+        .as_mut_slice()
+        .map_err(candle_core::Error::wrap)?;
+    for (row, params) in params.iter().enumerate() {
+        let start = row * CUDA_TOPK_SAMPLING_PARAM_WIDTH;
+        let top_k = u16::try_from(params.top_k).map_err(candle_core::Error::wrap)?;
+        host[start] = params.inverse_temperature;
+        host[start + 1] = f32::from(top_k);
+        host[start + 2] = params.top_p;
+        host[start + 3] = params.min_p;
+        host[start + 4] = params.uniform;
+    }
+    dev.memcpy_htod(&slot.params_host, &mut slot.params)?;
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+fn cuda_topk_sampling_submit_inner(
+    input: &Tensor,
+    token_ids_dst: Option<&Tensor>,
+    params: &[CudaTopKSamplingParams],
+    cache: &mut Option<CudaTopKSamplingWorkspace>,
+    op: &'static str,
+) -> Result<CudaTopKSamplingSubmission> {
+    use candle_core::backend::{BackendDevice, BackendStorage};
+    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use candle_core::cuda_backend::CudaStorageSlice;
+
+    if !matches!(input.dtype(), DType::BF16 | DType::F16 | DType::F32) {
+        candle_core::bail!("{op} requires BF16, F16, or F32 logits");
+    }
+    if !input.is_contiguous() {
+        return Err(candle_core::Error::RequiresContiguous { op });
+    }
+    let [rows, vocab] = input.dims() else {
+        candle_core::bail!("{op} requires logits with shape [batch, vocab]");
+    };
+    if *rows == 0 || *vocab == 0 {
+        candle_core::bail!("{op} requires non-empty logits");
+    }
+    let max_k = validate_cuda_topk_sampling_params(params, *rows, *vocab, op)?;
+    let (storage, _) = input.storage_and_layout();
+    let storage = match &*storage {
+        candle_core::Storage::Cuda(storage) => storage,
+        _ => candle_core::bail!("{op} requires CUDA logits"),
+    };
+    let dev = storage.device();
+    let needs_alloc = cache.as_ref().is_none_or(|workspace| {
+        workspace.capacity_rows < *rows
+            || workspace.capacity_k < max_k
+            || workspace.vocab != *vocab
+            || workspace.location != dev.location()
+    });
+    if needs_alloc {
+        if cache
+            .as_ref()
+            .is_some_and(|workspace| workspace.token_ring.has_pending())
+        {
+            candle_core::bail!("{op} cannot resize while submissions are pending");
+        }
+        *cache = Some(new_cuda_topk_sampling_workspace(dev, *rows, *vocab, max_k)?);
+    }
+
+    let stream = dev.cuda_stream();
+    let workspace = cache
+        .as_mut()
+        .expect("CUDA top-k sampling workspace was allocated above");
+    let reservation = workspace
+        .token_ring
+        .reserve(input, token_ids_dst, *rows, op)?;
+    let slot_index = reservation.slot;
+    let result = (|| {
+        let ranked =
+            cuda_topk_ranked_packed_batched_with_workspace(input, max_k, &mut workspace.ranked)?;
+        let slot = &mut workspace.slots[slot_index];
+        copy_cuda_topk_sampling_params(dev, slot, params)?;
+
+        let (packed_storage, packed_layout) = ranked.packed.storage_and_layout();
+        let candle_core::Storage::Cuda(packed_storage) = &*packed_storage else {
+            unreachable!("ranked top-k output is CUDA")
+        };
+        let CudaStorageSlice::F32(packed_slice) = &packed_storage.slice else {
+            unreachable!("ranked top-k output is F32")
+        };
+        let (token_storage, token_layout) = reservation.device_tokens.storage_and_layout();
+        let candle_core::Storage::Cuda(token_storage) = &*token_storage else {
+            unreachable!("reserved token destination is CUDA")
+        };
+        let CudaStorageSlice::U32(token_slice) = &token_storage.slice else {
+            unreachable!("reserved token destination is U32")
+        };
+        let (packed_ptr, packed_guard) = packed_slice.device_ptr(&stream);
+        let (params_ptr, params_guard) = slot.params.device_ptr(&stream);
+        let (tokens_ptr, tokens_guard) = token_slice.device_ptr(&stream);
+        let packed_ptr = unsafe { (packed_ptr as *const f32).add(packed_layout.start_offset()) };
+        let params_ptr = params_ptr as *const f32;
+        let tokens_ptr = unsafe { (tokens_ptr as *mut u32).add(token_layout.start_offset()) };
+        unsafe {
+            ffi::sample_ranked_topk(
+                packed_ptr,
+                params_ptr,
+                tokens_ptr,
+                i32::try_from(*rows).map_err(candle_core::Error::wrap)?,
+                i32::try_from(ranked.k).map_err(candle_core::Error::wrap)?,
+                stream.cu_stream() as i64,
+            );
+        }
+        drop(packed_guard);
+        drop(params_guard);
+        drop(tokens_guard);
+        Result::<()>::Ok(())
+    })();
+    if let Err(error) = result {
+        let _ = stream.synchronize();
+        workspace.token_ring.abort(&reservation);
+        return Err(error);
+    }
+    let token = match workspace.token_ring.finish_launch(reservation) {
+        Ok(token) => token,
+        Err(error) => {
+            let _ = stream.synchronize();
+            return Err(error);
+        }
+    };
+    Ok(CudaTopKSamplingSubmission { token })
+}
+
+#[cfg(feature = "cuda")]
+pub(crate) fn cuda_topk_sampling_submit_batched(
+    input: &Tensor,
+    params: &[CudaTopKSamplingParams],
+    cache: &mut Option<CudaTopKSamplingWorkspace>,
+) -> Result<CudaTopKSamplingSubmission> {
+    cuda_topk_sampling_submit_inner(
+        input,
+        None,
+        params,
+        cache,
+        "cuda_topk_sampling_submit_batched",
+    )
+}
+
+#[cfg(feature = "cuda")]
+pub(crate) fn cuda_topk_sampling_submit_batched_into(
+    input: &Tensor,
+    token_ids_dst: &Tensor,
+    params: &[CudaTopKSamplingParams],
+    cache: &mut Option<CudaTopKSamplingWorkspace>,
+) -> Result<CudaTopKSamplingSubmission> {
+    cuda_topk_sampling_submit_inner(
+        input,
+        Some(token_ids_dst),
+        params,
+        cache,
+        "cuda_topk_sampling_submit_batched_into",
+    )
+}
+
+#[cfg(feature = "cuda")]
+pub(crate) fn cuda_topk_sampling_device_tokens_wait_on(
+    workspace: &mut CudaTopKSamplingWorkspace,
+    submission: &CudaTopKSamplingSubmission,
+    consumer_stream: &Arc<candle_core::cuda_backend::cudarc::driver::CudaStream>,
+) -> Result<()> {
+    workspace.token_ring.wait_on(
+        &submission.token,
+        consumer_stream,
+        "cuda_topk_sampling_device_tokens_wait_on",
+    )
+}
+
+#[cfg(feature = "cuda")]
+pub(crate) fn cuda_topk_sampling_device_tokens_release_after(
+    workspace: &mut CudaTopKSamplingWorkspace,
+    submission: &CudaTopKSamplingSubmission,
+    consumer_stream: &Arc<candle_core::cuda_backend::cudarc::driver::CudaStream>,
+) -> Result<()> {
+    workspace.token_ring.release_after(
+        &submission.token,
+        consumer_stream,
+        "cuda_topk_sampling_device_tokens_release_after",
+    )
+}
+
+#[cfg(feature = "cuda")]
+pub(crate) fn cuda_topk_sampling_submission_complete<'a>(
+    workspace: &'a mut CudaTopKSamplingWorkspace,
+    submission: &CudaTopKSamplingSubmission,
+) -> Result<CudaTopKSamplingCompletion<'a>> {
+    let token_ids = workspace
+        .token_ring
+        .complete(&submission.token, "cuda_topk_sampling_submission_complete")?;
+    if token_ids.contains(&CUDA_TOP1_INVALID_TOKEN) {
+        candle_core::bail!("invalid CUDA top-k sampling output");
+    }
+    Ok(CudaTopKSamplingCompletion { token_ids })
+}
+
+#[cfg(feature = "cuda")]
+pub(crate) fn cuda_topk_sampling_submission_cancel(
+    workspace: &mut CudaTopKSamplingWorkspace,
+    submission: &CudaTopKSamplingSubmission,
+) -> Result<()> {
+    workspace
+        .token_ring
+        .cancel(&submission.token, "cuda_topk_sampling_submission_cancel")
 }
 
 #[allow(dead_code)]
@@ -5027,8 +5733,16 @@ pub(crate) fn try_cuda_qk_rms_norm_rope_positions(
     let dev = q_storage.device();
     let stream = dev.cuda_stream();
     let stream_ptr = stream.cu_stream() as i64;
-    let q_shape = Shape::from_dims(&[batch, q_heads, seq_len, head_dim]);
-    let k_shape = Shape::from_dims(&[batch, k_heads, seq_len, head_dim]);
+    let output_token_major = q.stride()[1] == head_dim && q.stride()[3] == 1;
+    let output_shape = |heads| {
+        Shape::from_dims(&if output_token_major {
+            [batch, seq_len, heads, head_dim]
+        } else {
+            [batch, heads, seq_len, head_dim]
+        })
+    };
+    let q_shape = output_shape(q_heads);
+    let k_shape = output_shape(k_heads);
     let q_elem_count = q.elem_count();
 
     let q_stride = q_layout.stride();
@@ -5147,6 +5861,7 @@ pub(crate) fn try_cuda_qk_rms_norm_rope_positions(
                     k_eps,
                     i32::from(is_neox),
                     $dtype_id,
+                    i32::from(output_token_major),
                     stream_ptr,
                 );
             }
@@ -5180,6 +5895,14 @@ pub(crate) fn try_cuda_qk_rms_norm_rope_positions(
                 None
             };
 
+            let (q_tensor, k_tensor) = if output_token_major {
+                (
+                    q_tensor.transpose(1, 2)?,
+                    k_tensor.map(|tensor| tensor.transpose(1, 2)).transpose()?,
+                )
+            } else {
+                (q_tensor, k_tensor)
+            };
             Ok(Some((q_tensor, k_tensor)))
         }};
     }
@@ -5774,6 +6497,18 @@ pub fn mul_and_act(a: &Tensor, b: &Tensor, act: Activation) -> Result<Tensor> {
     a.apply(&act)? * b
 }
 
+pub(crate) fn try_fused_gated_projection(
+    gate: &Tensor,
+    value: &Tensor,
+    act: Activation,
+    projection: &dyn mistralrs_quant::QuantMethod,
+) -> Result<Option<Tensor>> {
+    let Some(activation) = glu_activation_type(act) else {
+        return Ok(None);
+    };
+    mistralrs_quant::try_forward_fused_quantized_glu(gate, value, projection, activation)
+}
+
 pub fn mul_and_candle_act(a: &Tensor, b: &Tensor, act: candle_nn::Activation) -> Result<Tensor> {
     // Check if we can use the fused kernel (works on CUDA, Metal, and CPU)
     if matches!(a.dtype(), DType::F16 | DType::BF16 | DType::F32) && a.dtype() == b.dtype() {
@@ -5787,6 +6522,27 @@ pub fn mul_and_candle_act(a: &Tensor, b: &Tensor, act: candle_nn::Activation) ->
 
 pub fn split_mul_and_act(xs: &Tensor, split_size: usize, act: Activation) -> Result<Tensor> {
     split_mul_and_act_order(xs, split_size, act, GatedActivationOrder::GateUp)
+}
+
+pub(crate) fn try_fused_split_glu_quantized_forward(
+    xs: &Tensor,
+    split_size: usize,
+    act: Activation,
+    projection: &dyn mistralrs_quant::QuantMethod,
+) -> Result<Option<Tensor>> {
+    #[cfg(feature = "cuda")]
+    {
+        let Some(activation) = glu_activation_type(act) else {
+            return Ok(None);
+        };
+        projection.try_forward_fused_split_glu(xs, split_size, activation)
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    {
+        let _ = (xs, split_size, act, projection);
+        Ok(None)
+    }
 }
 
 pub fn split_mul_and_act_order(
@@ -5862,6 +6618,66 @@ impl MergedDenseProjection {
             self.proj.forward(xs).map(Some)
         }
     }
+
+    pub(crate) fn activation_quantization_scheme_for(
+        &self,
+        xs: &Tensor,
+    ) -> Option<mistralrs_quant::ActivationQuantizationScheme> {
+        if self
+            .originals
+            .iter()
+            .any(|proj| proj.is_dynamic_lora_active())
+        {
+            None
+        } else {
+            self.proj.activation_quantization_scheme_for(xs)
+        }
+    }
+
+    pub(crate) fn preferred_activation_scale_layout_for(
+        &self,
+        xs: &Tensor,
+    ) -> Option<mistralrs_quant::ActivationScaleLayout> {
+        if self
+            .originals
+            .iter()
+            .any(|proj| proj.is_dynamic_lora_active())
+        {
+            None
+        } else {
+            self.proj.preferred_activation_scale_layout_for(xs)
+        }
+    }
+
+    pub(crate) fn forward_quantized_packed(
+        &self,
+        activation: &mistralrs_quant::QuantizedActivation,
+    ) -> Result<Tensor> {
+        if self
+            .originals
+            .iter()
+            .any(|proj| proj.is_dynamic_lora_active())
+        {
+            candle_core::bail!(
+                "packed projection cannot use a prequantized activation with active dynamic LoRA"
+            )
+        }
+        self.proj.forward_quantized(activation)
+    }
+
+    pub(crate) fn forward_quantized(
+        &self,
+        activation: &mistralrs_quant::QuantizedActivation,
+    ) -> Result<Vec<Tensor>> {
+        let ys = self.forward_quantized_packed(activation)?;
+        let mut parts = Vec::with_capacity(self.output_dims.len());
+        let mut offset = 0;
+        for &dim in &self.output_dims {
+            parts.push(ys.narrow(D::Minus1, offset, dim)?);
+            offset += dim;
+        }
+        Ok(parts)
+    }
 }
 
 /// Feed-forward path for quantized gate/up/down projections.
@@ -5906,6 +6722,9 @@ pub(crate) fn quantized_ffn(
 
     let lhs = gate.forward(xs)?;
     let rhs = up.forward(xs)?;
+    if let Some(output) = try_fused_gated_projection(&lhs, &rhs, act, down)? {
+        return Ok(output);
+    }
     let inter = mul_and_act(&lhs, &rhs, act)?;
     down.forward(&inter)
 }
@@ -5946,6 +6765,8 @@ pub(crate) fn qkv_projections(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+
     use std::{collections::HashMap, sync::Arc};
 
     use candle_core::{DType, Device, Tensor};
@@ -5972,6 +6793,69 @@ mod tests {
             (actual - expected).abs() <= tolerance,
             "expected {expected}, got {actual}"
         );
+    }
+
+    #[cfg(feature = "cuda")]
+    fn topk_sampling_reference(
+        logits: &[f32],
+        inverse_temperature: f32,
+        top_k: usize,
+        top_p: f32,
+        min_p: f32,
+        uniform: f32,
+    ) -> u32 {
+        let mut indices = (0..logits.len()).collect::<Vec<_>>();
+        indices.sort_unstable_by(|&left, &right| {
+            logits[right]
+                .partial_cmp(&logits[left])
+                .unwrap()
+                .then_with(|| left.cmp(&right))
+        });
+        indices.truncate(top_k.min(logits.len()));
+
+        let scaled_max = logits[indices[0]] * inverse_temperature;
+        let mut probabilities = indices
+            .iter()
+            .map(|&index| (logits[index] * inverse_temperature - scaled_max).exp())
+            .collect::<Vec<_>>();
+        let denominator = probabilities.iter().sum::<f32>();
+        for probability in &mut probabilities {
+            *probability /= denominator;
+        }
+        if top_p > 0.0 && top_p < 1.0 {
+            let cutoff = top_p * probabilities.iter().sum::<f32>();
+            let mut cumulative = 0.0f32;
+            for probability in &mut probabilities {
+                if cumulative >= cutoff {
+                    *probability = 0.0;
+                } else {
+                    cumulative += *probability;
+                }
+            }
+        }
+        if min_p > 0.0 && min_p < 1.0 {
+            let threshold = probabilities[0] * min_p;
+            for probability in &mut probabilities {
+                if threshold >= *probability {
+                    *probability = 0.0;
+                }
+            }
+        }
+
+        let chosen = uniform * probabilities.iter().sum::<f32>();
+        let mut cumulative = 0.0f32;
+        let mut selected = None;
+        for (rank, &probability) in probabilities.iter().enumerate() {
+            cumulative += probability;
+            if probability > 0.0 {
+                selected = Some(rank);
+            }
+            if cumulative > chosen {
+                selected = Some(rank);
+                break;
+            }
+        }
+        indices[selected.unwrap()] as u32
     }
 
     #[cfg(feature = "cuda")]
@@ -6270,6 +7154,177 @@ mod tests {
     }
 
     #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_qk_norm_rope_positions_preserves_projection_layout() -> candle_core::Result<()> {
+        const BATCH: usize = 2;
+        const SEQ_LEN: usize = 3;
+        const Q_HEADS: usize = 3;
+        const K_HEADS: usize = 2;
+        const HEAD_DIM: usize = 64;
+        const PADDING_HEADS: usize = 1;
+        const CACHE_ROWS: usize = 11;
+        const EPS: f32 = 1e-6;
+        const BF16_TOLERANCE: f32 = 0.008;
+        const F16_TOLERANCE: f32 = 0.001;
+        const F32_TOLERANCE: f32 = 1e-5;
+        const POSITIONS: [u32; BATCH * SEQ_LEN] = [9, 2, 7, 1, 10, 4];
+
+        let device = Device::new_cuda(0)?;
+        let packed_heads = PADDING_HEADS + Q_HEADS + K_HEADS;
+        let width = packed_heads * HEAD_DIM;
+        let raw = (0..BATCH * SEQ_LEN * width)
+            .map(|index| ((index * 29 + index / 7) % 277) as f32 / 71.0 - 1.7)
+            .collect::<Vec<_>>();
+        for dtype in [DType::BF16, DType::F16, DType::F32] {
+            let packed = Tensor::from_vec(
+                raw.clone(),
+                (BATCH, SEQ_LEN, packed_heads, HEAD_DIM),
+                &device,
+            )?
+            .to_dtype(dtype)?;
+            let q = packed.narrow(2, PADDING_HEADS, Q_HEADS)?.transpose(1, 2)?;
+            let k = packed
+                .narrow(2, PADDING_HEADS + Q_HEADS, K_HEADS)?
+                .transpose(1, 2)?;
+            for projection in [&q, &k] {
+                assert!(projection.storage_and_layout().1.start_offset() > 0);
+                assert_eq!(projection.stride()[2], width);
+            }
+            let weight = Tensor::from_vec(
+                (0..HEAD_DIM)
+                    .map(|index| 0.7 + index as f32 / 211.0)
+                    .collect::<Vec<_>>(),
+                HEAD_DIM,
+                &device,
+            )?
+            .to_dtype(dtype)?;
+            let positions = Tensor::new(POSITIONS.as_slice(), &device)?;
+            for rot_dim in [HEAD_DIM / 4, HEAD_DIM / 2] {
+                let angles = Tensor::from_vec(
+                    (0..CACHE_ROWS * rot_dim)
+                        .map(|index| index as f32 * 0.023)
+                        .collect::<Vec<_>>(),
+                    (CACHE_ROWS, rot_dim),
+                    &device,
+                )?;
+                let cos = angles.cos()?.to_dtype(dtype)?;
+                let sin = angles.sin()?.to_dtype(dtype)?;
+                let values = |tensor: &Tensor| -> candle_core::Result<Vec<f32>> {
+                    tensor
+                        .to_device(&Device::Cpu)?
+                        .to_dtype(DType::F32)?
+                        .flatten_all()?
+                        .to_vec1()
+                };
+                let weights = values(&weight)?;
+                let cos_values = values(&cos)?;
+                let sin_values = values(&sin)?;
+                for is_neox in [false, true] {
+                    let reference = |input: &Tensor| -> candle_core::Result<Vec<f32>> {
+                        let input_values = values(input)?;
+                        let heads = input.dim(1)?;
+                        let mut expected = vec![0f32; input_values.len()];
+                        for batch in 0..BATCH {
+                            for head in 0..heads {
+                                for seq in 0..SEQ_LEN {
+                                    let row = ((batch * heads + head) * SEQ_LEN + seq) * HEAD_DIM;
+                                    let squares = input_values[row..row + HEAD_DIM]
+                                        .iter()
+                                        .map(|x| f64::from(*x).powi(2))
+                                        .sum::<f64>();
+                                    let inv_rms =
+                                        (squares / HEAD_DIM as f64 + f64::from(EPS)).sqrt().recip();
+                                    let normalized = (0..HEAD_DIM)
+                                        .map(|col| {
+                                            f64::from(input_values[row + col])
+                                                * inv_rms
+                                                * f64::from(weights[col])
+                                        })
+                                        .collect::<Vec<_>>();
+                                    for col in 0..HEAD_DIM {
+                                        expected[row + col] = normalized[col] as f32;
+                                    }
+                                    let cache_row =
+                                        POSITIONS[batch * SEQ_LEN + seq] as usize * rot_dim;
+                                    for col in 0..rot_dim {
+                                        let (left, right) = if is_neox {
+                                            (col, col + rot_dim)
+                                        } else {
+                                            (2 * col, 2 * col + 1)
+                                        };
+                                        let c = f64::from(cos_values[cache_row + col]);
+                                        let s = f64::from(sin_values[cache_row + col]);
+                                        expected[row + left] =
+                                            (normalized[left] * c - normalized[right] * s) as f32;
+                                        expected[row + right] =
+                                            (normalized[right] * c + normalized[left] * s) as f32;
+                                    }
+                                }
+                            }
+                        }
+                        values(
+                            &Tensor::from_vec(expected, input.shape(), &Device::Cpu)?
+                                .to_dtype(dtype)?,
+                        )
+                    };
+                    let expected_q = reference(&q)?;
+                    let expected_k = reference(&k)?;
+                    for token_major in [false, true] {
+                        let q = if token_major {
+                            q.clone()
+                        } else {
+                            q.contiguous()?
+                        };
+                        let k = if token_major {
+                            k.clone()
+                        } else {
+                            k.contiguous()?
+                        };
+                        for with_k in [false, true] {
+                            let (actual_q, actual_k) = super::try_cuda_qk_rms_norm_rope_positions(
+                                &q,
+                                with_k.then_some(&k),
+                                &weight,
+                                with_k.then_some(&weight),
+                                EPS,
+                                EPS,
+                                &cos,
+                                &sin,
+                                &positions,
+                                is_neox,
+                            )?
+                            .expect("supported CUDA Q/K normalization and RoPE");
+                            assert_eq!(actual_q.shape(), q.shape());
+                            assert_eq!(actual_k.is_some(), with_k);
+                            let outputs = std::iter::once((&actual_q, &expected_q))
+                                .chain(actual_k.as_ref().map(|tensor| (tensor, &expected_k)));
+                            for (actual, expected) in outputs {
+                                if token_major {
+                                    assert!(actual.transpose(1, 2)?.is_contiguous());
+                                } else {
+                                    assert!(actual.is_contiguous());
+                                }
+                                let tolerance = match dtype {
+                                    DType::BF16 => BF16_TOLERANCE,
+                                    DType::F16 => F16_TOLERANCE,
+                                    _ => F32_TOLERANCE,
+                                };
+                                for (index, (actual, expected)) in
+                                    values(actual)?.into_iter().zip(expected).enumerate()
+                                {
+                                    assert!((actual - expected).abs() <= tolerance * expected.abs().max(1.0),
+                                        "{dtype:?} token_major={token_major} neox={is_neox} with_k={with_k} output[{index}]={actual}, expected={expected}");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
     fn packed_reference(logits: &[f32], k: usize, inverse_temperature: f32) -> Vec<f32> {
         let mut indices = (0..logits.len()).collect::<Vec<_>>();
         indices.sort_unstable_by(|&lhs, &rhs| logits[rhs].total_cmp(&logits[lhs]));
@@ -6520,18 +7575,162 @@ mod tests {
 
     #[cfg(feature = "cuda")]
     #[test]
+    fn cuda_resident_topk_sampling_matches_filtered_reference() -> candle_core::Result<()> {
+        const BATCH: usize = 4;
+        const VOCAB: usize = 2051;
+
+        let device = Device::new_cuda(0)?;
+        let mut rows = Vec::with_capacity(BATCH * VOCAB);
+        for row in 0..BATCH {
+            rows.extend((0..VOCAB).map(|column| {
+                let shuffled = (column * 977 + row * 131) % VOCAB;
+                shuffled as f32 * 0.0031 + column as f32 * 1e-7 - row as f32 * 0.17
+            }));
+        }
+        let inverse_temperatures = [1.0f32, 0.5, 1.7, 0.9];
+        let top_ks = [20u32, 7, 13, 3];
+        let top_ps = [0.95f32, 0.55, 1.0, 0.2];
+        let min_ps = [0.0f32, 0.1, 0.05, 0.0];
+        let uniforms = [0.0f32, 0.347, 0.891, 0.777];
+        let params = (0..BATCH)
+            .map(|row| super::CudaTopKSamplingParams {
+                inverse_temperature: inverse_temperatures[row],
+                top_k: top_ks[row] as usize,
+                top_p: top_ps[row],
+                min_p: min_ps[row],
+                uniform: uniforms[row],
+            })
+            .collect::<Vec<_>>();
+        let expected = (0..BATCH)
+            .map(|row| {
+                topk_sampling_reference(
+                    &rows[row * VOCAB..(row + 1) * VOCAB],
+                    inverse_temperatures[row],
+                    top_ks[row] as usize,
+                    top_ps[row],
+                    min_ps[row],
+                    uniforms[row],
+                )
+            })
+            .collect::<Vec<_>>();
+        let logits = Tensor::from_vec(rows, (BATCH, VOCAB), &device)?;
+        let mut workspace = None;
+        let submission =
+            super::cuda_topk_sampling_submit_batched(&logits, &params, &mut workspace)?;
+        let actual = super::cuda_topk_sampling_submission_complete(
+            workspace.as_mut().unwrap(),
+            &submission,
+        )?
+        .token_ids()
+        .to_vec();
+
+        assert_eq!(actual, expected);
+        Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_resident_topk_sampling_reuses_ring_and_destination() -> candle_core::Result<()> {
+        const BATCH: usize = 2;
+
+        let device = Device::new_cuda(0)?;
+        let stream = device.as_cuda_device()?.cuda_stream();
+        let resident_input = Tensor::zeros((4, 1), DType::U32, &device)?;
+        let first_logits = Tensor::new(&[[9.0f32, 8.0, 1.0, 0.0], [0.0, 1.0, 9.0, 8.0]], &device)?;
+        let second_logits = Tensor::new(&[[8.0f32, 9.0, 0.0, 1.0], [1.0, 0.0, 8.0, 9.0]], &device)?;
+        let inverse_temperatures = [1.0f32; BATCH];
+        let top_ks = [2u32; BATCH];
+        let top_ps = [1.0f32; BATCH];
+        let min_ps = [0.0f32; BATCH];
+        let first_uniforms = [0.01f32; BATCH];
+        let second_uniforms = [0.99f32; BATCH];
+        let first_params = (0..BATCH)
+            .map(|row| super::CudaTopKSamplingParams {
+                inverse_temperature: inverse_temperatures[row],
+                top_k: top_ks[row] as usize,
+                top_p: top_ps[row],
+                min_p: min_ps[row],
+                uniform: first_uniforms[row],
+            })
+            .collect::<Vec<_>>();
+        let second_params = (0..BATCH)
+            .map(|row| super::CudaTopKSamplingParams {
+                inverse_temperature: inverse_temperatures[row],
+                top_k: top_ks[row] as usize,
+                top_p: top_ps[row],
+                min_p: min_ps[row],
+                uniform: second_uniforms[row],
+            })
+            .collect::<Vec<_>>();
+        let mut workspace = None;
+        let first = super::cuda_topk_sampling_submit_batched_into(
+            &first_logits,
+            &resident_input,
+            &first_params,
+            &mut workspace,
+        )?;
+        let first_slot = first.token.reservation.slot;
+        super::cuda_topk_sampling_device_tokens_wait_on(
+            workspace.as_mut().unwrap(),
+            &first,
+            &stream,
+        )?;
+        super::cuda_topk_sampling_device_tokens_release_after(
+            workspace.as_mut().unwrap(),
+            &first,
+            &stream,
+        )?;
+        let second = super::cuda_topk_sampling_submit_batched_into(
+            &second_logits,
+            &resident_input,
+            &second_params,
+            &mut workspace,
+        )?;
+        assert_ne!(first_slot, second.token.reservation.slot);
+        assert!(super::cuda_topk_sampling_submit_batched(
+            &Tensor::zeros((BATCH, 4), DType::F32, &device)?,
+            &first_params,
+            &mut workspace,
+        )
+        .is_err());
+        super::cuda_topk_sampling_device_tokens_release_after(
+            workspace.as_mut().unwrap(),
+            &second,
+            &stream,
+        )?;
+
+        let first_tokens =
+            super::cuda_topk_sampling_submission_complete(workspace.as_mut().unwrap(), &first)?
+                .token_ids()
+                .to_vec();
+        let second_tokens =
+            super::cuda_topk_sampling_submission_complete(workspace.as_mut().unwrap(), &second)?
+                .token_ids()
+                .to_vec();
+        assert_eq!(first_tokens, [0, 2]);
+        assert_eq!(second_tokens, [0, 2]);
+
+        let third =
+            super::cuda_topk_sampling_submit_batched(&first_logits, &first_params, &mut workspace)?;
+        assert_eq!(third.token.reservation.slot, first_slot);
+        super::cuda_topk_sampling_submission_cancel(workspace.as_mut().unwrap(), &third)?;
+        Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
     fn cuda_cached_batched_top1_tracks_batch_shape() -> candle_core::Result<()> {
         let device = Device::new_cuda(0)?;
         let mut workspace = None;
         let first = Tensor::new(&[[1.0f32, 4.0, 3.0], [8.0, 2.0, 5.0]], &device)?;
         let actual = super::cuda_top1_logits_f32_packed_batched_cached(&first, &mut workspace)?;
         assert_eq!(actual, vec![[4.0, 1.0], [8.0, 0.0]]);
-        assert_eq!(workspace.as_ref().unwrap().nrows, 2);
+        assert_eq!(workspace.as_ref().unwrap().capacity_rows, 2);
 
         let second = Tensor::new(&[[0.0f32, -2.0, 7.0]], &device)?;
         let actual = super::cuda_top1_logits_f32_packed_batched_cached(&second, &mut workspace)?;
         assert_eq!(actual, vec![[7.0, 2.0]]);
-        assert_eq!(workspace.as_ref().unwrap().nrows, 1);
+        assert_eq!(workspace.as_ref().unwrap().capacity_rows, 2);
         Ok(())
     }
 
@@ -6568,10 +7767,10 @@ mod tests {
         let second = Tensor::new(&[[6.0f32, 4.0, 3.0], [1.0, 2.0, 9.0]], &device)?;
         let mut workspace = None;
         let first = super::cuda_top1_logits_submit_batched(&first, &mut workspace)?;
-        let first_slot = first.slot;
+        let first_slot = first.token.reservation.slot;
         let second = super::cuda_top1_logits_submit_batched(&second, &mut workspace)?;
 
-        assert_ne!(first_slot, second.slot);
+        assert_ne!(first_slot, second.token.reservation.slot);
         assert!(super::cuda_top1_logits_submit_batched(
             &Tensor::zeros((2, 3), DType::F32, &device)?,
             &mut workspace,
@@ -6590,7 +7789,7 @@ mod tests {
 
         let third = Tensor::new(&[[1.0f32, 2.0, 8.0], [3.0, 7.0, 4.0]], &device)?;
         let third = super::cuda_top1_logits_submit_batched(&third, &mut workspace)?;
-        assert_eq!(third.slot, first_slot);
+        assert_eq!(third.token.reservation.slot, first_slot);
         let third_tokens =
             super::cuda_top1_submission_complete(workspace.as_mut().unwrap(), &third)?
                 .token_ids()
@@ -6648,12 +7847,15 @@ mod tests {
         let first = Tensor::new(&[[1.0f32, 4.0], [8.0, 2.0]], &device)?;
         let submission = super::cuda_top1_logits_submit_batched(&first, &mut workspace)?;
         super::cuda_top1_submission_complete(workspace.as_mut().unwrap(), &submission)?;
-        let first_workspace_id = workspace.as_ref().unwrap().id;
+        let first_workspace_id = workspace.as_ref().unwrap().token_ring.id;
 
         let second = Tensor::new(&[[1.0f32, 9.0]], &device)?;
         let submission = super::cuda_top1_logits_submit_batched(&second, &mut workspace)?;
-        assert_eq!(workspace.as_ref().unwrap().id, first_workspace_id);
-        assert_eq!(workspace.as_ref().unwrap().nrows, 1);
+        assert_eq!(
+            workspace.as_ref().unwrap().token_ring.id,
+            first_workspace_id
+        );
+        assert_eq!(submission.batch_size(), 1);
         let completion =
             super::cuda_top1_submission_complete(workspace.as_mut().unwrap(), &submission)?;
         assert_eq!(completion.token_ids(), &[1]);
@@ -6956,7 +8158,6 @@ mod tests {
         const BACKING_ROWS: usize = 3;
         const ROWS: usize = 2;
         const VOCAB: usize = 248_320;
-        const K: usize = 16;
 
         let device = Device::new_cuda(0)?;
         let mut values = vec![-32.0f32; BACKING_ROWS * VOCAB];
@@ -6977,19 +8178,21 @@ mod tests {
                 .to_dtype(DType::F32)?
                 .to_device(&Device::Cpu)?
                 .to_vec2::<f32>()?;
-            let output = super::cuda_topk_ranked_packed_batched(&input, K)?;
-            let packed = output.packed.to_device(&Device::Cpu)?.to_vec2::<f32>()?;
+            for k in [20, 32] {
+                let output = super::cuda_topk_ranked_packed_batched(&input, k)?;
+                let packed = output.packed.to_device(&Device::Cpu)?.to_vec2::<f32>()?;
 
-            for (packed_row, reference_row) in packed.iter().zip(&reference) {
-                let mut indices = (0..VOCAB).collect::<Vec<_>>();
-                indices.sort_unstable_by(|&left, &right| {
-                    reference_row[right]
-                        .total_cmp(&reference_row[left])
-                        .then_with(|| left.cmp(&right))
-                });
-                for (slot, &index) in indices.iter().take(K).enumerate() {
-                    assert_eq!(packed_row[slot], reference_row[index]);
-                    assert_eq!(packed_row[K + slot], index as f32);
+                for (packed_row, reference_row) in packed.iter().zip(&reference) {
+                    let mut indices = (0..VOCAB).collect::<Vec<_>>();
+                    indices.sort_unstable_by(|&left, &right| {
+                        reference_row[right]
+                            .total_cmp(&reference_row[left])
+                            .then_with(|| left.cmp(&right))
+                    });
+                    for (slot, &index) in indices.iter().take(k).enumerate() {
+                        assert_eq!(packed_row[slot], reference_row[index]);
+                        assert_eq!(packed_row[k + slot], index as f32);
+                    }
                 }
             }
         }
@@ -7052,7 +8255,7 @@ mod tests {
                 .then_with(|| left.cmp(&right))
         });
 
-        for k in [7, 8, 16, 17, 20, 128] {
+        for k in [7, 8, 16, 17, 20, 32, 33, 128] {
             let output = super::cuda_topk_ranked_packed_batched(&logits, k)?;
             let packed = output.packed.to_device(&Device::Cpu)?.to_vec2::<f32>()?;
             for (slot, &index) in expected_indices.iter().take(k).enumerate() {
