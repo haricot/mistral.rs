@@ -42,7 +42,7 @@ jobs:
           cargo +stable metadata --locked --format-version 1 > /dev/null
           git status --short
           # Never silently reformat unrelated source files.
-          bad="$(git diff --name-only | grep -Ev '^(Cargo.lock|mistralrs-embeddinggemma2/src/.*\\.rs)$' || true)"
+          bad="$(git diff --name-only | grep -Ev '^(Cargo.lock|mistralrs-embeddinggemma2/src/.*[.]rs)$' || true)"
           test -z "$bad" || { echo "::error::Unexpected modified paths: $bad"; exit 3; }
           if git diff --quiet; then
             echo 'Fmt and Cargo.lock were already coherent' >> "$GITHUB_STEP_SUMMARY"
