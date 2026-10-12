@@ -24,7 +24,7 @@ use crate::pipeline::EmbeddingModel;
 use crate::pipeline::EmbeddingModelLoader;
 use crate::pipeline::{AutoEmbeddingLoader, EmbeddingModulePaths};
 use crate::pipeline::{ChatTemplate, EmbeddingModelPaths, IsqOrganization, Processor};
-use crate::pipeline::{EmbeddingGemmaLoader, Qwen3EmbeddingLoader};
+use crate::pipeline::{EmbeddingGemmaLoader, EmbeddingGemma2Loader, Qwen3EmbeddingLoader};
 use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::sequence::Sequence;
 use crate::utils::tokenizer::get_tokenizer;
@@ -151,6 +151,7 @@ impl EmbeddingLoaderBuilder {
     pub fn build(self, loader: Option<EmbeddingLoaderType>) -> Box<dyn Loader> {
         let loader: Box<dyn EmbeddingModelLoader> = match loader {
             Some(EmbeddingLoaderType::EmbeddingGemma) => Box::new(EmbeddingGemmaLoader),
+            Some(EmbeddingLoaderType::EmbeddingGemma2) => Box::new(EmbeddingGemma2Loader),
             Some(EmbeddingLoaderType::Qwen3Embedding) => Box::new(Qwen3EmbeddingLoader),
             None => Box::new(AutoEmbeddingLoader),
         };
@@ -237,6 +238,26 @@ impl Loader for EmbeddingLoader {
         } else {
             config
         };
+
+        let native_pooled = self.inner.returns_pooled_embeddings(&config)?;
+        if native_pooled {
+            if in_situ_quant.is_some()
+                || self.config.from_uqff.is_some()
+                || self.config.write_uqff.is_some()
+                || self.config.topology.is_some()
+                || self.config.imatrix.is_some()
+                || self.config.calibration_file.is_some()
+            {
+                anyhow::bail!(
+                    "EmbeddingGemma 2 initially supports only native F32, without ISQ, UQFF, topology or calibration"
+                );
+            }
+            // Single-device native Candle path: never claim support for
+            // automatic multi-device placement or distributed layers.
+            if matches!(mapper, DeviceMapSetting::Auto(_)) {
+                mapper = DeviceMapSetting::dummy();
+            }
+        }
 
         if paged_attn_config.is_some() {
             warn!("PagedAttention is not supported for embedding models, disabling it.");
@@ -485,14 +506,29 @@ impl Loader for EmbeddingLoader {
 
         let multi_progress = Arc::new(new_multi_progress());
 
-        let modules_config: Vec<_> = paths
-            .get_modules()
-            .context("Embedding models require the `modules.json` file.")?
-            .to_vec();
-        assert!(matches!(
-            modules_config.first(),
-            Some(EmbeddingModulePaths::Transformer { .. })
-        ));
+        let modules_config: Vec<_> = if native_pooled {
+            // Candle::EmbeddingGemma2::embed already applies mean pooling,
+            // Matryoshka truncation and normalization. Do not apply an
+            // additional sentence-transformers module stack.
+            if paths.get_modules().is_some_and(|modules| {
+                modules.iter().any(|m| !matches!(m, EmbeddingModulePaths::Transformer { .. }))
+            }) {
+                anyhow::bail!(
+                    "EmbeddingGemma 2 forbids extra sentence-transformers pooling, dense or normalization modules"
+                );
+            }
+            Vec::new()
+        } else {
+            let modules = paths
+                .get_modules()
+                .context("Embedding models require the `modules.json` file.")?
+                .to_vec();
+            anyhow::ensure!(
+                matches!(modules.first(), Some(EmbeddingModulePaths::Transformer { .. })),
+                "Embedding models require a Transformer first module"
+            );
+            modules
+        };
 
         let mut modules: Vec<Box<dyn Module + Send + Sync>> = Vec::new();
         for module in &modules_config {
