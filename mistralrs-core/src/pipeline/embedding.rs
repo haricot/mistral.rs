@@ -137,8 +137,9 @@ mod native_gemma2_module_tests {
             r#"{"embedding_dimension":768,"pooling_mode":"mean","include_prompt":true,"custom":42}"#,
         ] {
             std::fs::write(&pooling, config).unwrap();
-            assert!(validate_native_gemma2_modules(Some(&official_modules(pooling.clone())))
-                .is_err());
+            assert!(
+                validate_native_gemma2_modules(Some(&official_modules(pooling.clone()))).is_err()
+            );
         }
     }
 
