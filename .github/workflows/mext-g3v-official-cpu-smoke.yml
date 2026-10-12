@@ -37,6 +37,8 @@ jobs:
         run: cargo +stable fmt --all -- --check
       - name: Strict native Gemma2 module compatibility tests
         run: cargo +stable test --locked --no-default-features -p mistralrs-core native_gemma2_ --lib
+      - name: Parse official Google Sentence Transformers module names
+        run: cargo +stable test --locked --no-default-features -p mistralrs-core official_gemma2_sentence_transformers_metadata_parses --lib
       - name: Typecheck the real-checkpoint SDK smoke binary
         run: cargo +stable check --locked --no-default-features -p mistralrs --example embedding_gemma2_native_smoke
       - name: Evidence boundary
