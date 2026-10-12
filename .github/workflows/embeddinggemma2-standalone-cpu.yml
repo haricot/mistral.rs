@@ -1,0 +1,42 @@
+name: MEXT G3 — EmbeddingGemma 2 Standalone CPU
+
+on:
+  push:
+    branches:
+      - embeddinggemma2_standalone
+  pull_request:
+    branches:
+      - master
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'mistralrs-embeddinggemma2/**'
+      - '.github/workflows/embeddinggemma2-standalone-cpu.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          toolchain: stable
+          components: rustfmt,clippy
+      - name: Verify exact Cargo.lock resolution
+        run: cargo +stable metadata --locked --format-version 1 > "$RUNNER_TEMP/metadata.json"
+      - name: Check Rust formatting of standalone
+        run: cargo +stable fmt --manifest-path mistralrs-embeddinggemma2/Cargo.toml -- --check
+      - name: Run local-only checkpoint inventory unit tests
+        run: cargo +stable test --locked --no-default-features -p mistralrs-embeddinggemma2 --lib
+      - name: Verify local CLI builds
+        run: cargo +stable check --locked --no-default-features -p mistralrs-embeddinggemma2 --bin embeddinggemma2-text
+      - name: No model parity or GPU proof
+        run: |
+          echo 'CANDLE_TEXT_ADAPTER_CPU_SMOKE_ONLY: no Google checkpoint parity, batch, image/audio, CUDA or SM61 proof' >> "$GITHUB_STEP_SUMMARY"
