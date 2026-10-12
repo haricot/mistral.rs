@@ -57,6 +57,112 @@ use tokenizers::Tokenizer;
 use tokio::sync::Mutex;
 use tracing::{debug, info, trace, warn};
 
+/// Verify the published Sentence Transformers metadata is equivalent to the
+/// mean-pooling + L2-normalization performed inside Candle's EmbeddingGemma 2.
+/// Never silently discard incompatible pooling, Dense or custom modules.
+fn validate_native_gemma2_modules(modules: Option<&[EmbeddingModulePaths]>) -> Result<()> {
+    use EmbeddingModulePaths::{Normalize, Pooling, Transformer};
+
+    let Some(modules) = modules else {
+        // A native Transformers checkpoint may omit modules.json entirely.
+        return Ok(());
+    };
+    match modules {
+        [] | [Transformer { .. }] => Ok(()),
+        [Transformer { .. }, Pooling { config, .. }, Normalize { .. }] => {
+            let config: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(config).with_context(|| {
+                    format!("reading EmbeddingGemma 2 pooling config {}", config.display())
+                })?)?;
+            let obj = config
+                .as_object()
+                .context("EmbeddingGemma 2 pooling config must be an object")?;
+            anyhow::ensure!(
+                obj.len() == 3
+                    && obj.get("pooling_mode").and_then(|v| v.as_str()) == Some("mean")
+                    && obj.get("include_prompt").and_then(|v| v.as_bool()) == Some(true)
+                    && obj.get("embedding_dimension").and_then(|v| v.as_u64()) == Some(768),
+                "EmbeddingGemma 2 Sentence Transformers pooling metadata is not equivalent to native Candle mean+L2(768)"
+            );
+            Ok(())
+        }
+        _ => anyhow::bail!(
+            "EmbeddingGemma 2 accepts only native no-module metadata or              Transformer -> Pooling(mean,include_prompt,768) -> Normalize;              Dense/custom/alternate pooling cannot be skipped"
+        ),
+    }
+}
+
+#[cfg(test)]
+mod native_gemma2_module_tests {
+    use super::*;
+
+    fn official_modules(pooling_config: std::path::PathBuf) -> Vec<EmbeddingModulePaths> {
+        vec![
+            EmbeddingModulePaths::Transformer {
+                path: String::new(),
+            },
+            EmbeddingModulePaths::Pooling {
+                path: "1_Pooling".to_owned(),
+                config: pooling_config,
+            },
+            EmbeddingModulePaths::Normalize {
+                path: "2_Normalize".to_owned(),
+            },
+        ]
+    }
+
+    #[test]
+    fn native_gemma2_accepts_official_mean_pooling_and_skips_repeat() {
+        let dir = tempfile::tempdir().unwrap();
+        let pooling = dir.path().join("config.json");
+        std::fs::write(
+            &pooling,
+            r#"{"embedding_dimension":768,"pooling_mode":"mean","include_prompt":true}"#,
+        )
+        .unwrap();
+        let modules = official_modules(pooling);
+        validate_native_gemma2_modules(Some(&modules)).unwrap();
+        assert!(validate_native_gemma2_modules(None).is_ok());
+        assert!(validate_native_gemma2_modules(Some(&modules[..1])).is_ok());
+    }
+
+    #[test]
+    fn native_gemma2_rejects_semantically_different_pooling() {
+        let dir = tempfile::tempdir().unwrap();
+        let pooling = dir.path().join("config.json");
+        for config in [
+            r#"{"embedding_dimension":768,"pooling_mode":"cls","include_prompt":true}"#,
+            r#"{"embedding_dimension":768,"pooling_mode":"mean","include_prompt":false}"#,
+            r#"{"embedding_dimension":512,"pooling_mode":"mean","include_prompt":true}"#,
+            r#"{"embedding_dimension":768,"pooling_mode":"mean","include_prompt":true,"custom":42}"#,
+        ] {
+            std::fs::write(&pooling, config).unwrap();
+            assert!(validate_native_gemma2_modules(Some(&official_modules(pooling.clone())))
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn native_gemma2_rejects_dense_and_out_of_order_modules() {
+        let dir = tempfile::tempdir().unwrap();
+        let pooling = dir.path().join("config.json");
+        std::fs::write(
+            &pooling,
+            r#"{"embedding_dimension":768,"pooling_mode":"mean","include_prompt":true}"#,
+        )
+        .unwrap();
+        let mut modules = official_modules(pooling);
+        modules.push(EmbeddingModulePaths::Dense {
+            path: "custom".to_owned(),
+            config: dir.path().join("dense.json"),
+            model: dir.path().join("dense.safetensors"),
+        });
+        assert!(validate_native_gemma2_modules(Some(&modules)).is_err());
+        modules.swap(0, 1);
+        assert!(validate_native_gemma2_modules(Some(&modules[..3])).is_err());
+    }
+}
+
 pub struct EmbeddingPipeline {
     model: Box<dyn EmbeddingModel + Send + Sync>,
     tracked_modules: Vec<mistralrs_quant::TrackedModule>,
@@ -516,18 +622,10 @@ impl Loader for EmbeddingLoader {
         let multi_progress = Arc::new(new_multi_progress());
 
         let modules_config: Vec<_> = if native_pooled {
-            // Candle::EmbeddingGemma2::embed already applies mean pooling,
-            // Matryoshka truncation and normalization. Do not apply an
-            // additional sentence-transformers module stack.
-            if paths.get_modules().is_some_and(|modules| {
-                modules
-                    .iter()
-                    .any(|m| !matches!(m, EmbeddingModulePaths::Transformer { .. }))
-            }) {
-                anyhow::bail!(
-                    "EmbeddingGemma 2 forbids extra sentence-transformers pooling, dense or normalization modules"
-                );
-            }
+            // Native Candle already performs mean pooling and L2
+            // normalization. Validate sentence-transformers metadata
+            // against those exact semantics, then avoid running it again.
+            validate_native_gemma2_modules(paths.get_modules())?;
             Vec::new()
         } else {
             let modules = paths
