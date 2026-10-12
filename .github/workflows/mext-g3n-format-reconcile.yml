@@ -38,7 +38,7 @@ jobs:
           # Resolve the full dependency graph changed by native candle-transformers.
           cargo +stable metadata --format-version 1 > "$RUNNER_TEMP/metadata.json"
           cargo +stable metadata --locked --format-version 1 > /dev/null
-          bad="$(git diff --name-only | grep -Ev '^(Cargo.lock|mistralrs/src/model_builder_trait.rs|mistralrs-core/src/embedding_models/embedding_gemma2.rs|mistralrs-core/src/pipeline/(embedding.rs|macros.rs|mod.rs|loaders/(embedding_loaders.rs|mod.rs)))$' || true)"
+          bad="$(git diff --name-only | grep -Ev '^(Cargo.lock|mistralrs-quant/src/rotary/mod.rs|mistralrs-quant/src/gguf/(archive.rs|mod.rs)|mistralrs-quant/src/lib.rs|mistralrs/src/model_builder_trait.rs|mistralrs-core/src/embedding_models/embedding_gemma2.rs|mistralrs-core/src/pipeline/(embedding.rs|macros.rs|mod.rs|loaders/(embedding_loaders.rs|mod.rs)))$' || true)"
           test -z "$bad" || { echo "::error::Unexpected Rustfmt modifications: $bad"; exit 3; }
           if git diff --quiet; then
             echo 'G3N Rustfmt clean' >> "$GITHUB_STEP_SUMMARY"
@@ -50,7 +50,8 @@ jobs:
           }
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add Cargo.lock mistralrs/src/model_builder_trait.rs mistralrs-core/src/embedding_models/embedding_gemma2.rs \
+          git add mistralrs-quant/src/rotary/mod.rs mistralrs-quant/src/gguf/archive.rs \
+            mistralrs-quant/src/gguf/mod.rs mistralrs-quant/src/lib.rs Cargo.lock mistralrs/src/model_builder_trait.rs mistralrs-core/src/embedding_models/embedding_gemma2.rs \
             mistralrs-core/src/pipeline/embedding.rs \
             mistralrs-core/src/pipeline/macros.rs \
             mistralrs-core/src/pipeline/mod.rs \
