@@ -52,7 +52,10 @@ pub fn compare(
     min_cosine: f64,
     max_abs_allowed: f64,
 ) -> Result<ParityReport> {
-    ensure!(reference.schema_version == 1, "reference schema_version must be 1");
+    ensure!(
+        reference.schema_version == 1,
+        "reference schema_version must be 1"
+    );
     ensure!(
         !reference.model_revision.trim().is_empty()
             && !reference.tokenizer_revision.trim().is_empty()
@@ -89,7 +92,11 @@ pub fn compare(
         "token IDs or token count differ from reference"
     );
     ensure!(
-        reference.vector.iter().chain(observed.vector.iter()).all(|x| x.is_finite()),
+        reference
+            .vector
+            .iter()
+            .chain(observed.vector.iter())
+            .all(|x| x.is_finite()),
         "non-finite embedding component"
     );
     let mut observed_sq = 0_f64;
@@ -110,7 +117,8 @@ pub fn compare(
     let observed_l2 = observed_sq.sqrt();
     let reference_l2 = reference_sq.sqrt();
     ensure!(
-        observed_l2.is_finite() && reference_l2.is_finite()
+        observed_l2.is_finite()
+            && reference_l2.is_finite()
             && (observed_l2 - 1.0).abs() <= 0.01
             && (reference_l2 - 1.0).abs() <= 0.01,
         "embeddings are not unit-normalized (Matryoshka vectors must be normalized)"
