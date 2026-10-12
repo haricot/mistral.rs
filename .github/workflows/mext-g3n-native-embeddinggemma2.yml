@@ -39,6 +39,10 @@ jobs:
         run: cargo +stable check --locked --no-default-features -p mistralrs-core
       - name: Verify native architecture routing without checkpoint downloads
         run: cargo +stable test --locked --no-default-features -p mistralrs-core embedding_gemma2_routes_to_a_distinct_native_family --lib
+      - name: Verify metadata reverse mapping and generated supported-models documentation
+        run: |
+          cargo +stable test --locked --no-default-features -p mistralrs-core config_archs_round_trip --lib
+          cargo +stable test --locked --no-default-features -p mistralrs-core supported_models_matches_committed --lib
       - name: Safety boundary
         run: |
           echo 'G3N_CPU_ONLY: no Google checkpoint parity, CUDA execution, multi-GPU, ISQ or physical SM61 proof.' >> "$GITHUB_STEP_SUMMARY"
