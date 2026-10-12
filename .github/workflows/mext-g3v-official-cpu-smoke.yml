@@ -1,0 +1,48 @@
+name: MEXT G3V — Official Metadata and Native CPU Smoke
+
+on:
+  push:
+    branches:
+      - integration/mext-g3v-official-model-runtime
+  pull_request:
+    paths:
+      - 'mistralrs-core/src/pipeline/embedding.rs'
+      - 'mistralrs-core/src/pipeline/loaders/embedding_loaders.rs'
+      - 'mistralrs/examples/getting_started/embedding_gemma2_native_smoke/**'
+      - 'mistralrs/Cargo.toml'
+      - '.github/workflows/mext-g3v-official-cpu-smoke.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+concurrency:
+  group: mext-g3v-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  official-metadata-contract:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          toolchain: stable
+          components: rustfmt
+      - name: Check locked Candle and SDK graph
+        run: cargo +stable metadata --locked --format-version 1 > "$RUNNER_TEMP/metadata.json"
+      - name: Rustfmt must match committed source
+        run: cargo +stable fmt --all -- --check
+      - name: Strict native Gemma2 module compatibility tests
+        run: cargo +stable test --locked --no-default-features -p mistralrs-core native_gemma2_ --lib
+      - name: Parse official Google Sentence Transformers module names
+        run: cargo +stable test --locked --no-default-features -p mistralrs-core official_gemma2_sentence_transformers_metadata_parses --lib
+      - name: Typecheck the real-checkpoint SDK smoke binary
+        run: cargo +stable check --locked --no-default-features -p mistralrs --example embedding_gemma2_native_smoke
+      - name: Evidence boundary
+        run: |
+          echo 'PASS here means official-metadata compatibility unit tests and SDK smoke compilation only.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'REAL_CHECKPOINT_INFERENCE=NOT_EXECUTED GOOGLE_NUMERIC_PARITY=NOT_EXECUTED' >> "$GITHUB_STEP_SUMMARY"
+          echo 'HTTP_EMBEDDINGS=NOT_EXECUTED CUDA_SM61=NOT_EXECUTED' >> "$GITHUB_STEP_SUMMARY"
