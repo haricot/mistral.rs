@@ -252,54 +252,72 @@ macro_rules! get_embedding_paths {
 
         let mut parsed_modules = Vec::new();
         let is_local = std::path::Path::new(&$this.model_id).exists();
+        // Native pooled EmbeddingGemma 2 checkpoints do not require
+        // sentence-transformers modules.json. Avoid fetching an absent
+        // remote file; other embeddings retain their established behavior.
+        let config_body = std::fs::read_to_string(&config_filename)?;
+        let already_pooled = $this.inner.returns_pooled_embeddings(&config_body)?;
         let modules_path = if is_local {
-            model_id.join("modules.json")
+            Some(model_id.join("modules.json"))
+        } else if already_pooled && !emb_dir_list.contains(&"modules.json".to_string()) {
+            None
         } else {
-            $crate::api_get_file!(api, "modules.json", model_id, &revision)
+            Some($crate::api_get_file!(
+                api,
+                "modules.json",
+                model_id,
+                &revision
+            ))
         };
 
-        if modules_path.exists() {
-            let modules: Vec<$crate::pipeline::EmbeddingModule> =
-                serde_json::from_str(&std::fs::read_to_string(&modules_path)?)?;
-            for module in modules {
-                match module.ty {
-                    $crate::pipeline::EmbeddingModuleType::Transformer => {
-                        parsed_modules.push($crate::pipeline::EmbeddingModulePaths::Transformer {
-                            path: module.path.clone(),
-                        });
-                    }
-                    $crate::pipeline::EmbeddingModuleType::Pooling => {
-                        parsed_modules.push($crate::pipeline::EmbeddingModulePaths::Pooling {
-                            path: module.path.clone(),
-                            config: $crate::api_get_file!(
-                                api,
-                                &format!("{}/config.json", module.path),
-                                model_id,
-                                &revision
-                            ),
-                        });
-                    }
-                    $crate::pipeline::EmbeddingModuleType::Dense => {
-                        parsed_modules.push($crate::pipeline::EmbeddingModulePaths::Dense {
-                            path: module.path.clone(),
-                            config: $crate::api_get_file!(
-                                api,
-                                &format!("{}/config.json", module.path),
-                                model_id,
-                                &revision
-                            ),
-                            model: $crate::api_get_file!(
-                                api,
-                                &format!("{}/model.safetensors", module.path),
-                                model_id,
-                                &revision
-                            ),
-                        });
-                    }
-                    $crate::pipeline::EmbeddingModuleType::Normalize => {
-                        parsed_modules.push($crate::pipeline::EmbeddingModulePaths::Normalize {
-                            path: module.path.clone(),
-                        });
+        if let Some(modules_path) = modules_path {
+            if modules_path.exists() {
+                let modules: Vec<$crate::pipeline::EmbeddingModule> =
+                    serde_json::from_str(&std::fs::read_to_string(&modules_path)?)?;
+                for module in modules {
+                    match module.ty {
+                        $crate::pipeline::EmbeddingModuleType::Transformer => {
+                            parsed_modules.push(
+                                $crate::pipeline::EmbeddingModulePaths::Transformer {
+                                    path: module.path.clone(),
+                                },
+                            );
+                        }
+                        $crate::pipeline::EmbeddingModuleType::Pooling => {
+                            parsed_modules.push($crate::pipeline::EmbeddingModulePaths::Pooling {
+                                path: module.path.clone(),
+                                config: $crate::api_get_file!(
+                                    api,
+                                    &format!("{}/config.json", module.path),
+                                    model_id,
+                                    &revision
+                                ),
+                            });
+                        }
+                        $crate::pipeline::EmbeddingModuleType::Dense => {
+                            parsed_modules.push($crate::pipeline::EmbeddingModulePaths::Dense {
+                                path: module.path.clone(),
+                                config: $crate::api_get_file!(
+                                    api,
+                                    &format!("{}/config.json", module.path),
+                                    model_id,
+                                    &revision
+                                ),
+                                model: $crate::api_get_file!(
+                                    api,
+                                    &format!("{}/model.safetensors", module.path),
+                                    model_id,
+                                    &revision
+                                ),
+                            });
+                        }
+                        $crate::pipeline::EmbeddingModuleType::Normalize => {
+                            parsed_modules.push(
+                                $crate::pipeline::EmbeddingModulePaths::Normalize {
+                                    path: module.path.clone(),
+                                },
+                            );
+                        }
                     }
                 }
             }

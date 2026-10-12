@@ -99,6 +99,7 @@ The `Architecture` column is the `config.json` `architectures` value. Per-family
 | Architecture | Model families | Example |
 |---|---|---|
 | `Gemma3TextModel` | EmbeddingGemma | <details><summary><code>google/embeddinggemma-300m</code></summary><code>mistralrs run -m google/embeddinggemma-300m</code></details> |
+| `EmbeddingGemma2Model` | EmbeddingGemma 2 (experimental F32) | No published example |
 | `Qwen3ForCausalLM` | Qwen3 Embedding | <details><summary><code>Qwen/Qwen3-Embedding-0.6B</code></summary><code>mistralrs run -m Qwen/Qwen3-Embedding-0.6B</code></details> |
 
 ## Format and quantization notes

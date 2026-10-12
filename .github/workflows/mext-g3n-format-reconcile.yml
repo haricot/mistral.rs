@@ -1,0 +1,62 @@
+name: MEXT G3N — Format Candidate
+
+on:
+  push:
+    branches:
+      - integration/mext-g3n-native-embeddinggemma2
+  workflow_dispatch:
+
+permissions:
+  contents: read
+concurrency:
+  group: mext-g3n-format
+  cancel-in-progress: false
+
+jobs:
+  rustfmt:
+    if: github.ref == 'refs/heads/integration/mext-g3n-native-embeddinggemma2'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: true
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          toolchain: stable
+          components: rustfmt
+      - name: Format only newly changed Rust sources and guard candidate lease
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          cargo +stable fmt --all
+          # Resolve the full dependency graph changed by native candle-transformers.
+          cargo +stable metadata --format-version 1 > "$RUNNER_TEMP/metadata.json"
+          cargo +stable metadata --locked --format-version 1 > /dev/null
+          bad="$(git diff --name-only | grep -Ev '^(Cargo.lock|mistralrs-quant/src/rotary/mod.rs|mistralrs-quant/src/gguf/(archive.rs|mod.rs)|mistralrs-quant/src/lib.rs|mistralrs/src/model_builder_trait.rs|mistralrs-core/src/embedding_models/embedding_gemma2.rs|mistralrs-core/src/pipeline/(embedding.rs|macros.rs|mod.rs|loaders/(embedding_loaders.rs|mod.rs)))$' || true)"
+          test -z "$bad" || { echo "::error::Unexpected Rustfmt modifications: $bad"; exit 3; }
+          if git diff --quiet; then
+            echo 'G3N Rustfmt clean' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          current="$(git ls-remote origin refs/heads/integration/mext-g3n-native-embeddinggemma2 | cut -f1)"
+          test "$current" = "$GITHUB_SHA" || {
+            echo "::error::Candidate moved during formatting, refusing stale commit"; exit 3;
+          }
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add mistralrs-quant/src/rotary/mod.rs mistralrs-quant/src/gguf/archive.rs \
+            mistralrs-quant/src/gguf/mod.rs mistralrs-quant/src/lib.rs Cargo.lock mistralrs/src/model_builder_trait.rs mistralrs-core/src/embedding_models/embedding_gemma2.rs \
+            mistralrs-core/src/pipeline/embedding.rs \
+            mistralrs-core/src/pipeline/macros.rs \
+            mistralrs-core/src/pipeline/mod.rs \
+            mistralrs-core/src/pipeline/loaders/embedding_loaders.rs \
+            mistralrs-core/src/pipeline/loaders/mod.rs
+          git commit -m 'build(g3n): resolve Candle lockfile and format native Gemma2'
+          git push origin HEAD:refs/heads/integration/mext-g3n-native-embeddinggemma2
+          echo 'Formatting only; neither CPU nor GPU nor parity proof' >> "$GITHUB_STEP_SUMMARY"

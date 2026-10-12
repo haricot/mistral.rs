@@ -1,0 +1,54 @@
+name: MEXT G3N — Native EmbeddingGemma 2 CPU
+
+on:
+  push:
+    branches:
+      - integration/mext-g3n-native-embeddinggemma2
+  pull_request:
+    paths:
+      - 'mistralrs-core/src/embedding_models/embedding_gemma2.rs'
+      - 'mistralrs-core/src/pipeline/embedding.rs'
+      - 'mistralrs-core/src/pipeline/macros.rs'
+      - 'mistralrs-core/src/pipeline/loaders/embedding_loaders.rs'
+      - 'mistralrs-core/src/pipeline/loaders/mod.rs'
+      - 'mistralrs-core/src/pipeline/mod.rs'
+      - 'mistralrs-core/Cargo.toml'
+      - '.github/workflows/mext-g3n-native-embeddinggemma2.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mext-g3n-native-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-cpu:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          toolchain: stable
+          components: rustfmt
+      - name: Verify locked fork dependencies
+        run: cargo +stable metadata --locked --format-version 1 > "$RUNNER_TEMP/mistral-metadata.json"
+      - name: Check format without updating source
+        run: cargo +stable fmt --all -- --check
+      - name: Typecheck native core (CPU only)
+        run: cargo +stable check --locked --no-default-features -p mistralrs-core
+      - name: Typecheck Rust SDK EmbeddingModelBuilder (CPU only)
+        run: cargo +stable check --locked --no-default-features -p mistralrs
+      - name: Verify native architecture routing without checkpoint downloads
+        run: cargo +stable test --locked --no-default-features -p mistralrs-core embedding_gemma2_routes_to_a_distinct_native_family --lib
+      - name: Verify metadata reverse mapping and generated supported-models documentation
+        run: |
+          cargo +stable test --locked --no-default-features -p mistralrs-core config_archs_round_trip --lib
+          cargo +stable test --locked --no-default-features -p mistralrs-core supported_models_matches_committed --lib
+      - name: Safety boundary
+        run: |
+          echo 'G3N_CPU_ONLY: no Google checkpoint parity, CUDA execution, multi-GPU, ISQ or physical SM61 proof.' >> "$GITHUB_STEP_SUMMARY"
