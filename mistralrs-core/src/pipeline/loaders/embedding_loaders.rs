@@ -872,6 +872,31 @@ impl DeviceMappedModelLoader for EmbeddingGemma2Loader {
 mod tests {
     use super::*;
 
+    #[test]
+    fn embedding_gemma2_routes_to_a_distinct_native_family() {
+        assert_eq!(
+            EmbeddingLoaderType::from_causal_lm_name("EmbeddingGemma2Model")
+                .expect("native Gemma 2 architecture"),
+            EmbeddingLoaderType::EmbeddingGemma2
+        );
+        assert_eq!(
+            "embeddinggemma2".parse::<EmbeddingLoaderType>().unwrap(),
+            EmbeddingLoaderType::EmbeddingGemma2
+        );
+        assert_eq!(EmbeddingLoaderType::EmbeddingGemma2.to_string(), "embeddinggemma2");
+        assert_eq!(
+            EmbeddingLoaderType::from_causal_lm_name("Gemma3TextModel").unwrap(),
+            EmbeddingLoaderType::EmbeddingGemma
+        );
+        assert!(AutoEmbeddingLoader
+            .returns_pooled_embeddings(r#"{"architectures":["EmbeddingGemma2Model"]}"#)
+            .unwrap());
+        assert!(!AutoEmbeddingLoader
+            .returns_pooled_embeddings(r#"{"architectures":["Gemma3TextModel"]}"#)
+            .unwrap());
+        assert!(EmbeddingGemma2Loader.promoted_isq_predicates("{}").unwrap().is_empty());
+    }
+
     fn assert_promotes_only_embedding_weight(predicates: &[Regex]) {
         assert_eq!(predicates.len(), 1);
         assert!(predicates
