@@ -35,8 +35,8 @@ jobs:
         run: cargo +stable fmt --manifest-path mistralrs-embeddinggemma2/Cargo.toml -- --check
       - name: Run local-only checkpoint inventory unit tests
         run: cargo +stable test --locked --no-default-features -p mistralrs-embeddinggemma2 --lib
-      - name: Verify local CLI builds
-        run: cargo +stable check --locked --no-default-features -p mistralrs-embeddinggemma2 --bin embeddinggemma2-text
+      - name: Verify both local CLIs build
+        run: cargo +stable check --locked --no-default-features -p mistralrs-embeddinggemma2 --bins
       - name: No model parity or GPU proof
         run: |
           echo 'CANDLE_TEXT_ADAPTER_CPU_SMOKE_ONLY: no Google checkpoint parity, batch, image/audio, CUDA or SM61 proof' >> "$GITHUB_STEP_SUMMARY"
