@@ -21,6 +21,38 @@ def edit_once(src: str, old: str, new: str, context: str) -> str:
 
 build_path = Path("mistralrs-quant/build.rs")
 build = build_path.read_text()
+module_path = Path("mistralrs-quant/src/blockwise_fp8/mod.rs")
+module = module_path.read_text()
+ffi_path = Path("mistralrs-quant/src/blockwise_fp8/ffi.rs")
+ffi = ffi_path.read_text()
+
+# The historical SM61 candidate may already have the native/portable MMA
+# split. Accept it only after validating every known component together.
+present = {
+    "build cfg declaration": build.count('println!("cargo::rustc-check-cfg=cfg(has_fp8_mma_kernels)");'),
+    "native SM80 cfg": build.count('println!("cargo:rustc-cfg=has_fp8_mma_kernels");'),
+    "MMA consumer guards": module.count("has_fp8_mma_kernels"),
+    "MMA native FFI guard": ffi.count("#[cfg(has_fp8_mma_kernels)]"),
+}
+if any(present.values()):
+    if not (
+        present["build cfg declaration"] == 1
+        and present["native SM80 cfg"] == 1
+        and present["MMA consumer guards"] == 20
+        and module.count("has_blockwise_fp8_kernels") == 0
+        and present["MMA native FFI guard"] == 1
+        and ffi.count("#[cfg(has_blockwise_fp8_kernels)]") == 1
+        and 'HAVE_BLOCKWISE_DEQUANT_KERNELS: bool = cfg!(has_blockwise_fp8_kernels)' in ffi
+        and 'println!("cargo:rustc-cfg=has_blockwise_fp8_kernels");' in build
+        and '"*_fp8_mma.cu",' in build
+    ):
+        raise RuntimeError(
+            "FP8 MMA pre-existing split is partial or duplicated; "
+            f"markers={present}; refusing replay"
+        )
+    print("PORT_FP8_MMA_GUARD_ALREADY_VALIDATED: native MMA SM80+, Pascal software FP8 retained")
+    raise SystemExit(0)
+
 build = edit_once(
     build,
     '    println!("cargo::rustc-check-cfg=cfg(has_blockwise_fp8_kernels)");\n',
