@@ -64,14 +64,12 @@ build = edit_once(
     build,
     '''        if cc_over_80 {
             println!("cargo:rustc-cfg=has_marlin_kernels");
-            // WMMA tensor core MXFP4 kernel (FP16/BF16 WMMA requires SM >= 80)
 ''',
     '''        if cc_over_80 {
             println!("cargo:rustc-cfg=has_marlin_kernels");
-            // Never advertise native MMA when *_fp8_mma.cu is excluded (SM61).
-            // Keep the original SM80+ compilation capability unchanged.
+            // Native FP8 MMA must be enabled only when its CUDA source is compiled.
+            // Pascal retains the separate portable has_blockwise_fp8_kernels path.
             println!("cargo:rustc-cfg=has_fp8_mma_kernels");
-            // WMMA tensor core MXFP4 kernel (FP16/BF16 WMMA requires SM >= 80)
 ''',
     "native MMA cap gate",
 )
