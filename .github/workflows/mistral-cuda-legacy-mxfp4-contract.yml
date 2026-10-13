@@ -5,6 +5,8 @@ on:
     branches: [mirror_orch]
     paths:
       - '.github/scripts/legacy-cuda-port-mxfp4.py'
+      - '.github/scripts/legacy-cuda-port-flashinfer-math.py'
+      - '.github/scripts/legacy-cuda-port-fp8-mma-guard.py'
       - '.github/workflows/mistral-cuda-legacy-mxfp4-contract.yml'
   workflow_dispatch:
 
@@ -64,6 +66,45 @@ jobs:
             after="$(git diff --binary | sha256sum | cut -d' ' -f1)"
             test "$before" = "$after"
           )
+      - name: FlashInfer SM61 math is a no-op when complete and applies once on upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          shim="$GITHUB_WORKSPACE/.github/scripts/legacy-cuda-port-flashinfer-math.py"
+          path=mistralrs-paged-attn/src/cuda/flashinfer/math.cuh
+          (
+            cd contracts/allow-old-card
+            python3 "$shim" | grep -F 'PORT_FLASHINFER_SM61_MATH_ALREADY_VALIDATED'
+            git diff --exit-code -- "$path"
+          )
+          (
+            cd contracts/upstream
+            python3 "$shim" | grep -F 'PORT_FLASHINFER_SM61_MATH_R1_READY'
+            test "$(git diff --name-only -- "$path")" = "$path"
+            before="$(git diff --binary -- "$path" | sha256sum)"
+            python3 "$shim" | grep -F 'PORT_FLASHINFER_SM61_MATH_ALREADY_VALIDATED'
+            test "$before" = "$(git diff --binary -- "$path" | sha256sum)"
+          )
+      - name: FP8 native MMA SM80 split remains idempotent and keeps Pascal fallback
+        shell: bash
+        run: |
+          set -euo pipefail
+          shim="$GITHUB_WORKSPACE/.github/scripts/legacy-cuda-port-fp8-mma-guard.py"
+          paths=(mistralrs-quant/build.rs mistralrs-quant/src/blockwise_fp8/mod.rs mistralrs-quant/src/blockwise_fp8/ffi.rs)
+          (
+            cd contracts/allow-old-card
+            python3 "$shim" | grep -F 'PORT_FP8_MMA_GUARD_ALREADY_VALIDATED'
+            git diff --exit-code -- "${paths[@]}"
+          )
+          (
+            cd contracts/upstream
+            python3 "$shim" | grep -F 'PORT_FP8_MMA_GUARD_R1_READY'
+            expected="$(printf '%s\n' "${paths[@]}" | LC_ALL=C sort)"
+            test "$(git diff --name-only -- "${paths[@]}" | LC_ALL=C sort)" = "$expected"
+            before="$(git diff --binary -- "${paths[@]}" | sha256sum)"
+            python3 "$shim" | grep -F 'PORT_FP8_MMA_GUARD_ALREADY_VALIDATED'
+            test "$before" = "$(git diff --binary -- "${paths[@]}" | sha256sum)"
+          )
       - name: Partial previous port fails without changing any file
         shell: bash
         run: |
@@ -91,5 +132,5 @@ jobs:
           )
       - name: Evidence scope
         run: |
-          echo "MXFP4_SHIM_CONTRACT=PASS" >> "$GITHUB_STEP_SUMMARY"
+          echo "MXFP4_FLASHINFER_FP8_MMA_PORT_CONTRACT=PASS" >> "$GITHUB_STEP_SUMMARY"
           echo "Candidate compilation, rebase, CUDA and physical GPU proof: NOT EXECUTED." >> "$GITHUB_STEP_SUMMARY"
