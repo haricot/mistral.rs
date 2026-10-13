@@ -1,0 +1,95 @@
+name: CUDA Legacy MXFP4 Rebase Contract
+
+on:
+  push:
+    branches: [mirror_orch]
+    paths:
+      - '.github/scripts/legacy-cuda-port-mxfp4.py'
+      - '.github/workflows/mistral-cuda-legacy-mxfp4-contract.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: legacy-mxfp4-contract-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rebase-shim-contract:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: haricot/mistral.rs
+          ref: 00d0a5e6989a42d1f3d903e72c427439a6098717
+          path: contracts/allow-old-card
+          persist-credentials: false
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: EricLBuehler/mistral.rs
+          ref: 28ed6daca455b4ae063896014d1ea698b912c539
+          path: contracts/upstream
+          persist-credentials: false
+      - name: Already-ported historical source is an exact no-op
+        shell: bash
+        run: |
+          set -euo pipefail
+          shim="$GITHUB_WORKSPACE/.github/scripts/legacy-cuda-port-mxfp4.py"
+          (
+            cd contracts/allow-old-card
+            python3 "$shim" | grep -F 'PORT_MXFP4_ALREADY_VALIDATED'
+            git diff --exit-code
+          )
+      - name: Modern upstream source receives exactly the known MXFP4 port once
+        shell: bash
+        run: |
+          set -euo pipefail
+          shim="$GITHUB_WORKSPACE/.github/scripts/legacy-cuda-port-mxfp4.py"
+          (
+            cd contracts/upstream
+            python3 "$shim" | grep -F 'PORT_MXFP4_R1_READY'
+            expected="$(printf '%s\n' \
+              mistralrs-quant/src/gguf/archive.rs \
+              mistralrs-quant/src/gguf/mod.rs \
+              mistralrs-quant/src/lib.rs | LC_ALL=C sort)"
+            changed="$(git diff --name-only | LC_ALL=C sort)"
+            test "$changed" = "$expected"
+            before="$(git diff --binary | sha256sum | cut -d' ' -f1)"
+            python3 "$shim" | grep -F 'PORT_MXFP4_ALREADY_VALIDATED'
+            after="$(git diff --binary | sha256sum | cut -d' ' -f1)"
+            test "$before" = "$after"
+          )
+      - name: Partial previous port fails without changing any file
+        shell: bash
+        run: |
+          set -euo pipefail
+          shim="$GITHUB_WORKSPACE/.github/scripts/legacy-cuda-port-mxfp4.py"
+          (
+            cd contracts/allow-old-card
+            python3 - <<'PY'
+          from pathlib import Path
+          p = Path("mistralrs-quant/src/gguf/mod.rs")
+          s = p.read_text()
+          old = "        GgmlDType::Mxfp4 => 39,\n"
+          assert s.count(old) == 1
+          p.write_text(s.replace(old, "", 1))
+          PY
+            before="$(git diff --binary | sha256sum | cut -d' ' -f1)"
+            if python3 "$shim" > contract-negative.log 2>&1; then
+              echo "::error::Partial MXFP4 source was erroneously accepted"
+              exit 1
+            fi
+            grep -F 'pre-existing port is incomplete or duplicated' contract-negative.log
+            after="$(git diff --binary | sha256sum | cut -d' ' -f1)"
+            test "$before" = "$after"
+            rm contract-negative.log
+          )
+      - name: Evidence scope
+        run: |
+          echo "MXFP4_SHIM_CONTRACT=PASS" >> "$GITHUB_STEP_SUMMARY"
+          echo "Candidate compilation, rebase, CUDA and physical GPU proof: NOT EXECUTED." >> "$GITHUB_STEP_SUMMARY"
