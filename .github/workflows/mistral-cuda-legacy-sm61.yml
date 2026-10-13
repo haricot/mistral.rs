@@ -57,6 +57,9 @@ jobs:
           rustup toolchain install stable --profile minimal --component clippy
           cargo +stable clippy --locked --workspace --tests --examples -- -D warnings
 
+  # Every attempt of a re-run must have distinct artifacts. GitHub Actions
+  # can return an older artifact when identical names are reused in one run.
+  # All downstream jobs verify the exact candidate bundle SHA before use.
   prepare:
     if: github.ref == 'refs/heads/mirror_orch' && inputs.validation_scope != 'clippy_only'
     name: Rebase historical PR and stage immutable candidate
@@ -93,7 +96,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: mistral-legacy-prep-${{ github.run_id }}
+          name: mistral-legacy-prep-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/legacy-rebase/
           if-no-files-found: warn
           retention-days: 90
@@ -111,7 +114,7 @@ jobs:
       - name: Download immutable candidate Git bundle
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
         with:
-          name: mistral-legacy-prep-${{ github.run_id }}
+          name: mistral-legacy-prep-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/legacy-candidate
       - name: Restore and verify exact candidate from bundle
         shell: bash
@@ -154,7 +157,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: mistral-legacy-cpu-${{ github.run_id }}
+          name: mistral-legacy-cpu-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/mistral-legacy-cpu/
           if-no-files-found: warn
           retention-days: 90
@@ -172,7 +175,7 @@ jobs:
       - name: Download immutable candidate Git bundle
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
         with:
-          name: mistral-legacy-prep-${{ github.run_id }}
+          name: mistral-legacy-prep-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/legacy-candidate
       - name: Restore and verify exact candidate from bundle
         shell: bash
@@ -246,7 +249,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: mistral-legacy-cuda-${{ github.run_id }}
+          name: mistral-legacy-cuda-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/mistral-legacy-cuda/
           if-no-files-found: warn
           retention-days: 90
@@ -264,7 +267,7 @@ jobs:
       - name: Download immutable candidate Git bundle
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
         with:
-          name: mistral-legacy-prep-${{ github.run_id }}
+          name: mistral-legacy-prep-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/legacy-candidate
       - name: Restore and verify exact candidate from bundle
         shell: bash
@@ -328,7 +331,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: mistral-legacy-gpu-${{ github.run_id }}
+          name: mistral-legacy-gpu-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/mistral-legacy-gpu/
           if-no-files-found: warn
           retention-days: 90
@@ -349,13 +352,13 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
         with:
-          pattern: mistral-legacy-*-${{ github.run_id }}
+          pattern: mistral-legacy-*-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/legacy-proof
           merge-multiple: false
       - name: Download immutable candidate Git bundle
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
         with:
-          name: mistral-legacy-prep-${{ github.run_id }}
+          name: mistral-legacy-prep-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/legacy-candidate
       - name: Restore and verify exact candidate from bundle
         shell: bash
@@ -381,7 +384,7 @@ jobs:
           test "$(git rev-parse HEAD)" = "$CANDIDATE"
           test "$(sha256sum Cargo.lock | cut -d' ' -f1)" = "$LOCK"
           for gate in cpu cuda gpu; do
-            file="$RUNNER_TEMP/legacy-proof/mistral-legacy-$gate-$GITHUB_RUN_ID/report.json"
+            file="$RUNNER_TEMP/legacy-proof/mistral-legacy-$gate-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/report.json"
             test -s "$file"
             jq -e --arg sha "$CANDIDATE" --arg lock "$LOCK" --arg gate "$gate" '
               .candidate_sha==$sha and .lock_sha256==$lock and
@@ -391,7 +394,7 @@ jobs:
                  .target=="sm_61" and
                  ((.tests|sort)==(["f32","bf16","fp8-e4m3","moe-f16-bf16-prefill","quant-bf16-linear"]|sort))))' "$file" >/dev/null
           done
-          prep="$RUNNER_TEMP/legacy-proof/mistral-legacy-prep-$GITHUB_RUN_ID/provenance.json"
+          prep="$RUNNER_TEMP/legacy-proof/mistral-legacy-prep-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/provenance.json"
           test -s "$prep"
           jq -e --arg sha "$CANDIDATE" --arg old "$ORIGINAL" \
             --arg master "$MASTER" --arg candle "$CANDLE" --arg lock "$LOCK" \
@@ -405,7 +408,7 @@ jobs:
           test "$(git ls-remote upstream refs/heads/master | cut -f1)" = "$MASTER" || {
             echo "::error::Upstream moved; prepare a fresh rebase"; exit 3;
           }
-          test "$REF" = "artifact://mistral-legacy-prep-$GITHUB_RUN_ID/candidate.bundle"
+          test "$REF" = "artifact://mistral-legacy-prep-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/candidate.bundle"
           test "$(git ls-remote origin refs/heads/allow_old_card | cut -f1)" = "$ORIGINAL" || {
             echo "::error::PR head moved. Refusing to overwrite changes"; exit 3;
           }
