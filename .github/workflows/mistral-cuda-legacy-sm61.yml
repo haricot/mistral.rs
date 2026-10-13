@@ -107,18 +107,6 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 120
     steps:
-      - name: Verify Haricot one-shot runner identity
-        shell: bash
-        env:
-          PREPARED_CANDIDATE: ${{ needs.prepare.outputs.candidate }}
-        run: |
-          set -euo pipefail
-          test "${EXPECTED_RUN_ID:-}" = "$GITHUB_RUN_ID"
-          test "${EXPECTED_CANDIDATE_SHA:-}" = "$PREPARED_CANDIDATE"
-          test "${RUNNER_REPO:-}" = "$GITHUB_REPOSITORY"
-          test "${RUNNER_NO_DEFAULT_LABELS:-}" = true
-          test "${ASD_REQUIRED:-false}" = false
-          echo "MISTRAL_LEGACY_RUNNER_IDENTITY=PASS"
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           ref: mirror_orch
@@ -276,6 +264,18 @@ jobs:
       - mistral-legacy-${{ github.run_id }}
     timeout-minutes: 120
     steps:
+      - name: Verify Haricot one-shot runner identity
+        shell: bash
+        env:
+          PREPARED_CANDIDATE: ${{ needs.prepare.outputs.candidate }}
+        run: |
+          set -euo pipefail
+          test "${EXPECTED_RUN_ID:-}" = "$GITHUB_RUN_ID"
+          test "${EXPECTED_CANDIDATE_SHA:-}" = "$PREPARED_CANDIDATE"
+          test "${RUNNER_REPO:-}" = "$GITHUB_REPOSITORY"
+          test "${RUNNER_NO_DEFAULT_LABELS:-}" = true
+          test "${ASD_REQUIRED:-false}" = false
+          echo "MISTRAL_LEGACY_RUNNER_IDENTITY=PASS"
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           ref: mirror_orch
