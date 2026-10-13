@@ -66,7 +66,7 @@ if git merge-base --is-ancestor "$master" "$old" &&
   git bundle verify "$report/candidate.bundle"
   bundle_sha="$(sha256sum "$report/candidate.bundle" | cut -d' ' -f1)"
   candidate="$(git rev-parse HEAD)"
-  ref="artifact://mistral-legacy-prep-$GITHUB_RUN_ID/candidate.bundle"
+  ref="artifact://mistral-legacy-prep-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/candidate.bundle"
   test "$(git ls-remote origin refs/heads/allow_old_card | cut -f1)" = "$old"
   test "$(git ls-remote upstream refs/heads/master | cut -f1)" = "$master"
   jq --arg candidate "$candidate" --arg lock "$lock" --arg ref "$ref" \
@@ -428,7 +428,7 @@ candidate="$(git rev-parse HEAD)"
 git bundle create "$report/candidate.bundle" HEAD "^$master"
 git bundle verify "$report/candidate.bundle"
 bundle_sha="$(sha256sum "$report/candidate.bundle" | cut -d' ' -f1)"
-ref="artifact://mistral-legacy-prep-$GITHUB_RUN_ID/candidate.bundle"
+ref="artifact://mistral-legacy-prep-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/candidate.bundle"
 test "$(git ls-remote origin refs/heads/allow_old_card | cut -f1)" = "$old"
 test "$(git ls-remote upstream refs/heads/master | cut -f1)" = "$master"
 jq --arg candidate "$candidate" --arg lock "$lock" --arg ref "$ref" \
