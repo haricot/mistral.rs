@@ -16,8 +16,40 @@ def replace_one(src: str, old: str, new: str, label: str) -> str:
     return src.replace(old, new, 1)
 
 
+# The historical allow_old_card source may already contain this exact MXFP4
+# port after a successful previous promotion. Rebase must not apply it twice.
+# Verify the *whole* semantic contract before accepting a no-op; a partial
+# pre-existing port is a hard error, not a reason to weaken the anchors below.
 archive_path = Path("mistralrs-quant/src/gguf/archive.rs")
+gguf_path = Path("mistralrs-quant/src/gguf/mod.rs")
+lib_path = Path("mistralrs-quant/src/lib.rs")
 archive = archive_path.read_text()
+gguf = gguf_path.read_text()
+lib = lib_path.read_text()
+ported_contract = {
+    "packed Candle import": (archive, "BlockMxfp4,"),
+    "GGUF mmap alignment": (archive, "GgmlDType::Mxfp4 => align_of::<BlockMxfp4>(),"),
+    "UQFF type encoder": (gguf, "GgmlDType::Mxfp4 => 39,"),
+    "UQFF type decoder": (gguf, "39 => Ok(GgmlDType::Mxfp4),"),
+    "GGUF dtype label": (gguf, '39 => "mxfp4",'),
+    "roundtrip regression": (gguf, "fn mxfp4_ggml_uqff_type_roundtrip()"),
+    "distinct packed ISQ arm": (lib, "GgmlDType::Mxfp4"),
+    "distinct packed ISQ explanation": (lib, "GGUF MXFP4 is a packed GGML tensor type"),
+}
+present = {name: src.count(marker) for name, (src, marker) in ported_contract.items()}
+if any(present.values()):
+    if not all(n == 1 for n in present.values()):
+        raise RuntimeError(
+            "MXFP4 pre-existing port is incomplete or duplicated; refusing "
+            "to replay or silently skip compatibility: " + repr(present)
+        )
+    print(
+        "PORT_MXFP4_ALREADY_VALIDATED: GGML=39, alignment=BlockMxfp4, "
+        "roundtrip=present, ISQ=distinct; no changes"
+    )
+    raise SystemExit(0)
+
+# Unported upstream shape: retain every original exact-one anchor below.
 archive = replace_one(
     archive,
     "            BlockQ6K, BlockQ8K, BlockQ8_0, BlockQ8_1,",
