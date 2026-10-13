@@ -11,6 +11,38 @@ from pathlib import Path
 path = Path("mistralrs-paged-attn/src/cuda/flashinfer/math.cuh")
 src = path.read_text()
 
+# A previously promoted Pascal candidate already contains all five guards.
+# Do not try to match the obsolete unguarded PTX bodies a second time.
+# Require the complete known SM61 fallback contract before accepting a no-op.
+pascal_guard = "#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ < 750)"
+guard_count = src.count(pascal_guard)
+if guard_count:
+    required = {
+        "half2 exp2": "return __halves2half2(__float2half_rn(::exp2f(__low2float(x))),",
+        "half exp2": "return __float2half_rn(::exp2f(__half2float(x)));",
+        "float tanh": "return ::tanhf(x);",
+        "half2 tanh": "return __halves2half2(__float2half_rn(::tanhf(__low2float(x))),",
+        "half tanh": "return __float2half_rn(::tanhf(__half2float(x)));",
+    }
+    occurrences = {name: src.count(needle) for name, needle in required.items()}
+    # Ensure PTX native paths were preserved, not replaced by Pascal math.
+    high_arch_ptx = [
+        'asm volatile("ex2.approx.f16x2',
+        'asm volatile("ex2.approx.f16 ',
+        'asm volatile("tanh.approx.f32 ',
+        'asm volatile("tanh.approx.f16x2 ',
+        'asm volatile("tanh.approx.f16 ',
+    ]
+    if guard_count != 5 or any(n != 1 for n in occurrences.values()) or any(
+        src.count(needle) != 1 for needle in high_arch_ptx
+    ):
+        raise RuntimeError(
+            "FlashInfer SM61 pre-existing math port is partial or duplicated; "
+            f"guards={guard_count}, variants={occurrences}; refusing replay"
+        )
+    print("PORT_FLASHINFER_SM61_MATH_ALREADY_VALIDATED: 5 Pascal branches; native PTX retained")
+    raise SystemExit(0)
+
 def replace_once(before: str, after: str, what: str) -> None:
     global src
     n = src.count(before)
