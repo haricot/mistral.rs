@@ -401,7 +401,15 @@ git add Cargo.toml Cargo.lock \
   mistralrs-paged-attn/src/cuda/backend/paged_attention.rs \
   mistralrs-paged-attn/src/cuda/flashinfer/math.cuh \
   mistralrs-core/tests/legacy_sm61_runtime.rs
-git commit -m "build(cuda): pin Candle cuda_legacy and add Pascal runtime check"
+# A rebased, previously validated allow_old_card candidate can already contain
+# every pinned feature and the exact resolved lock. Do not fail or create an
+# empty commit when Cargo and the porting shims produce no staged changes.
+if git diff --cached --quiet; then
+  echo "::notice::PORT_REBASE_NOOP: all reviewed CUDA Legacy content already present; retaining exact HEAD"
+  echo "PORT_REBASE_NOOP: zero staged changes after fmt, Cargo update and provenance checks" >> "$report/rebase.log"
+else
+  git commit -m "build(cuda): pin Candle cuda_legacy and add Pascal runtime check"
+fi
 # The candidate MUST include all rustfmt changes. The old candidate silently
 # dropped ffi.rs: fmt passed in the working tree, but failed after bundle restore.
 # Fail closed on any uncommitted or untracked file before exporting the bundle.
