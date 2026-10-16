@@ -1,0 +1,86 @@
+name: Relaunch pinned Mistral Legacy SM61 with unified runner
+on:
+  push:
+    branches: [mirror_orch]
+    paths:
+      - .github/workflows/launch-legacy-sm61-v62-20261016.yml
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: launch-pinned-mistral-legacy-sm61-v62-20261016
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    if: >-
+      github.repository == 'haricot/mistral.rs' &&
+      github.ref == 'refs/heads/mirror_orch' &&
+      github.event.head_commit.message == 'ci: relaunch pinned Legacy SM61 with unified runner contract'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      EXPECTED_PR: 00d0a5e6989a42d1f3d903e72c427439a6098717
+      EXPECTED_UPSTREAM: 28ed6daca455b4ae063896014d1ea698b912c539
+      EXPECTED_CANDLE: bfce966ad4d61a48801eb6af4db8b8eabebc01a8
+      EXPECTED_WORKFLOW_BLOB: 4fda5fdaec4b4a9ab3310e4482ff23e012f9d15c
+      OBSOLETE_RUN_ID: '38936494807'
+      OBSOLETE_GPU_JOB_ID: '117141782993'
+    steps:
+      - name: Verify pinned sources and merged runner contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(gh api repos/haricot/mistral.rs/branches/mirror_orch --jq .commit.sha)" = "$GITHUB_SHA"
+          test "$(gh api repos/haricot/mistral.rs/branches/allow_old_card --jq .commit.sha)" = "$EXPECTED_PR"
+          test "$(gh api repos/EricLBuehler/mistral.rs/branches/master --jq .commit.sha)" = "$EXPECTED_UPSTREAM"
+          test "$(gh api repos/haricot/candle/branches/cuda_legacy --jq .commit.sha)" = "$EXPECTED_CANDLE"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/contents/.github/workflows/mistral-cuda-legacy-sm61.yml?ref=$GITHUB_SHA" --jq .sha)" = "$EXPECTED_WORKFLOW_BLOB"
+          gh api repos/haricot/candle/actions/runs/38898658386 |
+            jq -e '.status=="completed" and .conclusion=="success"' >/dev/null
+          gh api 'repos/haricot/candle/actions/runs/38898658386/jobs?per_page=100' |
+            jq -e 'any(.jobs[]; .name=="SM61 legacy runtime" and .conclusion=="success") and
+                   any(.jobs[]; .name=="Promote validated Legacy refs" and .conclusion=="success")' >/dev/null
+          echo "PRELAUNCH=PASS feature=$EXPECTED_PR upstream=$EXPECTED_UPSTREAM candle=$EXPECTED_CANDLE" >> "$GITHUB_STEP_SUMMARY"
+      - name: Cancel only the obsolete waiting campaign
+        shell: bash
+        run: |
+          set -euo pipefail
+          old="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$OBSOLETE_RUN_ID")"
+          jq -e '.id==38936494807 and
+                 .path==".github/workflows/mistral-cuda-legacy-sm61.yml" and
+                 .head_branch=="mirror_orch" and .event=="workflow_dispatch" and
+                 .head_sha=="214a81746e117f619efcd2a000071a0914d107d6" and
+                 .run_attempt==1' <<<"$old" >/dev/null
+          if [[ "$(jq -r .status <<<"$old")" != completed ]]; then
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$OBSOLETE_RUN_ID/jobs?filter=latest&per_page=100" |
+              jq -e --argjson job "$OBSOLETE_GPU_JOB_ID" '
+                .total_count==(.jobs|length) and
+                any(.jobs[]; .id==$job and .status=="queued" and .runner_id==0 and
+                  .name=="Physical NVIDIA Pascal SM61 smoke proof" and
+                  (.labels|sort)==(["self-hosted","linux","x64","cuda","sm61"]|sort))' >/dev/null
+            gh api --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$OBSOLETE_RUN_ID/cancel"
+            for attempt in {1..30}; do
+              state="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$OBSOLETE_RUN_ID" --jq .status)"
+              [[ "$state" == completed ]] && break
+              sleep 2
+            done
+            test "$state" = completed
+          fi
+          echo "OBSOLETE_CAMPAIGN=COMPLETED run=$OBSOLETE_RUN_ID" >> "$GITHUB_STEP_SUMMARY"
+      - name: Dispatch a new full pinned campaign
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(gh api repos/haricot/mistral.rs/branches/mirror_orch --jq .commit.sha)" = "$GITHUB_SHA"
+          gh api "repos/$GITHUB_REPOSITORY/actions/workflows/mistral-cuda-legacy-sm61.yml/runs?event=workflow_dispatch&head_sha=$GITHUB_SHA&per_page=100" |
+            jq -e '.total_count==0' >/dev/null
+          gh workflow run mistral-cuda-legacy-sm61.yml --repo "$GITHUB_REPOSITORY" --ref mirror_orch \
+            -f validation_scope=full \
+            -f expected_pr_sha="$EXPECTED_PR" \
+            -f expected_upstream_sha="$EXPECTED_UPSTREAM" \
+            -f expected_candle_sha="$EXPECTED_CANDLE"
+          echo "DISPATCH=REQUESTED workflow=mistral-cuda-legacy-sm61.yml scope=full orchestrator=$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
