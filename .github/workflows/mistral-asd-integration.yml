@@ -8,7 +8,7 @@ on:
         default: ""
         type: string
       expected_candle_sha:
-        description: Optional expected haricot/candle:extended SHA; leave empty to pin the current validated extended head
+        description: Optional pinned Candle SM61 SHA; leave empty to use candle_for_mistralrs (validated Extended snapshot)
         required: false
         default: ""
         type: string
@@ -62,37 +62,42 @@ jobs:
           [[ "$remote_seed" == "$seed" ]] || { echo '::error::Source moved during checkout'; exit 3; }
 
           candle_repo="https://github.com/haricot/candle.git"
-          candle_branch="extended"
+          candle_branch="candle_for_mistralrs"
           candle="$(git ls-remote --heads "$candle_repo" "refs/heads/$candle_branch" | cut -f1)"
-          [[ "$candle" =~ ^[0-9a-f]{40}$ ]] || { echo '::error::Cannot resolve haricot/candle:extended'; exit 3; }
+          [[ "$candle" =~ ^[0-9a-f]{40}$ ]] || { echo '::error::Cannot resolve haricot/candle:candle_for_mistralrs'; exit 3; }
           if [[ -n "${EXPECTED_CANDLE}" ]]; then
             [[ "${EXPECTED_CANDLE}" =~ ^[0-9a-f]{40}$ ]] || { echo '::error::expected_candle_sha must be empty or exactly one full 40-character SHA'; exit 2; }
             [[ "${EXPECTED_CANDLE}" == "$candle" ]] || {
-              echo "::error::haricot/candle:extended moved from requested SHA (actual: $candle)"; exit 3;
+              echo "::error::haricot/candle:candle_for_mistralrs moved from requested SHA (actual: $candle)"; exit 3;
             }
           fi
 
-          candle_validation_ref="$(
-            git ls-remote --heads "$candle_repo" 'refs/heads/archive/extended/sm61-validated-*' |
-              awk -v sha="$candle" '$1 == sha { print $2; exit }'
+          # GitHub cleanup replaced the old validation branch with an annotated tag.
+          # Peel the exact immutable archive tag to its commit, never compare its tag-object SHA.
+          candle_validation_ref="refs/tags/archive/candle-pruned-20261016/archive/extended/sm61-validated-38898680839-2"
+          validated_candle="$(
+            git ls-remote --tags "$candle_repo" "${candle_validation_ref}^{}" |
+              awk -v ref="${candle_validation_ref}^{}" '$2 == ref { print $1; exit }'
           )"
-          [[ -n "$candle_validation_ref" ]] || {
-            echo "::error::haricot/candle:extended $candle has no physical SM61 validation archive"; exit 3;
+          [[ "$validated_candle" == "$candle" ]] || {
+            echo "::error::candle_for_mistralrs $candle does not match the physically validated Extended SM61 archive ($validated_candle)"; exit 3;
           }
 
-          candle_checkout="$RUNNER_TEMP/candle-extended"
+          candle_checkout="$RUNNER_TEMP/candle-for-mistralrs"
           rm -rf "$candle_checkout"
           git clone --quiet --no-tags --filter=blob:none --single-branch --branch "$candle_branch" \
             "$candle_repo" "$candle_checkout"
           [[ "$(git -C "$candle_checkout" rev-parse HEAD)" == "$candle" ]] || {
-            echo '::error::Candle extended moved during checkout'; exit 3;
+            echo '::error::candle_for_mistralrs moved during checkout'; exit 3;
           }
           jq -e '
             .schema_version==1 and
-            .kind=="extended-six" and
+            .kind=="extended-multi" and
+            .feature_count==8 and
+            .campaign=="extended-38898680839-1" and
             .integration_target=="extended" and
             ([.features[].feature] | sort) ==
-              (["asd_core_v3_standalone","bf16_candle","cudnn_fallback_candle","fp4_candle","fp8_candle","moe_simt_f16_candle"] | sort)
+              (["asd_core_v3_standalone","bf16_candle","cudnn_fallback_candle","embeddinggemma2","fp4_candle","fp8_candle","lean4_standalone","moe_simt_f16_candle"] | sort)
           ' "$candle_checkout/candle-integration/extended.json" >/dev/null
 
           git merge-base --is-ancestor "20f607a77abd4738aa5594ee93a393a9fd284605" HEAD
@@ -126,7 +131,7 @@ jobs:
              | .candle_branch=$candle_branch
              | .candle_sha=$candle
              | .candle_validation_ref=$validation_ref
-             | .comment="Physical Pascal gate uses the exact validated haricot/candle:extended SHA, CPU-resolved Cargo.lock, hosted SM61 compile, and physical SM61 runtime proof"' \
+             | .comment="Physical Pascal gate uses candle_for_mistralrs, the exact tag-validated Candle Extended SM61 commit, CPU-resolved Cargo.lock, hosted SM61 compile, and physical SM61 runtime proof"' \
             mistral-integration/sources.json > "$tmp_sources"
           mv "$tmp_sources" mistral-integration/sources.json
 
@@ -171,7 +176,7 @@ jobs:
           echo "lock=${lock}" >> "$GITHUB_OUTPUT"
           echo "candle=${candle}" >> "$GITHUB_OUTPUT"
           echo "candle_validation_ref=${candle_validation_ref}" >> "$GITHUB_OUTPUT"
-          printf 'Candidate %s, lock %s, Candle extended %s (%s)\n' \
+          printf 'Candidate %s, lock %s, Candle candle_for_mistralrs %s (%s)\n' \
             "$candidate" "$lock" "$candle" "$candle_validation_ref" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Preserve preflight diagnostics
@@ -323,7 +328,7 @@ jobs:
             jq -n --arg sha "$SHA" --arg lock "$LOCK" --arg candle "$CANDLE_SHA" \
               --arg candle_validation_ref "$CANDLE_VALIDATION_REF" \
               '{schema_version:1,candidate_sha:$sha,lock_sha256:$lock,candle_sha:$candle,
-                candle_validation_ref:$candle_validation_ref,candle_branch:"extended",
+                candle_validation_ref:$candle_validation_ref,candle_branch:"candle_for_mistralrs",
                 target:"linux-x86_64-sm61",cuda:"12.9.2",
                 features:["cuda-legacy-bf16","cuda-legacy-fp8","cuda-legacy-fp4"]}' \
               > "$pkgdir/BUILD-METADATA.json"
@@ -439,7 +444,7 @@ jobs:
           test "$(git rev-parse HEAD)" = "$SHA"
           test "$(sha256sum Cargo.lock | cut -d' ' -f1)" = "$LOCK"
           test "$(jq -r '.candle_sha' mistral-integration/sources.json)" = "$CANDLE_SHA"
-          test "$(jq -r '.candle_branch' mistral-integration/sources.json)" = "extended"
+          test "$(jq -r '.candle_branch' mistral-integration/sources.json)" = "candle_for_mistralrs"
           test "$(jq -r '.candle_validation_ref' mistral-integration/sources.json)" = "$CANDLE_VALIDATION_REF"
 
           remote="$(git ls-remote origin refs/heads/asd_runner | cut -f1)"
@@ -483,7 +488,7 @@ jobs:
             git push origin ":refs/heads/$TEMP_REF"
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "PROMOTED asd_runner $SHA after CPU + hosted CUDA + physical SM61 proofs; Candle extended $CANDLE_SHA; archives $before_ref and $validated_ref; tag $tag" >> "$GITHUB_STEP_SUMMARY"
+          echo "PROMOTED asd_runner $SHA after CPU + hosted CUDA + physical SM61 proofs; Candle candle_for_mistralrs $CANDLE_SHA; archives $before_ref and $validated_ref; tag $tag" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish promoted SM61 binary release
         if: ${{ inputs.publish_binary }}
@@ -502,4 +507,4 @@ jobs:
           gh release create "$TAG" "$pkg#Linux x86_64 SM61 binary" "$sum#SHA-256" \
             --verify-tag --prerelease \
             --title "mistral.rs ASD SM61 ${SHA:0:12}" \
-            --notes "Promoted asd_runner candidate $SHA, validated on CPU, hosted CUDA 12.9.2 SM61 compilation, and a physical Pascal SM61 GPU. Candle extended: $CANDLE_SHA. Features: cuda-legacy-bf16, cuda-legacy-fp8, cuda-legacy-fp4."
+            --notes "Promoted asd_runner candidate $SHA, validated on CPU, hosted CUDA 12.9.2 SM61 compilation, and a physical Pascal SM61 GPU. Candle candle_for_mistralrs (validated Extended): $CANDLE_SHA. Features: cuda-legacy-bf16, cuda-legacy-fp8, cuda-legacy-fp4."
