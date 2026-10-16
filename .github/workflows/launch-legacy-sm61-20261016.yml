@@ -1,0 +1,53 @@
+name: Launch pinned Mistral Legacy SM61 (one-shot)
+on:
+  push:
+    branches: [mirror_orch]
+    paths:
+      - .github/workflows/launch-legacy-sm61-20261016.yml
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: launch-pinned-mistral-legacy-sm61-20261016
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    if: >-
+      github.repository == 'haricot/mistral.rs' &&
+      github.ref == 'refs/heads/mirror_orch' &&
+      github.event.head_commit.message == 'ci: trigger pinned Mistral Legacy SM61 qualification'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Verify immutable feature, upstream, Candle, and original SM61 proof
+        shell: bash
+        run: |
+          set -euo pipefail
+          ORIG="00d0a5e6989a42d1f3d903e72c427439a6098717"
+          UP="28ed6daca455b4ae063896014d1ea698b912c539"
+          CANDLE="bfce966ad4d61a48801eb6af4db8b8eabebc01a8"
+          test "$(gh api repos/haricot/mistral.rs/branches/allow_old_card --jq .commit.sha)" = "$ORIG"
+          test "$(gh api repos/EricLBuehler/mistral.rs/branches/master --jq .commit.sha)" = "$UP"
+          test "$(gh api repos/haricot/candle/branches/cuda_legacy --jq .commit.sha)" = "$CANDLE"
+          gh api repos/haricot/candle/actions/runs/38898658386 |
+            jq -e '.status=="completed" and .conclusion=="success"' >/dev/null
+          gh api 'repos/haricot/candle/actions/runs/38898658386/jobs?per_page=100' |
+            jq -e 'any(.jobs[]; .name=="SM61 legacy runtime" and .conclusion=="success") and
+                   any(.jobs[]; .name=="Promote validated Legacy refs" and .conclusion=="success")' >/dev/null
+          echo "PRELAUNCH=PASS allow_old_card=$ORIG upstream=$UP candle_cuda_legacy=$CANDLE" >> "$GITHUB_STEP_SUMMARY"
+      - name: Dispatch full pinned Mistral CUDA Legacy campaign
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh workflow run mistral-cuda-legacy-sm61.yml --repo "$GITHUB_REPOSITORY" --ref mirror_orch \
+            -f validation_scope=full \
+            -f expected_pr_sha=00d0a5e6989a42d1f3d903e72c427439a6098717 \
+            -f expected_upstream_sha=28ed6daca455b4ae063896014d1ea698b912c539 \
+            -f expected_candle_sha=bfce966ad4d61a48801eb6af4db8b8eabebc01a8
+          echo "DISPATCH=REQUESTED workflow=mistral-cuda-legacy-sm61.yml scope=full" >> "$GITHUB_STEP_SUMMARY"
+          echo "This one-shot dispatcher does not promote allow_old_card or change Candle." >> "$GITHUB_STEP_SUMMARY"
