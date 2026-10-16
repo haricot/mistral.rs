@@ -256,10 +256,26 @@ jobs:
 
   gpu:
     needs: [prepare, cpu, cuda_compile]
-    name: Physical NVIDIA Pascal SM61 smoke proof
-    runs-on: [self-hosted, linux, x64, cuda, sm61]
+    name: Physical NVIDIA Pascal SM61 smoke proof (candidate=${{ needs.prepare.outputs.candidate }})
+    # V6.1 registers with --no-default-labels: generic queued GPU jobs
+    # cannot claim this one-shot physical runner.
+    runs-on:
+      - mistral-legacy
+      - mistral-legacy-${{ github.run_id }}
     timeout-minutes: 120
     steps:
+      - name: Verify Haricot one-shot runner identity
+        shell: bash
+        env:
+          PREPARED_CANDIDATE: ${{ needs.prepare.outputs.candidate }}
+        run: |
+          set -euo pipefail
+          test "${EXPECTED_RUN_ID:-}" = "$GITHUB_RUN_ID"
+          test "${EXPECTED_CANDIDATE_SHA:-}" = "$PREPARED_CANDIDATE"
+          test "${RUNNER_REPO:-}" = "$GITHUB_REPOSITORY"
+          test "${RUNNER_NO_DEFAULT_LABELS:-}" = true
+          test "${ASD_REQUIRED:-false}" = false
+          echo "MISTRAL_LEGACY_RUNNER_IDENTITY=PASS"
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           ref: mirror_orch
