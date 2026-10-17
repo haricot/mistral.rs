@@ -1046,10 +1046,7 @@ impl GGUFLoader {
             &fs::read_to_string(paths.get_config_filename())?,
         )?;
         if crate::gguf::voxtral4::is_voxtral4_architecture(&architecture) {
-            crate::gguf::voxtral4_config::validate_native_voxtral4_config(
-                &archive,
-                &config,
-            )?;
+            crate::gguf::voxtral4_config::validate_native_voxtral4_config(&archive, &config)?;
         }
         let config = stamp_qk_rope_layout(&config, rope_pairing)?;
         if architecture == "gemma3" {
