@@ -38,8 +38,11 @@ use crate::pipeline::{
 };
 use crate::speculative::SpeculativeGraphState;
 
+// cudarc exposes CUDA graph flags as a repr-transparent integer newtype.
+// Extract its numeric value for the driver's cuGraphInstantiateWithFlags(u64).
 const CUDA_GRAPH_INSTANTIATE_FLAGS: u64 =
-    sys::CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH as u64;
+    sys::CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH.0 as u64;
+const _: () = assert!(CUDA_GRAPH_INSTANTIATE_FLAGS == 1);
 // Matches the standard CUDA paged-attention V2 partition size.
 const PAGED_ATTENTION_PARTITION_SIZE: usize = 512;
 const TARGET_CUDA_DECODE_GRAPH_CACHE_CAPACITY: usize = 64;
@@ -60,6 +63,10 @@ static CUDA_GRAPH_MEMORY_POOL_SCOPES: OnceLock<Mutex<HashMap<usize, MemoryPoolSc
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum CudaGraphComponent {
     Target,
+    #[cfg_attr(
+        not(all(feature = "flash-attn", target_family = "unix")),
+        allow(dead_code)
+    )]
     DFlash,
 }
 
@@ -2955,6 +2962,10 @@ impl CudaGraphPinnedBuffer {
         Ok(())
     }
 
+    #[cfg_attr(
+        not(all(feature = "flash-attn", target_family = "unix")),
+        allow(dead_code)
+    )]
     fn copy_from_f32_slice(
         &mut self,
         src: &[f32],
@@ -3208,6 +3219,10 @@ impl CudaGraphHostStaging {
         buffer.copy_from_u32_slice(src, dst, &stream)
     }
 
+    #[cfg_attr(
+        not(all(feature = "flash-attn", target_family = "unix")),
+        allow(dead_code)
+    )]
     pub(crate) fn copy_from_f32_slice(
         &mut self,
         name: &'static str,
