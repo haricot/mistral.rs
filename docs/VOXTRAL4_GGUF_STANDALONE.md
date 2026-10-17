@@ -80,3 +80,24 @@ and physical SM61 parity. The B1 header pass alone is not an inference pass.
     ./target/release/mistralrs serve \
       -m cstr/voxtral-mini-4b-realtime-GGUF \
       -f voxtral-mini-4b-realtime-q4_k.gguf
+
+
+## B2-C1 Rust Tekken tokenizer (under CI)
+
+The dedicated mistralrs-core/src/gguf/voxtral4_tokenizer.rs module reads
+the GGUF embedded Tekken F32 byte payload, parses 150000 serialized ranks,
+retains only 130072 active ranks, checks all 256 single-byte seeds, and
+implements the ranked BPE merge, special-token scanner and pretoken splitting
+as deployed in CrispASR src/voxtral4b.cpp.
+
+This reference pretokenizer is **not** the full Unicode tekken.json regex.
+Agreement with CrispASR requires a separately generated corpus and C++/Rust
+ID-by-ID differential harness. Do not confuse structural ID bounds or
+synthetic Rust unit tests with actual GGUF tokenizer parity.
+
+Optional real model test (no GPU):
+
+    VOXTRAL4_GGUF_PATH="$MODEL" cargo test --locked -p mistralrs-core \
+      --lib gguf::voxtral4_tokenizer -- --nocapture
+
+GGUF quantized/audio forward remains NOT_VALIDATED.
