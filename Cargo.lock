@@ -643,7 +643,7 @@ checksum = "ade8366b8bd5ba243f0a58f036cc0ca8a2f069cff1a2351ef1cac6b083e16fc0"
 [[package]]
 name = "candle-core"
 version = "0.11.0"
-source = "git+https://github.com/haricot/candle.git?rev=89adbfa5b8af544f65ad33c7d2facf389e58704e#89adbfa5b8af544f65ad33c7d2facf389e58704e"
+source = "git+https://github.com/haricot/candle.git?rev=f5ce7f6f8b7a68d14a55419f9f221e1ae3537fd3#f5ce7f6f8b7a68d14a55419f9f221e1ae3537fd3"
 dependencies = [
  "accelerate-src",
  "byteorder",
@@ -666,17 +666,20 @@ dependencies = [
  "rand_distr 0.5.1",
  "rayon",
  "safetensors",
+ "serde",
+ "serde_json",
+ "sha2",
  "thiserror 2.0.18",
  "tokenizers 0.23.2",
  "yoke",
  "zerocopy",
- "zip 8.6.0",
+ "zip 9.0.3",
 ]
 
 [[package]]
 name = "candle-flash-attn-v3"
 version = "0.11.0"
-source = "git+https://github.com/haricot/candle.git?rev=89adbfa5b8af544f65ad33c7d2facf389e58704e#89adbfa5b8af544f65ad33c7d2facf389e58704e"
+source = "git+https://github.com/haricot/candle.git?rev=f5ce7f6f8b7a68d14a55419f9f221e1ae3537fd3#f5ce7f6f8b7a68d14a55419f9f221e1ae3537fd3"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -689,15 +692,16 @@ dependencies = [
 [[package]]
 name = "candle-kernels"
 version = "0.11.0"
-source = "git+https://github.com/haricot/candle.git?rev=89adbfa5b8af544f65ad33c7d2facf389e58704e#89adbfa5b8af544f65ad33c7d2facf389e58704e"
+source = "git+https://github.com/haricot/candle.git?rev=f5ce7f6f8b7a68d14a55419f9f221e1ae3537fd3#f5ce7f6f8b7a68d14a55419f9f221e1ae3537fd3"
 dependencies = [
  "cudaforge",
+ "sha2",
 ]
 
 [[package]]
 name = "candle-metal-kernels"
 version = "0.11.0"
-source = "git+https://github.com/haricot/candle.git?rev=89adbfa5b8af544f65ad33c7d2facf389e58704e#89adbfa5b8af544f65ad33c7d2facf389e58704e"
+source = "git+https://github.com/haricot/candle.git?rev=f5ce7f6f8b7a68d14a55419f9f221e1ae3537fd3#f5ce7f6f8b7a68d14a55419f9f221e1ae3537fd3"
 dependencies = [
  "block2",
  "half",
@@ -712,7 +716,7 @@ dependencies = [
 [[package]]
 name = "candle-nn"
 version = "0.11.0"
-source = "git+https://github.com/haricot/candle.git?rev=89adbfa5b8af544f65ad33c7d2facf389e58704e#89adbfa5b8af544f65ad33c7d2facf389e58704e"
+source = "git+https://github.com/haricot/candle.git?rev=f5ce7f6f8b7a68d14a55419f9f221e1ae3537fd3#f5ce7f6f8b7a68d14a55419f9f221e1ae3537fd3"
 dependencies = [
  "accelerate-src",
  "candle-core",
@@ -8151,13 +8155,14 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "8.6.0"
+version = "9.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d04a6b5381502aa6087c94c669499eb1602eb9c5e8198e534de571f7154809b"
+checksum = "c2d98561b612a84ae525331a7a094429ef8a5772514ed507ff6db5f54badc971"
 dependencies = [
  "crc32fast",
  "indexmap 2.13.0",
  "memchr",
+ "nix 0.31.3",
  "typed-path",
 ]
 
