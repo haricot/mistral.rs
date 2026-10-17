@@ -241,6 +241,13 @@ fn record_cuda_graph_event(
     outcome: CudaGraphOutcome,
 ) {
     let labels = cuda_graph_event_labels(component, event, outcome);
+    #[cfg(feature = "d7-trace")]
+    candle_core::diagnostics::event("graph.lifecycle", || {
+        candle_core::diagnostics::Payload::new()
+            .text("component", labels.component)
+            .text("event", labels.event)
+            .text("outcome", labels.outcome)
+    });
     metrics::counter!(
         CUDA_GRAPH_EVENTS_METRIC,
         "component" => labels.component,
@@ -1828,6 +1835,12 @@ impl CudaDecodeGraphState {
         step: &CudaGraphDecodeStep,
         input: CudaDecodeGraphReplayInput<'_>,
     ) -> candle_core::Result<Option<CudaDecodeGraphReplay>> {
+        #[cfg(feature = "d7-trace")]
+        let _d7 = candle_core::diagnostics::scope_in_window("graph.replay", Some("active"), || {
+            candle_core::diagnostics::Payload::new()
+                .text("key", format!("{key:?}"))
+                .text("node_mapping", "unavailable")
+        });
         let Some(pos) = self.entries.iter().position(|entry| entry.key == *key) else {
             return Ok(None);
         };
@@ -2089,6 +2102,10 @@ pub(crate) fn capture_cuda_decode_graph<F>(
 where
     F: FnOnce(&Tensor, &PagedAttentionInputMetadata) -> candle_core::Result<Tensor>,
 {
+    #[cfg(feature = "d7-trace")]
+    let _d7 = candle_core::diagnostics::scope_in_window("graph.capture", Some("capture"), || {
+        candle_core::diagnostics::Payload::new()
+    });
     let CudaDecodeGraphCaptureCtx {
         key,
         input_ids,

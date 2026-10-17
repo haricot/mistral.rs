@@ -38,8 +38,8 @@ jobs:
         run: |
           set -euo pipefail
           candle="$(jq -r '.candle_sha' mistral-integration/sources.json)"
-          test "$(jq -r '.candle_branch' mistral-integration/sources.json)" = extended
-          test "$candle" = 66c4651cc83f9a43e79a4aa09302aac9bc763d2c
+          test "$(jq -r '.candle_branch' mistral-integration/sources.json)" = d7-trace-extended
+          test "$candle" = a33fcc375cd4d26bd6a3d1aae7174b593345e975
           test "$(jq -r '.standalone_status' mistral-integration/sources.json)" = UNVALIDATED_STANDALONE_CANDIDATE
           grep -Fq "$candle" Cargo.lock
           test "$(grep -Fc "rev = \"$candle\"" Cargo.toml)" = 4

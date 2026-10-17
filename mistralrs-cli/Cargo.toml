@@ -57,6 +57,7 @@ crossterm = "0.28"
 fuzzy-matcher = "0.3"
 
 [features]
+d7-trace = ["candle-core/d7-trace", "mistralrs-core/d7-trace"]
 default = ["code-execution"]
 cuda = ["mistralrs-core/cuda", "mistralrs-server-core/cuda"]
 cuda-legacy-bf16 = ["cuda", "mistralrs-core/cuda-legacy-bf16", "mistralrs-server-core/cuda-legacy-bf16"]

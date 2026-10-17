@@ -2303,6 +2303,22 @@ impl Pipeline for NormalPipeline {
             recurrent_batch_kind,
             adapter_leases,
         } = *inputs.downcast().expect("Downcast failed.");
+        #[cfg(feature = "d7-trace")]
+        let _d7 =
+            candle_core::diagnostics::scope_in_window("engine.forward", Some("active"), || {
+                candle_core::diagnostics::Payload::new()
+                    .object("input_ids", candle_core::diagnostics::tensor(&input_ids))
+                    .text(
+                        "phase",
+                        if input_ids.dims().get(1).copied().unwrap_or(0) == 1 {
+                            "decode_or_single_token_prefill"
+                        } else {
+                            "prefill_or_verify"
+                        },
+                    )
+                    .text("request_mapping", "unobserved")
+                    .boolean("raw_logits", return_raw_logits)
+            });
         let lora_execution = super::resolve_lora_execution(
             self.dynamic_lora.as_deref(),
             &input_ids,

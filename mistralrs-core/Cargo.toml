@@ -119,6 +119,7 @@ objc2-metal = { workspace = true, optional = true }
 candle-metal-kernels = { workspace = true, optional = true }
 
 [features]
+d7-trace = ["candle-core/d7-trace"]
 pyo3_macros = ["pyo3", "mistralrs-mcp/pyo3_macros"]
 cuda = [
     "candle-core/cuda",
