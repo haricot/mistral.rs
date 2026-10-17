@@ -143,11 +143,11 @@ def decode_tekken(blob, n_vocab):
 
 
 def inspect_assets(path):
-    # Ensure the B1 whole-name header contract was independently established.
-    from voxtral4_gguf_contract import validate_header_contract
+    # Reuse the full B1 header contract, not only a representative list.
     head = inspect(path)
-    if head["architecture"] != "voxtral4b" or head["tensor_count"] != 714:
-        raise ValueError("unqualified Voxtral4b release")
+    if (head["architecture"] != "voxtral4b"
+            or head["b1_contract"]["status"] != "B1_HEADER_PASS_RUNTIME_NOT_QUALIFIED"):
+        raise ValueError("GGUF failed the full B1 header contract")
     assets, metadata, specials = read_assets(path)
     if not specials or len(specials) != metadata.get("tokenizer.tekken.n_specials"):
         raise ValueError("Tekken special token names are missing or inconsistent")
