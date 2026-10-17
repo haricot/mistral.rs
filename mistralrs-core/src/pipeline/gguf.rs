@@ -586,6 +586,18 @@ impl GGUFLoader {
             }
             None => bail!("GGUF metadata is missing `general.architecture`"),
         };
+        // B0: never send multimodal speech weights to the text-only registry.
+        // The GGUF format needs a Tekken and audio streaming bridge before
+        // enabling the native Voxtral model for inference.
+        if crate::gguf::voxtral4::is_voxtral4_architecture(architecture) {
+            let bindings = crate::gguf::voxtral4::build_voxtral4_bindings(&archive)?;
+            bail!(
+                "Voxtral Realtime GGUF {architecture} has {} validated native tensor bindings, \
+                 but streaming audio and Tekken tokenization are not yet wired. \
+                 This standalone branch is an inventory milestone, not working inference.",
+                bindings.iter().count()
+            );
+        }
         if architecture.eq_ignore_ascii_case(crate::gguf::qwen4exp::ARCHITECTURE) {
             return self.load_native_qwen4exp(
                 archive,
