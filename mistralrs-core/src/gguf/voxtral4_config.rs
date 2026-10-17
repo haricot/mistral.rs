@@ -151,6 +151,24 @@ pub(crate) fn validate_native_voxtral4_config(
 mod tests {
     use super::*;
 
+    /// Test the exact checkpoint geometry without allocating Q4_K tensors.
+    /// Both inputs must be explicitly supplied; the hosted CI has neither.
+    #[test]
+    fn optional_real_gguf_vs_native_params() -> Result<()> {
+        let Ok(gguf) = std::env::var("VOXTRAL4_GGUF_PATH") else {
+            return Ok(());
+        };
+        let Ok(params) = std::env::var("VOXTRAL4_NATIVE_PARAMS") else {
+            return Ok(());
+        };
+        let archive = GgufArchive::open_file(gguf)?;
+        super::voxtral4::build_voxtral4_bindings(&archive)?;
+        let native = std::fs::read_to_string(params)?;
+        validate_native_voxtral4_config(&archive, &native)?;
+        println!("VOXTRAL4_B3_NATIVE_CONFIG=PASS");
+        Ok(())
+    }
+
     #[test]
     fn native_dimension_conflict_is_rejected() {
         let err = require_dimension(3072, 1280, "audio.d_model").unwrap_err().to_string();
