@@ -200,13 +200,13 @@ mod tests {
     fn fixture() -> Voxtral4Tekken {
         let specials = vec!["<unk>".to_string(), "[AUDIO]".to_string()];
         let mut tokens = (0u8..=255).map(|b| vec![b]).collect::<Vec<_>>();
-        tokens.extend([b"Hi".to_vec(), b"Bon".to_vec(), b"jour".to_vec(), b"Bonjour".to_vec(), b"inert".to_vec()]);
+        tokens.extend([b"Hi".to_vec(), b"Bo".to_vec(), b"Bon".to_vec(), b"jo".to_vec(), b"jou".to_vec(), b"jour".to_vec(), b"Bonjour".to_vec(), b"inert".to_vec()]);
         let mut packed = Vec::new();
         for token in &tokens {
             packed.extend_from_slice(&(token.len() as u16).to_le_bytes());
             packed.extend_from_slice(token);
         }
-        Voxtral4Tekken::from_packed(&packed, specials, tokens.len(), 262).unwrap()
+        Voxtral4Tekken::from_packed(&packed, specials, tokens.len(), 265).unwrap()
     }
 
     #[test]
@@ -221,8 +221,8 @@ mod tests {
     #[test]
     fn bpe_merges_and_reserved_audio_token() -> Result<()> {
         let tok = fixture();
-        assert_eq!(tok.counts(), (260, 1));
-        assert_eq!(tok.encode_crispasr("Hi Bonjour[AUDIO]")?, [258, 34, 261, 1]);
+        assert_eq!(tok.counts(), (263, 1));
+        assert_eq!(tok.encode_crispasr("Hi Bonjour[AUDIO]")?, [258, 34, 264, 1]);
         assert!(tok.encode_crispasr("")?.is_empty());
         Ok(())
     }
