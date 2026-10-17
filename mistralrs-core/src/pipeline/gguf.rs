@@ -528,6 +528,68 @@ impl GGUFLoader {
         })
     }
 
+    /// Voxtral4 GGUF embeds F32-packed Tekken ranks, not tokenizer.ggml.tokens.
+    /// Until the native GGUF Tekken bridge is fully integrated, require the
+    /// original Voxtral tokenizer assets and reject out-of-range vocabularies.
+    fn resolve_voxtral4_tokenizer(
+        &self,
+        paths: &dyn ModelPaths,
+        archive: &mistralrs_quant::GgufArchive,
+    ) -> Result<ResolvedGgufTokenizer> {
+        let path = self
+            .tokenizer_json
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| paths.get_tokenizer_filename().clone());
+        if path.as_os_str().is_empty() {
+            bail!(
+                "Voxtral4 GGUF B3 needs original Voxtral Realtime tokenizer.json; \
+                 pass --tok-model-id mistralai/Voxtral-Mini-4B-Realtime-2602"
+            );
+        }
+        let tokenizer = get_tokenizer(&path, None).with_context(|| {
+            format!(
+                "Cannot load native Voxtral Realtime tokenizer from {}",
+                path.display()
+            )
+        })?;
+        let specials = match archive.metadata_value("tokenizer.tekken.specials") {
+            Some(candle_core::quantized::gguf_file::Value::Array(values)) => values,
+            _ => bail!("Voxtral4 GGUF must contain 1000 Tekken special token names"),
+        };
+        anyhow::ensure!(
+            specials.len() == 1000,
+            "Voxtral4 GGUF has unexpected Tekken special-token count"
+        );
+        for (id, entry) in specials.iter().enumerate() {
+            let candle_core::quantized::gguf_file::Value::String(expected) = entry else {
+                bail!("Voxtral4 GGUF special token {id} is not a string");
+            };
+            let actual = tokenizer.id_to_token(id as u32);
+            anyhow::ensure!(
+                actual.as_deref() == Some(expected.as_str()),
+                "Voxtral4 tokenizer differs from GGUF at special ID {id}: \
+                 native={actual:?}, GGUF={expected:?}"
+            );
+        }
+        let count = tokenizer.get_vocab_size(true);
+        anyhow::ensure!(
+            count <= 131_072,
+            "Voxtral4 native tokenizer exposes {count} IDs but GGUF embeds only \
+             131072 rows. A strict capped Tekken adapter is required; refusing \
+             unchecked GGUF/native tokenizer mixing"
+        );
+        Ok(ResolvedGgufTokenizer {
+            conversion: GgufTokenizerConversion {
+                tokenizer,
+                bos: Some("<s>".to_owned()),
+                eos: Some("</s>".to_owned()),
+                unk: Some("<unk>".to_owned()),
+            },
+            generation_config_compatible: true,
+        })
+    }
+
     fn resolve_generation_config(
         &self,
         paths: &dyn ModelPaths,
