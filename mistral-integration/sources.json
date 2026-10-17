@@ -18,8 +18,14 @@
   "candle_validation_ref": "refs/tags/archive/candle-pruned-20261016/archive/extended/sm61-validated-38898680839-2",
   "kind": "mistral-extended",
   "target_branch": "extended",
-  "seed_sha": "080fdd5ccf1ff8b6bcb0df9e2dbc189763770588",
-  "campaign": "mistral-extended-39008621812-1",
   "validation_state": "UNVALIDATED_CANDIDATE",
-  "asd_required": true
+  "asd_required": true,
+  "lfm25_dspark": {
+    "source_branch": "lfm25_dspark",
+    "source_sha": "7501527eb3633e9ea020a9b6559d11c6634287d0",
+    "base_sha": "d3813494903e5cfca01e12df596f3fe14a5d22ba",
+    "extended_base_sha": "71c0e13021a4544c1b475eff136f807e42bfe91c",
+    "commit_count": 6,
+    "model_gpu_validation": "PENDING"
+  }
 }

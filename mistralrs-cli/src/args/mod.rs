@@ -635,7 +635,7 @@ pub struct RuntimeOptions {
     #[serde(default)]
     pub mtp: bool,
 
-    /// MTP assistant model id or path.
+    /// MTP, DFlash, or DSpark assistant model id or path.
     #[arg(long)]
     #[serde(default)]
     pub mtp_model: Option<String>,
@@ -824,7 +824,7 @@ pub struct BenchRuntimeOptions {
     #[arg(long, conflicts_with = "mtp_model")]
     pub mtp: bool,
 
-    /// MTP assistant model id or path.
+    /// MTP, DFlash, or DSpark assistant model id or path.
     #[arg(long)]
     pub mtp_model: Option<String>,
 
@@ -1060,6 +1060,54 @@ mod tests {
     use std::{fs, path::Path};
 
     use super::*;
+
+    #[test]
+    fn run_accepts_lfm_dspark_one_shot_input() {
+        let cli = Cli::try_parse_from([
+            "mistralrs",
+            "run",
+            "-m",
+            "LiquidAI/LFM2.5-2.6B",
+            "--mtp-model",
+            "LiquidAI/LFM2.5-2.6B-DSpark",
+            "--mtp-n-predict",
+            "8",
+            "--mtp-draft-sampling",
+            "greedy",
+            "--dtype",
+            "f16",
+            "--input",
+            "Describe the model's agent capabilities.",
+        ])
+        .unwrap();
+        let Command::Run { input, runtime, .. } = cli.command else {
+            panic!("expected run command");
+        };
+        assert_eq!(
+            input.as_deref(),
+            Some("Describe the model's agent capabilities.")
+        );
+        let mtp = runtime.mtp_config().expect("missing DSpark config");
+        assert_eq!(mtp.n_predict, Some(8));
+        assert_eq!(
+            mtp.draft_sampling_method,
+            mistralrs_core::MtpDraftSamplingMethod::Greedy
+        );
+    }
+
+    #[test]
+    fn serve_rejects_one_shot_input() {
+        let error = Cli::try_parse_from([
+            "mistralrs",
+            "serve",
+            "-m",
+            "LiquidAI/LFM2.5-2.6B",
+            "--input",
+            "Hello",
+        ])
+        .unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
 
     fn resolve_default_command(command: &str, args: &[&str]) -> anyhow::Result<ModelType> {
         let cli = Cli::try_parse_from(
