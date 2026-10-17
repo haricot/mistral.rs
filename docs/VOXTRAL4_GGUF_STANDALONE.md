@@ -39,8 +39,23 @@ streaming audio processing through the native Voxtral path.
 B4: Quantified parity on a common French WAV with CrispASR, then hosted
 CUDA compilation and physical Pascal SM61 run (accuracy/latency evidence).
 
-Only add to Mistral Extended after passing B1 through B4. Never promote
-or advertise GGUF inference from the B0 inventory-only milestone.
+B1 (2026-10-17): real Q4_K header PASSED all 714 names, shapes checked,
+and 303 F32 + 2 F16 + 409 Q4_K. Inventory fingerprint
+775c2b3010a52d3a11d61f89b62ab2124c3fd4f29366a1e648736552f7a2dc9e.
+This fingerprint is not a whole-file content digest.
+
+B2-A: tools/voxtral4_gguf_assets.py decodes the converter's packed
+150000-entry Tekken BPE byte stream, all 1000 special-token strings, and the
+original F32 Slaney filterbank/Hann window from their GGUF tensor offsets,
+without fetching or decoding the 2.52 GB of Q4_K model weights. The tool
+records SHA256 digests and validates the 400-sample periodic Hann window.
+It does NOT prove tokenizer ID mapping: 150000 BPE entries vs 131072 model
+embedding rows remains an explicit unresolved blocker.
+
+    python3 -B tools/voxtral4_gguf_assets.py "$MODEL" --report voxtral4-b2-assets.json
+
+Only add to Mistral Extended after completing B2/B3/B4 with real forward
+and physical SM61 parity. The B1 header pass alone is not an inference pass.
 
 ## Model-free test
 
