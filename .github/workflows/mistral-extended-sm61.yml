@@ -1,4 +1,4 @@
-name: Mistral ASD Integration
+name: Mistral Extended SM61
 on:
   workflow_dispatch:
     inputs:
@@ -20,7 +20,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: mistral-asd-integration
+  group: mistral-extended-sm61
   cancel-in-progress: false
 
 jobs:
@@ -37,6 +37,7 @@ jobs:
       lock: ${{ steps.pin.outputs.lock }}
       candle: ${{ steps.pin.outputs.candle }}
       candle_validation_ref: ${{ steps.pin.outputs.candle_validation_ref }}
+      previous_extended: ${{ steps.pin.outputs.previous_extended }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # Node24
         with:
@@ -149,7 +150,39 @@ jobs:
              .sm61_source_sha==$sm61 and
              (.features | sort) == (["cuda-legacy-bf16","cuda-legacy-fp8","cuda-legacy-fp4"] | sort)' \
             mistral-integration/sources.json >/dev/null
+          previous_extended="$(git ls-remote origin refs/heads/extended | cut -f1)"
+          jq --arg seed "$seed" --arg campaign "mistral-extended-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            '.kind="mistral-extended" | .target_branch="extended" | .seed_sha=$seed |
+             .campaign=$campaign | .validation_state="UNVALIDATED_CANDIDATE" | .asd_required=true' \
+            mistral-integration/sources.json > "$tmp_sources"
+          mv "$tmp_sources" mistral-integration/sources.json
+          cat > mistralrs-core/tests/extended_sm61_runtime.rs <<'RS'
+          #![cfg(feature = "cuda")]
+          use candle_core::{DType, Device, Result, Tensor};
+          
+          #[test]
+          fn extended_sm61_f32_bf16_fp8_roundtrip() -> Result<()> {
+              let device = Device::new_cuda(0)?;
+              let input = Tensor::new(&[1f32, 2., 3., 4.], &device)?;
+              let doubled = (&input + &input)?;
+              assert_eq!(
+                  doubled.to_device(&Device::Cpu)?.to_vec1::<f32>()?,
+                  vec![2., 4., 6., 8.]
+              );
+              for dtype in [DType::BF16, DType::F8E4M3] {
+                  let tensor = input.to_dtype(dtype)?;
+                  let restored = tensor.to_dtype(DType::F32)?;
+                  device.synchronize()?;
+                  let values = restored.to_device(&Device::Cpu)?.to_vec1::<f32>()?;
+                  for (value, expected) in values.iter().zip([1., 2., 3., 4.]) {
+                      assert!((value - expected).abs() < 0.1, "{dtype:?}: {value} != {expected}");
+                  }
+              }
+              Ok(())
+          }
+          RS
           rustup toolchain install stable --profile minimal --component rustfmt
+          rustfmt +stable --edition 2021 mistralrs-core/tests/extended_sm61_runtime.rs
           report="$RUNNER_TEMP/mistral-asd-preflight"
           mkdir -p "$report"
           if ! cargo +stable fmt --all -- --check > "$report/fmt.log" 2>&1; then
@@ -163,7 +196,7 @@ jobs:
           lock="$(sha256sum Cargo.lock | cut -d' ' -f1)"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add Cargo.toml Cargo.lock mistral-integration/sources.json
+          git add Cargo.toml Cargo.lock mistral-integration/sources.json mistralrs-core/tests/extended_sm61_runtime.rs
           if ! git diff --cached --quiet; then
             git commit -m "build(asd): pin validated Candle extended ${candle:0:12}"
           fi
@@ -171,6 +204,7 @@ jobs:
           ref="integration/asd_runner-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           git push origin "HEAD:refs/heads/${ref}"
           echo "seed=${seed}" >> "$GITHUB_OUTPUT"
+          echo "previous_extended=${previous_extended}" >> "$GITHUB_OUTPUT"
           echo "candidate=${candidate}" >> "$GITHUB_OUTPUT"
           echo "candidate_ref=${ref}" >> "$GITHUB_OUTPUT"
           echo "lock=${lock}" >> "$GITHUB_OUTPUT"
@@ -183,7 +217,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # Node24
         with:
-          name: mistral-asd-preflight-${{ github.run_id }}
+          name: mistral-asd-preflight-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/mistral-asd-preflight/
           if-no-files-found: ignore
           retention-days: 21
@@ -232,7 +266,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7 / Node24
         with:
-          name: mistral-asd-cpu-${{ github.run_id }}
+          name: mistral-asd-cpu-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/mistral-asd-cpu/
           if-no-files-found: warn
           retention-days: 90
@@ -250,18 +284,15 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          repository: haricot/candle
-          # Use the exact physically validated Candle Extended commit for both
-          # source dependencies and the hosted CUDA 12.9.2 compiler tooling.
-          ref: ${{ needs.prepare.outputs.candle }}
-          path: .ci-tools
+          ref: ${{ github.sha }}
+          path: .ci-orchestration
           persist-credentials: false
-      - name: Build same hosted SM61 compiler image as Candle
+      - name: Build pinned CUDA 12.9.2 hosted compiler
         run: |
           set -euo pipefail
           docker build --pull \
-            -f .ci-tools/.github/container/Containerfile.cuda1292-ubuntu2604 \
-            -t mistral-asd-cuda1292 .ci-tools/.github/container
+            -f .ci-orchestration/.github/container/Containerfile.mistral-sm61 \
+            -t mistral-extended-cuda1292 .ci-orchestration/.github/container
       - name: Compile Mistral.rs BF16, FP8 and FP4 for sm_61 without GPU execution
         shell: bash
         env:
@@ -295,27 +326,28 @@ jobs:
             --env "HOME=$RUNNER_TEMP/asd-home" \
             --env "CARGO_HOME=$RUNNER_TEMP/asd-cargo" \
             --env "RUSTUP_HOME=/opt/rustup" \
-            --env "PATH=/usr/local/cuda-12.9/bin:/opt/cargo/bin:/usr/bin:/bin" \
-            --env CUDA_HOME=/usr/local/cuda-12.9 \
-            --env NVCC_CCBIN=/usr/bin/g++-14 \
-            --env CC=/usr/bin/gcc-14 --env CXX=/usr/bin/g++-14 \
+            --env "PATH=/usr/local/cuda/bin:/opt/cargo/bin:/usr/bin:/bin" \
+            --env CUDA_HOME=/usr/local/cuda \
+            --env NVCC_CCBIN=/usr/bin/g++ \
+            --env CC=/usr/bin/gcc --env CXX=/usr/bin/g++ \
             --env CUDA_COMPUTE_CAP=61 \
             --env "PUBLISH_BINARY=$PUBLISH_BINARY" \
-            mistral-asd-cuda1292 bash -euc '
+            mistral-extended-cuda1292 bash -euc '
               git config --global --add safe.directory "$PWD"
               nvcc --version
+              export CUDA_COMPUTE_CAP=61 CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 ALLOW_LEGACY=bf16,fp8
               if [[ "${PUBLISH_BINARY:-false}" == "true" ]]; then
                 cargo build --locked --release -p mistralrs-cli --no-default-features \
                   --features cuda-legacy-bf16,cuda-legacy-fp8,cuda-legacy-fp4
                 cargo test --locked --release -p mistralrs-core --no-default-features \
                   --features cuda-legacy-bf16,cuda-legacy-fp8,cuda-legacy-fp4 \
-                  --test asd_sm61_smoke --no-run
+                  --test asd_sm61_smoke --test extended_sm61_runtime --no-run
               else
                 cargo check --locked -p mistralrs-cli --no-default-features \
                   --features cuda-legacy-bf16,cuda-legacy-fp8,cuda-legacy-fp4
                 cargo test --locked -p mistralrs-core --no-default-features \
                   --features cuda-legacy-bf16,cuda-legacy-fp8,cuda-legacy-fp4 \
-                  --test asd_sm61_smoke --no-run
+                  --test asd_sm61_smoke --test extended_sm61_runtime --no-run
               fi
             ' 2>&1 | tee "$report/compile.log"
           kill "$heartbeat_pid" 2>/dev/null || true
@@ -347,18 +379,35 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: mistral-asd-cuda-${{ github.run_id }}
+          name: mistral-asd-cuda-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/mistral-asd-cuda/
           if-no-files-found: warn
           retention-days: 90
 
   gpu:
     needs: [prepare, cpu, cuda_compile]
-    runs-on: [self-hosted, linux, x64, cuda, sm61]
+    name: SM61 Mistral Extended runtime (candidate=${{ needs.prepare.outputs.candidate }})
+    runs-on:
+      - mistral-extended
+      - mistral-extended-${{ github.run_id }}
     timeout-minutes: 120
     permissions:
       contents: read
     steps:
+      - name: Verify unified runner and Extended identity
+        shell: bash
+        env:
+          PREPARED_CANDIDATE: ${{ needs.prepare.outputs.candidate }}
+        run: |
+          set -euo pipefail
+          test "${EXPECTED_RUN_ID:-}" = "$GITHUB_RUN_ID"
+          test "${EXPECTED_CANDIDATE_SHA:-}" = "$PREPARED_CANDIDATE"
+          test "${RUNNER_REPO:-}" = "$GITHUB_REPOSITORY"
+          test "${RUNNER_NO_DEFAULT_LABELS:-}" = true
+          test "${ASD_REQUIRED:-false}" = true
+          test -s /run/haricot/asd/fallbacks/current.json
+          test -s /run/haricot/asd/profiles/current.asd
+          echo MISTRAL_EXTENDED_RUNNER_IDENTITY=PASS
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           ref: ${{ needs.prepare.outputs.candidate }}
@@ -382,11 +431,13 @@ jobs:
           fi
           export CUDA_COMPUTE_CAP=61
           export NVCC_CCBIN=/usr/bin/g++-14
-          rustup toolchain install stable --profile minimal
+          cargo +stable --version
+          rustc +stable --version
+          export ALLOW_LEGACY=bf16,fp8 CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0
           nvcc --version > "$report/nvcc.txt"
           cargo +stable test --locked -p mistralrs-core --no-default-features \
             --features cuda-legacy-bf16,cuda-legacy-fp8,cuda-legacy-fp4 \
-            --test asd_sm61_smoke -- --nocapture > "$report/smoke.log" 2>&1 || {
+            --test asd_sm61_smoke --test extended_sm61_runtime -- --nocapture > "$report/smoke.log" 2>&1 || {
               tail -n 100 "$report/smoke.log"; exit 1;
             }
           jq -n --arg sha "$SHA" --arg lock "$LOCK" \
@@ -396,7 +447,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: mistral-asd-gpu-${{ github.run_id }}
+          name: mistral-asd-gpu-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/mistral-asd-gpu/
           if-no-files-found: warn
           retention-days: 90
@@ -416,7 +467,7 @@ jobs:
           persist-credentials: true
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # Node24
         with:
-          pattern: mistral-asd-*-${{ github.run_id }}
+          pattern: mistral-asd-*-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/asd-proof
           merge-multiple: false
       - name: Gate on matching proofs, archive, and force-with-lease promote
@@ -424,6 +475,7 @@ jobs:
         shell: bash
         env:
           SEED: ${{ needs.prepare.outputs.seed }}
+          PREVIOUS_EXTENDED: ${{ needs.prepare.outputs.previous_extended }}
           SHA: ${{ needs.prepare.outputs.candidate }}
           TEMP_REF: ${{ needs.prepare.outputs.candidate_ref }}
           LOCK: ${{ needs.prepare.outputs.lock }}
@@ -432,7 +484,7 @@ jobs:
         run: |
           set -euo pipefail
           for gate in cpu cuda gpu; do
-            report="$RUNNER_TEMP/asd-proof/mistral-asd-${gate}-${GITHUB_RUN_ID}/report.json"
+            report="$RUNNER_TEMP/asd-proof/mistral-asd-${gate}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/report.json"
             test -s "$report"
             jq -e --arg sha "$SHA" --arg lock "$LOCK" --arg gate "$gate" \
               '.candidate_sha==$sha and .lock_sha256==$lock and
@@ -447,34 +499,32 @@ jobs:
           test "$(jq -r '.candle_branch' mistral-integration/sources.json)" = "extended"
           test "$(jq -r '.candle_validation_ref' mistral-integration/sources.json)" = "$CANDLE_VALIDATION_REF"
 
-          remote="$(git ls-remote origin refs/heads/asd_runner | cut -f1)"
-          if test "$remote" != "$SEED" && test "$remote" != "$SHA"; then
-            echo "::error::asd_runner moved unexpectedly ($remote); no promotion"; exit 3
+          test "$(git ls-remote origin refs/heads/asd_runner | cut -f1)" = "$SEED"
+          remote="$(git ls-remote origin refs/heads/extended | cut -f1)"
+          if test "$remote" != "$PREVIOUS_EXTENDED" && test "$remote" != "$SHA"; then
+            echo "::error::extended moved after preparation; no promotion"; exit 3
           fi
           git merge-base --is-ancestor "$SEED" "$SHA"
-
-          before_ref="archive/asd_runner/pre-promote-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          validated_ref="archive/asd_runner/sm61-validated-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          for spec in "$SEED:$before_ref" "$SHA:$validated_ref"; do
-            value="${spec%%:*}"
-            ref="${spec#*:}"
-            current="$(git ls-remote origin "refs/heads/$ref" | cut -f1)"
-            if test -n "$current"; then
-              test "$current" = "$value" || {
-                echo "::error::archive $ref already exists at unexpected SHA $current"; exit 3;
-              }
-            else
-              git push origin "$value:refs/heads/$ref"
-            fi
-          done
-
-          if test "$remote" = "$SEED"; then
-            git push --force-with-lease="refs/heads/asd_runner:$SEED" \
-              origin "$SHA:refs/heads/asd_runner"
+          validated_ref="archive/extended/sm61-validated-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          current="$(git ls-remote origin "refs/heads/$validated_ref" | cut -f1)"
+          if test -n "$current"; then
+            test "$current" = "$SHA"
+          else
+            git push origin "$SHA:refs/heads/$validated_ref"
           fi
-          test "$(git ls-remote origin refs/heads/asd_runner | cut -f1)" = "$SHA"
+          if test -n "$PREVIOUS_EXTENDED"; then
+            before_ref="archive/extended/pre-promote-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            current="$(git ls-remote origin "refs/heads/$before_ref" | cut -f1)"
+            if test -n "$current"; then test "$current" = "$PREVIOUS_EXTENDED";
+            else git push origin "$PREVIOUS_EXTENDED:refs/heads/$before_ref"; fi
+          fi
+          if test "$remote" != "$SHA"; then
+            git push --force-with-lease="refs/heads/extended:$PREVIOUS_EXTENDED" \
+              origin "$SHA:refs/heads/extended"
+          fi
+          test "$(git ls-remote origin refs/heads/extended | cut -f1)" = "$SHA"
 
-          tag="promoted/asd_runner/${SHA:0:12}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          tag="promoted/extended/${SHA:0:12}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           if ! git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
@@ -488,7 +538,7 @@ jobs:
             git push origin ":refs/heads/$TEMP_REF"
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "PROMOTED asd_runner $SHA after CPU + hosted CUDA + physical SM61 proofs; Candle extended $CANDLE_SHA; archives $before_ref and $validated_ref; tag $tag" >> "$GITHUB_STEP_SUMMARY"
+          echo "PROMOTED extended $SHA after CPU + hosted CUDA + physical SM61 proofs; Candle extended $CANDLE_SHA; validated archive $validated_ref; tag $tag" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish promoted SM61 binary release
         if: ${{ inputs.publish_binary }}
@@ -500,11 +550,12 @@ jobs:
           CANDLE_SHA: ${{ needs.prepare.outputs.candle }}
         run: |
           set -euo pipefail
-          pkg="$RUNNER_TEMP/asd-proof/mistral-asd-cuda-${GITHUB_RUN_ID}/mistralrs-linux-x86_64-sm61.tar.gz"
+          pkg="$RUNNER_TEMP/asd-proof/mistral-asd-cuda-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/mistralrs-linux-x86_64-sm61.tar.gz"
           sum="${pkg}.sha256"
           test -s "$pkg"
           test -s "$sum"
           gh release create "$TAG" "$pkg#Linux x86_64 SM61 binary" "$sum#SHA-256" \
             --verify-tag --prerelease \
             --title "mistral.rs ASD SM61 ${SHA:0:12}" \
-            --notes "Promoted asd_runner candidate $SHA, validated on CPU, hosted CUDA 12.9.2 SM61 compilation, and a physical Pascal SM61 GPU. Candle extended: $CANDLE_SHA. Features: cuda-legacy-bf16, cuda-legacy-fp8, cuda-legacy-fp4."
+            --notes "Promoted extended candidate $SHA, validated on CPU, hosted CUDA 12.9.2 SM61 compilation, and a physical Pascal SM61 GPU. Candle extended: $CANDLE_SHA. Features: cuda-legacy-bf16, cuda-legacy-fp8, cuda-legacy-fp4."
+
