@@ -1,0 +1,29 @@
+name: Voxtral4 GGUF Standalone CPU Contract
+
+on:
+  push:
+    branches: [voxtral4_gguf]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: voxtral4-gguf-\${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  contract:
+    name: Voxtral4 GGUF inventory and formatting (CPU only)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Install stable Rust
+        run: rustup toolchain install stable --profile minimal --component rustfmt
+      - name: Check formatting
+        run: cargo +stable fmt --all -- --check
+      - name: Test native Voxtral4 GGUF inventory
+        run: cargo +stable test --locked -p mistralrs-core --lib gguf::voxtral4
