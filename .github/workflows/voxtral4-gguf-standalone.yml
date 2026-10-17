@@ -52,3 +52,5 @@ jobs:
         run: cargo +stable test --locked -p mistralrs-core --lib gguf::voxtral4
       - name: Test Rust GGUF Tekken BPE and CrispASR splitting
         run: cargo +stable test --locked -p mistralrs-core --lib gguf::voxtral4_tokenizer
+      - name: Test native Voxtral GGUF metadata/params compatibility (B3-A)
+        run: cargo +stable test --locked -p mistralrs-core --lib gguf::voxtral4_config
