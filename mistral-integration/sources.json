@@ -3,8 +3,8 @@
   "base_master_sha": "20f607a77abd4738aa5594ee93a393a9fd284605",
   "sm61_source_sha": "d3813494903e5cfca01e12df596f3fe14a5d22ba",
   "candle_repository": "haricot/candle",
-  "candle_branch": "candle_asd_cuda",
-  "candle_sha": "89adbfa5b8af544f65ad33c7d2facf389e58704e",
+  "candle_branch": "extended",
+  "candle_sha": "f5ce7f6f8b7a68d14a55419f9f221e1ae3537fd3",
   "features": [
     "cuda-legacy-bf16",
     "cuda-legacy-fp8",
@@ -14,5 +14,12 @@
     "cpu_moe_expert",
     "cuda_asd_runner_extended"
   ],
-  "comment": "Physical Pascal gate must use exact candidate SHA, candle_asd_cuda provenance, and CPU-resolved Cargo.lock"
+  "comment": "Physical Pascal gate uses extended, the exact tag-validated Candle Extended SM61 commit, CPU-resolved Cargo.lock, hosted SM61 compile, and physical SM61 runtime proof",
+  "candle_validation_ref": "refs/tags/archive/candle-pruned-20261016/archive/extended/sm61-validated-38898680839-2",
+  "kind": "mistral-extended",
+  "target_branch": "extended",
+  "seed_sha": "080fdd5ccf1ff8b6bcb0df9e2dbc189763770588",
+  "campaign": "mistral-extended-39008621812-1",
+  "validation_state": "UNVALIDATED_CANDIDATE",
+  "asd_required": true
 }

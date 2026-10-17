@@ -39,10 +39,10 @@ rust-version = "1.94"
 # candle-nn = { path = "../candle/candle-nn", version = "0.11.0" }
 # candle-flash-attn-v3 = { path = "../candle/candle-flash-attn-v3", version = "0.11.0" }
 # candle-metal-kernels = { path = "../candle/candle-metal-kernels", version = "0.11.0" }
-candle-core = { git = "https://github.com/haricot/candle.git", version = "0.11.0", rev = "89adbfa5b8af544f65ad33c7d2facf389e58704e" }
-candle-nn = { git = "https://github.com/haricot/candle.git", version = "0.11.0", rev = "89adbfa5b8af544f65ad33c7d2facf389e58704e" }
-candle-flash-attn-v3 = { git = "https://github.com/haricot/candle.git", version = "0.11.0", rev = "89adbfa5b8af544f65ad33c7d2facf389e58704e" }
-candle-metal-kernels = { git = "https://github.com/haricot/candle.git", version = "0.11.0", rev = "89adbfa5b8af544f65ad33c7d2facf389e58704e" }
+candle-core = { git = "https://github.com/haricot/candle.git", version = "0.11.0", rev = "f5ce7f6f8b7a68d14a55419f9f221e1ae3537fd3" }
+candle-nn = { git = "https://github.com/haricot/candle.git", version = "0.11.0", rev = "f5ce7f6f8b7a68d14a55419f9f221e1ae3537fd3" }
+candle-flash-attn-v3 = { git = "https://github.com/haricot/candle.git", version = "0.11.0", rev = "f5ce7f6f8b7a68d14a55419f9f221e1ae3537fd3" }
+candle-metal-kernels = { git = "https://github.com/haricot/candle.git", version = "0.11.0", rev = "f5ce7f6f8b7a68d14a55419f9f221e1ae3537fd3" }
 
 axum = "0.8.8"
 http-body-util = "0.1.3"
