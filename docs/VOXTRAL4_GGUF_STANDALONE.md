@@ -101,3 +101,46 @@ Optional real model test (no GPU):
       --lib gguf::voxtral4_tokenizer -- --nocapture
 
 GGUF quantized/audio forward remains NOT_VALIDATED.
+
+
+## B2-C2 — independent C++/Rust token-ID parity (2026-10-17)
+
+CrispASR reference:
+- Git commit 369029c91d90a61d8346b8bbdafe426bfdde76d1.
+- src/voxtral_tekken_vocab.h Git blob
+  66a3a97a74adf94b2b177e41552cd0130e90fd58.
+- tools/voxtral4_gguf_cpp_oracle.cpp compiles the *original* pinned
+  CrispASR rank-based BPE decoder and its Unicode-aware reference
+  pretokenizer. For the deployed voxtral4b path, a separate byte-class
+  pretokenizer is reproduced from CrispASR src/voxtral4b.cpp.
+
+The model-free hosted CI compiles the pinned C++ oracle and runs the Rust
+unit tests; it cannot prove real-GGUF ID parity without the user's checkpoint.
+
+The real-checkpoint differential script:
+- Reads only the GGUF Tekken F32 asset, 1000 special tokens and metadata.
+- Re-validates B2-B and the full packed-vocabulary SHA-256.
+- Compiles a CPU-only C++ reference against a Git-blob-verified header.
+- Compares all 30 fixed French/multilingual/technical corpus entries,
+  in order, ID-by-ID, through the Rust tokenizer against the C++ deployed
+  runtime's Tekken tokenizer.
+- Separately measures divergence between the deployed C++ pretokenizer and
+  the richer Unicode pretokenizer from the same pinned header, *without*
+  conflating the two implementations.
+- Fails on every Rust-vs-deployed-C++ token-ID mismatch.
+
+Run from the root of a clean Voxtral4 GGUF worktree:
+
+    MODEL="$HOME/.cache/huggingface/hub/models--cstr--voxtral-mini-4b-realtime-GGUF/snapshots/1c61dc461970d53264d784363b31ca113c7e01fd/voxtral-mini-4b-realtime-q4_k.gguf"
+    python3 -B tools/voxtral4_gguf_cpp_parity.py "$MODEL" \
+      --report voxtral4-b2c2-report.json
+
+It downloads just the pinned 17 KB C++ reference header from GitHub,
+and verifies its exact Git blob SHA before compilation. For offline runs,
+supply --reference-header /path/to/CrispASR/src/voxtral_tekken_vocab.h;
+the SHA check is identical.
+
+Acceptance: B2C2_DEPLOYED_CRISPASR_PARITY_PASS_UNICODE_PARITY_NOT_ESTABLISHED.
+This is not full Mistral Tekken parity, and cannot promote GGUF audio
+inference or the Extended workflow. The later qualification must compare
+with official Mistral tokenization and actual Q4_K speech inference.
