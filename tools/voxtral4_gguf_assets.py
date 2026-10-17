@@ -64,6 +64,7 @@ def read_assets(path):
                 if key.startswith("tokenizer.tekken.") or key in (
                     "general.architecture", "general.alignment",
                     "voxtral4b.llm.vocab_size",
+                    "voxtral4b.audio_token_id",
                 ):
                     metadata[key] = value
         tensors = {}
