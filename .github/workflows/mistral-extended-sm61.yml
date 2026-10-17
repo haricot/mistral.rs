@@ -12,6 +12,11 @@ on:
         required: false
         default: ""
         type: string
+      expected_lfm25_dspark_sha:
+        description: Optional expected lfm25_dspark_standalone SHA; leave empty to pin its current head
+        required: false
+        default: ""
+        type: string
       publish_binary:
         description: Build and publish a downloadable Linux x86_64 SM61 binary after promotion
         required: false
@@ -38,6 +43,7 @@ jobs:
       candle: ${{ steps.pin.outputs.candle }}
       candle_validation_ref: ${{ steps.pin.outputs.candle_validation_ref }}
       previous_extended: ${{ steps.pin.outputs.previous_extended }}
+      lfm25_dspark: ${{ steps.pin.outputs.lfm25_dspark }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # Node24
         with:
@@ -50,6 +56,8 @@ jobs:
         env:
           EXPECTED_SEED: ${{ inputs.expected_seed_sha }}
           EXPECTED_CANDLE: ${{ inputs.expected_candle_sha }}
+          EXPECTED_LFM25_DSPARK: ${{ inputs.expected_lfm25_dspark_sha }}
+          ORCHESTRATOR_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           seed="$(git rev-parse HEAD)"
@@ -61,6 +69,13 @@ jobs:
           fi
           remote_seed="$(git ls-remote origin refs/heads/asd_runner | cut -f1)"
           [[ "$remote_seed" == "$seed" ]] || { echo '::error::Source moved during checkout'; exit 3; }
+          lfm25_dspark="$(git ls-remote origin refs/heads/lfm25_dspark_standalone | cut -f1)"
+          [[ "$lfm25_dspark" =~ ^[0-9a-f]{40}$ ]] || { echo '::error::Cannot resolve LFM2.5 DSpark standalone'; exit 3; }
+          if [[ -n "$EXPECTED_LFM25_DSPARK" ]]; then
+            [[ "$EXPECTED_LFM25_DSPARK" =~ ^[0-9a-f]{40}$ ]] || { echo '::error::expected_lfm25_dspark_sha must be a full SHA'; exit 2; }
+            [[ "$EXPECTED_LFM25_DSPARK" == "$lfm25_dspark" ]] || { echo '::error::LFM2.5 DSpark standalone moved'; exit 3; }
+          fi
+          git fetch --no-tags origin "$lfm25_dspark"
 
           candle_repo="https://github.com/haricot/candle.git"
           candle_branch="extended"
@@ -104,6 +119,14 @@ jobs:
           git merge-base --is-ancestor "20f607a77abd4738aa5594ee93a393a9fd284605" HEAD
           git merge-base --is-ancestor "d3813494903e5cfca01e12df596f3fe14a5d22ba" HEAD
 
+          git cat-file -e "${ORCHESTRATOR_SHA}^{commit}" || git fetch --no-tags origin "$ORCHESTRATOR_SHA"
+          compose_tools="$RUNNER_TEMP/lfm25-dspark-compose"
+          mkdir -p "$compose_tools/tests"
+          git show "$ORCHESTRATOR_SHA:.github/scripts/compose_lfm25_dspark.py" > "$compose_tools/compose_lfm25_dspark.py"
+          git show "$ORCHESTRATOR_SHA:.github/scripts/tests/test_compose_lfm25_dspark.py" > "$compose_tools/tests/test_compose_lfm25_dspark.py"
+          python3 -m unittest discover -s "$compose_tools/tests" -p test_compose_lfm25_dspark.py -v
+          python3 "$compose_tools/compose_lfm25_dspark.py" --source-sha "$lfm25_dspark" --candle-sha "$candle"
+
           python3 - "$candle" <<'PY'
           import re
           import sys
@@ -137,6 +160,7 @@ jobs:
           mv "$tmp_sources" mistral-integration/sources.json
 
           jq -e --arg candle "$candle" \
+            --arg lfm25_dspark "$lfm25_dspark" \
             --arg candle_branch "$candle_branch" \
             --arg validation_ref "$candle_validation_ref" \
             --arg base "20f607a77abd4738aa5594ee93a393a9fd284605" \
@@ -148,6 +172,7 @@ jobs:
              .candle_validation_ref==$validation_ref and
              .base_master_sha==$base and
              .sm61_source_sha==$sm61 and
+             .components.lfm25_dspark.source_sha==$lfm25_dspark and
              (.features | sort) == (["cuda-legacy-bf16","cuda-legacy-fp8","cuda-legacy-fp4"] | sort)' \
             mistral-integration/sources.json >/dev/null
           previous_extended="$(git ls-remote origin refs/heads/extended | cut -f1)"
@@ -198,9 +223,11 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add Cargo.toml Cargo.lock mistral-integration/sources.json mistralrs-core/tests/extended_sm61_runtime.rs
           if ! git diff --cached --quiet; then
-            git commit -m "build(asd): pin validated Candle extended ${candle:0:12}"
+            git commit -m "build(extended): compose LFM2.5 DSpark ${lfm25_dspark:0:12} with Candle ${candle:0:12}"
           fi
           candidate="$(git rev-parse HEAD)"
+          git merge-base --is-ancestor "$lfm25_dspark" "$candidate"
+          test "$(git ls-remote origin refs/heads/lfm25_dspark_standalone | cut -f1)" = "$lfm25_dspark"
           ref="integration/asd_runner-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           git push origin "HEAD:refs/heads/${ref}"
           echo "seed=${seed}" >> "$GITHUB_OUTPUT"
@@ -210,8 +237,9 @@ jobs:
           echo "lock=${lock}" >> "$GITHUB_OUTPUT"
           echo "candle=${candle}" >> "$GITHUB_OUTPUT"
           echo "candle_validation_ref=${candle_validation_ref}" >> "$GITHUB_OUTPUT"
-          printf 'Candidate %s, lock %s, Candle extended %s (%s)\n' \
-            "$candidate" "$lock" "$candle" "$candle_validation_ref" >> "$GITHUB_STEP_SUMMARY"
+          echo "lfm25_dspark=${lfm25_dspark}" >> "$GITHUB_OUTPUT"
+          printf 'Candidate %s, lock %s, Candle extended %s (%s), LFM2.5 DSpark %s\n' \
+            "$candidate" "$lock" "$candle" "$candle_validation_ref" "$lfm25_dspark" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Preserve preflight diagnostics
         if: always()
@@ -238,16 +266,20 @@ jobs:
         env:
           LOCK: ${{ needs.prepare.outputs.lock }}
           SHA: ${{ needs.prepare.outputs.candidate }}
+          LFM25_DSPARK_SHA: ${{ needs.prepare.outputs.lfm25_dspark }}
         run: |
           set -euo pipefail
           report="$RUNNER_TEMP/mistral-asd-cpu"
           mkdir -p "$report"
           test "$(git rev-parse HEAD)" = "$SHA"
           test "$(sha256sum Cargo.lock | cut -d' ' -f1)" = "$LOCK"
+          test "$(jq -r '.components.lfm25_dspark.source_sha' mistral-integration/sources.json)" = "$LFM25_DSPARK_SHA"
+          export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0
+          export CARGO_PROFILE_TEST_OPT_LEVEL=0 CARGO_PROFILE_TEST_DEBUG=0
           rustup toolchain install stable --profile minimal --component rustfmt
           cargo +stable fmt --all -- --check > "$report/fmt.log" 2>&1
           if ! cargo +stable check --locked -p mistralrs-core -p mistralrs-quant \
-            -p mistralrs-paged-attn > "$report/check.log" 2>&1; then
+            -p mistralrs-paged-attn -p mistralrs-cli > "$report/check.log" 2>&1; then
             echo "::error::CPU check failed; final diagnostics:"
             tail -n 120 "$report/check.log"
             exit 1
@@ -258,9 +290,19 @@ jobs:
             tail -n 120 "$report/tests.log"
             exit 1
           fi
+          if ! CARGO_BUILD_JOBS=1 cargo +stable test --locked \
+            -p mistralrs-core -p mistralrs-cli --no-default-features --lib --bin mistralrs -- \
+            speculative:: models::lfm2:: flashinfer_speculative_rows_keep_gather_block_tables args::tests:: \
+            > "$report/lfm25-dspark-tests.log" 2>&1; then
+            tail -n 120 "$report/lfm25-dspark-tests.log"
+            exit 1
+          fi
+          grep -Fq 'dspark_reserves_recurrent_checkpoint_lanes_before_pipeline_build ... ok' "$report/lfm25-dspark-tests.log"
+          grep -Fq 'run_accepts_lfm_dspark_one_shot_input ... ok' "$report/lfm25-dspark-tests.log"
           cp Cargo.lock "$report/Cargo.lock"
-          jq -n --arg sha "$SHA" --arg lock "$LOCK" \
-            '{schema_version:1,candidate_sha:$sha,lock_sha256:$lock,status:"CPU_PASSED"}' \
+          jq -n --arg sha "$SHA" --arg lock "$LOCK" --arg lfm "$LFM25_DSPARK_SHA" \
+            '{schema_version:1,candidate_sha:$sha,lock_sha256:$lock,
+              lfm25_dspark_source_sha:$lfm,status:"CPU_PASSED"}' \
             > "$report/report.json"
       - name: Preserve CPU proof
         if: always()
@@ -301,12 +343,14 @@ jobs:
           PUBLISH_BINARY: ${{ inputs.publish_binary }}
           CANDLE_SHA: ${{ needs.prepare.outputs.candle }}
           CANDLE_VALIDATION_REF: ${{ needs.prepare.outputs.candle_validation_ref }}
+          LFM25_DSPARK_SHA: ${{ needs.prepare.outputs.lfm25_dspark }}
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/mistral-asd-cuda" "$RUNNER_TEMP/asd-home" "$RUNNER_TEMP/asd-cargo"
           report="$RUNNER_TEMP/mistral-asd-cuda"
           test "$(git rev-parse HEAD)" = "$SHA"
           test "$(sha256sum Cargo.lock | cut -d' ' -f1)" = "$LOCK"
+          test "$(jq -r '.components.lfm25_dspark.source_sha' mistral-integration/sources.json)" = "$LFM25_DSPARK_SHA"
           # Keep compiler progress visible, including during slow CUDA kernel builds.
           # This only changes future runs: the active run uses its pinned workflow SHA.
           touch "$report/compile.log"
@@ -336,6 +380,7 @@ jobs:
               git config --global --add safe.directory "$PWD"
               nvcc --version
               export CUDA_COMPUTE_CAP=61 CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 ALLOW_LEGACY=bf16,fp8
+              export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_PROFILE_TEST_OPT_LEVEL=0
               if [[ "${PUBLISH_BINARY:-false}" == "true" ]]; then
                 cargo build --locked --release -p mistralrs-cli --no-default-features \
                   --features cuda-legacy-bf16,cuda-legacy-fp8,cuda-legacy-fp4
@@ -349,6 +394,8 @@ jobs:
                   --features cuda-legacy-bf16,cuda-legacy-fp8,cuda-legacy-fp4 \
                   --test asd_sm61_smoke --test extended_sm61_runtime --no-run
               fi
+              cargo test --locked -p mistralrs-core --lib --no-default-features \
+                --features cuda-legacy-bf16,cuda-legacy-fp8,cuda-legacy-fp4 --no-run
             ' 2>&1 | tee "$report/compile.log"
           kill "$heartbeat_pid" 2>/dev/null || true
           trap - EXIT
@@ -358,8 +405,9 @@ jobs:
             mkdir -p "$pkgdir"
             cp target/release/mistralrs "$pkgdir/mistralrs"
             jq -n --arg sha "$SHA" --arg lock "$LOCK" --arg candle "$CANDLE_SHA" \
-              --arg candle_validation_ref "$CANDLE_VALIDATION_REF" \
+              --arg candle_validation_ref "$CANDLE_VALIDATION_REF" --arg lfm "$LFM25_DSPARK_SHA" \
               '{schema_version:1,candidate_sha:$sha,lock_sha256:$lock,candle_sha:$candle,
+                lfm25_dspark_source_sha:$lfm,
                 candle_validation_ref:$candle_validation_ref,candle_branch:"extended",
                 target:"linux-x86_64-sm61",cuda:"12.9.2",
                 features:["cuda-legacy-bf16","cuda-legacy-fp8","cuda-legacy-fp4"]}' \
@@ -371,8 +419,9 @@ jobs:
             rm -rf "$pkgdir"
           fi
           cp Cargo.lock "$report/Cargo.lock"
-          jq -n --arg sha "$SHA" --arg lock "$LOCK" \
+          jq -n --arg sha "$SHA" --arg lock "$LOCK" --arg lfm "$LFM25_DSPARK_SHA" \
             '{schema_version:1,candidate_sha:$sha,lock_sha256:$lock,
+              lfm25_dspark_source_sha:$lfm,
               target:"sm_61",cuda:"12.9.2",gpu_executed:false,status:"CUDA_COMPILE_PASSED"}' \
             > "$report/report.json"
       - name: Preserve hosted CUDA proof
@@ -417,12 +466,14 @@ jobs:
         env:
           SHA: ${{ needs.prepare.outputs.candidate }}
           LOCK: ${{ needs.prepare.outputs.lock }}
+          LFM25_DSPARK_SHA: ${{ needs.prepare.outputs.lfm25_dspark }}
         run: |
           set -euo pipefail
           report="$RUNNER_TEMP/mistral-asd-gpu"
           mkdir -p "$report"
           test "$(git rev-parse HEAD)" = "$SHA"
           test "$(sha256sum Cargo.lock | cut -d' ' -f1)" = "$LOCK"
+          test "$(jq -r '.components.lfm25_dspark.source_sha' mistral-integration/sources.json)" = "$LFM25_DSPARK_SHA"
           nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader > "$report/gpu.txt"
           grep -Eq ',[[:space:]]*6\.1([[:space:]]|$)' "$report/gpu.txt"
           if test -x /opt/cuda129/bin/nvcc; then
@@ -434,14 +485,24 @@ jobs:
           cargo +stable --version
           rustc +stable --version
           export ALLOW_LEGACY=bf16,fp8 CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0
+          export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_PROFILE_TEST_OPT_LEVEL=0
           nvcc --version > "$report/nvcc.txt"
           cargo +stable test --locked -p mistralrs-core --no-default-features \
             --features cuda-legacy-bf16,cuda-legacy-fp8,cuda-legacy-fp4 \
             --test asd_sm61_smoke --test extended_sm61_runtime -- --nocapture > "$report/smoke.log" 2>&1 || {
               tail -n 100 "$report/smoke.log"; exit 1;
             }
-          jq -n --arg sha "$SHA" --arg lock "$LOCK" \
+          cargo +stable test --locked -p mistralrs-core --lib --no-default-features \
+            --features cuda-legacy-bf16,cuda-legacy-fp8,cuda-legacy-fp4 -- \
+            dspark speculative_shortconv_maps_every_token_to_its_lane multitoken_decode \
+            gathered_decode_counts_each_query_token_as_a_row flashinfer_speculative_rows_keep_gather_block_tables \
+            > "$report/lfm25-dspark-tests.log" 2>&1 || {
+              tail -n 100 "$report/lfm25-dspark-tests.log"; exit 1;
+            }
+          grep -Fq 'multitoken_decode_normalizes_rank_two_causal_mask ... ok' "$report/lfm25-dspark-tests.log"
+          jq -n --arg sha "$SHA" --arg lock "$LOCK" --arg lfm "$LFM25_DSPARK_SHA" \
             '{schema_version:1,candidate_sha:$sha,lock_sha256:$lock,
+              lfm25_dspark_source_sha:$lfm,lfm25_dspark_model_executed:false,
               target:"sm_61",gpu_executed:true,status:"GPU_PASSED"}' > "$report/report.json"
       - name: Preserve physical GPU proof
         if: always()
@@ -481,13 +542,15 @@ jobs:
           LOCK: ${{ needs.prepare.outputs.lock }}
           CANDLE_SHA: ${{ needs.prepare.outputs.candle }}
           CANDLE_VALIDATION_REF: ${{ needs.prepare.outputs.candle_validation_ref }}
+          LFM25_DSPARK_SHA: ${{ needs.prepare.outputs.lfm25_dspark }}
         run: |
           set -euo pipefail
           for gate in cpu cuda gpu; do
             report="$RUNNER_TEMP/asd-proof/mistral-asd-${gate}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/report.json"
             test -s "$report"
-            jq -e --arg sha "$SHA" --arg lock "$LOCK" --arg gate "$gate" \
+            jq -e --arg sha "$SHA" --arg lock "$LOCK" --arg gate "$gate" --arg lfm "$LFM25_DSPARK_SHA" \
               '.candidate_sha==$sha and .lock_sha256==$lock and
+              .lfm25_dspark_source_sha==$lfm and
               (( $gate=="cpu" and .status=="CPU_PASSED" ) or
                ( $gate=="cuda" and .status=="CUDA_COMPILE_PASSED" and .gpu_executed==false ) or
                ( $gate=="gpu" and .status=="GPU_PASSED" and .gpu_executed==true ))' \
@@ -498,13 +561,16 @@ jobs:
           test "$(jq -r '.candle_sha' mistral-integration/sources.json)" = "$CANDLE_SHA"
           test "$(jq -r '.candle_branch' mistral-integration/sources.json)" = "extended"
           test "$(jq -r '.candle_validation_ref' mistral-integration/sources.json)" = "$CANDLE_VALIDATION_REF"
+          test "$(jq -r '.components.lfm25_dspark.source_sha' mistral-integration/sources.json)" = "$LFM25_DSPARK_SHA"
 
           test "$(git ls-remote origin refs/heads/asd_runner | cut -f1)" = "$SEED"
+          test "$(git ls-remote origin refs/heads/lfm25_dspark_standalone | cut -f1)" = "$LFM25_DSPARK_SHA"
           remote="$(git ls-remote origin refs/heads/extended | cut -f1)"
           if test "$remote" != "$PREVIOUS_EXTENDED" && test "$remote" != "$SHA"; then
             echo "::error::extended moved after preparation; no promotion"; exit 3
           fi
           git merge-base --is-ancestor "$SEED" "$SHA"
+          git merge-base --is-ancestor "$LFM25_DSPARK_SHA" "$SHA"
           validated_ref="archive/extended/sm61-validated-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           current="$(git ls-remote origin "refs/heads/$validated_ref" | cut -f1)"
           if test -n "$current"; then
@@ -529,7 +595,7 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           if ! git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
             git tag -a "$tag" "$SHA" \
-              -m "Mistral.rs ASD CPU + hosted SM61 CUDA + physical Pascal proof, run ${GITHUB_RUN_ID} attempt ${GITHUB_RUN_ATTEMPT}; Candle extended $CANDLE_SHA"
+              -m "Mistral.rs Extended CPU + hosted SM61 CUDA + physical Pascal and LFM unit proof, run ${GITHUB_RUN_ID} attempt ${GITHUB_RUN_ATTEMPT}; Candle extended $CANDLE_SHA; LFM2.5 DSpark $LFM25_DSPARK_SHA"
             git push origin "refs/tags/$tag"
           fi
 
@@ -538,7 +604,7 @@ jobs:
             git push origin ":refs/heads/$TEMP_REF"
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "PROMOTED extended $SHA after CPU + hosted CUDA + physical SM61 proofs; Candle extended $CANDLE_SHA; validated archive $validated_ref; tag $tag" >> "$GITHUB_STEP_SUMMARY"
+          echo "PROMOTED extended $SHA after CPU + hosted CUDA + physical SM61 proofs; Candle extended $CANDLE_SHA; LFM2.5 DSpark $LFM25_DSPARK_SHA; validated archive $validated_ref; tag $tag" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish promoted SM61 binary release
         if: ${{ inputs.publish_binary }}
@@ -548,6 +614,7 @@ jobs:
           TAG: ${{ steps.promote.outputs.tag }}
           SHA: ${{ needs.prepare.outputs.candidate }}
           CANDLE_SHA: ${{ needs.prepare.outputs.candle }}
+          LFM25_DSPARK_SHA: ${{ needs.prepare.outputs.lfm25_dspark }}
         run: |
           set -euo pipefail
           pkg="$RUNNER_TEMP/asd-proof/mistral-asd-cuda-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/mistralrs-linux-x86_64-sm61.tar.gz"
@@ -556,6 +623,6 @@ jobs:
           test -s "$sum"
           gh release create "$TAG" "$pkg#Linux x86_64 SM61 binary" "$sum#SHA-256" \
             --verify-tag --prerelease \
-            --title "mistral.rs ASD SM61 ${SHA:0:12}" \
-            --notes "Promoted extended candidate $SHA, validated on CPU, hosted CUDA 12.9.2 SM61 compilation, and a physical Pascal SM61 GPU. Candle extended: $CANDLE_SHA. Features: cuda-legacy-bf16, cuda-legacy-fp8, cuda-legacy-fp4."
+            --title "mistral.rs Extended SM61 ${SHA:0:12}" \
+            --notes "Promoted extended candidate $SHA, validated on CPU, hosted CUDA 12.9.2 SM61 compilation, and a physical Pascal SM61 GPU. Candle extended: $CANDLE_SHA. LFM2.5 DSpark source: $LFM25_DSPARK_SHA; unit tests passed, full model inference remains a separate local check. Features: cuda-legacy-bf16, cuda-legacy-fp8, cuda-legacy-fp4."
 
