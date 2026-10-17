@@ -177,7 +177,7 @@ mod tests {
             return Ok(());
         };
         let archive = GgufArchive::open_file(gguf)?;
-        super::voxtral4::build_voxtral4_bindings(&archive)?;
+        crate::gguf::voxtral4::build_voxtral4_bindings(&archive)?;
         let native = std::fs::read_to_string(params)?;
         validate_native_voxtral4_config(&archive, &native)?;
         println!("VOXTRAL4_B3_NATIVE_CONFIG=PASS");
