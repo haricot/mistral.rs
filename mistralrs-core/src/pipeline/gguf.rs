@@ -586,17 +586,20 @@ impl GGUFLoader {
             }
             None => bail!("GGUF metadata is missing `general.architecture`"),
         };
-        // B0: never send multimodal speech weights to the text-only registry.
-        // The GGUF format needs a Tekken and audio streaming bridge before
-        // enabling the native Voxtral model for inference.
+        // B3-A: Voxtral4 GGUF is all-in-one multimodal, not normal GGUF.
+        // Reuse the native VoxtralLoader and GgufWeightSource.
         if crate::gguf::voxtral4::is_voxtral4_architecture(architecture) {
-            let bindings = crate::gguf::voxtral4::build_voxtral4_bindings(&archive)?;
-            bail!(
-                "Voxtral Realtime GGUF {architecture} has {} validated native tensor bindings, \
-                 but streaming audio and Tekken tokenization are not yet wired. \
-                 This standalone branch is an inventory milestone, not working inference.",
-                bindings.iter().count()
-            );
+            crate::gguf::voxtral4::build_voxtral4_bindings(&archive)?;
+            return self.load_native_multimodal(NativeMultimodalLoadArgs {
+                paths,
+                mmproj_paths: &[],
+                dtype,
+                device,
+                silent,
+                mapper,
+                in_situ_quant,
+                paged_attn_config,
+            });
         }
         if architecture.eq_ignore_ascii_case(crate::gguf::qwen4exp::ARCHITECTURE) {
             return self.load_native_qwen4exp(
@@ -942,6 +945,11 @@ impl GGUFLoader {
         }
 
         let (loader_type, bindings, rope_pairing) = match architecture.as_str() {
+            "voxtral4" | "voxtral4b" => (
+                MultimodalLoaderType::Voxtral,
+                crate::gguf::voxtral4::build_voxtral4_bindings(&archive)?,
+                RopePairing::Adjacent,
+            ),
             "gemma4" => (
                 MultimodalLoaderType::Gemma4,
                 build_gemma4_bindings(&archive)?,
@@ -975,6 +983,12 @@ impl GGUFLoader {
             &loader_type,
             &fs::read_to_string(paths.get_config_filename())?,
         )?;
+        if crate::gguf::voxtral4::is_voxtral4_architecture(&architecture) {
+            crate::gguf::voxtral4_config::validate_native_voxtral4_config(
+                &archive,
+                &config,
+            )?;
+        }
         let config = stamp_qk_rope_layout(&config, rope_pairing)?;
         if architecture == "gemma3" {
             ensure_gemma3_vision_config(&config)?;
@@ -986,7 +1000,11 @@ impl GGUFLoader {
             internal_dtype,
         )?);
         let weights = source.sharded_var_builder(Device::Cpu);
-        let tokenizer = self.resolve_tokenizer(paths, archive.metadata())?;
+        let tokenizer = if crate::gguf::voxtral4::is_voxtral4_architecture(&architecture) {
+            self.resolve_voxtral4_tokenizer(paths, &archive)?
+        } else {
+            self.resolve_tokenizer(paths, archive.metadata())?
+        };
         let generation_config = self.resolve_generation_config(paths, &tokenizer);
         let gguf_chat_template =
             if paths.get_template_filename().is_none() && self.chat_template.is_none() {
