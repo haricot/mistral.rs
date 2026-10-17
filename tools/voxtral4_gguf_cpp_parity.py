@@ -61,11 +61,8 @@ def packed_tekken_bytes(f32_blob):
 def create_sidecar(path, metadata, specials, f32_blob):
     if metadata.get("voxtral4b.llm.vocab_size") != 131072:
         raise ValueError("wrong embedding table size")
-    if len(specials) != metadata.get("tokenizer.tekken.n_specials") != 1000:
-        # Explicit assertion below avoids accepting a pairwise equality
-        # with an unsupported number of special tokens.
-        raise ValueError("special token count differs from GGUF metadata")
-    if len(specials) != 1000:
+    if (len(specials) != 1000
+            or metadata.get("tokenizer.tekken.n_specials") != 1000):
         raise ValueError("unexpected Voxtral4b special-token count")
     if metadata.get("tokenizer.tekken.n_vocab") != 150000:
         raise ValueError("unexpected serialized BPE rank count")
@@ -109,8 +106,7 @@ def check(model, header, report_path, repo_root):
     corpus = json.loads((repo_root / "tools/voxtral4_gguf_french_corpus.json").read_text(encoding="utf-8"))
     if not isinstance(corpus, list) or len(corpus) < 20 or any(not isinstance(s, str) for s in corpus):
         raise ValueError("invalid fixed French test corpus")
-    _, metadata, specials = read_assets(model)
-    resources, _, _ = read_assets(model)
+    resources, metadata, specials = read_assets(model)
     if not all(k in resources for k in ("tokenizer.tekken.vocab_tensor",)):
         raise ValueError("Tekken GGUF resource missing")
     reference = get_reference_header(header)
