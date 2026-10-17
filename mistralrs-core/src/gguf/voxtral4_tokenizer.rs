@@ -292,6 +292,62 @@ mod tests {
         assert!(Voxtral4Tekken::from_packed(&data, vec!["<unk>".into()], 257, 400).is_err());
     }
 
+    /// Optional real-model differential: C++ oracle linked to the verified
+    /// CrispASR header and the Rust GGUF tokenizer must agree ID by ID.
+    /// The Python driver sets all three environment variables, including the
+    /// explicitly fingerprinted 150000-rank Tekken sidecar.
+    #[test]
+    fn optional_crispasr_cpp_differential() -> Result<()> {
+        let Ok(model) = std::env::var("VOXTRAL4_GGUF_PATH") else {
+            return Ok(());
+        };
+        let Ok(oracle) = std::env::var("VOXTRAL4_CPP_ORACLE") else {
+            return Ok(());
+        };
+        let Ok(sidecar) = std::env::var("VOXTRAL4_CPP_SIDECAR") else {
+            return Ok(());
+        };
+        let archive = GgufArchive::open_file(model)?;
+        let tokenizer = Voxtral4Tekken::from_archive(&archive)?;
+        let corpus: Vec<String> = serde_json::from_str(include_str!(
+            "../../../tools/voxtral4_gguf_french_corpus.json"
+        ))?;
+        let mut command = std::process::Command::new(&oracle);
+        command.arg(&sidecar).arg("runtime");
+        for phrase in &corpus {
+            use std::fmt::Write;
+            let mut encoded = String::with_capacity(phrase.len() * 2);
+            for byte in phrase.as_bytes() {
+                write!(&mut encoded, "{byte:02x}")?;
+            }
+            command.arg(encoded);
+        }
+        let output = command.output().context("CrispASR oracle did not launch")?;
+        ensure!(
+            output.status.success(),
+            "CrispASR reference failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = std::str::from_utf8(&output.stdout)?;
+        let actual_lines = stdout.lines().collect::<Vec<_>>();
+        ensure!(
+            actual_lines.len() == corpus.len(),
+            "CrispASR oracle returned {} responses for {} phrases",
+            actual_lines.len(),
+            corpus.len()
+        );
+        for (index, (phrase, row)) in corpus.iter().zip(actual_lines).enumerate() {
+            let expected: Vec<u32> = serde_json::from_str(row)?;
+            let actual = tokenizer.encode_crispasr(phrase)?;
+            ensure!(
+                actual == expected,
+                "CrispASR Rust token mismatch at case {index} {phrase:?}: native={actual:?} reference={expected:?}"
+            );
+        }
+        println!("B2C2_CPP_RUST_RUNTIME_PARITY=PASS cases={}", corpus.len());
+        Ok(())
+    }
+
     #[test]
     fn optional_real_gguf_tok_ids() -> Result<()> {
         let Ok(path) = std::env::var("VOXTRAL4_GGUF_PATH") else {
