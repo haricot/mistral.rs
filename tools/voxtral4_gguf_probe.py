@@ -5,11 +5,14 @@ No additional Python dependencies, no mmap of tensor payload, no GPU.
 This is diagnostic data and is NOT a proof of correct transcription.
 """
 import argparse
+import hashlib
 import json
 import os
 import struct
 from collections import Counter
 from pathlib import Path
+
+from voxtral4_gguf_contract import validate_header_contract
 
 VALUE_TYPES = {
     0: ("B", 1), 1: ("b", 1), 2: ("H", 2), 3: ("h", 2),
@@ -99,6 +102,7 @@ def inspect(path):
             ):
                 metadata[key] = value
         tensor_names = set()
+        tensor_info = {}
         counts = Counter()
         examples = []
         representative = {
@@ -123,11 +127,19 @@ def inspect(path):
             if name in tensor_names:
                 raise ValueError(f"duplicate GGUF tensor {name}")
             tensor_names.add(name)
+            tensor_info[name] = (tuple(reversed(dims)), dtype)
             counts[str(dtype)] += 1
             if name in representative:
                 examples.append({"name": name, "shape": list(reversed(dims)), "ggml_type": dtype})
+        contract = validate_header_contract(metadata, tensor_info)
+        fingerprint = hashlib.sha256()
+        for name, (shape, dtype) in sorted(tensor_info.items()):
+            fingerprint.update(json.dumps([name, shape, dtype], separators=(",", ":")).encode("utf-8"))
+            fingerprint.update(b"\n")
         return {
             "status": "GGUF_HEADER_ONLY_NOT_RUNTIME_QUALIFIED",
+            "b1_contract": contract,
+            "tensor_inventory_sha256": fingerprint.hexdigest(),
             "file": Path(path).name,
             "size_bytes": reader.end,
             "gguf_version": version,
@@ -149,12 +161,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("gguf", help="Local GGUF file; only the header is read")
     parser.add_argument("--report", help="Write JSON report to this path")
+    parser.add_argument("--require-b1", action="store_true", help="Exit nonzero unless full header contract passes")
     args = parser.parse_args()
     result = inspect(args.gguf)
     encoded = json.dumps(result, indent=2, sort_keys=True, ensure_ascii=False)
     print(encoded)
     if args.report:
         Path(args.report).write_text(encoded + "\n", encoding="utf-8")
+    if args.require_b1 and result["b1_contract"]["status"] != "B1_HEADER_PASS_RUNTIME_NOT_QUALIFIED":
+        raise SystemExit(2)
 
 
 if __name__ == "__main__":
