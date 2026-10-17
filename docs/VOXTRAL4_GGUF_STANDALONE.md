@@ -144,3 +144,51 @@ Acceptance: B2C2_DEPLOYED_CRISPASR_PARITY_PASS_UNICODE_PARITY_NOT_ESTABLISHED.
 This is not full Mistral Tekken parity, and cannot promote GGUF audio
 inference or the Extended workflow. The later qualification must compare
 with official Mistral tokenization and actual Q4_K speech inference.
+
+
+## B3-A — native multimodal transport (2026-10-17)
+
+Implemented branch-local dispatch for general.architecture = voxtral4 or
+voxtral4b from the normal GGUF path into load_native_multimodal, with no
+extra --mmproj file required for this all-in-one converter.
+It reuses MultimodalLoaderType::Voxtral / VoxtralLoader and
+GgufWeightSource sharded_var_builder, with all 711 converter weight bindings.
+
+The native params.json and GGUF architecture metadata are compared
+dimension-by-dimension (audio, decoder, RoPE, adaptive normalization,
+projection and signal settings). No separate Voxtral inference engine
+exists in this branch.
+
+**Tokenizer safety gate:** the packed F32 GGUF Tekken BPE representation is
+not the generic tokenizer.ggml.tokens format. B3-A requires a native
+tokenizer.json from the original Voxtral checkpoint, matching all 1000
+GGUF special IDs, and at most 131072 addressable token IDs. This rejects
+an oversized unfiltered 150000-rank tokenizer rather than risking illegal
+GGUF embedding lookups. An embedded GGUF -> HuggingFace Tokenizers bridge
+that guarantees the active-rank cap is still needed if the original
+tokenizer does not meet this invariant.
+
+First run B3-A CPU native configuration preflight, using the real GGUF
+and original native model params.json:
+
+    VOXTRAL4_GGUF_PATH="$MODEL" \
+      VOXTRAL4_NATIVE_PARAMS="/path/to/original/params.json" \
+      cargo test --locked -p mistralrs-core --lib \
+      gguf::voxtral4_config -- --nocapture
+
+Experimental native VoxtralLoader direct weight load (NOT QUALIFIED):
+
+    ./target/release/mistralrs serve \
+      -m cstr/voxtral-mini-4b-realtime-GGUF \
+      -f voxtral-mini-4b-realtime-q4_k.gguf \
+      --tok-model-id mistralai/Voxtral-Mini-4B-Realtime-2602
+
+If params.json or the 1000 special-token contract is missing, the
+adapter fails closed with an explicit diagnostic. This command has NOT
+passed a real Q4_K forward or a French WAV test. Do not enable this
+branch in the Extended campaign until the B3 Q4_K/audio/rope parity
+and B4 physical Pascal SM61 qualification pass.
+
+The native Voxtral ISQ q4k command remains the validated *load*
+baseline (loading and server startup on the Pascal 8 GB GPU), not
+a demonstrated audio transcription quality baseline.
