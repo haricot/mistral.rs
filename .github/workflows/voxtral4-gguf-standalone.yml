@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: voxtral4-gguf-\${{ github.ref }}
+  group: voxtral4-gguf-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
