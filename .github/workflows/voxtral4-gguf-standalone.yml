@@ -10,7 +10,7 @@ permissions:
 
 concurrency:
   group: voxtral4-gguf-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   contract:
