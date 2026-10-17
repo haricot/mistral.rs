@@ -27,5 +27,7 @@ jobs:
         run: cargo +stable fmt --all -- --check
       - name: Test complete Voxtral4b header contract (synthetic CPU fixtures)
         run: python3 -B -m unittest discover -s tools -p 'test_voxtral4_gguf_contract.py' -v
+      - name: Test embedded Tekken GGUF asset decoder (CPU fixtures)
+        run: python3 -B -m unittest discover -s tools -p 'test_voxtral4_gguf_assets.py' -v
       - name: Test native Voxtral4 GGUF inventory
         run: cargo +stable test --locked -p mistralrs-core --lib gguf::voxtral4
