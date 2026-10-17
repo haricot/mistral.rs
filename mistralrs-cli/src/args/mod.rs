@@ -1105,7 +1105,8 @@ mod tests {
             "--input",
             "Hello",
         ])
-        .unwrap_err();
+        .err()
+        .expect("serve must reject --input");
         assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
