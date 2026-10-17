@@ -31,6 +31,23 @@ jobs:
         run: python3 -B -m unittest discover -s tools -p 'test_voxtral4_gguf_assets.py' -v
       - name: Test Tekken active/inert token-ID domain (CPU fixtures)
         run: python3 -B -m unittest discover -s tools -p 'test_voxtral4_gguf_token_ids.py' -v
+      - name: Compile pinned CrispASR C++ tokenizer oracle (model-free)
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          curl -fsSL --retry 3 \
+            "https://raw.githubusercontent.com/CrispStrobe/CrispASR/369029c91d90a61d8346b8bbdafe426bfdde76d1/src/voxtral_tekken_vocab.h" \
+            -o "$tmp/voxtral_tekken_vocab.h"
+          [[ "$(git hash-object "$tmp/voxtral_tekken_vocab.h")" == \
+            "66a3a97a74adf94b2b177e41552cd0130e90fd58" ]] || {
+              echo "::error::Pinned CrispASR tokenizer reference hash mismatch"
+              exit 2
+            }
+          g++ -std=c++17 -O2 -Wall -Wextra \
+            -I "$tmp" tools/voxtral4_gguf_cpp_oracle.cpp \
+            -o "$tmp/voxtral4_cpp_oracle"
+          test -x "$tmp/voxtral4_cpp_oracle"
       - name: Test native Voxtral4 GGUF inventory
         run: cargo +stable test --locked -p mistralrs-core --lib gguf::voxtral4
       - name: Test Rust GGUF Tekken BPE and CrispASR splitting
