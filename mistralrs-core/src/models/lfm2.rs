@@ -1,5 +1,7 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
+mod speculative;
+
 use std::{
     collections::HashMap,
     ops::Range,
@@ -633,6 +635,31 @@ fn packed_short_conv_ranges(
     packed_query_ranges(shape.physical_batch, shape.physical_tokens, query_lens)
 }
 
+fn speculative_checkpoint_slots(
+    active_slots: &[u32],
+    checkpoint_lanes: usize,
+    lane: usize,
+) -> Result<Vec<u32>> {
+    if checkpoint_lanes == 0 || lane >= checkpoint_lanes {
+        candle_core::bail!(
+            "LFM2 recurrent checkpoint lane {lane} is outside {checkpoint_lanes} lanes"
+        );
+    }
+    active_slots
+        .iter()
+        .map(|slot| {
+            let logical = *slot as usize / checkpoint_lanes;
+            let physical = logical
+                .checked_mul(checkpoint_lanes)
+                .and_then(|base| base.checked_add(lane))
+                .ok_or_else(|| {
+                    candle_core::Error::msg("LFM2 recurrent checkpoint slot overflow")
+                })?;
+            u32::try_from(physical).map_err(candle_core::Error::wrap)
+        })
+        .collect()
+}
+
 impl ShortConv {
     fn new(
         cfg: &Config,
@@ -764,6 +791,28 @@ impl ShortConv {
 
         let y = (c_proj * conv_out)?.transpose(1, 2)?.contiguous()?;
         self.out_proj.forward(&y)
+    }
+
+    fn forward_speculative(
+        &self,
+        x: &Tensor,
+        conv_state: &mut Tensor,
+    ) -> Result<(Tensor, Vec<Tensor>)> {
+        let (_, seq_len, hidden) = x.dims3()?;
+        let projected = self.in_proj.forward(x)?.transpose(1, 2)?;
+        let b_proj = projected.narrow(1, 0, hidden)?;
+        let c_proj = projected.narrow(1, hidden, hidden)?;
+        let x_proj = projected.narrow(1, 2 * hidden, hidden)?;
+        let bx = (b_proj * x_proj)?;
+        let mut outputs = Vec::with_capacity(seq_len);
+        let mut checkpoints = Vec::with_capacity(seq_len);
+        for position in 0..seq_len {
+            outputs.push(self.decode_conv(&bx.narrow(2, position, 1)?, conv_state)?);
+            checkpoints.push(conv_state.clone());
+        }
+        let conv_out = Tensor::cat(&outputs.iter().collect::<Vec<_>>(), 2)?;
+        let y = (c_proj * conv_out)?.transpose(1, 2)?.contiguous()?;
+        Ok((self.out_proj.forward(&y)?, checkpoints))
     }
 
     fn forward_packed_prefill(
@@ -951,6 +1000,23 @@ impl DecoderLayer {
         let ffn_out = self.feed_forward.forward(&self.ffn_norm.forward(&x)?)?;
         ffn_out + residual
     }
+
+    fn forward_conv_speculative(
+        &self,
+        x: &Tensor,
+        conv_state: &mut Tensor,
+    ) -> Result<(Tensor, Vec<Tensor>)> {
+        let LayerImpl::Conv(conv) = &self.layer_impl else {
+            candle_core::bail!("expected conv layer")
+        };
+        let residual = x;
+        let normalized = self.operator_norm.forward(x)?;
+        let (conv_out, checkpoints) = conv.forward_speculative(&normalized, conv_state)?;
+        let x = (conv_out + residual)?;
+        let residual = &x;
+        let ffn_out = self.feed_forward.forward(&self.ffn_norm.forward(&x)?)?;
+        Ok(((ffn_out + residual)?, checkpoints))
+    }
 }
 
 pub struct Model {
@@ -965,6 +1031,18 @@ pub struct Model {
     mapper: Box<dyn DeviceMapper + Send + Sync>,
     cfg: ModelConfigMetadata,
     max_seq_len: usize,
+    mtp_n_predict: std::sync::atomic::AtomicUsize,
+    draft_lm_head: Mutex<Option<Arc<dyn QuantMethod>>>,
+    dflash: Mutex<Option<Arc<crate::speculative::DFlashDraftModel>>>,
+    store_spec_hidden: std::sync::atomic::AtomicBool,
+    dflash_tap_layers: Mutex<Vec<usize>>,
+    last_spec_capture: Mutex<Option<SpecCapture>>,
+    last_full_capture: Mutex<Option<SpecCapture>>,
+}
+
+#[derive(Clone)]
+struct SpecCapture {
+    taps: Vec<Tensor>,
 }
 
 impl Model {
@@ -1143,6 +1221,13 @@ impl Model {
             },
             mapper,
             max_seq_len: cfg.max_position_embeddings,
+            mtp_n_predict: std::sync::atomic::AtomicUsize::new(0),
+            draft_lm_head: Mutex::new(None),
+            dflash: Mutex::new(None),
+            store_spec_hidden: std::sync::atomic::AtomicBool::new(false),
+            dflash_tap_layers: Mutex::new(Vec::new()),
+            last_spec_capture: Mutex::new(None),
+            last_full_capture: Mutex::new(None),
         })
     }
 
@@ -1229,6 +1314,16 @@ impl Model {
         };
         let mask = DeviceMappedMask::new(mask, &*self.mapper)?;
 
+        let store_spec = self
+            .store_spec_hidden
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let tap_layers = self
+            .dflash_tap_layers
+            .lock()
+            .expect("LFM2 DSpark taps poisoned")
+            .clone();
+        let mut taps_all = Vec::with_capacity(tap_layers.len());
+
         for (layer_idx, layer) in self.layers.iter().enumerate() {
             x = self.mapper.map(x, layer_idx)?;
             match &layer.layer_impl {
@@ -1259,6 +1354,7 @@ impl Model {
                                 "Hybrid cache layer {layer_idx} is missing recurrent state indices"
                             ))
                         })?;
+                    let checkpoint_lanes = hybrid_cache.checkpoint_lanes();
                     let Some(HybridLayerCache::Recurrent(pool)) = hybrid_cache.get_mut(layer_idx)
                     else {
                         candle_core::bail!(
@@ -1269,25 +1365,76 @@ impl Model {
                     let use_existing_state = recurrent_metadata.batch_kind()
                         == RecurrentBatchKind::Decode
                         || !ctx.is_first_prompt_chunk();
-                    x = layer.forward_conv(
-                        &x,
-                        &mut conv_state,
-                        recurrent_metadata.batch_kind(),
-                        use_existing_state,
-                        packed_query_lens.as_deref(),
-                    )?;
-                    pool.scatter_conv_state_with_host_indices(
-                        &indices,
-                        recurrent_metadata.state_indices_host(),
-                        &conv_state,
-                    )?;
+                    let speculative = recurrent_metadata.batch_kind()
+                        == RecurrentBatchKind::SpeculativeDecode
+                        && checkpoint_lanes > 1;
+                    if speculative {
+                        let query_len = x.dim(1)?;
+                        if query_len > checkpoint_lanes {
+                            candle_core::bail!(
+                                "LFM2 speculative query length {query_len} exceeds {checkpoint_lanes} checkpoint lanes"
+                            );
+                        }
+                        let host_indices =
+                            recurrent_metadata.state_indices_host().ok_or_else(|| {
+                                candle_core::Error::msg(
+                                    "LFM2 speculative ShortConv requires host state indices",
+                                )
+                            })?;
+                        let (next_x, checkpoints) =
+                            layer.forward_conv_speculative(&x, &mut conv_state)?;
+                        for (lane, checkpoint) in checkpoints.iter().enumerate() {
+                            let physical =
+                                speculative_checkpoint_slots(host_indices, checkpoint_lanes, lane)?;
+                            pool.scatter_conv_state_for_indices(&physical, checkpoint)?;
+                        }
+                        x = next_x;
+                    } else {
+                        x = layer.forward_conv(
+                            &x,
+                            &mut conv_state,
+                            recurrent_metadata.batch_kind(),
+                            use_existing_state,
+                            packed_query_lens.as_deref(),
+                        )?;
+                        pool.scatter_conv_state_with_host_indices(
+                            &indices,
+                            recurrent_metadata.state_indices_host(),
+                            &conv_state,
+                        )?;
+                    }
                 }
+            }
+            if store_spec && tap_layers.contains(&layer_idx) {
+                taps_all.push(x.to_device(&self.device)?);
             }
         }
 
         let x = x.to_device(&self.device)?;
         let x = self.embedding_norm.forward(&x)?;
+        if store_spec {
+            let full_capture = recurrent_metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.batch_kind() == RecurrentBatchKind::Prefill)
+                .then(|| SpecCapture {
+                    taps: taps_all.clone(),
+                });
+            *self
+                .last_full_capture
+                .lock()
+                .expect("LFM2 full DSpark capture poisoned") = full_capture;
+        }
         let x = ctx.logits(&x)?;
+        if store_spec {
+            let taps = taps_all
+                .iter()
+                .map(|tap| ctx.logits(tap))
+                .collect::<Result<Vec<_>>>()?;
+            *self
+                .last_spec_capture
+                .lock()
+                .expect("LFM2 DSpark capture poisoned") = Some(SpecCapture { taps });
+        }
         self.lm_head.forward(&x)
     }
 
@@ -1380,8 +1527,6 @@ impl IsqModel for Model {
     }
 }
 
-impl crate::speculative::SpeculativeTargetMixin for Model {}
-
 impl NormalModel for Model {
     fn forward(&self, input_ids: &Tensor, ctx: &mut ModelForwardContext<'_>) -> Result<Tensor> {
         self.forward(input_ids, ctx)
@@ -1432,7 +1577,7 @@ impl AnyMoeBaseModelMixin for Model {}
 
 #[cfg(test)]
 mod tests {
-    use super::{packed_short_conv_ranges, PackedShortConvShape};
+    use super::{packed_short_conv_ranges, speculative_checkpoint_slots, PackedShortConvShape};
 
     fn shape() -> PackedShortConvShape {
         PackedShortConvShape {
@@ -1479,5 +1624,19 @@ mod tests {
         let mut wrong_cache_len = shape();
         wrong_cache_len.state_cache_len = 2;
         assert!(packed_short_conv_ranges(wrong_cache_len, &[2, 1, 4]).is_err());
+    }
+
+    #[test]
+    fn speculative_shortconv_maps_every_token_to_its_lane() {
+        assert_eq!(
+            speculative_checkpoint_slots(&[11, 19], 8, 0).unwrap(),
+            vec![8, 16]
+        );
+        assert_eq!(
+            speculative_checkpoint_slots(&[11, 19], 8, 6).unwrap(),
+            vec![14, 22]
+        );
+        assert!(speculative_checkpoint_slots(&[11], 8, 8).is_err());
+        assert!(speculative_checkpoint_slots(&[11], 0, 0).is_err());
     }
 }
