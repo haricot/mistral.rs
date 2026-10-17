@@ -33,3 +33,5 @@ jobs:
         run: python3 -B -m unittest discover -s tools -p 'test_voxtral4_gguf_token_ids.py' -v
       - name: Test native Voxtral4 GGUF inventory
         run: cargo +stable test --locked -p mistralrs-core --lib gguf::voxtral4
+      - name: Test Rust GGUF Tekken BPE and CrispASR splitting
+        run: cargo +stable test --locked -p mistralrs-core --lib gguf::voxtral4_tokenizer
