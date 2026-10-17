@@ -2422,8 +2422,9 @@ mod tests {
 
     #[test]
     fn multitoken_decode_rejects_ambiguous_rank_two_batch_mask() -> Result<()> {
-        let mask = Tensor::zeros((9, 1275), DType::F32, &Device::Cpu).unwrap();
+        let mask = Tensor::zeros((9, 1275), DType::F32, &Device::Cpu)?;
         assert!(normalize_multitoken_decode_mask(&mask, 2, 32, 9, 1275).is_err());
+        Ok(())
     }
 
     #[cfg(all(feature = "cuda", target_family = "unix"))]
