@@ -132,10 +132,25 @@ pub(crate) fn validate_native_voxtral4_config(
         integer(archive, &format!("{dec}.ada_norm_dim"))?,
         "llm.ada_norm_dim",
     )?;
-    require_real(cfg.rope_theta, real(archive, &format!("{dec}.rope_theta"))?, "llm.rope_theta")?;
-    require_real(enc.rope_theta, real(archive, &format!("{audio}.rope_theta"))?, "audio.rope_theta")?;
-    require_real(cfg.norm_eps, real(archive, &format!("{dec}.rms_norm_eps"))?, "llm.rms_norm_eps")?;
-    ensure!(cfg.tied_embeddings, "Voxtral4 GGUF requires tied embeddings");
+    require_real(
+        cfg.rope_theta,
+        real(archive, &format!("{dec}.rope_theta"))?,
+        "llm.rope_theta",
+    )?;
+    require_real(
+        enc.rope_theta,
+        real(archive, &format!("{audio}.rope_theta"))?,
+        "audio.rope_theta",
+    )?;
+    require_real(
+        cfg.norm_eps,
+        real(archive, &format!("{dec}.rms_norm_eps"))?,
+        "llm.rms_norm_eps",
+    )?;
+    ensure!(
+        cfg.tied_embeddings,
+        "Voxtral4 GGUF requires tied embeddings"
+    );
     ensure!(
         cfg.ada_rms_norm_t_cond,
         "Voxtral4 GGUF decoder requires adaptive RMS normalization"
@@ -171,7 +186,9 @@ mod tests {
 
     #[test]
     fn native_dimension_conflict_is_rejected() {
-        let err = require_dimension(3072, 1280, "audio.d_model").unwrap_err().to_string();
+        let err = require_dimension(3072, 1280, "audio.d_model")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("audio.d_model"));
     }
 
