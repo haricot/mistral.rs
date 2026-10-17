@@ -29,7 +29,10 @@ pub(crate) fn build_voxtral4_bindings(archive: &GgufArchive) -> Result<GgufBindi
         Some(Value::String(name)) => name.as_str(),
         _ => bail!("Voxtral GGUF requires string general.architecture"),
     };
-    ensure!(is_voxtral4_architecture(arch), "unexpected architecture {arch}");
+    ensure!(
+        is_voxtral4_architecture(arch),
+        "unexpected architecture {arch}"
+    );
     // Preserve the independently versioned architecture and metadata namespace.
     let ns = if archive.metadata_value("voxtral4b.llm.n_layers").is_some() {
         "voxtral4b"
@@ -40,7 +43,11 @@ pub(crate) fn build_voxtral4_bindings(archive: &GgufArchive) -> Result<GgufBindi
     };
     let audio = required_count(archive, ns, "audio")?;
     let text = required_count(archive, ns, "llm")?;
-    let names = archive.tensors().keys().map(String::as_str).collect::<HashSet<_>>();
+    let names = archive
+        .tensors()
+        .keys()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
     build_from_inventory(&names, audio, text)
 }
 
@@ -72,13 +79,34 @@ fn build_from_inventory(
     for (native, gguf) in [
         (format!("{root}.tok_embeddings.weight"), "token_embd.weight"),
         ("norm.weight".to_string(), "output_norm.weight"),
-        (format!("{enc}.conv_layers.0.conv.weight"), "audio.conv.1.weight"),
-        (format!("{enc}.conv_layers.0.conv.bias"), "audio.conv.1.bias"),
-        (format!("{enc}.conv_layers.1.conv.weight"), "audio.conv.2.weight"),
-        (format!("{enc}.conv_layers.1.conv.bias"), "audio.conv.2.bias"),
-        (format!("{enc}.transformer.norm.weight"), "audio.ln_post.weight"),
-        (format!("{root}.audio_language_projection.0.weight"), "proj1.weight"),
-        (format!("{root}.audio_language_projection.2.weight"), "proj2.weight"),
+        (
+            format!("{enc}.conv_layers.0.conv.weight"),
+            "audio.conv.1.weight",
+        ),
+        (
+            format!("{enc}.conv_layers.0.conv.bias"),
+            "audio.conv.1.bias",
+        ),
+        (
+            format!("{enc}.conv_layers.1.conv.weight"),
+            "audio.conv.2.weight",
+        ),
+        (
+            format!("{enc}.conv_layers.1.conv.bias"),
+            "audio.conv.2.bias",
+        ),
+        (
+            format!("{enc}.transformer.norm.weight"),
+            "audio.ln_post.weight",
+        ),
+        (
+            format!("{root}.audio_language_projection.0.weight"),
+            "proj1.weight",
+        ),
+        (
+            format!("{root}.audio_language_projection.2.weight"),
+            "proj2.weight",
+        ),
     ] {
         insert(native, gguf.to_string())?;
     }
@@ -144,7 +172,9 @@ mod tests {
     #[test]
     fn incomplete_audio_inventory_is_not_silently_accepted() {
         let names = HashSet::from(["token_embd.weight", "output_norm.weight"]);
-        let error = build_from_inventory(&names, 32, 26).unwrap_err().to_string();
+        let error = build_from_inventory(&names, 32, 26)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("audio.conv.1.weight"), "{error}");
     }
 
