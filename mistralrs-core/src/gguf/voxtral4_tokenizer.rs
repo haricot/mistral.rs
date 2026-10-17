@@ -29,7 +29,10 @@ impl Voxtral4Tekken {
                 .collect::<Result<Vec<_>>>()?,
             _ => bail!("Voxtral GGUF lacks tokenizer.tekken.specials"),
         };
-        ensure!(specials.len() == count(archive, "tokenizer.tekken.n_specials")?, "Tekken special count mismatch");
+        ensure!(
+            specials.len() == count(archive, "tokenizer.tekken.n_specials")?,
+            "Tekken special count mismatch"
+        );
         let vocab = count(archive, "tokenizer.tekken.n_vocab")?;
         let rows = count(archive, "voxtral4b.llm.vocab_size")?;
         ensure!(rows == 131_072, "unqualified Voxtral4b embedding count");
@@ -39,9 +42,15 @@ impl Voxtral4Tekken {
             "Tekken audio token must be [AUDIO] at its declared ID"
         );
         let tensor = archive.tensor_data("tokenizer.tekken.vocab_tensor")?;
-        ensure!(tensor.info().dtype().raw() == 0, "Tekken byte payload must be F32");
+        ensure!(
+            tensor.info().dtype().raw() == 0,
+            "Tekken byte payload must be F32"
+        );
         let data = tensor.bytes();
-        ensure!(data.len() % 4 == 0 && data.len() <= 8_000_000, "invalid Tekken F32 payload length");
+        ensure!(
+            data.len() % 4 == 0 && data.len() <= 8_000_000,
+            "invalid Tekken F32 payload length"
+        );
         let mut bytes = Vec::with_capacity(data.len() / 4);
         for four in data.chunks_exact(4) {
             let value = f32::from_le_bytes(four.try_into().expect("fixed four-byte chunks"));
@@ -55,16 +64,22 @@ impl Voxtral4Tekken {
     }
 
     pub(crate) fn from_packed(
-        packed: &[u8], specials: Vec<String>, serialized: usize, embedding_rows: usize,
+        packed: &[u8],
+        specials: Vec<String>,
+        serialized: usize,
+        embedding_rows: usize,
     ) -> Result<Self> {
         ensure!(
-            !specials.is_empty() && specials.len() < embedding_rows &&
-            (1..=200_000).contains(&serialized),
+            !specials.is_empty()
+                && specials.len() < embedding_rows
+                && (1..=200_000).contains(&serialized),
             "invalid Tekken rank/special/embedding counts"
         );
         let mut specials_seen = HashSet::new();
         ensure!(
-            specials.iter().all(|s| !s.is_empty() && specials_seen.insert(s)),
+            specials
+                .iter()
+                .all(|s| !s.is_empty() && specials_seen.insert(s)),
             "duplicate or empty Tekken special token"
         );
         let active = serialized.min(embedding_rows - specials.len());
@@ -79,18 +94,29 @@ impl Voxtral4Tekken {
             ensure!(end <= packed.len(), "truncated Tekken BPE token bytes");
             if rank < active {
                 ensure!(
-                    ranks.insert(packed[pos..end].to_vec(), rank as u32).is_none(),
+                    ranks
+                        .insert(packed[pos..end].to_vec(), rank as u32)
+                        .is_none(),
                     "duplicate active Tekken BPE token"
                 );
             }
             pos = end;
         }
-        ensure!(pos == packed.len(), "trailing bytes in Tekken BPE vocabulary");
+        ensure!(
+            pos == packed.len(),
+            "trailing bytes in Tekken BPE vocabulary"
+        );
         ensure!(
             (0u8..=255).all(|b| ranks.contains_key(&[b][..])),
             "Tekken active vocabulary does not cover all 256 single bytes"
         );
-        Ok(Self { specials, ranks, active, inactive, embedding_rows })
+        Ok(Self {
+            specials,
+            ranks,
+            active,
+            inactive,
+            embedding_rows,
+        })
     }
 
     pub(crate) fn counts(&self) -> (usize, usize) {
@@ -102,16 +128,22 @@ impl Voxtral4Tekken {
         let mut ids = Vec::new();
         let mut pos = 0;
         while pos < text.len() {
-            if let Some((id, special)) = self.specials.iter().enumerate().find(
-                |(_, special)| text[pos..].starts_with(special.as_str())
-            ) {
+            if let Some((id, special)) = self
+                .specials
+                .iter()
+                .enumerate()
+                .find(|(_, special)| text[pos..].starts_with(special.as_str()))
+            {
                 ids.push(id as u32);
                 pos += special.len();
                 continue;
             }
-            let next = self.specials.iter()
+            let next = self
+                .specials
+                .iter()
                 .filter_map(|special| text[pos..].find(special).map(|i| pos + i))
-                .min().unwrap_or(text.len());
+                .min()
+                .unwrap_or(text.len());
             ensure!(next > pos, "Tekken special scanner made no progress");
             for part in crispasr4b_split(&text[pos..next]) {
                 self.merge_ranked(part.as_bytes(), &mut ids);
@@ -140,13 +172,18 @@ impl Voxtral4Tekken {
                     }
                 }
             }
-            let Some((index, _)) = best else { break; };
+            let Some((index, _)) = best else {
+                break;
+            };
             pieces[index].1 += pieces[index + 1].1;
             pieces.remove(index + 1);
         }
         for (start, len) in pieces {
-            ids.push(self.ranks.get(&bytes[start..start + len])
-                .map_or(0, |rank| *rank + self.specials.len() as u32));
+            ids.push(
+                self.ranks
+                    .get(&bytes[start..start + len])
+                    .map_or(0, |rank| *rank + self.specials.len() as u32),
+            );
         }
     }
 }
@@ -180,10 +217,14 @@ fn crispasr4b_split(input: &str) -> Vec<&str> {
             }
         } else if first >= 0x80 {
             i += 1;
-            while i < bytes.len() && (bytes[i] & 0xc0) == 0x80 { i += 1; }
+            while i < bytes.len() && (bytes[i] & 0xc0) == 0x80 {
+                i += 1;
+            }
             while i < bytes.len() && bytes[i] >= 0x80 {
                 i += 1;
-                while i < bytes.len() && (bytes[i] & 0xc0) == 0x80 { i += 1; }
+                while i < bytes.len() && (bytes[i] & 0xc0) == 0x80 {
+                    i += 1;
+                }
             }
         } else {
             i += 1;
@@ -200,7 +241,16 @@ mod tests {
     fn fixture() -> Voxtral4Tekken {
         let specials = vec!["<unk>".to_string(), "[AUDIO]".to_string()];
         let mut tokens = (0u8..=255).map(|b| vec![b]).collect::<Vec<_>>();
-        tokens.extend([b"Hi".to_vec(), b"Bo".to_vec(), b"Bon".to_vec(), b"jo".to_vec(), b"jou".to_vec(), b"jour".to_vec(), b"Bonjour".to_vec(), b"inert".to_vec()]);
+        tokens.extend([
+            b"Hi".to_vec(),
+            b"Bo".to_vec(),
+            b"Bon".to_vec(),
+            b"jo".to_vec(),
+            b"jou".to_vec(),
+            b"jour".to_vec(),
+            b"Bonjour".to_vec(),
+            b"inert".to_vec(),
+        ]);
         let mut packed = Vec::new();
         for token in &tokens {
             packed.extend_from_slice(&(token.len() as u16).to_le_bytes());
@@ -213,7 +263,10 @@ mod tests {
     fn crispasr_utf8_pretoken_splits() {
         assert_eq!(
             crispasr4b_split("Bonjour à l'école!  42\n[AUDIO]"),
-            ["Bonjour", " ", "à", " ", "l", "'", "é", "cole", "!", "  ", "42", "\n", "[", "AUDIO", "]"]
+            [
+                "Bonjour", " ", "à", " ", "l", "'", "é", "cole", "!", "  ", "42", "\n", "[",
+                "AUDIO", "]"
+            ]
         );
         assert_eq!(crispasr4b_split("texte—café"), ["texte", "—", "caf", "é"]);
     }
@@ -241,7 +294,9 @@ mod tests {
 
     #[test]
     fn optional_real_gguf_tok_ids() -> Result<()> {
-        let Ok(path) = std::env::var("VOXTRAL4_GGUF_PATH") else { return Ok(()); };
+        let Ok(path) = std::env::var("VOXTRAL4_GGUF_PATH") else {
+            return Ok(());
+        };
         let archive = GgufArchive::open_file(path)?;
         let tok = Voxtral4Tekken::from_archive(&archive)?;
         assert_eq!(tok.counts(), (130_072, 19_928));
