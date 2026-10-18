@@ -79,10 +79,35 @@ This follows NVIDIA's [CUDA 12.9 detach guidance](https://docs.nvidia.com/cupti/
 so teardown is serialized with other CUDA threads. Successful finalization
 invalidates the subscriber; Drop never unsubscribes or reinitializes CUPTI
 after it. Cleanup is attempted once even when flushing or JSON writing fails.
-The missing explicit detach is a code defect; a fresh hardware run must still
-confirm whether this change resolves the observed SIGSEGV.
+The missing explicit detach is a code defect. The successful follow-up below
+confirms normal termination in the tested workload; it does not establish the
+original crash's stack trace.
 
 `python3 mistral-integration/cupti-check/test_lifecycle.py` runs the actual Rust
 module with synthetic CUDA/CUPTI shared libraries. It checks finish, Drop,
 sync/flush/write/finalize errors and a missing exit callback, including ordering and
 absence of duplicate cleanup. This is CPU FFI validation, not a GPU test.
+
+## Successful CUDA 12.9/sm_61 capture
+
+The follow-up `d7-T123-20261018T193823.655236Z.zip` confirms that tested code
+pin `642ff4198383c6a9647770f359f7fb07e0360275` completes native collection
+and exits normally for the bounded LFM2.5-2.6B F16 bench workload. Archive SHA-256:
+`ac1e66053dcb1a29bfcd50c1b302492997992579da0960fadbd6016b71bab9d5`.
+Both inventories verify, and replaying raw T1/CUPTI data reproduces the stored
+reports exactly.
+
+T1 records 17,680 events on its first attempt with zero drops/open scopes.
+Native T2 records 73,158 activities, including 9,877 kernels, with zero drops,
+zero incomplete/invalid timestamps, successful CUDA synchronization, flush and
+finalization, and process exit 0. The preceding SIGSEGV and zero timestamps are
+absent in this corrected run. These results validate this tested diagnostic
+scope; they do not establish universal stability or a performance gain.
+
+T3 observes 330 F16 stateful ShortConv decode calls with contiguous x
+`[1,2048,1]`, state `[1,2048,3]` and weights `[2048,1,3]`, K=3 and zero
+offsets. The separate 48-case reference pass is hash-verified reused evidence.
+ASD candidate submissions remain zero because the stateful F16 ABI is not yet
+implemented. Exact semantic-to-kernel attribution and untraced engine A/B
+qualification remain separate work. The native collector is now hardware
+validated for this scope; Nsight is optional.
