@@ -725,7 +725,7 @@ impl ShortConv {
         #[cfg(feature = "d7-trace")]
         let _d7 = candle_core::diagnostics::scope("lfm.shortconv.decode", || {
             candle_core::diagnostics::Payload::new()
-                .text("operation", "causal_depthwise_conv1d_step")
+                .text("operation", "lfm.shortconv.decode")
                 .object("input", candle_core::diagnostics::tensor(bx))
                 .object("state", candle_core::diagnostics::tensor(conv_state))
                 .object(
@@ -733,23 +733,16 @@ impl ShortConv {
                     candle_core::diagnostics::tensor(self.conv.weight()),
                 )
                 .number("kernel", self.l_cache as u64)
-                .text("implementation", "existing_tensor_reference")
-        });
-        #[cfg(feature = "d7-trace")]
-        candle_core::diagnostics::event("asd.decision", || {
-            candle_core::diagnostics::Payload::new()
-                .boolean("selected", false)
-                .text("reason", "stateful_abi_not_implemented")
+                .text("implementation", "stateful_operator_dispatch")
         });
         let new_col = bx.narrow(2, bx.dim(2)? - 1, 1)?;
-        *conv_state = if self.l_cache > 1 {
-            let kept = conv_state.narrow(2, 1, self.l_cache - 1)?;
-            Tensor::cat(&[kept, new_col], 2)?
-        } else {
-            new_col
-        };
-        let weight = self.conv.weight().squeeze(1)?.unsqueeze(0)?;
-        let mut conv_out = (conv_state.clone() * weight)?.sum(D::Minus1)?;
+        let (conv_out, next_state) = candle_core::stateful::causal_depthwise_conv1d_step(
+            &new_col,
+            conv_state,
+            self.conv.weight(),
+        )?;
+        *conv_state = next_state;
+        let mut conv_out = conv_out.squeeze(2)?;
         if let Some(bias) = self.conv.bias() {
             conv_out = conv_out.broadcast_add(&bias.reshape((1, bias.dim(0)?))?)?;
         }

@@ -111,3 +111,40 @@ ASD candidate submissions remain zero because the stateful F16 ABI is not yet
 implemented. Exact semantic-to-kernel attribution and untraced engine A/B
 qualification remain separate work. The native collector is now hardware
 validated for this scope; Nsight is optional.
+
+## Stateful F16 ShortConv ABI candidate
+
+The new Candle candidate pin is
+`84a0b24c030d3af912dcab9a3939f8b0de1dbd32` on `d7-stateful-f16`
+([Candle #28](https://github.com/haricot/candle/pull/28)). It adds the external
+`asd.xswyn.f16.k3.v1` ABI: read-only x/state/weight, fresh output and next-state
+buffers, and batch/channel scalars. F16 products are rounded before the same
+F32 reduction used by the tensor reference. Bias and the other LFM operations
+retain their existing arithmetic.
+
+`decode_conv` now delegates to Candle's stateful dispatcher. Its LFM scope
+describes model context; the nested stateful scope owns the generic operation
+signature and actual selection/submission events, avoiding duplicate counting
+of a single decode operation. Without an eligible explicit profile it keeps
+the reference path, including autograd and unsupported layouts/kernels/dtypes.
+
+A `candidate` profile requires `CANDLE_ASD_ALLOW_STATEFUL_CANDIDATE=1`, scoped
+to this stateful F16 raw-CUDA operation. The tuner stages it under the new
+report, preserves the production ASD store, and verifies the external artifact
+hash and decision identity. It never labels the candidate as promoted.
+
+The CUDA + `d7-trace` CLI command
+`mistralrs d7-shortconv-f16-validate --out DIRECTORY` calls Candle's shared
+validator using this same compiled engine. It checks bit-exact same-device
+output/state parity over 768 steps and 48 forks, immutable retained states,
+10 layout/autograd fallbacks, and 408 actual traced candidate submissions.
+The report binds the fresh validation nonce and verified artifact SHA-256.
+The coordinated `--stateful-f16` launcher runs it before real-model capture,
+then requires both semantic submissions and the candidate kernel in native
+CUPTI. It reuses the Cargo target and emits the new engine at a separate path.
+
+The hardware-validated collector code pin remains
+`642ff4198383c6a9647770f359f7fb07e0360275`. Its successful diagnostic evidence
+does not validate this new Candle/kernel/dispatch candidate. Fresh physical
+parity and real-engine evidence are required, followed by separate untraced
+A/B gain qualification. No optimized candidate performance is claimed yet.

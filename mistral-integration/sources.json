@@ -3,8 +3,8 @@
   "base_master_sha": "20f607a77abd4738aa5594ee93a393a9fd284605",
   "sm61_source_sha": "d3813494903e5cfca01e12df596f3fe14a5d22ba",
   "candle_repository": "haricot/candle",
-  "candle_branch": "d7-trace-extended",
-  "candle_sha": "a33fcc375cd4d26bd6a3d1aae7174b593345e975",
+  "candle_branch": "d7-stateful-f16",
+  "candle_sha": "84a0b24c030d3af912dcab9a3939f8b0de1dbd32",
   "features": [
     "cuda-legacy-bf16",
     "cuda-legacy-fp8",
@@ -20,5 +20,8 @@
   "d7_core_source_sha": "443e9b11b3854251774a3b09f5b755cd5c09b7a2",
   "d7_status": "DIAGNOSTIC_CANDIDATE_NOT_GPU_QUALIFIED",
   "historical_candle_validation_ref": "refs/heads/archive/extended/sm61-validated-38064926957-1",
-  "historical_candle_sha": "66c4651cc83f9a43e79a4aa09302aac9bc763d2c"
+  "historical_candle_sha": "66c4651cc83f9a43e79a4aa09302aac9bc763d2c",
+  "d7_stateful_abi": "asd.xswyn.f16.k3.v1",
+  "d7_stateful_status": "UNQUALIFIED_CANDIDATE_REQUIRES_GPU_PARITY_AND_GAIN",
+  "d7_native_collector_validated_sha": "642ff4198383c6a9647770f359f7fb07e0360275"
 }

@@ -41,6 +41,11 @@ async fn main() -> Result<()> {
     let _diagnostic_capture = diagnostic_capture::DiagnosticCapture::from_env()?;
 
     match cli.command {
+        #[cfg(all(feature = "cuda", feature = "d7-trace"))]
+        Command::D7ShortconvF16Validate { out } => {
+            candle_core::stateful::validate_f16_candidate(&out)
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        }
         Command::Serve {
             model_type,
             default_model,
