@@ -26,6 +26,7 @@ mistralrs = { workspace = true }
 mistralrs-sandbox = { workspace = true }
 mistralrs-quant = { workspace = true }
 candle-core = { workspace = true }
+cudarc = { version = "=0.19.10", default-features = false, features = ["cupti"], optional = true }
 
 clap = { workspace = true }
 clap_complete = "4.5"
@@ -57,6 +58,7 @@ crossterm = "0.28"
 fuzzy-matcher = "0.3"
 
 [features]
+flow-tuner-cupti = ["cuda", "dep:cudarc"]
 d7-trace = ["candle-core/d7-trace", "mistralrs-core/d7-trace"]
 default = ["code-execution"]
 cuda = ["mistralrs-core/cuda", "mistralrs-server-core/cuda"]

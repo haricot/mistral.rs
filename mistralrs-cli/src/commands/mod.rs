@@ -1,6 +1,8 @@
 //! Command implementations for mistralrs-cli
 
 mod bench;
+#[cfg(all(feature = "cuda", feature = "flow-tuner-cupti"))]
+mod flow_tuner_cupti;
 mod cache;
 mod config;
 mod doctor;

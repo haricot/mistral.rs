@@ -25,3 +25,39 @@ The coordinated launcher/reader and hardware commands are in
 [Flow-Adaptive-Tuner D7_TRACE.md](https://github.com/haricot/flow-adaptive-tuner/blob/d7-engine-objective-abcd/docs/D7_TRACE.md).
 Detailed capture is diagnostic only. D7 timing rejects its variables/injected
 collectors. A trace does not qualify a gain or establish GPU optimality.
+
+
+## Native CUPTI collector recovery
+
+`flow-tuner-cupti` reuses the in-process Rust collector recovered from
+`flow-adaptive-tuner_v0.3.19-r2d_fresh-post-c3-residual.zip`
+(SHA-256 `26a7127789bca33866d0cc030c4e465d599545555223b52ebc0a339cbfa1c8a1`).
+The historical source used cudarc 0.19.8. This branch uses the existing Candle
+lockfile's cudarc 0.19.10 with its `cupti` feature and dynamic linking; Candle
+and its CUDA kernels are not downgraded. The recovered module typechecks with
+that version. Historical hardware success does not qualify this new integration.
+
+Build the CLI with its existing CUDA features plus `d7-trace flow-tuner-cupti`.
+Set `CUDA_PATH`, `CUDA_HOME` and `CUDA_ROOT` to the CUDA 12.9 installation and
+put its CUPTI 12 library directory first in `LD_LIBRARY_PATH`.
+`FLOW_TUNER_CUPTI_OUT` enables collection; when absent, the module returns
+without initializing CUPTI. `FLOW_TUNER_CUPTI_MODE=runtime-driver-diagnostic`
+collects kernel/copy/memset and runtime/driver activities.
+
+The benchmark starts collection after model loading and benchmark warmups,
+and calls `finish()` before returning its results. JSON keeps the existing
+`mistralrs.flow-tuner-cupti.v2` schema and adds the D7 nonce/run ID plus a flush
+completion flag. A support query rejects an incompatible sm_61 collector.
+
+The coordinated tuner command `tools/d7-t123-local.py --resume <report-dir>
+--native-cupti --cuda-root /opt/cuda129` prepares this feature. Its first native
+run builds the engine integration, reuses the verified Candle reference cases
+and existing Cargo target, and emits the new executable at a separate path.
+Nsight and NVTX are not required. The GPU capture covers the bench region;
+T1 remains a separate semantic capture. No exact semantic-to-kernel attribution,
+engine speedup or optimized ShortConv kernel is claimed.
+
+`mistral-integration/cupti-check` typechecks the actual recovered module and runs
+its disabled path on CPU in CI. Its dynamic-loading check is independent of
+the production CLI's existing dynamic-linking configuration. Actual collection
+still requires the CUDA 12.9/sm_61 machine.

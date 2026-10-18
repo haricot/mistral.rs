@@ -3558,6 +3558,7 @@ dependencies = [
  "clap_complete",
  "comfy-table",
  "crossterm 0.28.1",
+ "cudarc",
  "ctrlc",
  "directories 6.0.0",
  "dirs",

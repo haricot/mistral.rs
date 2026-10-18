@@ -8,6 +8,18 @@ on:
 permissions:
   contents: read
 jobs:
+  native-collector:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          toolchain: stable
+      - run: cargo check --locked --manifest-path mistral-integration/cupti-check/Cargo.toml
+      - run: cargo run --locked --manifest-path mistral-integration/cupti-check/Cargo.toml
   cpu:
     runs-on: ubuntu-latest
     timeout-minutes: 60

@@ -1,0 +1,11 @@
+[package]
+name = "d7-native-cupti-check"
+version = "0.0.0"
+edition = "2021"
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+cudarc = { version = "=0.19.10", default-features = false, features = ["std", "driver", "cupti", "cuda-12090", "dynamic-loading"] }
+
+[workspace]
