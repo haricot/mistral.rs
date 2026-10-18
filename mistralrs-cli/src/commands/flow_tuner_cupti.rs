@@ -1,7 +1,10 @@
 use anyhow::{anyhow, bail, Context, Result};
 use cudarc::{
     cupti::{
-        result::{activity, compute_capability_supported, subscribe, unsubscribe, CuptiError},
+        result::{
+            activity, compute_capability_supported, enable_callback, subscribe, unsubscribe,
+            CuptiError,
+        },
         sys::{self, CUptiResult},
     },
     driver,
@@ -14,7 +17,7 @@ use std::{
     path::PathBuf,
     ptr,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         Mutex, OnceLock,
     },
 };
@@ -27,10 +30,14 @@ const RUNTIME_DRIVER_BACKEND: &str =
     "cudarc-0.19.10-cupti-activity-cuda12.9-runtime-driver-diagnostic";
 const CUPTI_BUFFER_SIZE: usize = 8 * 1024 * 1024;
 const CUPTI_BUFFER_ALIGN: usize = 8;
+const FINALIZE_PENDING: u32 = u32::MAX;
+const FINALIZE_CBID: u32 = sys::CUpti_driver_api_trace_cbid::CUPTI_DRIVER_TRACE_CBID_cuInit as u32;
 
 static ACTIVITIES: OnceLock<Mutex<Vec<TraceActivity>>> = OnceLock::new();
 static CALLBACK_ERROR: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 static DROPPED_RECORDS: AtomicU64 = AtomicU64::new(0);
+static FINALIZE_REQUESTED: AtomicBool = AtomicBool::new(false);
+static FINALIZE_RESULT: AtomicU32 = AtomicU32::new(FINALIZE_PENDING);
 
 #[derive(Debug, Clone, Copy)]
 enum TraceMode {
@@ -89,6 +96,8 @@ struct TraceFile {
     nonce: Option<String>,
     run_id: Option<String>,
     flush_complete: bool,
+    finalize_complete: bool,
+    cuda_synchronized: bool,
     backend: &'static str,
     mode: &'static str,
     compute_capability_major: i32,
@@ -117,6 +126,48 @@ fn activities() -> &'static Mutex<Vec<TraceActivity>> {
 
 fn callback_error() -> &'static Mutex<Option<String>> {
     CALLBACK_ERROR.get_or_init(|| Mutex::new(None))
+}
+
+fn synchronize_primary_contexts() -> Result<()> {
+    let current =
+        driver::result::ctx::get_current().context("CUDA current context query failed")?;
+    let count = driver::result::device::get_count().context("CUDA device count query failed")?;
+    for ordinal in 0..count {
+        let device = driver::result::device::get(ordinal).context("CUDA device query failed")?;
+        let context = unsafe { driver::result::primary_ctx::retain(device) }
+            .context("CUDA primary context retain failed")?;
+        let synchronized = unsafe { driver::result::ctx::set_current(context) }
+            .and_then(|()| driver::result::ctx::synchronize());
+        let restored =
+            unsafe { driver::result::ctx::set_current(current.unwrap_or(ptr::null_mut())) };
+        let released = unsafe { driver::result::primary_ctx::release(device) };
+        synchronized.context("CUDA primary context synchronization failed")?;
+        restored.context("CUDA original context restore failed")?;
+        released.context("CUDA primary context release failed")?;
+    }
+    Ok(())
+}
+
+unsafe extern "C" fn finalize_callback(
+    _userdata: *mut std::ffi::c_void,
+    domain: sys::CUpti_CallbackDomain,
+    cbid: sys::CUpti_CallbackId,
+    cbdata: *const std::ffi::c_void,
+) {
+    if domain != sys::CUpti_CallbackDomain::CUPTI_CB_DOMAIN_DRIVER_API
+        || cbid != FINALIZE_CBID
+        || cbdata.is_null()
+    {
+        return;
+    }
+    let data = unsafe { &*cbdata.cast::<sys::CUpti_CallbackData>() };
+    if data.callbackSite == sys::CUpti_ApiCallbackSite::CUPTI_API_EXIT
+        && FINALIZE_REQUESTED.swap(false, Ordering::AcqRel)
+    {
+        // CUPTI requires API-exit detachment to serialize teardown with other CUDA threads.
+        let result = unsafe { sys::cuptiFinalize() };
+        FINALIZE_RESULT.store(result as u32, Ordering::Release);
+    }
 }
 
 fn set_callback_error(error: impl Into<String>) {
@@ -332,7 +383,8 @@ impl BenchCuptiTrace {
 
         let mut subscriber: sys::CUpti_SubscriberHandle = ptr::null_mut();
         unsafe {
-            subscribe(&mut subscriber, None, ptr::null_mut()).context("CUPTI subscribe failed")?;
+            subscribe(&mut subscriber, Some(finalize_callback), ptr::null_mut())
+                .context("CUPTI subscribe failed")?;
         }
 
         if let Err(error) = activity::register_callbacks(
@@ -374,28 +426,58 @@ impl BenchCuptiTrace {
 
     pub(crate) fn finish(mut self) -> Result<()> {
         self.flush_disable_and_write()?;
-        self.active = false;
         Ok(())
     }
 
-    fn flush_disable_and_write(&mut self) -> Result<()> {
+    fn stop(&mut self) -> Result<()> {
+        self.active = false;
         let flush_flag = unsafe {
             std::mem::transmute::<sys::CUpti_ActivityFlag, u32>(
                 sys::CUpti_ActivityFlag::CUPTI_ACTIVITY_FLAG_FLUSH_FORCED,
             )
         };
 
-        activity::flush_all(flush_flag).context("CUPTI activity flush failed")?;
-
+        let mut stopped = Ok(());
         for kind in self.enabled_kinds.iter().rev().copied() {
-            activity::disable(kind)
-                .with_context(|| format!("CUPTI disable failed for {kind:?}"))?;
+            let disabled = activity::disable(kind)
+                .with_context(|| format!("CUPTI disable failed for {kind:?}"));
+            if stopped.is_ok() {
+                stopped = disabled;
+            }
         }
+        let synchronized = synchronize_primary_contexts();
+        let flushed = activity::flush_all(flush_flag).context("CUPTI activity flush failed");
+        let finalize = self.finalize_at_api_exit();
+        stopped.and(synchronized).and(flushed).and(finalize)
+    }
 
+    fn finalize_at_api_exit(&self) -> Result<()> {
+        FINALIZE_RESULT.store(FINALIZE_PENDING, Ordering::Release);
         unsafe {
-            unsubscribe(self.subscriber as sys::CUpti_SubscriberHandle)
-                .context("CUPTI unsubscribe failed")?;
+            enable_callback(
+                1,
+                self.subscriber as sys::CUpti_SubscriberHandle,
+                sys::CUpti_CallbackDomain::CUPTI_CB_DOMAIN_DRIVER_API,
+                FINALIZE_CBID,
+            )
+            .context("CUPTI finalize callback enable failed")?;
         }
+        FINALIZE_REQUESTED.store(true, Ordering::Release);
+        let trigger = driver::result::init();
+        FINALIZE_REQUESTED.store(false, Ordering::Release);
+        trigger.context("CUDA API exit for CUPTI finalize failed")?;
+        let result = FINALIZE_RESULT.load(Ordering::Acquire);
+        if result == FINALIZE_PENDING {
+            bail!("CUPTI finalize callback was not invoked");
+        }
+        if result != CUptiResult::CUPTI_SUCCESS as u32 {
+            bail!("CUPTI finalize failed with result {result}");
+        }
+        Ok(())
+    }
+
+    fn flush_disable_and_write(&mut self) -> Result<()> {
+        self.stop()?;
 
         if let Some(error) = callback_error()
             .lock()
@@ -415,6 +497,8 @@ impl BenchCuptiTrace {
             nonce: std::env::var("D7_TRACE_NONCE").ok(),
             run_id: std::env::var("D7_TRACE_RUN_ID").ok(),
             flush_complete: true,
+            finalize_complete: true,
+            cuda_synchronized: true,
             backend: self.mode.backend(),
             mode: self.mode.label(),
             compute_capability_major: 6,
@@ -441,19 +525,6 @@ impl Drop for BenchCuptiTrace {
             return;
         }
 
-        let _ = activity::flush_all(unsafe {
-            std::mem::transmute::<sys::CUpti_ActivityFlag, u32>(
-                sys::CUpti_ActivityFlag::CUPTI_ACTIVITY_FLAG_FLUSH_FORCED,
-            )
-        });
-
-        for kind in self.enabled_kinds.iter().rev().copied() {
-            let _ = activity::disable(kind);
-        }
-
-        unsafe {
-            let _ = unsubscribe(self.subscriber as sys::CUpti_SubscriberHandle);
-        }
-        self.active = false;
+        let _ = self.stop();
     }
 }
