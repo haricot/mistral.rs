@@ -148,3 +148,31 @@ The hardware-validated collector code pin remains
 does not validate this new Candle/kernel/dispatch candidate. Fresh physical
 parity and real-engine evidence are required, followed by separate untraced
 A/B gain qualification. No optimized candidate performance is claimed yet.
+
+## Physical candidate parity and T1 drain correction (2026-10-20)
+
+Archive `d7-T123-20261020T152235.349360Z.zip` (SHA-256
+`252a751ea8bf7f81142a6eb1e78392b2c25bca50a191829b324d3175cc7b30f0`)
+verifies all 66 outer and 31 engine inventory entries. Replaying each T1 and
+native T2 report reproduces the stored evidence exactly.
+
+The same-device candidate validator passes: 48 cases, 768 steps, 48 forks,
+10 fallbacks, immutable inputs/retained states, bit-exact outputs and states,
+408 traced candidate submissions and a complete 3,802-event validation trace.
+This physical result applies to Mistral `7d2eff3156c6fb085fb17c7b3fb9eb98e13d20b2`
+and Candle `84a0b24c030d3af912dcab9a3939f8b0de1dbd32`.
+All three real-model T1 attempts observe 330 active submissions of the staged
+artifact. The separate native T2 contains 330 `d7_shortconv_f16_k3_v1` kernels
+among 65,887 activities, with no drops/invalid timestamps and successful
+synchronization, flush, finalization and process exit.
+
+T1 still remains incomplete: each attempt loses one final `op.end` from an
+unclassified worker `index_select`. `Capture::finish` previously closed the
+collector while admitted work was still alive. The coordinated Candle pin
+`8a0e6d099e680496c623c116e0ebc1fd516ec3ce` stops admission and drains existing
+scopes/payload builders for up to one second before freezing records. A timeout
+stays explicitly incomplete. The regression fails on the old collector and
+passes on the corrected code. Fresh hardware capture must confirm this repair;
+the uploaded archive is not relabeled as complete. Native CUPTI is unchanged.
+No exact per-operation GPU attribution, full-engine output parity or untraced
+engine gain is established by these separate diagnostic captures.

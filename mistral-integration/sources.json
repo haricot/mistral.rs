@@ -4,7 +4,7 @@
   "sm61_source_sha": "d3813494903e5cfca01e12df596f3fe14a5d22ba",
   "candle_repository": "haricot/candle",
   "candle_branch": "d7-stateful-f16",
-  "candle_sha": "84a0b24c030d3af912dcab9a3939f8b0de1dbd32",
+  "candle_sha": "8a0e6d099e680496c623c116e0ebc1fd516ec3ce",
   "features": [
     "cuda-legacy-bf16",
     "cuda-legacy-fp8",
