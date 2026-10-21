@@ -1,0 +1,46 @@
+name: D7 semantic trace consumer
+on:
+  push:
+    branches: [d7-trace-t123]
+  pull_request:
+    branches: [asd_runner_standalone]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native-collector:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          toolchain: stable
+      - run: cargo check --locked --manifest-path mistral-integration/cupti-check/Cargo.toml
+      - run: cargo run --locked --manifest-path mistral-integration/cupti-check/Cargo.toml
+      - run: cargo check --locked --manifest-path mistral-integration/cupti-check/Cargo.toml --features d7-trace
+      - run: python3 mistral-integration/cupti-check/test_lifecycle.py
+  cpu:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          toolchain: stable
+      - name: Verify coordinated Candle pin
+        run: |
+          python3 - <<'PY'
+          import json, pathlib, tomllib
+          sources=json.loads(pathlib.Path('mistral-integration/sources.json').read_text())
+          deps=tomllib.loads(pathlib.Path('Cargo.toml').read_text())['workspace']['dependencies']
+          for name in ['candle-core','candle-nn','candle-metal-kernels','candle-flash-attn-v3']:
+              assert deps[name]['rev']==sources['candle_sha']
+          assert sources['d7_status']=='DIAGNOSTIC_CANDIDATE_NOT_GPU_QUALIFIED'
+          PY
+      - run: cargo check --locked --no-default-features -p mistralrs-cli --features d7-trace
+      - run: cargo check --locked --no-default-features -p mistralrs-core

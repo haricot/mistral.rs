@@ -722,15 +722,27 @@ impl ShortConv {
     }
 
     fn decode_conv(&self, bx: &Tensor, conv_state: &mut Tensor) -> Result<Tensor> {
+        #[cfg(feature = "d7-trace")]
+        let _d7 = candle_core::diagnostics::scope("lfm.shortconv.decode", || {
+            candle_core::diagnostics::Payload::new()
+                .text("operation", "lfm.shortconv.decode")
+                .object("input", candle_core::diagnostics::tensor(bx))
+                .object("state", candle_core::diagnostics::tensor(conv_state))
+                .object(
+                    "weight",
+                    candle_core::diagnostics::tensor(self.conv.weight()),
+                )
+                .number("kernel", self.l_cache as u64)
+                .text("implementation", "stateful_operator_dispatch")
+        });
         let new_col = bx.narrow(2, bx.dim(2)? - 1, 1)?;
-        *conv_state = if self.l_cache > 1 {
-            let kept = conv_state.narrow(2, 1, self.l_cache - 1)?;
-            Tensor::cat(&[kept, new_col], 2)?
-        } else {
-            new_col
-        };
-        let weight = self.conv.weight().squeeze(1)?.unsqueeze(0)?;
-        let mut conv_out = (conv_state.clone() * weight)?.sum(D::Minus1)?;
+        let (conv_out, next_state) = candle_core::stateful::causal_depthwise_conv1d_step(
+            &new_col,
+            conv_state,
+            self.conv.weight(),
+        )?;
+        *conv_state = next_state;
+        let mut conv_out = conv_out.squeeze(2)?;
         if let Some(bias) = self.conv.bias() {
             conv_out = conv_out.broadcast_add(&bias.reshape((1, bias.dim(0)?))?)?;
         }
@@ -744,6 +756,26 @@ impl ShortConv {
         batch_kind: RecurrentBatchKind,
         use_existing_state: bool,
     ) -> Result<Tensor> {
+        #[cfg(feature = "d7-trace")]
+        let _d7 = candle_core::diagnostics::scope("lfm.shortconv", || {
+            candle_core::diagnostics::Payload::new()
+                .text(
+                    "phase",
+                    if matches!(batch_kind, RecurrentBatchKind::Decode) {
+                        "decode"
+                    } else {
+                        "prefill"
+                    },
+                )
+                .boolean("use_existing_state", use_existing_state)
+                .object("input", candle_core::diagnostics::tensor(x))
+                .object("state", candle_core::diagnostics::tensor(conv_state))
+                .object(
+                    "weight",
+                    candle_core::diagnostics::tensor(self.conv.weight()),
+                )
+                .number("kernel", self.l_cache as u64)
+        });
         let (_, seq_len, hidden) = x.dims3()?;
         let projected = self.in_proj.forward(x)?.transpose(1, 2)?;
         let b_proj = projected.narrow(1, 0, hidden)?;
@@ -1230,6 +1262,12 @@ impl Model {
         let mask = DeviceMappedMask::new(mask, &*self.mapper)?;
 
         for (layer_idx, layer) in self.layers.iter().enumerate() {
+            #[cfg(feature = "d7-trace")]
+            let _d7 = candle_core::diagnostics::scope("model.layer", || {
+                candle_core::diagnostics::Payload::new()
+                    .text("model", "lfm2")
+                    .number("layer", layer_idx as u64)
+            });
             x = self.mapper.map(x, layer_idx)?;
             match &layer.layer_impl {
                 LayerImpl::Attention(_) => {

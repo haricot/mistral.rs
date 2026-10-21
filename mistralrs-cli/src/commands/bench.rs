@@ -245,6 +245,13 @@ pub async fn run_bench(
         iterations, prompt_lens, gen_len, depths
     );
 
+    #[cfg(all(feature = "cuda", feature = "flow-tuner-cupti"))]
+    let flow_tuner_cupti = super::flow_tuner_cupti::BenchCuptiTrace::start_from_env()?;
+    #[cfg(not(all(feature = "cuda", feature = "flow-tuner-cupti")))]
+    if std::env::var_os("FLOW_TUNER_CUPTI_OUT").is_some() {
+        anyhow::bail!("FLOW_TUNER_CUPTI_OUT requires the flow-tuner-cupti feature");
+    }
+
     #[cfg(feature = "cuda")]
     let cuda_profiler_range = std::env::var_os("MISTRALRS_BENCH_CUDA_PROFILER_RANGE").is_some();
     #[cfg(feature = "cuda")]
@@ -312,6 +319,11 @@ pub async fn run_bench(
                 results.push((tok_per_sec, ms_per_tok));
             }
         }
+    }
+
+    #[cfg(all(feature = "cuda", feature = "flow-tuner-cupti"))]
+    if let Some(trace) = flow_tuner_cupti {
+        trace.finish()?;
     }
 
     #[cfg(feature = "cuda")]

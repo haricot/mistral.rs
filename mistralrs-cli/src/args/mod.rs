@@ -39,6 +39,12 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Validate the explicitly staged F16 ShortConv candidate on CUDA.
+    #[cfg(all(feature = "cuda", feature = "d7-trace"))]
+    D7ShortconvF16Validate {
+        #[arg(long)]
+        out: std::path::PathBuf,
+    },
     /// Start HTTP/MCP server and (optionally) the UI at /ui
     Serve {
         #[command(subcommand)]

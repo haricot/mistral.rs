@@ -9,6 +9,8 @@
 mod args;
 mod commands;
 mod config;
+#[cfg(feature = "d7-trace")]
+mod diagnostic_capture;
 #[cfg(test)]
 mod docgen;
 mod ui;
@@ -35,8 +37,15 @@ async fn main() -> Result<()> {
     candle_core::utils::init_global_threadpool();
     let cli = Cli::parse();
     init_tracing(cli.global.verbose);
+    #[cfg(feature = "d7-trace")]
+    let _diagnostic_capture = diagnostic_capture::DiagnosticCapture::from_env()?;
 
     match cli.command {
+        #[cfg(all(feature = "cuda", feature = "d7-trace"))]
+        Command::D7ShortconvF16Validate { out } => {
+            candle_core::stateful::validate_f16_candidate(&out)
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        }
         Command::Serve {
             model_type,
             default_model,

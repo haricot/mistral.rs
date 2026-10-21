@@ -36,8 +36,8 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           candle="$(jq -r '.candle_sha' mistral-integration/sources.json)"
-          test "$candle" = 66c4651cc83f9a43e79a4aa09302aac9bc763d2c
-          test "$(jq -r '.candle_branch' mistral-integration/sources.json)" = extended
+          test "$candle" = a33fcc375cd4d26bd6a3d1aae7174b593345e975
+          test "$(jq -r '.candle_branch' mistral-integration/sources.json)" = d7-trace-extended
           test "$(jq -r '.standalone_status' mistral-integration/sources.json)" = UNVALIDATED_STANDALONE_CANDIDATE
           # Cargo itself recomputes the full git dependency graph.
           cargo +stable metadata --format-version 1 > "$RUNNER_TEMP/metadata.json"

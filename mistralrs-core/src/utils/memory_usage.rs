@@ -224,6 +224,16 @@ impl MemoryUsage {
             None
         };
         let graph_pool = query_cuda_graph_memory(stream.context().cu_device())?;
+        #[cfg(feature = "d7-trace")]
+        candle_core::diagnostics::event("memory.snapshot", || {
+            candle_core::diagnostics::Payload::new()
+                .text("scope", "device_context_existing_query")
+                .number("device_total", total as u64)
+                .number("device_available", available as u64)
+                .text("async_pool", format!("{async_pool:?}"))
+                .text("graph_pool", format!("{graph_pool:?}"))
+                .text("tensor_peak", "unavailable")
+        });
         Ok(Some(CudaAllocatorSnapshot {
             total,
             available,
