@@ -643,7 +643,7 @@ checksum = "ade8366b8bd5ba243f0a58f036cc0ca8a2f069cff1a2351ef1cac6b083e16fc0"
 [[package]]
 name = "candle-core"
 version = "0.11.0"
-source = "git+https://github.com/haricot/candle.git?rev=8a0e6d099e680496c623c116e0ebc1fd516ec3ce#8a0e6d099e680496c623c116e0ebc1fd516ec3ce"
+source = "git+https://github.com/haricot/candle.git?rev=5d166459144ed2b830f1d237286e851e654efb7b#5d166459144ed2b830f1d237286e851e654efb7b"
 dependencies = [
  "accelerate-src",
  "byteorder",
@@ -679,7 +679,7 @@ dependencies = [
 [[package]]
 name = "candle-flash-attn-v3"
 version = "0.11.0"
-source = "git+https://github.com/haricot/candle.git?rev=8a0e6d099e680496c623c116e0ebc1fd516ec3ce#8a0e6d099e680496c623c116e0ebc1fd516ec3ce"
+source = "git+https://github.com/haricot/candle.git?rev=5d166459144ed2b830f1d237286e851e654efb7b#5d166459144ed2b830f1d237286e851e654efb7b"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -692,7 +692,7 @@ dependencies = [
 [[package]]
 name = "candle-kernels"
 version = "0.11.0"
-source = "git+https://github.com/haricot/candle.git?rev=8a0e6d099e680496c623c116e0ebc1fd516ec3ce#8a0e6d099e680496c623c116e0ebc1fd516ec3ce"
+source = "git+https://github.com/haricot/candle.git?rev=5d166459144ed2b830f1d237286e851e654efb7b#5d166459144ed2b830f1d237286e851e654efb7b"
 dependencies = [
  "cudaforge",
  "sha2",
@@ -701,7 +701,7 @@ dependencies = [
 [[package]]
 name = "candle-metal-kernels"
 version = "0.11.0"
-source = "git+https://github.com/haricot/candle.git?rev=8a0e6d099e680496c623c116e0ebc1fd516ec3ce#8a0e6d099e680496c623c116e0ebc1fd516ec3ce"
+source = "git+https://github.com/haricot/candle.git?rev=5d166459144ed2b830f1d237286e851e654efb7b#5d166459144ed2b830f1d237286e851e654efb7b"
 dependencies = [
  "block2",
  "half",
@@ -716,7 +716,7 @@ dependencies = [
 [[package]]
 name = "candle-nn"
 version = "0.11.0"
-source = "git+https://github.com/haricot/candle.git?rev=8a0e6d099e680496c623c116e0ebc1fd516ec3ce#8a0e6d099e680496c623c116e0ebc1fd516ec3ce"
+source = "git+https://github.com/haricot/candle.git?rev=5d166459144ed2b830f1d237286e851e654efb7b#5d166459144ed2b830f1d237286e851e654efb7b"
 dependencies = [
  "accelerate-src",
  "candle-core",
@@ -8240,3 +8240,4 @@ checksum = "2959ca473aae96a14ecedf501d20b3608d2825ba280d5adb57d651721885b0c2"
 dependencies = [
  "zune-core 0.5.1",
 ]
+

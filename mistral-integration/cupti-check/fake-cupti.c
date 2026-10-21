@@ -1,6 +1,9 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
+#include <unistd.h>
+#include <sys/syscall.h>
 
 typedef void (*api_callback)(void *, unsigned, unsigned, const void *);
 typedef void (*request_callback)(uint8_t **, size_t *, size_t *);
@@ -9,7 +12,15 @@ typedef void (*complete_callback)(void *, unsigned, uint8_t *, size_t, size_t);
 static api_callback callback;
 static request_callback requested;
 static complete_callback completed;
-static unsigned enabled, inside_exit, finalized;
+static unsigned enabled, inside_exit, finalized, correlated;
+static _Thread_local uint64_t external_stack[128];
+static _Thread_local unsigned external_depth;
+struct external_record { unsigned kind, external_kind; uint64_t external_id; unsigned correlation_id, reserved; };
+struct api_record { unsigned kind, cbid; uint64_t start, end; unsigned pid, tid, correlation_id, result; };
+static struct external_record external_records[16];
+static struct api_record api_records[16];
+static unsigned record_count, record_index;
+static uint64_t timestamp(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000 + t.tv_nsec + 1000000; }
 static void *current_context = (void *)(uintptr_t)7;
 
 static void record(const char *name) {
@@ -45,7 +56,7 @@ int cuptiActivityRegisterCallbacks(request_callback req, complete_callback done)
 }
 
 int cuptiActivityEnable(unsigned kind) {
-    (void)kind;
+    if (kind == 39) correlated = 1;
     enabled++;
     return 0;
 }
@@ -66,7 +77,7 @@ int cuptiActivityFlushAll(unsigned flags) {
     size_t size = 0, max_records = 0;
     requested(&buffer, &size, &max_records);
     if (!buffer || !size || max_records) abort();
-    completed(NULL, 0, buffer, size, 0);
+    completed(NULL, 0, buffer, size, correlated && record_count ? 1 : 0);
     return getenv("D7_FAKE_FLUSH_ERROR") ? 1 : 0;
 }
 
@@ -80,8 +91,10 @@ int cuptiActivityGetNumDroppedRecords(void *context, unsigned stream, size_t *dr
 int cuptiActivityGetNextRecord(uint8_t *buffer, size_t size, void **record_out) {
     (void)buffer;
     (void)size;
-    (void)record_out;
-    abort();
+    if (!correlated || record_index >= record_count * 2) return 12;
+    unsigned index = record_index++;
+    *record_out = index % 2 ? (void *)&api_records[index / 2] : (void *)&external_records[index / 2];
+    return 0;
 }
 
 int cuptiGetResultString(int result, const char **message) {
@@ -100,6 +113,13 @@ int cuptiEnableCallback(unsigned enable, void *subscriber, unsigned domain, unsi
 int cuInit(unsigned flags) {
     (void)flags;
     record("cuInit");
+    if (correlated && enabled && external_depth) {
+        unsigned i = record_count++;
+        if (i >= 16) abort();
+        external_records[i] = (struct external_record){39, 3, external_stack[external_depth - 1], i + 100, 0};
+        uint64_t now = timestamp();
+        api_records[i] = (struct api_record){4, 1, now, now + 1, (unsigned)getpid(), (unsigned)syscall(SYS_gettid), i + 100, 0};
+    }
     if (!getenv("D7_FAKE_SKIP_CALLBACK")) {
         struct { unsigned callback_site; void *rest[16]; } data = {0};
         callback(NULL, 1, 1, &data);
@@ -147,5 +167,23 @@ int cuptiFinalize(void) {
     if (getenv("D7_FAKE_FINALIZE_ERROR")) return 1;
     finalized = 1;
     callback = NULL;
+    return 0;
+}
+
+
+int cuptiSetThreadIdType(unsigned kind) { if (kind != 1) abort(); record("system_tid"); return 0; }
+int cuptiGetTimestamp(uint64_t *value) { *value = timestamp(); return 0; }
+int cuptiActivityPushExternalCorrelationId(unsigned kind, uint64_t value) {
+    if (finalized || kind != 3 || external_depth >= 128) abort();
+    if (getenv("D7_FAKE_PUSH_ERROR")) return 1;
+    external_stack[external_depth++] = value;
+    record("push");
+    return 0;
+}
+int cuptiActivityPopExternalCorrelationId(unsigned kind, uint64_t *value) {
+    if (finalized || kind != 3 || !external_depth) abort();
+    *value = external_stack[--external_depth];
+    if (getenv("D7_FAKE_WRONG_POP")) (*value)++;
+    record("pop");
     return 0;
 }

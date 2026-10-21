@@ -54,3 +54,41 @@ with tempfile.TemporaryDirectory() as scratch:
         elif case != 'write_error':
             assert not output.exists(), case
         print(case + ': PASS (synthetic FFI, no GPU qualification)')
+
+    subprocess.run(['cargo', 'build', '--locked', '--features', 'd7-trace', '--manifest-path', str(here / 'Cargo.toml')], check=True)
+    for case, option, error in (
+        ('correlated', None, None),
+        ('push_error', 'D7_FAKE_PUSH_ERROR', 'external correlation incomplete'),
+        ('wrong_pop', 'D7_FAKE_WRONG_POP', 'external correlation incomplete'),
+        ('held_scope', 'D7_FAKE_HELD_SCOPE', 'external correlation incomplete'),
+    ):
+        output, log, semantic = root / (case + '.json'), root / (case + '.log'), root / (case + '-trace')
+        env = dict(os.environ, LD_LIBRARY_PATH=str(root), FLOW_TUNER_CUPTI_OUT=str(output),
+                   FLOW_TUNER_CUPTI_MODE='cpu-gpu-correlated', D7_FAKE_LOG=str(log), D7_FAKE_CORRELATED='1',
+                   D7_TRACE_RUN_ID=case, D7_TRACE_NONCE='nonce-' + case, D7_TRACE_DIR=str(semantic))
+        if option:
+            env[option] = '1'
+        result = subprocess.run([str(binary)], env=env, capture_output=True, text=True, timeout=10)
+        assert result.returncode == (1 if error else 0), (case, result.stderr)
+        calls = log.read_text().splitlines()
+        assert calls.count('finalize_at_exit') == 1 and calls.count('disable') == 6, (case, calls)
+        assert 'pop' not in calls[calls.index('finalize_at_exit') + 1:], (case, calls)
+        if error:
+            assert error in result.stderr and not output.exists(), (case, result.stderr)
+        else:
+            trace = json.loads(output.read_text())
+            assert trace['correlation']['complete'] and trace['correlation']['entered_scopes'] == trace['correlation']['exited_scopes'] == 2
+            assert len(trace['external_correlations']) == len(trace['activities']) == 2
+            events = [json.loads(line) for line in (semantic / 'events.ndjson').read_text().splitlines()]
+            begins = {e['scope_id']: e for e in events if e['event'] == 'op.begin'}
+            threads = set()
+            for mapping, api in zip(trace['external_correlations'], trace['activities']):
+                assert mapping['correlation_id'] == api['correlation_id']
+                assert mapping['external_kind'] == trace['correlation']['external_kind_id']
+                assert api['thread_id'] == begins[mapping['scope_id']]['cpu']['os_thread_id']
+                assert api['process_id'] == trace['process_id']
+                threads.add(api['thread_id'])
+            assert len(threads) == 2
+            assert calls.index('pop') < calls.index('flush') < calls.index('finalize_at_exit')
+        assert json.loads((semantic / 'trace-manifest.json').read_text())['complete']
+        print(case + ': PASS (synthetic FFI, no GPU qualification)')

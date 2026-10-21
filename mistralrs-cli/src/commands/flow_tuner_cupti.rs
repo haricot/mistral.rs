@@ -17,23 +17,31 @@ use std::{
     path::PathBuf,
     ptr,
     sync::{
-        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
         Mutex, OnceLock,
     },
 };
 
+#[cfg(feature = "d7-trace")]
+#[path = "flow_tuner_cupti/correlation.rs"]
+mod correlation;
+
+const CORRELATED_BACKEND: &str = "cudarc-0.19.10-cupti-activity-cuda12.9-cpu-gpu-correlated";
 const TRACE_SCHEMA: &str = "mistralrs.flow-tuner-cupti.v2";
 const TRACE_ENV: &str = "FLOW_TUNER_CUPTI_OUT";
 const TRACE_MODE_ENV: &str = "FLOW_TUNER_CUPTI_MODE";
 const GPU_TIMELINE_BACKEND: &str = "cudarc-0.19.10-cupti-activity-cuda12.9-gpu-timeline-only";
 const RUNTIME_DRIVER_BACKEND: &str =
     "cudarc-0.19.10-cupti-activity-cuda12.9-runtime-driver-diagnostic";
+const MAX_RETAINED_RECORDS: usize = 1_000_000;
 const CUPTI_BUFFER_SIZE: usize = 8 * 1024 * 1024;
 const CUPTI_BUFFER_ALIGN: usize = 8;
 const FINALIZE_PENDING: u32 = u32::MAX;
 const FINALIZE_CBID: u32 = sys::CUpti_driver_api_trace_cbid::CUPTI_DRIVER_TRACE_CBID_cuInit as u32;
 
+static RECORD_CAPACITY: AtomicUsize = AtomicUsize::new(MAX_RETAINED_RECORDS);
 static ACTIVITIES: OnceLock<Mutex<Vec<TraceActivity>>> = OnceLock::new();
+static EXTERNAL_CORRELATIONS: OnceLock<Mutex<Vec<ExternalCorrelation>>> = OnceLock::new();
 static CALLBACK_ERROR: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 static DROPPED_RECORDS: AtomicU64 = AtomicU64::new(0);
 static FINALIZE_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -43,6 +51,7 @@ static FINALIZE_RESULT: AtomicU32 = AtomicU32::new(FINALIZE_PENDING);
 enum TraceMode {
     GpuTimeline,
     RuntimeDriverDiagnostic,
+    CpuGpuCorrelated,
 }
 
 impl TraceMode {
@@ -53,9 +62,10 @@ impl TraceMode {
         {
             "gpu-timeline" => Ok(Self::GpuTimeline),
             "runtime-driver-diagnostic" => Ok(Self::RuntimeDriverDiagnostic),
+            "cpu-gpu-correlated" => Ok(Self::CpuGpuCorrelated),
             value => bail!(
                 "unsupported {TRACE_MODE_ENV}={value}; expected \
-                 gpu-timeline or runtime-driver-diagnostic"
+                 gpu-timeline, runtime-driver-diagnostic or cpu-gpu-correlated"
             ),
         }
     }
@@ -64,6 +74,7 @@ impl TraceMode {
         match self {
             Self::GpuTimeline => "gpu-timeline",
             Self::RuntimeDriverDiagnostic => "runtime-driver-diagnostic",
+            Self::CpuGpuCorrelated => "cpu-gpu-correlated",
         }
     }
 
@@ -71,6 +82,7 @@ impl TraceMode {
         match self {
             Self::GpuTimeline => GPU_TIMELINE_BACKEND,
             Self::RuntimeDriverDiagnostic => RUNTIME_DRIVER_BACKEND,
+            Self::CpuGpuCorrelated => CORRELATED_BACKEND,
         }
     }
 
@@ -80,11 +92,14 @@ impl TraceMode {
             sys::CUpti_ActivityKind::CUPTI_ACTIVITY_KIND_MEMCPY,
             sys::CUpti_ActivityKind::CUPTI_ACTIVITY_KIND_MEMSET,
         ];
-        if matches!(self, Self::RuntimeDriverDiagnostic) {
+        if matches!(self, Self::RuntimeDriverDiagnostic | Self::CpuGpuCorrelated) {
             kinds.extend([
                 sys::CUpti_ActivityKind::CUPTI_ACTIVITY_KIND_RUNTIME,
                 sys::CUpti_ActivityKind::CUPTI_ACTIVITY_KIND_DRIVER,
             ]);
+        }
+        if matches!(self, Self::CpuGpuCorrelated) {
+            kinds.push(sys::CUpti_ActivityKind::CUPTI_ACTIVITY_KIND_EXTERNAL_CORRELATION);
         }
         kinds
     }
@@ -104,6 +119,10 @@ struct TraceFile {
     compute_capability_minor: i32,
     dropped_records: u64,
     activities: Vec<TraceActivity>,
+    external_correlations: Vec<ExternalCorrelation>,
+    process_id: u32,
+    #[cfg(feature = "d7-trace")]
+    correlation: Option<correlation::Metadata>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -118,6 +137,19 @@ struct TraceActivity {
     correlation_id: Option<u32>,
     bytes: Option<u64>,
     callback_id: Option<u32>,
+    process_id: Option<u32>,
+    thread_id: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ExternalCorrelation {
+    external_kind: u32,
+    scope_id: u64,
+    correlation_id: u32,
+}
+
+fn external_correlations() -> &'static Mutex<Vec<ExternalCorrelation>> {
+    EXTERNAL_CORRELATIONS.get_or_init(|| Mutex::new(Vec::new()))
 }
 
 fn activities() -> &'static Mutex<Vec<TraceActivity>> {
@@ -209,6 +241,8 @@ unsafe fn activity_from_record(record: *mut sys::CUpti_Activity) -> Option<Trace
                 correlation_id: Some(unsafe { read_field(ptr::addr_of!((*kernel).correlationId)) }),
                 bytes: None,
                 callback_id: None,
+                process_id: None,
+                thread_id: None,
             })
         }
         sys::CUpti_ActivityKind::CUPTI_ACTIVITY_KIND_MEMCPY => {
@@ -225,6 +259,8 @@ unsafe fn activity_from_record(record: *mut sys::CUpti_Activity) -> Option<Trace
                 correlation_id: Some(unsafe { read_field(ptr::addr_of!((*copy).correlationId)) }),
                 bytes: Some(unsafe { read_field(ptr::addr_of!((*copy).bytes)) }),
                 callback_id: None,
+                process_id: None,
+                thread_id: None,
             })
         }
         sys::CUpti_ActivityKind::CUPTI_ACTIVITY_KIND_MEMSET => {
@@ -240,6 +276,8 @@ unsafe fn activity_from_record(record: *mut sys::CUpti_Activity) -> Option<Trace
                 correlation_id: Some(unsafe { read_field(ptr::addr_of!((*memset).correlationId)) }),
                 bytes: Some(unsafe { read_field(ptr::addr_of!((*memset).bytes)) }),
                 callback_id: None,
+                process_id: None,
+                thread_id: None,
             })
         }
         sys::CUpti_ActivityKind::CUPTI_ACTIVITY_KIND_RUNTIME
@@ -262,7 +300,28 @@ unsafe fn activity_from_record(record: *mut sys::CUpti_Activity) -> Option<Trace
                 correlation_id: Some(unsafe { read_field(ptr::addr_of!((*api).correlationId)) }),
                 bytes: None,
                 callback_id: Some(callback_id),
+                process_id: Some(unsafe { read_field(ptr::addr_of!((*api).processId)) }),
+                thread_id: Some(unsafe { read_field(ptr::addr_of!((*api).threadId)) }),
             })
+        }
+        sys::CUpti_ActivityKind::CUPTI_ACTIVITY_KIND_EXTERNAL_CORRELATION => {
+            let record = record.cast::<sys::CUpti_ActivityExternalCorrelation>();
+            let mapping = ExternalCorrelation {
+                external_kind: unsafe { read_field(ptr::addr_of!((*record).externalKind)) } as u32,
+                scope_id: unsafe { read_field(ptr::addr_of!((*record).externalId)) },
+                correlation_id: unsafe { read_field(ptr::addr_of!((*record).correlationId)) },
+            };
+            match external_correlations().lock() {
+                Ok(mut mappings) => {
+                    if mappings.len() < RECORD_CAPACITY.load(Ordering::Relaxed) {
+                        mappings.push(mapping);
+                    } else {
+                        DROPPED_RECORDS.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                Err(_) => set_callback_error("external correlation record lock poisoned"),
+            }
+            None
         }
         _ => None,
     }
@@ -276,7 +335,11 @@ fn process_buffer(buffer: *mut u8, valid_size: usize) -> std::result::Result<(),
             Ok(()) => {
                 if let Some(activity_record) = unsafe { activity_from_record(record) } {
                     if let Ok(mut records) = activities().lock() {
-                        records.push(activity_record);
+                        if records.len() < RECORD_CAPACITY.load(Ordering::Relaxed) {
+                            records.push(activity_record);
+                        } else {
+                            DROPPED_RECORDS.fetch_add(1, Ordering::Relaxed);
+                        }
                     } else {
                         set_callback_error("CUPTI activity record lock poisoned");
                     }
@@ -345,6 +408,8 @@ pub(crate) struct BenchCuptiTrace {
     mode: TraceMode,
     enabled_kinds: Vec<sys::CUpti_ActivityKind>,
     active: bool,
+    #[cfg(feature = "d7-trace")]
+    bridge: Option<std::sync::Arc<correlation::Bridge>>,
 }
 
 impl BenchCuptiTrace {
@@ -353,6 +418,21 @@ impl BenchCuptiTrace {
             return Ok(None);
         };
         let mode = TraceMode::from_env()?;
+        let capacity = std::env::var("D7_TRACE_CAPACITY")
+            .ok()
+            .map(|value| value.parse::<usize>())
+            .transpose()?
+            .unwrap_or(MAX_RETAINED_RECORDS);
+        if capacity == 0 || capacity > 2 * MAX_RETAINED_RECORDS {
+            bail!("invalid native activity capacity");
+        }
+        RECORD_CAPACITY.store(capacity, Ordering::Relaxed);
+        if matches!(mode, TraceMode::CpuGpuCorrelated) {
+            #[cfg(feature = "d7-trace")]
+            correlation::configure()?;
+            #[cfg(not(feature = "d7-trace"))]
+            bail!("cpu-gpu-correlated requires the d7-trace feature");
+        }
 
         if std::env::var_os("MISTRALRS_BENCH_CUDA_PROFILER_RANGE").is_some() {
             bail!(
@@ -375,6 +455,9 @@ impl BenchCuptiTrace {
 
         if let Ok(mut records) = activities().lock() {
             records.clear();
+        }
+        if let Ok(mut mappings) = external_correlations().lock() {
+            mappings.clear();
         }
         if let Ok(mut error) = callback_error().lock() {
             *error = None;
@@ -415,13 +498,22 @@ impl BenchCuptiTrace {
             enabled.push(kind);
         }
 
-        Ok(Some(Self {
+        let trace = Self {
             subscriber: subscriber as usize,
             output: PathBuf::from(output),
             mode,
             enabled_kinds: enabled,
             active: true,
-        }))
+            #[cfg(feature = "d7-trace")]
+            bridge: None,
+        };
+        #[cfg(feature = "d7-trace")]
+        let mut trace = trace;
+        #[cfg(feature = "d7-trace")]
+        if matches!(mode, TraceMode::CpuGpuCorrelated) {
+            trace.bridge = Some(correlation::Bridge::start()?);
+        }
+        Ok(Some(trace))
     }
 
     pub(crate) fn finish(mut self) -> Result<()> {
@@ -431,6 +523,14 @@ impl BenchCuptiTrace {
 
     fn stop(&mut self) -> Result<()> {
         self.active = false;
+        #[cfg(feature = "d7-trace")]
+        let correlated = self
+            .bridge
+            .as_ref()
+            .map(|bridge| bridge.stop())
+            .unwrap_or(Ok(()));
+        #[cfg(not(feature = "d7-trace"))]
+        let correlated: Result<()> = Ok(());
         let flush_flag = unsafe {
             std::mem::transmute::<sys::CUpti_ActivityFlag, u32>(
                 sys::CUpti_ActivityFlag::CUPTI_ACTIVITY_FLAG_FLUSH_FORCED,
@@ -448,7 +548,11 @@ impl BenchCuptiTrace {
         let synchronized = synchronize_primary_contexts();
         let flushed = activity::flush_all(flush_flag).context("CUPTI activity flush failed");
         let finalize = self.finalize_at_api_exit();
-        stopped.and(synchronized).and(flushed).and(finalize)
+        correlated
+            .and(stopped)
+            .and(synchronized)
+            .and(flushed)
+            .and(finalize)
     }
 
     fn finalize_at_api_exit(&self) -> Result<()> {
@@ -505,6 +609,13 @@ impl BenchCuptiTrace {
             compute_capability_minor: 1,
             dropped_records: DROPPED_RECORDS.load(Ordering::Relaxed),
             activities: records,
+            external_correlations: external_correlations()
+                .lock()
+                .map_err(|_| anyhow!("external correlation record lock poisoned"))?
+                .clone(),
+            process_id: std::process::id(),
+            #[cfg(feature = "d7-trace")]
+            correlation: self.bridge.as_ref().map(|bridge| bridge.metadata()),
         };
 
         if let Some(parent) = self.output.parent() {

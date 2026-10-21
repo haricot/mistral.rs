@@ -8,4 +8,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 cudarc = { version = "=0.19.10", default-features = false, features = ["std", "driver", "cupti", "cuda-12090", "dynamic-loading"] }
 
+candle-core = { git = "https://github.com/haricot/candle.git", rev = "5d166459144ed2b830f1d237286e851e654efb7b", features = ["d7-trace"], optional = true }
+
+[features]
+d7-trace = ["dep:candle-core"]
+
 [workspace]
+

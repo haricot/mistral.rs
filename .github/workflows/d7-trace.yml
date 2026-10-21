@@ -20,6 +20,7 @@ jobs:
           toolchain: stable
       - run: cargo check --locked --manifest-path mistral-integration/cupti-check/Cargo.toml
       - run: cargo run --locked --manifest-path mistral-integration/cupti-check/Cargo.toml
+      - run: cargo check --locked --manifest-path mistral-integration/cupti-check/Cargo.toml --features d7-trace
       - run: python3 mistral-integration/cupti-check/test_lifecycle.py
   cpu:
     runs-on: ubuntu-latest

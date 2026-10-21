@@ -176,3 +176,36 @@ passes on the corrected code. Fresh hardware capture must confirm this repair;
 the uploaded archive is not relabeled as complete. Native CUPTI is unchanged.
 No exact per-operation GPU attribution, full-engine output parity or untraced
 engine gain is established by these separate diagnostic captures.
+
+## Generic CPU clocks and same-process CPU/GPU correlation
+
+Candle pin `5d166459144ed2b830f1d237286e851e654efb7b` adds system thread IDs,
+Linux monotonic timestamps and per-thread CPU-time counters to semantic events.
+A generic application-owned `ScopeObserver` brackets actual submitting threads;
+Candle does not depend on CUPTI or select a model-specific correlation policy.
+
+With CLI features `d7-trace flow-tuner-cupti`, an active semantic capture and
+`FLOW_TUNER_CUPTI_MODE=cpu-gpu-correlated`, the existing native collector enables
+external-correlation activity. The bridge pushes/pops Candle scope IDs with
+CUPTI CUSTOM0, exports external-ID/API correlation records and system API thread
+IDs, and retains two host/CUPTI clock calibration brackets. CPU and GPU evidence
+share one run, nonce and process. Clock interpolation is only for visualization;
+attribution uses observed IDs. Kernel names or interval containment are not
+substitutes for correlation. CUDA graph node attribution and implicit propagation
+across asynchronous workers remain unavailable.
+
+The bridge stops admission, drains admitted scopes for up to one second and
+closes its CUPTI gate before finalization. A late scope destructor cannot invoke
+CUPTI after detach. Push/pop errors, drain failure, unknown coverage or discarded
+records cannot become a complete correlated capture. Native storage is bounded
+by `D7_TRACE_CAPACITY` (default one million records per record family); losses
+are counted. Existing noncorrelated collector modes keep their teardown protocol.
+
+The generic tuner CPU adapter adds procfs thread counters/states, scheduler and
+context-switch counters where available, plus optional perf call stacks. These
+are diagnostic captures. Scope CPU time covers its own submitting thread, not
+unobserved worker CPU time; sampling gaps and missing capabilities are explicit.
+The local launcher `--cpu-gpu` rebuilds the revised pinned engine using the
+verified Cargo cache and captures one diagnostic pass, without an A/B campaign.
+Previous native GPU hardware evidence stays attached to its old code pin.
+Fresh physical CPU/GPU correlation on CUDA 12.9/sm_61 is still required.
