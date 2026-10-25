@@ -47,7 +47,7 @@ jobs:
     name: CUDA 12.9 sm_61 compile (no GPU execution)
     runs-on: ubuntu-26.04
     container: nvidia/cuda:12.9.2-devel-ubuntu24.04
-    timeout-minutes: 75
+    timeout-minutes: 120
     env:
       CUDA_COMPUTE_CAP: 61
       CUDA_HOME: /usr/local/cuda
@@ -67,4 +67,8 @@ jobs:
       - name: Check the complete legacy CLI
         run: cargo check --locked -p mistralrs-cli --no-default-features --features cuda-legacy-bf16,cuda-legacy-fp8,cuda-legacy-fp4,cudnn
       - name: Compile the native Bolt tests for Pascal
-        run: cargo test --locked -p mistralrs-core --lib --no-default-features --features cuda-legacy-bf16,cuda-legacy-fp8,cuda-legacy-fp4 --no-run
+        run: >-
+          cargo --config 'profile.test.package.mistralrs-core.opt-level=0'
+          --config 'profile.test.package.mistralrs-core.codegen-units=8'
+          test --locked -p mistralrs-core --lib --no-default-features
+          --features cuda-legacy-bf16,cuda-legacy-fp8,cuda-legacy-fp4 --no-run
