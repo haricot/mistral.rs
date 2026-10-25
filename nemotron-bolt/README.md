@@ -58,9 +58,14 @@ Then restart with the same arguments plus:
 --mtp-n-predict 7 --mtp-draft-sampling greedy
 ```
 
-Use `chat_template_kwargs` with `enable_thinking: false` and
-`conversational_mode: true` for initial voice-like requests. The normal server
-tool-call parser and streaming endpoint remain available. For reproducible
+For initial voice-like requests, set `chat_template_kwargs` to
+`{"enable_thinking": false}` and include a system message asking for short
+spoken replies in French. This mistral.rs baseline forwards only
+`enable_thinking` and `reasoning_effort` from template kwargs. NVIDIA's
+`conversational_mode` kwarg is currently ignored; its direct forwarding and
+the runtime thinking-budget continuation need separate server integration.
+The normal server tool-call parser and streaming endpoint remain available.
+For reproducible
 measurements, download the revisions recorded in `sources.json` and supply
 local target/drafter paths. The convenience repository commands above follow
 the remote default revisions.
