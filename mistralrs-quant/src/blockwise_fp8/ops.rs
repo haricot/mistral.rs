@@ -1357,8 +1357,7 @@ pub fn fp8_indexed_moe_gemm(
     }
 }
 
-#[cfg_attr(not(has_cutlass_fp8_sm90_kernels), allow(dead_code))]
-#[cfg(feature = "cuda")]
+#[cfg(all(feature = "cuda", has_cutlass_fp8_sm90_kernels))]
 pub(crate) fn cutlass_fp8_blockwise_supported(
     weight: &Tensor,
     weight_scales: &Tensor,
