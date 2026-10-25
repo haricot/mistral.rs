@@ -31,12 +31,17 @@ graphs and the shared-KV prefill tail optimization are disabled while its
 layer taps are active. The existing Google Gemma 4 MTP path is preserved.
 All production inference remains Rust/Candle.
 
+For the text-only GGUF, turn and tool stops are recovered from the embedded
+Gemma 4 template when no generation config is available. Templates that handle
+native OpenAI tool messages keep their assistant content and `tool_call_id`;
+older Gemma 4 templates retain their tool-response normalization.
+
 ## Build and first qualification
 
 On a Pascal machine with CUDA 12.9 and GCC 14:
 
 ```bash
-CUDA_COMPUTE_CAP=61 NVCC=/opt/cuda/bin/nvcc NVCC_CCBIN=gcc-14 \
+CARGO_BUILD_JOBS=2 CUDA_COMPUTE_CAP=61 NVCC=/opt/cuda/bin/nvcc NVCC_CCBIN=gcc-14 \
 ALLOW_LEGACY=bf16,fp8 \
 cargo build --release --locked -p mistralrs-cli --no-default-features \
   --features cuda-legacy-bf16,cuda-legacy-fp8,cuda-legacy-fp4,cudnn
