@@ -9,6 +9,58 @@ pub(crate) const HAVE_CUTLASS_FP8_SM90_KERNELS: bool = cfg!(has_cutlass_fp8_sm90
 #[cfg_attr(not(has_deepgemm_fp8_sm90_provider), allow(dead_code))]
 pub(crate) const HAVE_DEEPGEMM_FP8_SM90_PROVIDER: bool = cfg!(has_deepgemm_fp8_sm90_provider);
 
+#[cfg(has_blockwise_fp8_kernels)]
+extern "C" {
+    pub(crate) fn mistralrs_fused_rms_norm_fp8_error_string(
+        status: i32,
+    ) -> *const core::ffi::c_char;
+
+    pub(crate) fn mistralrs_fused_add_rms_norm_quantize_bf16(
+        input: *const bf16,
+        residual: *const bf16,
+        weight: *const bf16,
+        residual_output: *mut bf16,
+        normalized_output: *mut bf16,
+        quantized_output: *mut F8E4M3,
+        scales: *mut f32,
+        inverse_rms: *mut f32,
+        rows: i32,
+        columns: i32,
+        scale_stride_m: i32,
+        epsilon: f32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+}
+
+#[cfg(has_fp8_mma_kernels)]
+extern "C" {
+    pub(crate) fn mistralrs_fp8_mma_error_string(status: i32) -> *const core::ffi::c_char;
+    pub(crate) fn mistralrs_fp8_mma_gemv(
+        weight: *const F8E4M3,
+        activation: *const F8E4M3,
+        activation_scales: *const f32,
+        weight_scales: *const f32,
+        output: *mut bf16,
+        rows: i32,
+        output_features: i32,
+        input_features: i32,
+        weight_scale_stride: i32,
+        activation_scale_stride_m: i32,
+        activation_scale_stride_g: i32,
+        stream: candle_core::cuda::cudarc::driver::sys::CUstream,
+    ) -> i32;
+    pub(crate) fn mistralrs_fp8_mma_quantize_bf16(
+        input: *const bf16,
+        quantized: *mut F8E4M3,
+        scales: *mut f32,
+        rows: i32,
+        columns: i32,
+        scale_stride_m: i32,
+        scale_stride_g: i32,
+        stream: candle_core::cuda::cudarc::driver::sys::CUstream,
+    ) -> i32;
+}
+
 #[cfg(has_deepgemm_fp8_sm90_provider)]
 pub(crate) const DEEPGEMM_SUCCESS: i32 = 0;
 #[cfg(has_deepgemm_fp8_sm90_provider)]
@@ -73,6 +125,19 @@ extern "C" {
         output_bf16: *mut core::ffi::c_void,
         workspace: *mut core::ffi::c_void,
         workspace_bytes: usize,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
+    #[allow(dead_code)]
+    pub(crate) fn mistralrs_deepgemm_sm90_gemm_prequantized(
+        prepared: *const DeepGemmPrepared,
+        m: u32,
+        activation_e4m3: *const core::ffi::c_void,
+        activation_scales: *const f32,
+        activation_scale_stride_m: u32,
+        weight_e4m3: *const core::ffi::c_void,
+        weight_scales: *const f32,
+        output_bf16: *mut core::ffi::c_void,
         stream: *mut core::ffi::c_void,
     ) -> i32;
 }
@@ -205,6 +270,66 @@ extern "C" {
         weight_block_size_x: i32,
         stream: candle_core::cuda::cudarc::driver::sys::CUstream,
     );
+
+    #[cfg(feature = "cutile")]
+    pub(crate) fn launch_quant_fp8_rowwise_kernel_f32(
+        input: *const f32,
+        output: *mut F8E4M3,
+        scales: *mut f32,
+        rows: i32,
+        columns: i32,
+        row_stride: i32,
+        stream: candle_core::cuda::cudarc::driver::sys::CUstream,
+    ) -> i32;
+
+    #[cfg(feature = "cutile")]
+    pub(crate) fn launch_quant_fp8_rowwise_kernel_f16(
+        input: *const f16,
+        output: *mut F8E4M3,
+        scales: *mut f32,
+        rows: i32,
+        columns: i32,
+        row_stride: i32,
+        stream: candle_core::cuda::cudarc::driver::sys::CUstream,
+    ) -> i32;
+
+    #[cfg(feature = "cutile")]
+    pub(crate) fn launch_quant_fp8_rowwise_kernel_bf16(
+        input: *const bf16,
+        output: *mut F8E4M3,
+        scales: *mut f32,
+        rows: i32,
+        columns: i32,
+        row_stride: i32,
+        stream: candle_core::cuda::cudarc::driver::sys::CUstream,
+    ) -> i32;
+
+    #[cfg(feature = "cutile")]
+    pub(crate) fn launch_quant_fp8_static_kernel_f32(
+        input: *const f32,
+        scale: *const f32,
+        output: *mut F8E4M3,
+        elements: usize,
+        stream: candle_core::cuda::cudarc::driver::sys::CUstream,
+    ) -> i32;
+
+    #[cfg(feature = "cutile")]
+    pub(crate) fn launch_quant_fp8_static_kernel_f16(
+        input: *const f16,
+        scale: *const f32,
+        output: *mut F8E4M3,
+        elements: usize,
+        stream: candle_core::cuda::cudarc::driver::sys::CUstream,
+    ) -> i32;
+
+    #[cfg(feature = "cutile")]
+    pub(crate) fn launch_quant_fp8_static_kernel_bf16(
+        input: *const bf16,
+        scale: *const f32,
+        output: *mut F8E4M3,
+        elements: usize,
+        stream: candle_core::cuda::cudarc::driver::sys::CUstream,
+    ) -> i32;
 
     // FP8 Matmul kernels (for forward method)
     pub(crate) fn launch_fp8_matmul_f16(

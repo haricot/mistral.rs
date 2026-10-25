@@ -117,6 +117,39 @@ pub trait SpeculativeTargetMixin {
         false
     }
 
+    fn supports_recurrent_speculative_transitions(&self) -> bool {
+        false
+    }
+
+    // PLE-style state that verify advances in place, so graph captures must snapshot and restore it
+    fn speculative_verify_mutates_recurrent_state(&self) -> bool {
+        false
+    }
+
+    fn reserve_recurrent_speculative_transition_storage(&self) -> Result<bool> {
+        Ok(false)
+    }
+
+    fn reserve_recurrent_decode_deferred_storage(&self) -> Result<bool> {
+        Ok(false)
+    }
+
+    fn disable_recurrent_decode_deferred_storage(&self) -> Result<bool> {
+        Ok(false)
+    }
+
+    fn apply_recurrent_speculative_transitions_for_current_batch(&self) -> Result<bool> {
+        Ok(false)
+    }
+
+    fn flush_recurrent_state_for_current_batch(&self) -> Result<()> {
+        Ok(())
+    }
+
+    fn flush_recurrent_speculative_transitions(&self, _seq_ids: &[usize]) -> Result<()> {
+        Ok(())
+    }
+
     fn supports_speculative_prompt_bootstrap(&self) -> bool {
         false
     }
@@ -154,6 +187,11 @@ pub trait SpeculativeTargetMixin {
         None
     }
 
+    /// Depths the autotuner may pick each step, at most the plan's depth; fewer than two pins the plan's depth.
+    fn speculative_depth_candidates(&self) -> Vec<usize> {
+        Vec::new()
+    }
+
     fn speculative_graph_plans(&self) -> Vec<SpeculativeGraphPlan> {
         self.speculative_plan(1)
             .map(|plan| SpeculativeGraphPlan::new(plan.proposal_len, None))
@@ -171,9 +209,13 @@ pub trait SpeculativeTargetMixin {
 
     fn speculative_observe(&self, _observation: SpeculativeBatchObservation) {}
 
-    fn speculative_bypass(&mut self, _seq_ids: &[usize]) {}
+    fn speculative_bypass(&mut self, seq_ids: &[usize]) -> Result<()> {
+        self.flush_recurrent_speculative_transitions(seq_ids)
+    }
 
-    fn release_speculative_sequences(&mut self, _seq_ids: &[usize]) {}
+    fn release_speculative_sequences(&mut self, seq_ids: &[usize]) -> Result<()> {
+        self.flush_recurrent_speculative_transitions(seq_ids)
+    }
 
     /// Returns `Ok(None)` when speculation is unsupported for the current step.
     /// Return `Err` only for real failures that should stop generation.
@@ -221,6 +263,8 @@ pub trait SpeculativeTargetMixin {
 
 #[cfg(test)]
 mod tests {
+    use std::{cell::RefCell, rc::Rc};
+
     use super::{
         clamp_speculative_prefix_cache_hit, SpeculativePrefixReplay, SpeculativeTargetMixin,
     };
@@ -228,6 +272,20 @@ mod tests {
     struct NoSpeculativeProposer;
 
     impl SpeculativeTargetMixin for NoSpeculativeProposer {}
+
+    struct TransitionTarget {
+        flushed: Rc<RefCell<Vec<Vec<usize>>>>,
+    }
+
+    impl SpeculativeTargetMixin for TransitionTarget {
+        fn flush_recurrent_speculative_transitions(
+            &self,
+            seq_ids: &[usize],
+        ) -> candle_core::Result<()> {
+            self.flushed.borrow_mut().push(seq_ids.to_vec());
+            Ok(())
+        }
+    }
 
     #[test]
     fn prefix_replay_clamp_preserves_block_alignment() {
@@ -259,5 +317,17 @@ mod tests {
             NoSpeculativeProposer.evict_speculative_cuda_graphs(usize::MAX),
             0
         );
+    }
+
+    #[test]
+    fn bypass_and_release_flush_recurrent_transitions() -> candle_core::Result<()> {
+        let flushed = Rc::new(RefCell::new(Vec::new()));
+        let mut target = TransitionTarget {
+            flushed: Rc::clone(&flushed),
+        };
+        target.speculative_bypass(&[3, 8])?;
+        target.release_speculative_sequences(&[8])?;
+        assert_eq!(*flushed.borrow(), vec![vec![3, 8], vec![8]]);
+        Ok(())
     }
 }

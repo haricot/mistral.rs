@@ -1,12 +1,24 @@
 #[cfg(feature = "cuda")]
 mod ffi;
+mod fp8;
 pub(crate) mod isq;
 pub mod log;
 mod ops;
 mod uqff;
 
+pub(crate) use fp8::contiguous_fp8;
 pub use ops::flash_attn_sinks_metal;
 pub use ops::flash_attn_sinks_varlen_metal;
+#[cfg(feature = "cuda")]
+pub(crate) use ops::fused_glu_quantized_bf16;
+#[cfg(all(
+    feature = "cuda",
+    any(
+        all(has_cutlass_fp8_sm90_kernels, has_deepgemm_fp8_sm90_provider),
+        all(has_blockwise_fp8_kernels, feature = "cutile")
+    )
+))]
+pub(crate) use ops::fused_split_glu_quantized_bf16;
 #[cfg(feature = "cuda")]
 pub use ops::gptoss_swiglu_fused;
 #[cfg(feature = "cuda")]

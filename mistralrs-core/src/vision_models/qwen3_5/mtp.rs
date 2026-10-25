@@ -11,27 +11,17 @@ use candle_core::{DType, Device, Module, Result, Tensor, D};
 use mistralrs_quant::{QuantMethod, ReplicatedLayer, ShardedVarBuilder};
 
 use crate::{
-    attention::AttentionMask,
     device_map::DeviceMapper,
     layers::{GemmaRmsNorm, Qwen3VLRotaryEmbedding},
     paged_attention::{load_fp8_attention_scales, AttentionImplementation, PagedAttention},
-    pipeline::{
-        text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
-        NormalLoadingMetadata,
-    },
+    pipeline::NormalLoadingMetadata,
+    speculative::builtin_mtp::MtpAttentionInputs,
     utils::unvarbuilder::UnVarBuilder,
 };
 
 use super::{config::TextConfig, text::DecoderLayer};
 
 pub const MTP_FC_WEIGHT: &str = "mtp.fc.weight";
-
-pub struct MtpAttentionInputs<'a> {
-    pub kv_cache: (Tensor, Tensor),
-    pub metadata: &'a PagedAttentionInputMetadata,
-    pub attention_mask: &'a AttentionMask,
-    pub flash_params: &'a FlashParams,
-}
 
 pub struct Qwen3_5MtpHead {
     pre_fc_norm_embedding: GemmaRmsNorm,
@@ -172,7 +162,11 @@ impl Qwen3_5MtpHead {
             .layer
             .rotary_emb()
             .expect("MTP layer is a full-attention block");
-        let cos_sin = rotary_emb.compute_cos_sin(positions, xs.dtype())?;
+        let cos_sin = match positions.rank() {
+            2 => rotary_emb.compute_text_cos_sin(positions, xs.dtype())?,
+            3 => rotary_emb.compute_cos_sin(positions, xs.dtype())?,
+            rank => candle_core::bail!("unexpected Qwen3.5 MTP position rank {rank}"),
+        };
         let xs = self.layer.forward_attention(
             &xs,
             attention.attention_mask,
