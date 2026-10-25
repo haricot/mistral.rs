@@ -26,6 +26,8 @@ const HARMONY_ALTERNATE_EOS: &[&str] = &[
     "<|channel|>", // Harmony
 ];
 
+const GEMMA4_ALTERNATE_EOS: &[&str] = &["<turn|>", "<|tool_response>"];
+
 #[allow(dead_code)]
 #[derive(Debug, Deserialize, Serialize)]
 pub struct AddedTokensDecoder {
@@ -177,21 +179,34 @@ pub fn calculate_eos_tokens(
     gen_conf: Option<&GenerationConfig>,
     tokenizer: &Tokenizer,
 ) -> Vec<u32> {
+    let vocab = tokenizer.get_vocab(true);
     let mut eos_tok_ids = chat_template.eos_tok().map(|x| vec![x]).unwrap_or_default();
     let mut bos_tok_ids = chat_template.bos_tok().map(|b| vec![b]).unwrap_or_default();
 
     let templates = chat_template.get_template_contents();
 
     for alternate in SUPPORTED_ALTERNATE_EOS {
-        if tokenizer.get_vocab(true).contains_key(*alternate)
-            && templates.iter().any(|t| t.contains(*alternate))
-        {
+        if vocab.contains_key(*alternate) && templates.iter().any(|t| t.contains(*alternate)) {
             eos_tok_ids.push(alternate.to_string())
+        }
+    }
+    // A text-only Gemma 4 GGUF may omit the generation config containing these stops.
+    for template in templates
+        .iter()
+        .filter(|t| t.contains("<|turn>") && t.contains("<turn|>"))
+    {
+        for alternate in GEMMA4_ALTERNATE_EOS {
+            if vocab.contains_key(*alternate) && template.contains(*alternate) {
+                let token = alternate.to_string();
+                if !eos_tok_ids.contains(&token) {
+                    eos_tok_ids.push(token);
+                }
+            }
         }
     }
     if chat_template.is_harmony_format() {
         for alternate in HARMONY_ALTERNATE_EOS {
-            if tokenizer.get_vocab(true).contains_key(*alternate)
+            if vocab.contains_key(*alternate)
                 && templates
                     .iter()
                     .any(|template| template.contains(*alternate))
@@ -256,8 +271,7 @@ pub fn calculate_eos_tokens(
     let mut eos_toks = Vec::new();
     for eos_tok in eos_tok_ids {
         eos_toks.push(
-            tokenizer
-                .get_vocab(true)
+            vocab
                 .get(&eos_tok)
                 .copied()
                 .unwrap_or_else(|| panic!("Unable to extract `{eos_tok}` EOS token.")),
@@ -452,6 +466,16 @@ use crate::request::{resolve_reasoning_controls, ReasoningEffort};
 /// Check if a chat template uses Gemma 4 tool call tokens.
 fn is_gemma4_tool_template(template: &str) -> bool {
     template.contains("<|tool_call>") && template.contains("<tool_call|>")
+}
+
+fn gemma4_has_native_tool_messages(template: &str) -> bool {
+    static COMMENTS: std::sync::LazyLock<Regex> =
+        std::sync::LazyLock::new(|| Regex::new(r"(?s)\{#.*?#\}").unwrap());
+    static TOOL_ID_ACCESS: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(r#"(?:\.\s*get\s*\(\s*|\[\s*)["']tool_call_id["']|\.\s*tool_call_id\b"#).unwrap()
+    });
+    // Bolt's template consumes OpenAI tool results and preserves assistant content itself.
+    TOOL_ID_ACCESS.is_match(&COMMENTS.replace_all(template, ""))
 }
 
 fn is_liquid_tool_template(template: &str) -> bool {
@@ -774,11 +798,13 @@ pub fn apply_chat_template_to(
     };
 
     let is_gemma4_template = is_gemma4_tool_template(&resolved_template);
+    let legacy_gemma4_tools =
+        is_gemma4_template && !gemma4_has_native_tool_messages(&resolved_template);
     let is_liquid_template = is_liquid_tool_template(&resolved_template);
 
     // HF templates expect tool_calls[].function.arguments as a mapping, not the OpenAI wire string
     parse_tool_call_arguments(&mut messages);
-    if is_gemma4_template {
+    if legacy_gemma4_tools {
         preprocess_gemma4_tool_messages(&mut messages);
     } else if is_liquid_template {
         clear_assistant_tool_call_content(&mut messages);
@@ -854,8 +880,6 @@ pub fn apply_chat_template_to(
         })
         .collect();
 
-    let is_gemma4 = is_gemma4_tool_template(&resolved_template);
-
     let tools = tools.iter().map(tool_template_value).collect::<Vec<_>>();
     let mut rendered = if tools.is_empty() {
         tmpl.render(context! {
@@ -886,12 +910,8 @@ pub fn apply_chat_template_to(
         })?
     };
 
-    // Gemma 4 fix: when tool_responses are in a user turn (the correct
-    // format), the template's generation-prompt logic skips `<|turn>model\n`
-    // because it checks `prev_message_type != 'tool_response'`.  But the
-    // training data ALWAYS has `<|turn>model\n` before the model generates.
-    // Append it when the template left it out.
-    if is_gemma4 && add_generation_prompt && rendered.ends_with("<tool_response|>") {
+    // Legacy templates need a model prefix after normalized user-turn tool responses.
+    if legacy_gemma4_tools && add_generation_prompt && rendered.ends_with("<tool_response|>") {
         rendered.push_str("<|turn>model\n");
     }
 
@@ -921,6 +941,134 @@ mod tests {
             ("role".to_string(), Either::Left("user".to_string())),
             ("content".to_string(), Either::Left(text.to_string())),
         ])
+    }
+
+    fn gemma4_stop_test_tokenizer() -> Tokenizer {
+        let vocab = ["<unk>", "<eos>", "<turn|>", "<|tool_response>", "<|turn>"]
+            .into_iter()
+            .enumerate()
+            .map(|(id, token)| (token.to_string(), id as u32))
+            .collect::<ahash::AHashMap<_, _>>();
+        Tokenizer::new(
+            tokenizers::models::wordlevel::WordLevel::builder()
+                .vocab(vocab)
+                .unk_token("<unk>".to_string())
+                .build()
+                .unwrap(),
+        )
+    }
+
+    #[test]
+    fn gemma4_embedded_template_recovers_turn_and_tool_stops_without_generation_config() {
+        let tokenizer = gemma4_stop_test_tokenizer();
+        let template: ChatTemplate = serde_json::from_value(serde_json::json!({
+            "eos_token": "<eos>",
+            "chat_template": "<|turn>model\n<turn|><|tool_response>"
+        }))
+        .unwrap();
+        assert_eq!(
+            calculate_eos_tokens(&template, None, &tokenizer),
+            vec![1, 2, 3]
+        );
+        let config: GenerationConfig = serde_json::from_value(serde_json::json!({
+            "eos_token_id": [1, 2, 3]
+        }))
+        .unwrap();
+        assert_eq!(
+            calculate_eos_tokens(&template, Some(&config), &tokenizer),
+            vec![1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn gemma4_stop_markers_do_not_change_an_unrelated_template() {
+        let tokenizer = gemma4_stop_test_tokenizer();
+        let template: ChatTemplate = serde_json::from_value(serde_json::json!({
+            "eos_token": "<eos>",
+            "chat_template": "Literal examples: <turn|> and <|tool_response>"
+        }))
+        .unwrap();
+        assert_eq!(calculate_eos_tokens(&template, None, &tokenizer), vec![1]);
+    }
+
+    #[test]
+    fn gemma4_native_tool_template_keeps_wire_messages_content_and_continuation() {
+        let source = concat!(
+            "{% for message in messages %}",
+            "{% if message['role'] == 'assistant' %}{{ message['content'] }}",
+            r#"<|tool_call>call:get_weather{city:<|"|>{{ message['tool_calls'][0]['function']['arguments']['city'] }}<|"|>}<tool_call|>"#,
+            "{% elif message['role'] == 'tool' %}",
+            "|{{ __TOOL_ID__ }}:{{ message['content'] }}<tool_response|>",
+            "{% endif %}{% endfor %}"
+        );
+        let mut assistant = assistant_message_with_tool_calls();
+        assistant.insert(
+            "content".to_string(),
+            Either::Left("Checking weather.".to_string()),
+        );
+        let mut result = tool_result_message("get_weather", "sunny");
+        result.insert(
+            "tool_call_id".to_string(),
+            Either::Left("call-1".to_string()),
+        );
+        for access in [
+            "message.get('tool_call_id')",
+            "message['tool_call_id']",
+            "message.tool_call_id",
+        ] {
+            let template = ChatTemplateValue(Either::Left(source.replace("__TOOL_ID__", access)));
+            let rendered = apply_chat_template_to(
+                vec![assistant.clone(), result.clone()],
+                true,
+                Some(false),
+                None,
+                &template,
+                None,
+                None,
+                None,
+                Vec::new(),
+            )
+            .unwrap();
+            assert_eq!(
+                rendered,
+                r#"Checking weather.<|tool_call>call:get_weather{city:<|"|>Boston<|"|>}<tool_call|>|call-1:sunny<tool_response|>"#
+            );
+        }
+    }
+
+    #[test]
+    fn gemma4_legacy_tool_template_still_normalizes_results_and_repairs_prefix() {
+        let template = ChatTemplateValue(Either::Left(
+            concat!(
+                "{# Legacy example: message.get('tool_call_id') #}",
+                "{% for message in messages %}",
+                "{% if message['role'] == 'assistant' %}<|tool_call>call:get_weather{}<tool_call|>",
+                "{% elif message['role'] == 'user' and message.get('tool_responses') %}",
+                "{{ message['tool_responses'][0]['name'] }}:",
+                "{{ message['tool_responses'][0]['response'] }}<tool_response|>",
+                "{% endif %}{% endfor %}"
+            )
+            .to_string(),
+        ));
+        let rendered = apply_chat_template_to(
+            vec![
+                assistant_message_with_tool_calls(),
+                tool_result_message("get_weather", "sunny"),
+            ],
+            true,
+            Some(false),
+            None,
+            &template,
+            None,
+            None,
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            rendered,
+            "<|tool_call>call:get_weather{}<tool_call|>get_weather:sunny<tool_response|><|turn>model\n"
+        );
     }
 
     #[test]
