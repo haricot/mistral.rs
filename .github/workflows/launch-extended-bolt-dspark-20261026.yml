@@ -33,7 +33,7 @@ jobs:
           test "$(gh api repos/haricot/mistral.rs/branches/nemotron_bolt_dflash_standalone --jq .commit.sha)" = 9bb7f8f158322c0a60ab5b675afacd27146339f7
           test "$(gh api repos/haricot/candle/branches/extended --jq .commit.sha)" = 40b5a8acc43b5f8ef925370ae12daddd929f39f2
           test "$(gh api repos/haricot/candle/branches/cuda_legacy --jq .commit.sha)" = bfce966ad4d61a48801eb6af4db8b8eabebc01a8
-          test "$(gh api "repos/$GITHUB_REPOSITORY/contents/.github/workflows/mistral-extended-sm61.yml?ref=$GITHUB_SHA" --jq .sha)" = 50cfe2661a5b7736b8922b1d7f5fa20f79c3731c
+          test "$(gh api "repos/$GITHUB_REPOSITORY/contents/.github/workflows/mistral-extended-sm61.yml?ref=$GITHUB_SHA" --jq .sha)" = 60fdeb29f8aae7e0ee54c3b66d3f6f5c3fdc2e1f
           gh api repos/haricot/candle/actions/runs/40029177676 |
             jq -e '.status=="completed" and .conclusion=="success"' >/dev/null
           gh api "repos/$GITHUB_REPOSITORY/actions/workflows/mistral-extended-sm61.yml/runs?event=workflow_dispatch&head_sha=$GITHUB_SHA&per_page=100" |
