@@ -17,8 +17,8 @@
   "comment": "LFM2.5 DSpark and native Bolt DFlash on the Gemma 4 master baseline; new matching CPU, CUDA compile and physical Pascal proofs are required.",
   "kind": "mistral-extended",
   "target_branch": "extended",
-  "seed_sha": "71c0e13021a4544c1b475eff136f807e42bfe91c",
-  "campaign": "nemotron-bolt-dflash",
+  "seed_sha": "080fdd5ccf1ff8b6bcb0df9e2dbc189763770588",
+  "campaign": "mistral-extended-40295347483-1",
   "validation_state": "UNVALIDATED_CANDIDATE",
   "asd_required": true,
   "previous_candle_validation_ref": "refs/tags/archive/candle-pruned-20261016/archive/extended/sm61-validated-38898680839-2",
@@ -37,5 +37,6 @@
     }
   },
   "candle_validation_ref": "refs/tags/archive/extended/sm61-validated-40029177676-2",
-  "candle_validation_run": 40029177676
+  "candle_validation_run": 40029177676,
+  "integration_source_sha": "619afd8e4d0236741a6e5b52a92815cc271f3ff1"
 }
