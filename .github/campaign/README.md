@@ -48,6 +48,16 @@ selection from the CUDA-enabled executables. The mandatory CPU backend test
 uses `Device::Cpu`; CLI argument, speculative decoding, model and quantization
 tests run alongside it. GPU-only tests are selected separately.
 
+Hosted CPU execution needs to load the CUDA-linked binaries without an NVIDIA
+driver installation. `cpu-runtime.py` exposes the Toolkit link stub as
+`libcuda.so.1` in a temporary loader path for that child process only, checks
+that CUDA initialization returns `CUDA_ERROR_STUB_LIBRARY`, and removes the
+path afterwards. The stub is created after archiving and is never included in
+the executable archive or used by the physical GPU runner.
+
+Compilation caches and per-attempt logs/archives are saved even when a CPU test
+fails. A failed attempt still cannot satisfy any CPU or GPU publication gate.
+
 Each bundle contains compiled tests, nextest, JUnit evidence and `build.json`.
 Proofs bind the candidate, lockfile, toolchain/image recipe and archive SHA-256.
 An unchanged build bundle may be reused after these checks. Cache hits alone

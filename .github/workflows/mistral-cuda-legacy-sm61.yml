@@ -79,7 +79,7 @@ jobs:
           echo "candidate=$candidate" >> "$GITHUB_OUTPUT"
           echo "cache_key=$(jq -r .input_key "$report/plan.json")" >> "$GITHUB_OUTPUT"
           echo "recipe=$(jq -r .recipe "$report/plan.json")" >> "$GITHUB_OUTPUT"
-          echo "environment_key=$(python3 -c 'import hashlib,json,sys;p=json.load(open(sys.argv[1]));print(hashlib.sha256(json.dumps([p["image"],p["recipe"],p["config"]["toolchain"],p["config"]["features"]],sort_keys=True).encode()).hexdigest())' "$report/plan.json")" >> "$GITHUB_OUTPUT"
+          echo "environment_key=$(python3 -c 'import hashlib,json,sys;p=json.load(open(sys.argv[1]));print(hashlib.sha256(json.dumps([p["image"],p["config"]["toolchain"],p["config"]["features"],"sm61","bf16,fp8"],sort_keys=True).encode()).hexdigest())' "$report/plan.json")" >> "$GITHUB_OUTPUT"
           if [[ legacy == extended ]]; then
             git push origin "$candidate:refs/heads/integration/asd_runner-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           fi
@@ -132,11 +132,14 @@ jobs:
         with:
           name: mistral-legacy-prep-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/campaign
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        id: compile_cache
         with:
           path: ${{ runner.temp }}/campaign-cache
-          key: mistral-sm61-${{ needs.prepare.outputs.environment_key }}-${{ needs.prepare.outputs.cache_key }}
-          restore-keys: mistral-sm61-${{ needs.prepare.outputs.environment_key }}-
+          key: mistral-sm61-${{ needs.prepare.outputs.environment_key }}-${{ needs.prepare.outputs.cache_key }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            mistral-sm61-${{ needs.prepare.outputs.environment_key }}-${{ needs.prepare.outputs.cache_key }}-
+            mistral-sm61-${{ needs.prepare.outputs.environment_key }}-
       - name: Restore an identical verified build bundle
         env:
           GH_TOKEN: ${{ github.token }}
@@ -182,6 +185,13 @@ jobs:
           zstd -dc "$root/image.tar.zst" | docker load
           test "$(docker image inspect mistral-campaign --format '{{.Id}}')" = "$image_id"
           rm -rf "$root"
+      - name: Verify hosted CPU loader before expensive compilation
+        if: env.REUSE_BUILD != 'true'
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" --entrypoint python3 \
+            -v "$RUNNER_TEMP:$RUNNER_TEMP:ro" mistral-campaign \
+            "$RUNNER_TEMP/campaign/orchestrator/cpu-runtime.py" -- \
+            python3 -c 'import ctypes; assert ctypes.CDLL("libcuda.so.1").cuInit(0) == 34'
       - name: Compile each independent source and run CPU tests with CUDA enabled
         if: env.REUSE_BUILD != 'true'
         env:
@@ -194,12 +204,26 @@ jobs:
           while read -r component sha key; do
             dir="$RUNNER_TEMP/builds/$component"
             mkdir -p "$dir"
-            docker run --rm --user "$(id -u):$(id -g)" --security-opt=no-new-privileges \
+            docker run --rm --user "$(id -u):$(id -g)" --security-opt=no-new-privileges --entrypoint /bin/bash \
               -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE:rw" -v "$RUNNER_TEMP:$RUNNER_TEMP:rw" \
               -w "$GITHUB_WORKSPACE" -e "HOME=$RUNNER_TEMP/campaign-home" \
               -e "CAMPAIGN_CACHE=$RUNNER_TEMP/campaign-cache" \
-              mistral-campaign bash "$RUNNER_TEMP/campaign/orchestrator/build.sh" "$dir" "$plan" "$component"
+              mistral-campaign "$RUNNER_TEMP/campaign/orchestrator/build.sh" "$dir" "$plan" "$component"
           done < <(jq -r '.matrix[] | [.component,.candidate,.build_key] | @tsv' "$plan")
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        if: always() && env.REUSE_BUILD != 'true' && steps.compile_cache.outputs.cache-primary-key != ''
+        continue-on-error: true
+        with:
+          path: ${{ runner.temp }}/campaign-cache
+          key: ${{ steps.compile_cache.outputs.cache-primary-key }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: failure()
+        with:
+          name: mistral-build-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/builds/
+          if-no-files-found: warn
+          retention-days: 7
+          compression-level: 0
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: success()
         with:
