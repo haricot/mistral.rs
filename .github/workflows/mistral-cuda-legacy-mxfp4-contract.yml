@@ -132,31 +132,23 @@ jobs:
             test "$before" = "$after"
             rm contract-negative.log
           )
-      - name: Guard against stale artifacts across re-run attempts
+      - name: Guard run-scoped proofs and content-addressed executable archives
         shell: bash
         run: |
-          python3 - <<'PY'
+          python3 - <<'PYCODE'
           from pathlib import Path
-          yaml = Path(".github/workflows/mistral-cuda-legacy-sm61.yml").read_text()
-          rebase = Path(".github/scripts/legacy-cuda-rebase.sh").read_text()
-          artifacts = [
-              line.strip() for line in yaml.splitlines()
-              if "mistral-legacy-" in line and "github.run_id" in line
-              and ("name:" in line or "pattern:" in line)
-          ]
-          assert len(artifacts) == 9, artifacts
-          assert all("github.run_attempt" in line for line in artifacts), artifacts
-          local = [
-              line.strip() for line in yaml.splitlines()
-              if "mistral-legacy-" in line and "$GITHUB_RUN_ID" in line
-          ]
-          assert len(local) == 3, local
-          assert all("-$GITHUB_RUN_ATTEMPT" in line for line in local), local
-          ref = "artifact://mistral-legacy-prep-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/candidate.bundle"
-          assert ref in yaml and rebase.count(ref) == 2
-          assert "if git diff --cached --quiet; then" in rebase
-          print("LEGACY_ATTEMPT_SCOPED_ARTIFACTS=PASS")
-          PY
+          for workflow in ("mistral-cuda-legacy-sm61.yml", "mistral-extended-sm61.yml"):
+              text = (Path(".github/workflows") / workflow).read_text()
+              evidence = [line.strip() for line in text.splitlines()
+                          if "name:" in line and any(prefix in line for prefix in
+                              ("mistral-legacy-prep-", "mistral-legacy-gpu-", "mistral-asd-prep-", "mistral-asd-gpu-"))]
+              assert evidence and all("github.run_id" in line and "github.run_attempt" in line for line in evidence), evidence
+              archives = [line.strip() for line in text.splitlines()
+                          if "name:" in line and "mistral-builds-" in line]
+              assert archives and all("needs.prepare.outputs.bundle_key" in line for line in archives), archives
+          print("RUN_SCOPED_PROOFS_AND_CONTENT_ADDRESSED_ARCHIVES=PASS")
+          PYCODE
+          python3 -B -m unittest discover -v -s .github/campaign/tests
       - name: Evidence scope
         run: |
           echo "MXFP4_FLASHINFER_FP8_MMA_PORT_CONTRACT=PASS" >> "$GITHUB_STEP_SUMMARY"
