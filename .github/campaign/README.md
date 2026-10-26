@@ -43,6 +43,13 @@ limited to reduce test compilation time; CUDA kernels retain their build-script
 `-O3` options. These archives are not release performance binaries. Release model
 benchmarks require the release profile and separate measurements.
 
+`compiler-env.sh` fixes Rust's CPU target to baseline `x86-64`, overriding the
+repository's `target-cpu=native` and inherited encoded flags. A hosted machine's
+AVX-512 instructions must not become unconditional instructions on the Pascal
+runner's CPU. Build proofs include the effective flags and compiler version.
+Changing these flags invalidates executable reuse; source candidates and CUDA
+kernel cache inputs remain independent of the host CPU instruction set.
+
 `build.sh` runs Cargo check, builds the nextest archive, and runs the CPU test
 selection from the CUDA-enabled executables. The mandatory CPU backend test
 uses `Device::Cpu`; CLI argument, speculative decoding, model and quantization
@@ -57,6 +64,7 @@ the executable archive or used by the physical GPU runner.
 
 Compilation caches and per-attempt logs/archives are saved even when a CPU test
 fails. A failed attempt still cannot satisfy any CPU or GPU publication gate.
+Compilation phases and their logs are also streamed to the Actions console.
 
 Each bundle contains compiled tests, nextest, JUnit evidence and `build.json`.
 Proofs bind the candidate, lockfile, toolchain/image recipe and archive SHA-256.

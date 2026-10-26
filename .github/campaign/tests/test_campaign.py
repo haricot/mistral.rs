@@ -226,6 +226,16 @@ class ProofTests(unittest.TestCase):
     def test_accepts_exact_build(self):
         self.assertEqual(c.verify_artifact(self.root, self.expected)["cpu_test_count"], 3)
 
+    def test_gpu_archive_accepts_portable_compiler_flags(self):
+        c.write_json(self.root / "build.json", {**self.proof, "rustflags": p.PORTABLE_RUSTFLAGS})
+        self.assertEqual(p.verify_build(self.root, self.expected)["rustflags"], p.PORTABLE_RUSTFLAGS)
+
+    def test_gpu_archive_rejects_native_or_missing_compiler_flags(self):
+        for flags in (None, "-C target-cpu=native", "-C target-cpu=x86-64-v4"):
+            c.write_json(self.root / "build.json", {**self.proof, "rustflags": flags})
+            with self.subTest(flags=flags), self.assertRaisesRegex(RuntimeError, "non-portable"):
+                p.verify_build(self.root, self.expected)
+
     def test_rejects_archive_tampering(self):
         (self.root / "tests.tar.zst").write_bytes(b"different executable")
         with self.assertRaisesRegex(RuntimeError, "digest mismatch"):

@@ -10,6 +10,9 @@ candidate="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["can
 git switch --detach --force "$candidate"
 git config --global --add safe.directory "$PWD"
 cp Cargo.lock "$report/Cargo.lock"
+source "$script_dir/compiler-env.sh"
+printf '%s\n' "$RUSTFLAGS" > "$report/rustflags.txt"
+rustc -vV > "$report/rustc-version.txt"
 export CUDA_COMPUTE_CAP=61 ALLOW_LEGACY=bf16,fp8
 export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 RUSTC_WRAPPER=/opt/tools/sccache
 export CARGO_TARGET_DIR="$CAMPAIGN_CACHE/target"
@@ -27,17 +30,21 @@ for name in campaign_backends legacy_sm61_runtime asd_sm61_smoke extended_sm61_r
   if [[ -f "mistralrs-core/tests/$name.rs" ]]; then test_args+=(--test "$name"); fi
 done
 date -u +%FT%TZ > "$report/start.txt"
+echo "CAMPAIGN_PHASE=$component:check RUSTFLAGS=$RUSTFLAGS"
 cargo check --locked --profile campaign -p mistralrs-cli --no-default-features \
-  --features "$features" --timings > "$report/check.log" 2>&1 || { tail -n 100 "$report/check.log"; exit 1; }
+  --features "$features" --timings 2>&1 | tee "$report/check.log"
+echo "CAMPAIGN_PHASE=$component:archive"
 cargo nextest archive --locked --cargo-profile campaign \
   -p mistralrs-core -p mistralrs-quant -p mistralrs-cli -p mistralrs-server-core --no-default-features \
   --features "$features" "${test_args[@]}" --archive-file "$report/tests.tar.zst" \
-  --config-file "$script_dir/nextest.toml" > "$report/build.log" 2>&1 || { tail -n 100 "$report/build.log"; exit 1; }
+  --config-file "$script_dir/nextest.toml" 2>&1 | tee "$report/build.log"
 cp /opt/tools/cargo-nextest "$report/cargo-nextest"
 python3 "$script_dir/proof.py" config "$report/nextest.toml" cpu --junit "$report/cpu-junit.xml"
+echo "CAMPAIGN_PHASE=$component:cpu-tests"
 python3 "$script_dir/cpu-runtime.py" -- "$report/cargo-nextest" nextest run --archive-file "$report/tests.tar.zst" \
   --config-file "$report/nextest.toml" --profile cpu --no-tests=fail \
-  > "$report/cpu.log" 2>&1 || { tail -n 100 "$report/cpu.log"; exit 1; }
+  2>&1 | tee "$report/cpu.log"
 find "$CARGO_TARGET_DIR/cargo-timings" -maxdepth 1 -name '*.html' -exec cp {} "$report/" \; || true
 sccache --show-stats > "$report/cache-stats.txt"
 python3 "$script_dir/proof.py" build "$report"
+echo "CAMPAIGN_PHASE=$component:passed"
