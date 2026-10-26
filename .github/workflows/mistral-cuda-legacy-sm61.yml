@@ -257,13 +257,16 @@ jobs:
           while IFS= read -r component; do
             mkdir -p "$RUNNER_TEMP/gpu-proof/target-$component"
           done < <(python3 -c 'import json,sys; [print(n["component"]) for n in json.load(open(sys.argv[1]))["matrix"]]' "$RUNNER_TEMP/campaign/plan.json")
+          lscpu > "$RUNNER_TEMP/gpu-proof/cpu.txt"
       - name: Execute hosted archives on physical Pascal
         run: bash "$RUNNER_TEMP/campaign/orchestrator/gpu.sh" "$RUNNER_TEMP/campaign/plan.json" "$RUNNER_TEMP/builds" "$RUNNER_TEMP/gpu-proof"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
           name: mistral-legacy-gpu-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/gpu-proof/
+          path: |
+            ${{ runner.temp }}/gpu-proof/
+            !${{ runner.temp }}/gpu-proof/target-*/**
           if-no-files-found: warn
           retention-days: 30
   promote:

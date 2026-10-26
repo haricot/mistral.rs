@@ -7,6 +7,8 @@ from pathlib import Path
 
 from campaign import ROOT, file_hash, verify_artifact, write_json
 
+PORTABLE_RUSTFLAGS = "-C target-cpu=x86-64"
+
 
 def node(plan, component):
     matches = [n for n in plan["matrix"] if n["component"] == component]
@@ -35,11 +37,22 @@ def build(directory):
     proof["status"] = "BUILD_AND_CPU_PASSED"
     proof["features"] = ["cuda-legacy-bf16", "cuda-legacy-fp8", "cuda-legacy-fp4"]
     proof["profile"] = "campaign"
+    proof["rustflags"] = (directory / "rustflags.txt").read_text().strip()
+    if proof["rustflags"] != PORTABLE_RUSTFLAGS:
+        raise RuntimeError("non-portable Rust compiler flags")
     proof["gpu_executed"] = False
-    proof["files"] = {n: file_hash(directory / n) for n in ["tests.tar.zst", "cargo-nextest", "cpu-junit.xml", "Cargo.lock"]}
+    proof["files"] = {n: file_hash(directory / n) for n in [
+        "tests.tar.zst", "cargo-nextest", "cpu-junit.xml", "Cargo.lock", "rustflags.txt", "rustc-version.txt"]}
     if proof["files"]["Cargo.lock"] != proof["lock"]:
         raise RuntimeError("built lockfile differs from preparation")
     write_json(directory / "build.json", proof)
+
+
+def verify_build(directory, expected):
+    proof = verify_artifact(directory, expected)
+    if proof.get("rustflags") != PORTABLE_RUSTFLAGS:
+        raise RuntimeError("non-portable Rust compiler flags")
+    return proof
 
 
 def main():
@@ -64,7 +77,7 @@ def main():
         print(test_count(args.path, "campaign_cuda_backend"))
     else:
         plan = json.loads(args.plan.read_text())
-        verify_artifact(args.path, node(plan, args.component))
+        verify_build(args.path, node(plan, args.component))
 
 
 if __name__ == "__main__":
