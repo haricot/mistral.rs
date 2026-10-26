@@ -1,4 +1,4 @@
-name: Launch pinned Extended Bolt and DSpark once
+name: Launch standalone CUDA archive campaign once
 on:
   push:
     branches: [mirror_orch]
@@ -8,44 +8,35 @@ permissions:
   contents: read
   actions: write
 concurrency:
-  group: launch-extended-bolt-dspark-20261026
+  group: launch-standalone-archives-20261026
   cancel-in-progress: false
 jobs:
   dispatch:
     if: >-
       github.repository == 'haricot/mistral.rs' &&
       github.ref == 'refs/heads/mirror_orch' &&
-      github.event.head_commit.message == 'ci: launch Extended Bolt and confidence DSpark validation'
+      github.event.head_commit.message == 'ci: launch standalone CUDA archive campaign'
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     env:
       GH_TOKEN: ${{ github.token }}
-      EXPECTED_SEED: 080fdd5ccf1ff8b6bcb0df9e2dbc189763770588
-      EXPECTED_CANDLE: 40b5a8acc43b5f8ef925370ae12daddd929f39f2
-      EXPECTED_BOLT: 9bb7f8f158322c0a60ab5b675afacd27146339f7
-      EXPECTED_LFM: 892950dccf5e5e74020bfd1d9fd9734e09992d95
-      EXPECTED_INTEGRATION: 619afd8e4d0236741a6e5b52a92815cc271f3ff1
-      EXPECTED_WORKFLOW_BLOB: 892384bf6c767843cd598829d6e51ca147d8fcf8
     steps:
-      - name: Verify source pins and dispatch the Extended campaign
+      - name: Check locked source heads and dispatch once
         shell: bash
         run: |
           set -euo pipefail
           test "$(gh api repos/haricot/mistral.rs/branches/mirror_orch --jq .commit.sha)" = "$GITHUB_SHA"
-          test "$(gh api repos/haricot/mistral.rs/branches/asd_runner --jq .commit.sha)" = "$EXPECTED_SEED"
-          test "$(gh api repos/haricot/mistral.rs/branches/lfm25_dspark_standalone --jq .commit.sha)" = "$EXPECTED_LFM"
-          test "$(gh api repos/haricot/mistral.rs/branches/nemotron_bolt_dflash_standalone --jq .commit.sha)" = "$EXPECTED_BOLT"
-          test "$(gh api repos/haricot/candle/branches/extended --jq .commit.sha)" = "$EXPECTED_CANDLE"
-          test "$(gh api "repos/$GITHUB_REPOSITORY/contents/.github/workflows/mistral-extended-sm61.yml?ref=$GITHUB_SHA" --jq .sha)" = "$EXPECTED_WORKFLOW_BLOB"
+          test "$(gh api repos/haricot/mistral.rs/branches/master --jq .commit.sha)" = 28ed6daca455b4ae063896014d1ea698b912c539
+          test "$(gh api repos/haricot/mistral.rs/branches/allow_old_card --jq .commit.sha)" = 00d0a5e6989a42d1f3d903e72c427439a6098717
+          test "$(gh api repos/haricot/mistral.rs/branches/asd_runner_standalone --jq .commit.sha)" = 0dc241c95d9945821c0fd3b51f72b0395eb592ff
+          test "$(gh api repos/haricot/mistral.rs/branches/lfm25_dspark_standalone --jq .commit.sha)" = 892950dccf5e5e74020bfd1d9fd9734e09992d95
+          test "$(gh api repos/haricot/mistral.rs/branches/nemotron_bolt_dflash_standalone --jq .commit.sha)" = 9bb7f8f158322c0a60ab5b675afacd27146339f7
+          test "$(gh api repos/haricot/candle/branches/extended --jq .commit.sha)" = 40b5a8acc43b5f8ef925370ae12daddd929f39f2
+          test "$(gh api repos/haricot/candle/branches/cuda_legacy --jq .commit.sha)" = bfce966ad4d61a48801eb6af4db8b8eabebc01a8
+          test "$(gh api "repos/$GITHUB_REPOSITORY/contents/.github/workflows/mistral-extended-sm61.yml?ref=$GITHUB_SHA" --jq .sha)" = 7a4f9e46a4ffd6d7405d5f2a98ee1e2407727ed4
           gh api repos/haricot/candle/actions/runs/40029177676 |
             jq -e '.status=="completed" and .conclusion=="success"' >/dev/null
           gh api "repos/$GITHUB_REPOSITORY/actions/workflows/mistral-extended-sm61.yml/runs?event=workflow_dispatch&head_sha=$GITHUB_SHA&per_page=100" |
             jq -e '.total_count==0' >/dev/null
-          gh workflow run mistral-extended-sm61.yml --repo "$GITHUB_REPOSITORY" --ref mirror_orch \
-            -f expected_seed_sha="$EXPECTED_SEED" \
-            -f expected_candle_sha="$EXPECTED_CANDLE" \
-            -f expected_lfm25_dspark_sha="$EXPECTED_LFM" \
-            -f expected_bolt_sha="$EXPECTED_BOLT" \
-            -f expected_integration_sha="$EXPECTED_INTEGRATION" \
-            -f publish_binary=false
-          echo "EXTENDED_DISPATCH=REQUESTED source=$EXPECTED_INTEGRATION" >> "$GITHUB_STEP_SUMMARY"
+          gh workflow run mistral-extended-sm61.yml --repo "$GITHUB_REPOSITORY" --ref mirror_orch
+          echo "STANDALONE_ARCHIVE_CAMPAIGN=REQUESTED" >> "$GITHUB_STEP_SUMMARY"
