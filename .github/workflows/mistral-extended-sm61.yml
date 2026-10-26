@@ -75,6 +75,7 @@ jobs:
           ORCHESTRATOR_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
+          trap 'echo "::error::Extended preparation failed at line $LINENO: $BASH_COMMAND"' ERR
           check_pin() {
             local label="$1" actual="$2" expected="$3"
             [[ "$actual" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Cannot resolve $label"; exit 3; }

@@ -24,8 +24,8 @@ jobs:
       EXPECTED_CANDLE: 40b5a8acc43b5f8ef925370ae12daddd929f39f2
       EXPECTED_BOLT: 9bb7f8f158322c0a60ab5b675afacd27146339f7
       EXPECTED_LFM: 892950dccf5e5e74020bfd1d9fd9734e09992d95
-      EXPECTED_INTEGRATION: 1753e965031bc705cabe5ce5fb4623d7f6d06d27
-      EXPECTED_WORKFLOW_BLOB: c183eef28e6936cddf373178e9e5e39544ce19fd
+      EXPECTED_INTEGRATION: 619afd8e4d0236741a6e5b52a92815cc271f3ff1
+      EXPECTED_WORKFLOW_BLOB: 892384bf6c767843cd598829d6e51ca147d8fcf8
     steps:
       - name: Verify source pins and dispatch the Extended campaign
         shell: bash
