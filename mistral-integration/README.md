@@ -1,5 +1,12 @@
 # Mistral.rs mirror orchestration
 
+The `integration/extended-nemotron-bolt-dflash` candidate merges Extended
+`71c0e13021a4` with the standalone Bolt work based on master `28ed6daca455`.
+It retains the ASD/DSpark and Pascal adaptations and updates Candle to
+`40b5a8acc43b`, matching the native half-duplex ASR provider. It has not
+inherited the older candidate's physical-GPU qualification. See
+`nemotron-bolt/README.md` and the updated source manifest before promotion.
+
 The default branch is `mirror_orch`. `master` remains the Mistral.rs code baseline.
 `.github/workflows/mistral-master-sync.yml` fetches the current `master` SHA (or a supplied exact SHA) and merges it into `mirror_orch` without changing `master`; scheduling is weekly, with manual dispatch supported. Conflicts stop synchronization and are saved as an artifact. No force rewrite of source history is allowed.
 

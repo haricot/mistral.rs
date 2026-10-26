@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
-  "base_master_sha": "20f607a77abd4738aa5594ee93a393a9fd284605",
+  "base_master_sha": "28ed6daca455b4ae063896014d1ea698b912c539",
   "sm61_source_sha": "d3813494903e5cfca01e12df596f3fe14a5d22ba",
   "candle_repository": "haricot/candle",
   "candle_branch": "extended",
-  "candle_sha": "f5ce7f6f8b7a68d14a55419f9f221e1ae3537fd3",
+  "candle_sha": "40b5a8acc43b5f8ef925370ae12daddd929f39f2",
   "features": [
     "cuda-legacy-bf16",
     "cuda-legacy-fp8",
@@ -14,12 +14,28 @@
     "cpu_moe_expert",
     "cuda_asd_runner_extended"
   ],
-  "comment": "Physical Pascal gate uses extended, the exact tag-validated Candle Extended SM61 commit, CPU-resolved Cargo.lock, hosted SM61 compile, and physical SM61 runtime proof",
-  "candle_validation_ref": "refs/tags/archive/candle-pruned-20261016/archive/extended/sm61-validated-38898680839-2",
+  "comment": "LFM2.5 DSpark and native Bolt DFlash on the Gemma 4 master baseline; new matching CPU, CUDA compile and physical Pascal proofs are required.",
   "kind": "mistral-extended",
   "target_branch": "extended",
-  "seed_sha": "080fdd5ccf1ff8b6bcb0df9e2dbc189763770588",
-  "campaign": "mistral-extended-39008621812-1",
+  "seed_sha": "71c0e13021a4544c1b475eff136f807e42bfe91c",
+  "campaign": "nemotron-bolt-dflash",
   "validation_state": "UNVALIDATED_CANDIDATE",
-  "asd_required": true
+  "asd_required": true,
+  "previous_candle_validation_ref": "refs/tags/archive/candle-pruned-20261016/archive/extended/sm61-validated-38898680839-2",
+  "standalone_source_sha": "9bb7f8f158322c0a60ab5b675afacd27146339f7",
+  "components": {
+    "lfm25_dspark": {
+      "branch": "lfm25_dspark_standalone",
+      "source_sha": "892950dccf5e5e74020bfd1d9fd9734e09992d95",
+      "base_master_sha": "20f607a77abd4738aa5594ee93a393a9fd284605",
+      "source_candle_sha": "f5ce7f6f8b7a68d14a55419f9f221e1ae3537fd3"
+    },
+    "nemotron_bolt_dflash": {
+      "branch": "nemotron_bolt_dflash_standalone",
+      "source_sha": "9bb7f8f158322c0a60ab5b675afacd27146339f7",
+      "base_master_sha": "28ed6daca455b4ae063896014d1ea698b912c539"
+    }
+  },
+  "candle_validation_ref": "refs/tags/archive/extended/sm61-validated-40029177676-2",
+  "candle_validation_run": 40029177676
 }

@@ -20,7 +20,19 @@ use super::forward::MoECudaFastPath;
 use super::forward::{MoEForward, MoEForwardConfig};
 
 #[cfg(feature = "cuda")]
-const GROUPED_PREFILL_MIN_TOKENS: usize = 32;
+pub(crate) const GROUPED_PREFILL_MIN_TOKENS: usize = 32;
+#[cfg(feature = "cuda")]
+const SMALL_GROUPED_MMQ_MIN_TOKENS: usize = 24;
+#[cfg(feature = "cuda")]
+const SMALL_GROUPED_MMQ_GATE_UP_SHAPE: [usize; 3] = [512, 640, 2560];
+#[cfg(feature = "cuda")]
+const SMALL_GROUPED_MMQ_DOWN_SHAPE: [usize; 3] = [512, 2560, 640];
+#[cfg(feature = "cuda")]
+const SMALL_GROUPED_MMQ_TOPK: usize = 10;
+#[cfg(feature = "cuda")]
+const SMALL_GROUPED_MMQ_COMPUTE_CAPABILITY: (i32, i32) = (12, 1);
+#[cfg(feature = "cuda")]
+static SMALL_GROUPED_MMQ_LOG: std::sync::Once = std::sync::Once::new();
 
 /// Canonical stacked expert weights, ENK [E, N, K] = [E, out, in]. The raw backends (Fused,
 /// Cutile) hold exactly this; nothing else stores a layout.
@@ -115,6 +127,101 @@ impl CutlassExpertsWeights {
             forward.topk_weights,
             config.num_experts,
             act,
+            dev,
+        )
+    }
+}
+
+/// Blockwise FP8 experts on the cuTile fused MoE.
+#[cfg(feature = "cutile")]
+pub(super) struct CutileFp8ExpertsWeights {
+    w: mistralrs_quant::cutile::CutileFp8MoeWeights,
+}
+
+#[cfg(feature = "cutile")]
+impl CutileFp8ExpertsWeights {
+    /// `None` when the checkpoint, device, or configuration is not one this backend serves.
+    pub(super) fn try_from_checkpoint(
+        cfg: &MoEExpertsConfig,
+        experts_vb: &ShardedVarBuilder,
+        comm: &Arc<mistralrs_quant::Comm>,
+        quantization_config: &Option<QuantizedConfig>,
+        act: Activation,
+    ) -> Result<Option<Self>> {
+        use mistralrs_quant::cutile::{fp8_moe_supported, FP8_MOE_GROUP};
+        let Some(QuantizedConfig::Fp8 {
+            weight_block_size: Some(block),
+            activation_scheme,
+            ..
+        }) = quantization_config
+        else {
+            return Ok(None);
+        };
+        if block.as_slice() != [FP8_MOE_GROUP, FP8_MOE_GROUP]
+            || *activation_scheme != Some(mistralrs_quant::Fp8ActivationScheme::Dynamic)
+            || comm.world_size() > 1
+            || super::config::gated_act(act).is_err()
+            || !matches!(
+                super::config::MoEExpertsBackend::from_env(),
+                None | Some(super::config::MoEExpertsBackend::Cutile)
+            )
+        {
+            return Ok(None);
+        }
+        let Device::Cuda(dev) = experts_vb.device() else {
+            return Ok(None);
+        };
+        if !mistralrs_quant::cutile::device_supported(dev)
+            || !fp8_moe_supported(dev, cfg.hidden_size, cfg.moe_intermediate_size)
+        {
+            return Ok(None);
+        }
+        let ckpt = ExpertCheckpoint::new(cfg, experts_vb.clone(), comm)?;
+        let Some((gate_up, gate_up_scales, down, down_scales)) =
+            ckpt.stacked_enk_fp8(FP8_MOE_GROUP)?
+        else {
+            return Ok(None);
+        };
+        let w = mistralrs_quant::cutile::CutileFp8MoeWeights::new(
+            gate_up,
+            gate_up_scales,
+            down,
+            down_scales,
+            cfg.num_experts,
+            cfg.num_experts_per_tok,
+        )?;
+        mistralrs_quant::cutile::register_moe_fp8_shape(&w);
+        mistralrs_quant::log::once_log_info(
+            "MoE experts backend: cuTile blockwise FP8 grouped GEMM",
+        );
+        Ok(Some(Self { w }))
+    }
+
+    pub(super) fn forward_impl(
+        &self,
+        forward: &MoEForward,
+        config: MoEForwardConfig,
+    ) -> Result<Tensor> {
+        if forward.lora.is_some() {
+            candle_core::bail!("dynamic LoRA is not supported on cuTile FP8 experts");
+        }
+        let activation = match config.act {
+            Activation::Silu => mistralrs_quant::GluActivationType::Silu,
+            Activation::NewGelu | Activation::GeluPytorchTanh => {
+                mistralrs_quant::GluActivationType::Gelu
+            }
+            other => {
+                candle_core::bail!("activation {other:?} is not supported by cuTile FP8 experts")
+            }
+        };
+        let dev = forward.xs_flat.device().as_cuda_device()?;
+        let xs = forward.xs_flat.to_dtype(DType::BF16)?;
+        mistralrs_quant::cutile::cutile_fused_moe_fp8(
+            &xs,
+            &self.w,
+            forward.topk_ids,
+            forward.topk_weights,
+            activation,
             dev,
         )
     }
@@ -648,6 +755,12 @@ impl FastExpertsWeights {
         vb: ShardedVarBuilder,
         quantization_config: &Option<QuantizedConfig>,
     ) -> Result<FastExpertsWeights> {
+        #[cfg(feature = "cutile")]
+        mistralrs_quant::cutile::register_nvfp4_routing(
+            vb.device(),
+            cfg.num_experts,
+            cfg.num_experts_per_tok,
+        )?;
         let experts_vb = vb.pp("experts");
         let read_vb = if should_stage_prequantized_on_cpu(&experts_vb) && !vb.device().is_cpu() {
             vb.set_device(Device::Cpu)
@@ -1032,12 +1145,80 @@ impl FastExpertsWeights {
     }
 
     #[cfg(feature = "cuda")]
+    fn prefers_small_grouped_mmq(&self, forward: &MoEForward, config: MoEForwardConfig) -> bool {
+        use candle_core::cuda::cudarc::driver::sys::CUdevice_attribute;
+        use candle_core::quantized::GgmlDType;
+
+        if !(SMALL_GROUPED_MMQ_MIN_TOKENS..GROUPED_PREFILL_MIN_TOKENS)
+            .contains(&forward.shape.num_tokens)
+            || forward.shape.seq_len <= 1
+            || forward.original_dtype != DType::BF16
+            || !matches!(config.act, Activation::Silu)
+            || self.sharded
+            || forward.lora.is_some()
+            || config.num_experts != SMALL_GROUPED_MMQ_GATE_UP_SHAPE[0]
+            || config.num_experts_per_tok != SMALL_GROUPED_MMQ_TOPK
+            || forward.shape.hidden_dim != SMALL_GROUPED_MMQ_GATE_UP_SHAPE[2]
+        {
+            return false;
+        }
+        let projections = [
+            &self.fused_gate_proj,
+            &self.fused_up_proj,
+            &self.fused_down_proj,
+        ];
+        let expected = [
+            (GgmlDType::Q4K, SMALL_GROUPED_MMQ_GATE_UP_SHAPE),
+            (GgmlDType::Q4K, SMALL_GROUPED_MMQ_GATE_UP_SHAPE),
+            (GgmlDType::Q4_1, SMALL_GROUPED_MMQ_DOWN_SHAPE),
+        ];
+        if !projections
+            .into_iter()
+            .zip(expected)
+            .all(|(projection, (dtype, shape))| {
+                !projection.has_bias()
+                    && !projection.is_dynamic_lora_active()
+                    && projection.stats_snapshot().is_none()
+                    && projection.get_qtensor().is_some_and(|weight| {
+                        weight.dtype() == dtype && weight.shape().dims() == shape.as_slice()
+                    })
+            })
+        {
+            return false;
+        }
+        let Ok(device) = forward.xs.device().as_cuda_device() else {
+            return false;
+        };
+        let stream = device.cuda_stream();
+        let context = stream.context();
+        context
+            .attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)
+            .is_ok_and(|major| major == SMALL_GROUPED_MMQ_COMPUTE_CAPABILITY.0)
+            && context
+                .attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR)
+                .is_ok_and(|minor| minor == SMALL_GROUPED_MMQ_COMPUTE_CAPABILITY.1)
+    }
+
+    #[cfg(feature = "cuda")]
     pub(super) fn forward_cuda(
         &self,
         forward: &MoEForward,
         config: MoEForwardConfig,
     ) -> Result<Option<Tensor>> {
-        match Self::select_cuda_fast_path(forward) {
+        let path = match Self::select_cuda_fast_path(forward) {
+            Some(MoECudaFastPath::Decode) if self.prefers_small_grouped_mmq(forward, config) => {
+                SMALL_GROUPED_MMQ_LOG.call_once(|| {
+                    tracing::info!(
+                        min_tokens = SMALL_GROUPED_MMQ_MIN_TOKENS,
+                        max_tokens = GROUPED_PREFILL_MIN_TOKENS - 1,
+                        "Using grouped GGUF MoE for small batches"
+                    );
+                });
+                Some(MoECudaFastPath::GroupedPrefill)
+            }
+            path => path,
+        };
+        match path {
             Some(MoECudaFastPath::Decode) => self
                 .forward_decode(forward, config)
                 .map_err(|err| err.context("moe experts fast decode")),
@@ -1046,6 +1227,17 @@ impl FastExpertsWeights {
                 .map_err(|err| err.context("moe experts fast grouped")),
             None => Ok(None),
         }
+    }
+
+    fn uses_flattened_gather(&self, device: &Device) -> bool {
+        device.is_cuda()
+            || [
+                &self.fused_gate_proj,
+                &self.fused_up_proj,
+                &self.fused_down_proj,
+            ]
+            .iter()
+            .any(|projection| projection.name() == "NVFP4")
     }
 
     pub(super) fn forward_gather(
@@ -1059,7 +1251,7 @@ impl FastExpertsWeights {
             .process_routed_stats(forward.xs_flat, ids)?;
         self.fused_up_proj
             .process_routed_stats(forward.xs_flat, ids)?;
-        let ys = if forward.xs.device().is_cuda() {
+        let ys = if self.uses_flattened_gather(forward.xs.device()) {
             let xs =
                 forward
                     .xs_flat
@@ -1118,7 +1310,7 @@ impl FastExpertsWeights {
         self.fused_up_proj
             .process_routed_stats(forward.xs_flat, ids)?;
 
-        let (gather_input, gather_ids) = if forward.xs.device().is_cuda() {
+        let (gather_input, gather_ids) = if self.uses_flattened_gather(forward.xs.device()) {
             (
                 forward
                     .xs_flat
@@ -1154,7 +1346,7 @@ impl FastExpertsWeights {
         let down_input = crate::ops::mul_and_act(&gate, &up, config.act)?;
         self.fused_down_proj
             .process_routed_stats(&down_input, ids)?;
-        let down_base = if forward.xs.device().is_cuda() {
+        let down_base = if self.uses_flattened_gather(forward.xs.device()) {
             self.fused_down_proj.gather_forward(&down_input, ids)?
         } else {
             self.fused_down_proj.gather_forward(
@@ -1730,6 +1922,89 @@ mod immediate_isq_tests {
         );
         for module in modules {
             module.ct.resolve()?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod nvfp4_tests {
+    use super::*;
+    use crate::layers::Activation;
+    use crate::moe::experts::forward::MoEForwardShape;
+    use mistralrs_quant::{Nvfp4ActivationMode, Nvfp4Layer, Nvfp4LayerParts};
+
+    const FEATURES: usize = 16;
+    const EXPERTS: usize = 2;
+    const TOKENS: usize = 2;
+    const TOPK: usize = 2;
+
+    fn projection(values: [f32; EXPERTS], quantized: bool) -> Result<Arc<dyn QuantMethod>> {
+        let device = &Device::Cpu;
+        let globals = Tensor::from_vec(
+            values
+                .into_iter()
+                .flat_map(|value| std::iter::repeat_n(value, FEATURES))
+                .collect::<Vec<_>>(),
+            (EXPERTS, FEATURES),
+            device,
+        )?;
+        if quantized {
+            Ok(Arc::new(Nvfp4Layer::from_parts(Nvfp4LayerParts {
+                weight: Tensor::full(0x22u8, (EXPERTS, FEATURES, FEATURES / 2), device)?,
+                scales: Tensor::ones((EXPERTS, FEATURES, 1), DType::F8E4M3, device)?,
+                global_scales: globals,
+                input_scale: None,
+                activation: Nvfp4ActivationMode::None,
+                bias: None,
+                dtype: DType::F32,
+            })?))
+        } else {
+            Ok(Arc::new(UnquantLinear::new(
+                QuantMethodConfig::Unquantized(Linear::new(
+                    globals
+                        .unsqueeze(2)?
+                        .broadcast_as((EXPERTS, FEATURES, FEATURES))?
+                        .contiguous()?,
+                    None,
+                )),
+            )?))
+        }
+    }
+
+    #[test]
+    fn cpu_gather_combines_nvfp4_and_unquantized_projections() -> Result<()> {
+        let device = &Device::Cpu;
+        let mut input = vec![0f32; TOKENS * FEATURES];
+        input[0] = 1.0;
+        input[FEATURES] = 2.0;
+        let xs = Tensor::from_vec(input, (1, TOKENS, FEATURES), device)?;
+        let xs_flat = xs.reshape((TOKENS, FEATURES))?;
+        let ids = Tensor::new(&[[0u32, 1], [1, 0]], device)?;
+        let weights = Tensor::new(&[[0.25f32, 0.75], [0.75, 0.25]], device)?;
+        let forward = MoEForward {
+            xs: &xs,
+            xs_flat: &xs_flat,
+            topk_weights: &weights,
+            topk_ids: &ids,
+            original_dtype: DType::F32,
+            shape: MoEForwardShape::new(1, TOKENS, FEATURES),
+            lora: None,
+        };
+        let config = MoEForwardConfig {
+            num_experts: EXPERTS,
+            num_experts_per_tok: TOPK,
+            act: Activation::Relu,
+        };
+        for quantized_projection in 0..3 {
+            let experts = FastExpertsWeights {
+                fused_gate_proj: projection([1.0, 2.0], quantized_projection == 0)?,
+                fused_up_proj: projection([3.0, 4.0], quantized_projection == 1)?,
+                fused_down_proj: projection([1.0, 2.0], quantized_projection == 2)?,
+                sharded: false,
+            };
+            let output = experts.forward_gather(&forward, config)?.to_vec2::<f32>()?;
+            assert_eq!(output, vec![vec![204.0; FEATURES], vec![816.0; FEATURES]]);
         }
         Ok(())
     }

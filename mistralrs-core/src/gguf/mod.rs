@@ -4,6 +4,7 @@ mod content;
 pub(crate) mod gemma3_bindings;
 pub(crate) mod gemma3_config;
 pub(crate) mod gemma3n_bindings;
+pub(crate) mod gemma4_config;
 mod gguf_tokenizer;
 pub(crate) mod idefics3_bindings;
 mod lfm2_vl_bindings;
@@ -16,6 +17,7 @@ pub(crate) mod muse_glimmer_bindings;
 pub(crate) mod normal_bindings;
 pub(crate) mod normal_config;
 pub(crate) mod normal_registry;
+pub(crate) mod qwen4exp;
 pub(crate) mod qwen_multimodal_bindings;
 use strum::EnumString;
 

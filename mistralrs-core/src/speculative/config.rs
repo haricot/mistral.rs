@@ -38,6 +38,7 @@ pub struct MtpConfig {
     /// ISQ type for a draft-only copy of `lm_head`, so drafting skips the promoted (wider)
     /// sensitive-tensor type; the target still verifies with the promoted head.
     pub draft_lm_head_isq: Option<crate::IsqType>,
+    pub dspark_verify_profile: Option<PathBuf>,
 }
 
 #[doc(hidden)]
@@ -65,6 +66,7 @@ impl MtpConfig {
             n_predict,
             draft_sampling_method: MtpDraftSamplingMethod::default(),
             draft_lm_head_isq: None,
+            dspark_verify_profile: None,
         }
     }
 
@@ -74,6 +76,7 @@ impl MtpConfig {
             n_predict,
             draft_sampling_method: MtpDraftSamplingMethod::default(),
             draft_lm_head_isq: None,
+            dspark_verify_profile: None,
         }
     }
 
@@ -84,6 +87,11 @@ impl MtpConfig {
 
     pub fn with_draft_lm_head_isq(mut self, isq: Option<crate::IsqType>) -> Self {
         self.draft_lm_head_isq = isq;
+        self
+    }
+
+    pub fn with_dspark_verify_profile(mut self, path: Option<PathBuf>) -> Self {
+        self.dspark_verify_profile = path;
         self
     }
 
@@ -117,6 +125,45 @@ impl MtpConfig {
             .filter(|path| path.extension().is_some_and(|ext| ext == "safetensors"))
             .collect::<Vec<_>>();
         weight_paths.sort();
+        let raw: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(path.join("config.json")).map_err(candle_core::Error::msg)?,
+        )
+        .map_err(candle_core::Error::msg)?;
+        if raw
+            .get("quantization_config")
+            .and_then(|q| q.get("quant_algo"))
+            .and_then(serde_json::Value::as_str)
+            == Some("W4A16_NVFP4")
+        {
+            let tensors = unsafe {
+                mistralrs_quant::safetensors::MmapedSafetensors::multi_unique(&weight_paths)?
+            };
+            return tensors
+                .tensors()
+                .into_iter()
+                .try_fold(0usize, |total, (name, tensor)| {
+                    if !name.ends_with(".weight") {
+                        return Ok(total);
+                    }
+                    let elements = tensor
+                        .shape()
+                        .iter()
+                        .try_fold(1usize, |n, dim| n.checked_mul(*dim))
+                        .ok_or_else(|| candle_core::Error::msg("DFlash weight size overflow"))?;
+                    let expansion = if tensor.dtype() == safetensors::tensor::Dtype::U8 {
+                        2
+                    } else {
+                        1
+                    };
+                    elements
+                        .checked_mul(expansion)
+                        .and_then(|n| n.checked_mul(target_dtype.size_in_bytes()))
+                        .and_then(|n| total.checked_add(n))
+                        .ok_or_else(|| {
+                            candle_core::Error::msg("DFlash runtime weight size overflow")
+                        })
+                });
+        }
         crate::pipeline::checkpoint_runtime_size(&weight_paths, target_dtype)
             .map_err(candle_core::Error::msg)?
             .ok_or_else(|| {
@@ -161,6 +208,21 @@ pub fn reserve_external_mtp_memory_with_runtime(
         return Ok(Some(cache_config));
     };
     if mtp_config.is_builtin() {
+        let drafts = mtp_config
+            .n_predict
+            .unwrap_or(super::autotuner::AUTO_MAX_DEPTH);
+        if drafts == 0 {
+            anyhow::bail!("MTP n_predict must be at least 1.");
+        }
+        let lanes = drafts
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("MTP n_predict is too large"))?;
+        // Verify then logs GDN transitions in a pool sized before the KV cache instead of stashing states
+        if lanes > crate::cuda::gdn::GDN_SPEC_FUSED_MAX_TOKENS {
+            return Ok(Some(cache_config));
+        }
+        let mut cache_config = cache_config.with_recurrent_checkpoint_lanes(lanes)?;
+        cache_config.recurrent_checkpoint_lanes_auto = mtp_config.n_predict.is_none();
         return Ok(Some(cache_config));
     }
     let dtype = dtype.try_into_dtype(&[device])?;
@@ -176,6 +238,7 @@ pub fn reserve_external_mtp_memory_with_runtime(
             );
         }
         cache_config = cache_config.with_recurrent_checkpoint_lanes(drafts + 1)?;
+        cache_config.recurrent_checkpoint_lanes_auto = mtp_config.n_predict.is_none();
     }
     let bytes = mtp_config.external_weight_size_in_bytes(dtype)?;
     #[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
@@ -247,14 +310,12 @@ mod tests {
     use std::collections::HashMap;
 
     use safetensors::{serialize_to_file, tensor::Dtype as SafeDtype, tensor::TensorView};
-    use tempfile::tempdir;
+    use tempfile::{tempdir, TempDir};
 
     use super::*;
 
-    #[test]
-    fn external_weight_size_uses_runtime_dtype() -> anyhow::Result<()> {
+    fn external_checkpoint(config: &str) -> anyhow::Result<TempDir> {
         let dir = tempdir()?;
-        let path = dir.path().join("model.safetensors");
         let data = vec![0u8; 8];
         serialize_to_file(
             HashMap::from([(
@@ -262,12 +323,15 @@ mod tests {
                 TensorView::new(SafeDtype::BF16, vec![4], &data)?,
             )]),
             None,
-            &path,
+            &dir.path().join("model.safetensors"),
         )?;
-        fs::write(
-            dir.path().join("config.json"),
-            r#"{"architectures":["GenericMtpModel"]}"#,
-        )?;
+        fs::write(dir.path().join("config.json"), config)?;
+        Ok(dir)
+    }
+
+    #[test]
+    fn external_weight_size_uses_runtime_dtype() -> anyhow::Result<()> {
+        let dir = external_checkpoint(r#"{"architectures":["GenericMtpModel"]}"#)?;
         let config = MtpConfig::new(dir.path().to_string_lossy().into_owned(), None);
 
         assert_eq!(config.external_weight_size_in_bytes(DType::F32)?, 16);
@@ -284,6 +348,8 @@ mod tests {
             &Device::Cpu,
         )?
         .expect("cache config missing");
+        assert_eq!(cache_config.recurrent_checkpoint_lanes, 1);
+        assert!(!cache_config.recurrent_checkpoint_lanes_auto);
         let error = reserve_external_mtp_memory(
             Some(cache_config),
             Some(&config),
@@ -294,6 +360,130 @@ mod tests {
         assert!(error
             .to_string()
             .contains("paged attention device memory reservation overflow"));
+        Ok(())
+    }
+
+    #[test]
+    fn external_dflash_records_auto_and_explicit_checkpoint_depth() -> anyhow::Result<()> {
+        let dir = external_checkpoint(
+            r#"{
+                "architectures": ["DFlashDraftModel"],
+                "hidden_size": 8,
+                "intermediate_size": 16,
+                "num_hidden_layers": 1,
+                "num_attention_heads": 2,
+                "num_key_value_heads": 1,
+                "head_dim": 4,
+                "rms_norm_eps": 1e-6,
+                "vocab_size": 32,
+                "num_target_layers": 4,
+                "block_size": 8
+            }"#,
+        )?;
+        let base = crate::PagedAttentionConfig::new(
+            None,
+            crate::MemoryGpuConfig::Utilization(0.9),
+            crate::PagedCacheType::Auto,
+        )?;
+
+        let auto = MtpConfig::new(dir.path().to_string_lossy().into_owned(), None);
+        let auto = reserve_external_mtp_memory(Some(base), Some(&auto), &DType::F32, &Device::Cpu)?
+            .expect("cache config missing");
+        assert_eq!(auto.recurrent_checkpoint_lanes, 8);
+        assert!(auto.recurrent_checkpoint_lanes_auto);
+
+        let explicit = MtpConfig::new(dir.path().to_string_lossy().into_owned(), Some(3));
+        let explicit =
+            reserve_external_mtp_memory(Some(base), Some(&explicit), &DType::F32, &Device::Cpu)?
+                .expect("cache config missing");
+        assert_eq!(explicit.recurrent_checkpoint_lanes, 4);
+        assert!(!explicit.recurrent_checkpoint_lanes_auto);
+        Ok(())
+    }
+
+    #[test]
+    fn builtin_mtp_reserves_depth_and_rejects_invalid_counts() -> anyhow::Result<()> {
+        let base = crate::PagedAttentionConfig::new(
+            None,
+            crate::MemoryGpuConfig::Utilization(0.9),
+            crate::PagedCacheType::Auto,
+        )?;
+        let reserve = |count| {
+            reserve_external_mtp_memory(
+                Some(base),
+                Some(&MtpConfig::builtin(count)),
+                &DType::F32,
+                &Device::Cpu,
+            )
+        };
+        let auto = reserve(None)?.expect("cache config missing");
+        assert_eq!(
+            auto.recurrent_checkpoint_lanes,
+            super::super::autotuner::AUTO_MAX_DEPTH + 1
+        );
+        assert!(auto.recurrent_checkpoint_lanes_auto);
+        let explicit = reserve(Some(3))?.expect("cache config missing");
+        assert_eq!(explicit.recurrent_checkpoint_lanes, 4);
+        assert!(!explicit.recurrent_checkpoint_lanes_auto);
+        assert!(reserve(Some(0))
+            .unwrap_err()
+            .to_string()
+            .contains("at least 1"));
+        assert!(reserve(Some(usize::MAX))
+            .unwrap_err()
+            .to_string()
+            .contains("too large"));
+        Ok(())
+    }
+    #[test]
+    fn dspark_reserves_recurrent_checkpoint_lanes_before_pipeline_build() -> anyhow::Result<()> {
+        let dir = tempdir()?;
+        let path = dir.path().join("model.safetensors");
+        let data = vec![0u8; 8];
+        serialize_to_file(
+            HashMap::from([(
+                "layers.0.weight",
+                TensorView::new(SafeDtype::BF16, vec![4], &data)?,
+            )]),
+            None,
+            &path,
+        )?;
+        fs::write(
+            dir.path().join("config.json"),
+            r#"{
+                "architectures": ["Lfm2DSparkDraftModel"],
+                "hidden_size": 2048,
+                "intermediate_size": 6144,
+                "num_hidden_layers": 5,
+                "num_attention_heads": 32,
+                "num_key_value_heads": 8,
+                "head_dim": 64,
+                "rms_norm_eps": 1e-5,
+                "vocab_size": 128000,
+                "block_size": 9,
+                "dflash_config": {
+                    "target_layer_ids": [2, 9, 17, 21, 27]
+                },
+                "markov_rank": 256,
+                "markov_head_type": "vanilla"
+            }"#,
+        )?;
+        let config = MtpConfig::new(dir.path().to_string_lossy().into_owned(), Some(8));
+        let cache_config = crate::PagedAttentionConfig::new(
+            None,
+            crate::MemoryGpuConfig::Utilization(0.9),
+            crate::PagedCacheType::Auto,
+        )?;
+
+        let cache_config = reserve_external_mtp_memory(
+            Some(cache_config),
+            Some(&config),
+            &DType::F16,
+            &Device::Cpu,
+        )?
+        .expect("cache config missing");
+
+        assert_eq!(cache_config.recurrent_checkpoint_lanes, 9);
         Ok(())
     }
 }

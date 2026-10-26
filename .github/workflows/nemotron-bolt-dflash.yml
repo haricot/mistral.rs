@@ -1,0 +1,74 @@
+name: Nemotron Bolt DFlash standalone
+
+on:
+  push:
+    branches: [nemotron_bolt_dflash_standalone, integration/extended-nemotron-bolt-dflash]
+  pull_request:
+    paths:
+      - 'mistralrs-core/src/vision_models/gemma4/**'
+      - 'mistralrs-core/src/gguf/gemma4_config.rs'
+      - 'mistralrs-core/src/speculative/dflash*'
+      - '.github/workflows/nemotron-bolt-dflash.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bolt-dflash-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_BUILD_JOBS: 2
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+  CARGO_PROFILE_TEST_OPT_LEVEL: 1
+  CARGO_PROFILE_TEST_CODEGEN_UNITS: 1
+
+jobs:
+  cpu:
+    name: CPU native checkpoint and Gemma 4 contracts
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+      - run: cargo check --locked -p mistralrs-cli --no-default-features
+      - run: cargo test --locked -p mistralrs-core --lib --no-default-features -- bolt gemma4 dflash speculative
+      - run: cargo test --locked -p mistralrs-quant --lib --no-default-features -- gguf nvfp4
+
+  cuda_compile:
+    name: CUDA 12.9 sm_61 compile (no GPU execution)
+    runs-on: ubuntu-26.04
+    container: nvidia/cuda:12.9.2-devel-ubuntu24.04
+    timeout-minutes: 120
+    env:
+      CUDA_COMPUTE_CAP: 61
+      CUDA_HOME: /usr/local/cuda
+      CUDA_ROOT: /usr/local/cuda
+      NVCC: /usr/local/cuda/bin/nvcc
+      NVCC_CCBIN: /usr/bin/g++
+      ALLOW_LEGACY: bf16,fp8
+    steps:
+      - name: Install native build tools
+        run: |
+          apt-get update -qq
+          apt-get install -y --no-install-recommends build-essential git curl ca-certificates pkg-config libssl-dev cmake clang
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - name: Check the complete legacy CLI
+        run: cargo check --locked -p mistralrs-cli --no-default-features --features cuda-legacy-bf16,cuda-legacy-fp8,cuda-legacy-fp4,cudnn
+      - name: Compile the native Bolt tests for Pascal
+        run: >-
+          cargo --config 'profile.test.package.mistralrs-core.opt-level=0'
+          --config 'profile.test.package.mistralrs-core.codegen-units=8'
+          test --locked -p mistralrs-core --lib --no-default-features
+          --features cuda-legacy-bf16,cuda-legacy-fp8,cuda-legacy-fp4 --no-run

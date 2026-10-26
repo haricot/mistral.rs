@@ -5,6 +5,9 @@ use tracing::warn;
 
 #[cfg(feature = "metal")]
 const SIZE_IN_MB: usize = 1024 * 1024;
+// Left to the system on integrated GPUs, like llama.cpp's default `--fit-target`
+#[cfg(feature = "cuda")]
+pub(crate) const UNIFIED_SYSTEM_MARGIN_BYTES: usize = 1 << 30;
 
 #[derive(Debug, Clone, Copy)]
 pub enum DeviceMemory {
@@ -80,7 +83,8 @@ impl MemoryUsage {
     pub fn query(&self, device: &Device) -> Result<DeviceMemory> {
         match device {
             Device::Cpu => {
-                let sys = System::new_all();
+                let mut sys = System::new();
+                sys.refresh_memory();
                 Ok(DeviceMemory::Discrete {
                     total: usize::try_from(sys.total_memory())?,
                     free: usize::try_from(sys.available_memory())?,
@@ -89,12 +93,20 @@ impl MemoryUsage {
             #[cfg(feature = "cuda")]
             Device::Cuda(dev) => {
                 if super::normal::is_integrated_gpu(device) {
-                    let sys = System::new_all();
+                    let mut sys = System::new();
+                    sys.refresh_memory();
                     let total_bytes = usize::try_from(sys.total_memory())?;
                     let avail_bytes = usize::try_from(sys.available_memory())?;
-                    let fraction = igpu_memory_fraction();
-                    let budget = (total_bytes as f64 * fraction) as usize;
-                    let free = (avail_bytes as f64 * fraction) as usize;
+                    let (budget, free) = match igpu_memory_fraction_override() {
+                        Some(fraction) => (
+                            (total_bytes as f64 * fraction) as usize,
+                            (avail_bytes as f64 * fraction) as usize,
+                        ),
+                        None => (
+                            total_bytes.saturating_sub(UNIFIED_SYSTEM_MARGIN_BYTES),
+                            avail_bytes.saturating_sub(UNIFIED_SYSTEM_MARGIN_BYTES),
+                        ),
+                    };
                     Ok(DeviceMemory::Unified {
                         budget,
                         allocated: budget.saturating_sub(free),
@@ -378,12 +390,11 @@ fn cuda_result(
 }
 
 #[cfg(feature = "cuda")]
-fn igpu_memory_fraction() -> f64 {
+fn igpu_memory_fraction_override() -> Option<f64> {
     std::env::var("MISTRALRS_IGPU_MEMORY_FRACTION")
         .ok()
         .and_then(|s| s.parse::<f64>().ok())
         .filter(|&f| (0.0..=1.0).contains(&f))
-        .unwrap_or(0.75)
 }
 
 #[cfg(feature = "metal")]
