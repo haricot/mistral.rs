@@ -357,16 +357,18 @@ impl SpeculativeTargetMixin for Model {
             .collect()
     }
 
-    fn speculative_bypass(&mut self, seq_ids: &[usize]) {
+    fn speculative_bypass(&mut self, seq_ids: &[usize]) -> Result<()> {
         if let Some(drafter) = self.dflash.lock().expect("LFM2 DSpark poisoned").as_ref() {
             drafter.mark_seqs_dormant(seq_ids);
         }
+        Ok(())
     }
 
-    fn release_speculative_sequences(&mut self, seq_ids: &[usize]) {
+    fn release_speculative_sequences(&mut self, seq_ids: &[usize]) -> Result<()> {
         if let Some(drafter) = self.dflash.lock().expect("LFM2 DSpark poisoned").as_ref() {
             drafter.release_seqs(seq_ids);
         }
+        Ok(())
     }
 
     fn speculative_propose(

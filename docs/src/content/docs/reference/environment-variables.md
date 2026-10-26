@@ -67,16 +67,25 @@ See [CPU threads and affinity](/guides/perf/throughput-tuning/#cpu-threads-and-a
 | Variable | Purpose |
 |---|---|
 | `MISTRALRS_CUDA_GRAPHS` | CUDA graph acceleration is enabled by default when supported. Set to `0`, `false`, `no`, or `off` to disable. See [CUDA graphs](/guides/perf/paged-attention/#cuda-graphs). |
-| `MISTRALRS_DFLASH_ADAPTIVE` | Set to `1` or `true` to use full DFlash draft depth for batches up to 2 and depth 1 above that. Only applies when `--mtp-n-predict` is not set. |
+| `MISTRALRS_DFLASH_ADAPTIVE` | Enabled by default for automatic CUDA DFlash serving: use the full reserved depth for up to 8 live contexts and at most 3 drafts above that. Set to `0` or `false` to tune depth from measured throughput instead. Applies only when `--mtp-n-predict` is unset. |
 | `MISTRALRS_DFLASH_ISQ` | ISQ type for DFlash drafter weights (`q4k`, `q6k`, ... or `none` for bf16); defaults to the target's in-situ quantization type. |
 | `MISTRALRS_FLASHINFER_DECODE` | Disables FlashInfer decode acceleration when set to `0`, `false`, `no`, or `off`. Use only for compatibility troubleshooting. |
-| `MISTRALRS_GDN_DECODE_KERNEL` | Overrides the SM90 GDN decode kernel for benchmarking or troubleshooting. Accepted values are `auto` (default), `baseline`, `cooperative`, and `pipelined`; an incompatible forced kernel returns an error. |
+| `MISTRALRS_GDN_DECODE_KERNEL` | Overrides the CUDA GDN decode kernel for benchmarking or troubleshooting. Accepted values are `auto` (default), `baseline`, `cooperative`, `pipelined`, `vmajor4`, and `vmajor32`; an incompatible forced kernel returns an error. The value-major kernels need compute capability 8.0 or newer. |
+| `MISTRALRS_GDN_PREFILL_KERNEL` | Overrides the CUDA GDN prefill kernel. Accepted values are `auto` (default), `vmajor1`, `vmajor2`, `vmajor4`, `vmajor8`, `legacy-chunked`, `cutile` (cuTile builds, head dim 128), and `flashinfer-sm90` (Hopper builds only). |
 | `MISTRALRS_FP8_SM90_PROVIDER` | Selects the SM90 provider for compatible 128x128 blockwise FP8 weights. DeepGEMM decode is selected automatically on Linux with CUDA 12.8 or newer; set `cutlass` to disable it, or `deepgemm`/`auto` to select it explicitly. Kernels are prepared before graph capture, with clean CUTLASS fallback when JIT or cache preparation is unavailable. |
 | `MISTRALRS_DEEPGEMM_CACHE_DIR` | Overrides the owner-private, content-versioned DeepGEMM cubin and JIT-header cache. Defaults below `XDG_CACHE_HOME`, then `~/.cache`. |
 | `MISTRALRS_DEEPGEMM_NVCC` | Path to the `nvcc` executable used only when a DeepGEMM kernel is absent from the cache. A populated cache does not require runtime `nvcc`. |
 | `MISTRALRS_NO_MLA` | Disables MLA acceleration for DeepSeek V2/V3 when set to `1`. Use only for compatibility troubleshooting. |
 | `MISTRALRS_GGUF_AFFINE_BACKEND` | Set to `on` to speed up GGUF matmuls at batch sizes of 8 or more. Off by default because it keeps a second copy of the quantized weights, taking that memory from the KV cache. Worth enabling for production serving with high concurrency. |
-| `CUTILE_TILEIRAS_PATH` | Path to `tileiras` when it is not available on `PATH`. |
+| `MISTRALRS_MOE_BACKEND` | Overrides the MoE experts backend. `fused` (also `native`, `legacy`, `wmma`) selects the fused CUDA kernels, `cutile` the cuTile grouped GEMM, `cutlass` the CUTLASS grouped GEMM, and `fast` the gather-based path used on Metal, CPU, and ISQ. Unset, the fastest eligible backend is chosen; on cuTile builds, checkpoints whose experts carry 128x128 block-FP8 scales use the cuTile blockwise FP8 grouped GEMM unless `fast` is forced. |
+| `MISTRALRS_CUTILE_TUNE` | Controls the cuTile kernel autotuner that runs during warmup on cuTile builds. `auto` (default) reuses a persisted tuning record whose provenance (kernel source, GPU architecture, candidate set) matches and measures candidate configs for each registered kernel shape (MoE experts, FP8 GEMMs, routed LoRA) otherwise, `force` re-measures, and `off` uses the built-in policies. |
+| `MISTRALRS_CUTILE_TUNE_CACHE` | Directory holding the autotuner's records, one JSON file per kernel, shape, and GPU model. Defaults to `cutile_tune` under `XDG_CACHE_HOME/mistralrs`, then `~/.cache/mistralrs`. |
+| `CUDA_TOOLKIT_PATH` | CUDA toolkit root used by cuTile for headers, `tileiras`, and Tile IR bytecode compatibility. Recommended when multiple CUDA toolkits are installed. |
+| `CUTILE_TILEIRAS_PATH` | Path to a specific `tileiras` executable. Takes precedence over `CUDA_TOOLKIT_PATH` and automatic discovery. |
+| `CUTILE_SETUP_DIAGNOSTICS` | Set to `1` to print cuTile toolkit and `tileiras` discovery diagnostics. |
+| `CUTILE_JIT_LOG` | Set to `1` to print cuTile JIT and persistent-cache diagnostics. |
+| `CUTILE_JIT_TIMING` | If set, prints per-stage cuTile compilation timings and bounds-check placement counts. |
+| `CUTILE_BYTECODE_VERSION` | Advanced override for the emitted Tile IR bytecode version, such as `13.2`. Normally inferred from the selected toolkit or `tileiras`. |
 
 ## Multi-GPU and multi-node
 
@@ -97,7 +106,7 @@ See the [distributed inference guide](/guides/perf/distributed-inference/) for u
 
 | Variable | Purpose |
 |---|---|
-| `MISTRALRS_IGPU_MEMORY_FRACTION` | Fraction of integrated GPU memory usable on CUDA systems with iGPUs. Default 0.75. |
+| `MISTRALRS_IGPU_MEMORY_FRACTION` | Overrides the memory budget on CUDA integrated GPUs, such as DGX Spark, as a fraction of system memory. The default is available RAM minus 1 GiB, with the KV cache capped to the model context length. |
 
 ## Build-time
 

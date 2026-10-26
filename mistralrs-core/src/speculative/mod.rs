@@ -1,8 +1,12 @@
+pub mod autotuner;
+pub(crate) mod builtin_mtp;
 pub mod cache;
 pub mod config;
 pub mod dflash;
 pub mod driver;
 pub(crate) mod dspark_verify;
+pub(crate) mod gdn_transitions;
+pub(crate) mod hybrid_state;
 pub mod logging;
 pub(crate) mod paged_rows;
 pub mod policy;
