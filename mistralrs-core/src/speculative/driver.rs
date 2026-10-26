@@ -713,8 +713,9 @@ where
         );
     }
 
+    let verification_width = proposal_batch.verification_width(proposal_len)?;
     for (idx, proposal) in active_indices.iter().zip(proposal_batch.proposals) {
-        if proposal.tokens.len() == proposal_len {
+        if proposal.tokens.len() == verification_width {
             seqs[*idx].set_staged_speculative(proposal.tokens, proposal.distribution);
         } else {
             seqs[*idx].clear_staged_speculative_tokens();

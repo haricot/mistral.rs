@@ -38,6 +38,7 @@ pub struct MtpConfig {
     /// ISQ type for a draft-only copy of `lm_head`, so drafting skips the promoted (wider)
     /// sensitive-tensor type; the target still verifies with the promoted head.
     pub draft_lm_head_isq: Option<crate::IsqType>,
+    pub dspark_verify_profile: Option<PathBuf>,
 }
 
 #[doc(hidden)]
@@ -65,6 +66,7 @@ impl MtpConfig {
             n_predict,
             draft_sampling_method: MtpDraftSamplingMethod::default(),
             draft_lm_head_isq: None,
+            dspark_verify_profile: None,
         }
     }
 
@@ -74,6 +76,7 @@ impl MtpConfig {
             n_predict,
             draft_sampling_method: MtpDraftSamplingMethod::default(),
             draft_lm_head_isq: None,
+            dspark_verify_profile: None,
         }
     }
 
@@ -84,6 +87,11 @@ impl MtpConfig {
 
     pub fn with_draft_lm_head_isq(mut self, isq: Option<crate::IsqType>) -> Self {
         self.draft_lm_head_isq = isq;
+        self
+    }
+
+    pub fn with_dspark_verify_profile(mut self, path: Option<PathBuf>) -> Self {
+        self.dspark_verify_profile = path;
         self
     }
 

@@ -25,7 +25,9 @@ use serde::Deserialize;
 
 use crate::layers::{yarn_inv_freq_and_attention_factor, RmsNorm, YarnRopeConfig};
 use crate::prefix_cacher::PagedAuxiliaryPrefixState;
-use crate::speculative::{MtpConfig, MtpDraftSamplingMethod, SpeculativePrefixReplay};
+use crate::speculative::{
+    dspark_verify::DSparkVerifyProfile, MtpConfig, MtpDraftSamplingMethod, SpeculativePrefixReplay,
+};
 use crate::utils::varbuilder_utils::{from_mmaped_safetensors, DeviceForLoadTensor};
 
 #[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
@@ -1286,6 +1288,7 @@ pub struct DFlashDraftModel {
     norm: RmsNorm,
     selector: Option<CandidateSelector>,
     dspark_head: Option<DSparkHead>,
+    dspark_verify_profile: Option<DSparkVerifyProfile>,
     draft_sampling_method: MtpDraftSamplingMethod,
     inv_freq: Tensor,
     rope_attention_factor: f32,
@@ -1315,7 +1318,6 @@ struct DSparkHead {
     markov_embedding: Embedding,
     markov_projection: Linear,
     confidence_projection: Option<Linear>,
-    last_confidence: Mutex<Option<Tensor>>,
 }
 
 impl DSparkHead {
@@ -1344,7 +1346,7 @@ impl DSparkHead {
             .enable_confidence_head
             .unwrap_or(false)
             .then(|| {
-                let confidence = vb.pp("confidence_head").pp("proj");
+                let confidence = vb.pp("confidence_head").pp("proj").set_dtype(DType::F32);
                 Result::Ok(Linear::new(
                     confidence.get((1, cfg.hidden_size + rank), "weight")?,
                     Some(confidence.get(1, "bias")?),
@@ -1355,18 +1357,20 @@ impl DSparkHead {
             markov_embedding,
             markov_projection,
             confidence_projection,
-            last_confidence: Mutex::new(None),
         })
     }
 
-    fn select_greedy(&self, hidden: &Tensor, logits: &Tensor, anchors: &[u32]) -> Result<Tensor> {
+    fn select_greedy(
+        &self,
+        hidden: &Tensor,
+        logits: &Tensor,
+        anchors: &[u32],
+        compute_confidence: bool,
+    ) -> Result<(Tensor, Option<Tensor>)> {
         let (batch, positions, _) = hidden.dims3()?;
         let mut previous = Tensor::from_vec(anchors.to_vec(), (batch,), hidden.device())?;
         let mut tokens = Vec::with_capacity(positions);
-        let mut confidences = self
-            .confidence_projection
-            .as_ref()
-            .map(|_| Vec::with_capacity(positions));
+        let mut confidences = compute_confidence.then(|| Vec::with_capacity(positions));
         for position in 0..positions {
             let markov_hidden = self.markov_embedding.forward(&previous)?;
             let markov_logits = self.markov_projection.forward(&markov_hidden)?;
@@ -1377,18 +1381,17 @@ impl DSparkHead {
             {
                 let features =
                     Tensor::cat(&[&hidden.i((.., position, ..))?, &markov_hidden], D::Minus1)?;
-                values.push(candle_nn::ops::sigmoid(&projection.forward(&features)?)?);
+                values.push(candle_nn::ops::sigmoid(
+                    &projection.forward(&features.to_dtype(DType::F32)?)?,
+                )?);
             }
             tokens.push(next.clone());
             previous = next;
         }
-        *self
-            .last_confidence
-            .lock()
-            .expect("DSpark confidence state poisoned") = confidences
+        let confidence = confidences
             .map(|values| Tensor::cat(&values.iter().collect::<Vec<_>>(), D::Minus1))
             .transpose()?;
-        Tensor::stack(&tokens, 1)
+        Ok((Tensor::stack(&tokens, 1)?, confidence))
     }
 }
 
@@ -2255,6 +2258,21 @@ impl DFlashDraftModel {
         let raw = fs::read_to_string(path.join("config.json"))
             .map_err(|e| candle_core::Error::Msg(format!("failed to read DFlash config: {e}")))?;
         let cfg: DFlashConfig = serde_json::from_str(&raw).map_err(candle_core::Error::msg)?;
+        let dspark_verify_profile = config
+            .dspark_verify_profile
+            .as_deref()
+            .map(|path| {
+                if !cfg.is_dspark() || !cfg.enable_confidence_head.unwrap_or(false) {
+                    candle_core::bail!(
+                        "DSpark verify profile requires a DSpark checkpoint with a confidence head"
+                    );
+                }
+                let drafts = config
+                    .n_predict
+                    .unwrap_or(cfg.block_size().saturating_sub(1));
+                DSparkVerifyProfile::load(path, drafts)
+            })
+            .transpose()?;
         if !cfg.is_dflash() {
             candle_core::bail!(
                 "`--mtp-model` for this target must be a DFlash or DSpark draft model; got architectures {:?}",
@@ -2440,6 +2458,7 @@ impl DFlashDraftModel {
             norm: RmsNorm::new(hidden, eps, vb.pp("norm"))?,
             selector,
             dspark_head,
+            dspark_verify_profile,
             draft_sampling_method,
             inv_freq,
             rope_attention_factor,
@@ -2890,6 +2909,10 @@ impl DFlashDraftModel {
 
     pub fn has_selector(&self) -> bool {
         self.selector.is_some()
+    }
+
+    pub(crate) fn schedules_dspark_verification(&self) -> bool {
+        self.dspark_verify_profile.is_some()
     }
 
     pub fn is_dspark(&self) -> bool {
@@ -3752,7 +3775,20 @@ impl DFlashDraftModel {
                     "probabilistic DSpark drafting is not supported by the vanilla Markov head"
                 );
             }
-            let tokens = dspark.select_greedy(hidden, &logits, anchors)?;
+            let (tokens, confidence) = dspark.select_greedy(
+                hidden,
+                &logits,
+                anchors,
+                self.dspark_verify_profile.is_some(),
+            )?;
+            let tokens = if let Some(profile) = &self.dspark_verify_profile {
+                let confidence = confidence.as_ref().ok_or_else(|| {
+                    candle_core::Error::msg("DSpark confidence output is missing")
+                })?;
+                tokens.narrow(1, 0, profile.select_prefix(confidence)?)?
+            } else {
+                tokens
+            };
             #[cfg(feature = "cuda")]
             return Ok(DFlashProposalBatch::DeviceTokens(tokens));
             #[cfg(not(feature = "cuda"))]
@@ -3880,10 +3916,7 @@ fn repeat_kv(x: &Tensor, groups: usize) -> Result<Tensor> {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::HashSet,
-        sync::{Arc, Mutex},
-    };
+    use std::{collections::HashSet, sync::Arc};
 
     use candle_core::{Device, Result, Tensor, D};
     use candle_nn::{Embedding, Linear};
@@ -4370,12 +4403,12 @@ mod tests {
                 None,
             ),
             confidence_projection: None,
-            last_confidence: Mutex::new(None),
         };
         let hidden = Tensor::zeros((1, 2, 2), candle_core::DType::F32, &device)?;
         let logits = Tensor::zeros((1, 2, 3), candle_core::DType::F32, &device)?;
         assert_eq!(
-            head.select_greedy(&hidden, &logits, &[0])?
+            head.select_greedy(&hidden, &logits, &[0], false)?
+                .0
                 .to_vec2::<u32>()?,
             vec![vec![1, 2]]
         );
@@ -4745,6 +4778,37 @@ mod tests {
                     .capacity(),
             )
         );
+        Ok(())
+    }
+    #[test]
+    fn dspark_trained_confidence_tracks_markov_conditioning_without_changing_tokens() -> Result<()>
+    {
+        let device = Device::Cpu;
+        let head = DSparkHead {
+            markov_embedding: Embedding::new(
+                Tensor::new(&[[1f32, 0.], [0., 1.], [-1., -1.]], &device)?,
+                2,
+            ),
+            markov_projection: Linear::new(
+                Tensor::new(&[[0f32, 0.], [2., 0.], [0., 3.]], &device)?,
+                None,
+            ),
+            confidence_projection: Some(Linear::new(
+                Tensor::new(&[[0f32, 0., 2., -1.]], &device)?,
+                Some(Tensor::new(&[0f32], &device)?),
+            )),
+        };
+        let hidden = Tensor::zeros((1, 2, 2), candle_core::DType::F32, &device)?;
+        let logits = Tensor::zeros((1, 2, 3), candle_core::DType::F32, &device)?;
+        let (fixed, absent) = head.select_greedy(&hidden, &logits, &[0], false)?;
+        let (tokens, confidence) = head.select_greedy(&hidden, &logits, &[0], true)?;
+        assert_eq!(fixed.to_vec2::<u32>()?, vec![vec![1, 2]]);
+        assert_eq!(tokens.to_vec2::<u32>()?, fixed.to_vec2::<u32>()?);
+        assert!(absent.is_none());
+        let confidence = confidence.unwrap().to_vec2::<f32>()?;
+        for (actual, logit) in confidence[0].iter().zip([2f32, -1.]) {
+            assert!((actual - 1.0 / (1.0 + (-logit).exp())).abs() < 1e-6);
+        }
         Ok(())
     }
 }

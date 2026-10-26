@@ -13,7 +13,10 @@ use crate::speculative::{
 
 use super::{LayerType, Model};
 
-fn dspark_speculative_batch(batch: DFlashProposalBatch) -> Result<SpeculativeProposalBatch> {
+fn dspark_speculative_batch(
+    batch: DFlashProposalBatch,
+    bounded: bool,
+) -> Result<SpeculativeProposalBatch> {
     let proposals = match batch {
         DFlashProposalBatch::Tokens(tokens) => {
             tokens.into_iter().map(SpeculativeProposal::new).collect()
@@ -30,7 +33,13 @@ fn dspark_speculative_batch(batch: DFlashProposalBatch) -> Result<SpeculativePro
             candle_core::bail!("DSpark does not produce sparse DFlash2 proposals")
         }
     };
-    Ok(SpeculativeProposalBatch::new(proposals))
+    let batch = SpeculativeProposalBatch::new(proposals);
+    if bounded {
+        let width = batch.proposals.first().map_or(0, |p| p.tokens.len());
+        batch.with_verification_width(width)
+    } else {
+        Ok(batch)
+    }
 }
 
 impl Model {
@@ -234,12 +243,10 @@ impl Model {
             .lock()
             .expect("LFM2 draft lm_head poisoned");
         let lm_head = draft_head.as_ref().unwrap_or(&self.lm_head);
-        dspark_speculative_batch(drafter.finish_proposals(
-            &hidden,
-            ctx.sampled_tokens,
-            None,
-            lm_head,
-        )?)
+        dspark_speculative_batch(
+            drafter.finish_proposals(&hidden, ctx.sampled_tokens, None, lm_head)?,
+            drafter.schedules_dspark_verification(),
+        )
         .map(Some)
     }
 

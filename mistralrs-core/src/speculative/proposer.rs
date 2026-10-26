@@ -432,11 +432,33 @@ impl SpeculativeProposal {
 
 pub struct SpeculativeProposalBatch {
     pub proposals: Vec<SpeculativeProposal>,
+    verification_width: Option<usize>,
 }
 
 impl SpeculativeProposalBatch {
     pub fn new(proposals: Vec<SpeculativeProposal>) -> Self {
-        Self { proposals }
+        Self {
+            proposals,
+            verification_width: None,
+        }
+    }
+
+    pub(crate) fn with_verification_width(mut self, width: usize) -> Result<Self> {
+        self.verification_width = Some(width);
+        self.verification_width(width)?;
+        Ok(self)
+    }
+
+    pub(crate) fn verification_width(&self, maximum: usize) -> Result<usize> {
+        let Some(width) = self.verification_width else {
+            return Ok(maximum);
+        };
+        if width == 0 || width > maximum || self.proposals.iter().any(|p| p.tokens.len() != width) {
+            candle_core::bail!(
+                "bounded speculative proposals must share a nonzero width within {maximum}"
+            );
+        }
+        Ok(width)
     }
 }
 
@@ -486,6 +508,7 @@ pub fn sample_draft_rows(
 
 #[cfg(test)]
 mod tests {
+    use super::SpeculativeProposalBatch;
     use candle_core::{Device, Tensor};
 
     use super::{
@@ -623,5 +646,35 @@ mod tests {
     fn device_tokens_require_one_row() {
         let tensor = Tensor::zeros((1, 3), candle_core::DType::U32, &Device::Cpu).unwrap();
         assert!(SpeculativeTokens::from_device(tensor).is_err());
+    }
+    #[test]
+    fn dspark_bounded_proposals_keep_host_and_device_prefix_widths() -> candle_core::Result<()> {
+        let batch = SpeculativeProposalBatch::new(vec![
+            SpeculativeProposal::new(vec![1, 2]),
+            SpeculativeProposal::from_device(Tensor::new(&[3u32, 4], &Device::Cpu)?)?,
+        ])
+        .with_verification_width(2)?;
+        assert_eq!(batch.verification_width(8)?, 2);
+        assert!(batch.verification_width(1).is_err());
+        assert_eq!(batch.proposals[0].tokens.len(), 2);
+        assert_eq!(batch.proposals[1].tokens.len(), 2);
+        let fixed = SpeculativeProposalBatch::new(vec![SpeculativeProposal::new(vec![1, 2])]);
+        assert_eq!(fixed.verification_width(8)?, 8);
+        Ok(())
+    }
+
+    #[test]
+    fn dspark_bounded_proposals_reject_empty_or_heterogeneous_verification() {
+        assert!(
+            SpeculativeProposalBatch::new(vec![SpeculativeProposal::new(vec![])])
+                .with_verification_width(0)
+                .is_err()
+        );
+        assert!(SpeculativeProposalBatch::new(vec![
+            SpeculativeProposal::new(vec![1, 2]),
+            SpeculativeProposal::new(vec![3]),
+        ])
+        .with_verification_width(2)
+        .is_err());
     }
 }

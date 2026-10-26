@@ -2,6 +2,7 @@ pub mod cache;
 pub mod config;
 pub mod dflash;
 pub mod driver;
+pub(crate) mod dspark_verify;
 pub mod logging;
 pub(crate) mod paged_rows;
 pub mod policy;
@@ -43,6 +44,7 @@ mod tests {
             n_predict: Some(3),
             draft_sampling_method: MtpDraftSamplingMethod::Probabilistic,
             draft_lm_head_isq: None,
+            dspark_verify_profile: None,
         };
 
         assert_eq!(config.n_predict, Some(3));

@@ -49,3 +49,29 @@ Extended qualifications do not qualify this standalone branch.
 
 The branch is independently testable. Future composition into Extended is a
 separate integration step.
+
+## Optional confidence scheduling
+
+Fixed verification is the default reference. The trained confidence head can
+select a shorter common verification prefix for each dense batch when given
+measured full-step costs:
+
+```bash
+--mtp-n-predict 8 --mtp-dspark-verify-profile /path/to/pascal-dspark.json
+```
+
+The profile schema is `schema_version: 1`, `draft_tokens: 8`, and
+`batch_step_ms`, a mapping from batch-size strings to arrays of eight measured
+positive costs. Entry k-1 is the end-to-end time in milliseconds for drafting
+the full eight-token block and verifying only its first k tokens. Measure on
+the same target, drafter, dtype, device and representative context length.
+Costs from runs that also shorten drafting are not interchangeable.
+
+The scheduler maximizes expected committed tokens divided by the measured
+step cost. Conditional confidence probabilities are multiplied along each
+prefix. A dense batch uses one common width; this is not ragged per-request
+verification. Unprofiled batch sizes retain the full window. The ordinary
+target verifier and ShortConv/KV commit rules remain authoritative. This
+path currently supports greedy target decoding. Fixed and confidence modes
+need full-checkpoint parity and latency measurements on the physical GPU;
+unit tests do not establish a speedup.
