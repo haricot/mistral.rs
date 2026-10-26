@@ -72,13 +72,13 @@ quant = edit_one(quant,
     '    println!("cargo::rustc-check-cfg=cfg(allow_legacy_bf16)");\n'
     '    println!("cargo::rustc-check-cfg=cfg(allow_legacy_fp8)");\n',
     "FP8 cfg declaration")
-optin = '''        if allow_legacy_bf16 {
+legacy_bf16_guard = '''        if allow_legacy_bf16 {
             builder = builder.arg("-DALLOW_LEGACY_BF16");
             println!("cargo:rustc-cfg=allow_legacy_bf16");
         }
 
 '''
-newoptin = '''        let allow_legacy_fp8 = allow_legacy == "all"
+legacy_fp8_guard = '''        let allow_legacy_fp8 = allow_legacy == "all"
             || allow_legacy
                 .split(',')
                 .map(str::trim)
@@ -93,7 +93,7 @@ newoptin = '''        let allow_legacy_fp8 = allow_legacy == "all"
         }
 
 '''
-quant = edit_one(quant, optin, newoptin, "FP8 environment switch")
+quant = edit_one(quant, legacy_bf16_guard, legacy_fp8_guard, "FP8 environment switch")
 quant = edit_one(quant,
     '        let cc_over_80 = compute_cap >= 80;\n',
     '        let cc_over_80 = compute_cap >= 80;\n'
