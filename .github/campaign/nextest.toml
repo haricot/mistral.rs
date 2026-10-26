@@ -1,0 +1,24 @@
+[profile.default]
+fail-fast = true
+test-threads = 2
+
+[profile.cpu]
+default-filter = '''
+  test(campaign_cpu_backend) | test(campaign_force_cpu) | test(campaign_cpu_flag) | test(args::tests::)
+  | ((test(speculative::) | test(models::lfm2::) | test(bolt) | test(gemma4)
+       | test(pipeline::chat_template::tests) | test(flashinfer_speculative_rows_keep_gather_block_tables)
+       | test(uqff::tests::) | test(gguf::tests::) | test(test_fp8_vector_quant_cpu)
+       | test(test_fp8_vector_dequant))
+     & !test(cuda) & !test(graph_release_waits_for_detached_output_copies)
+     & !test(recurrent_checkpoint_device_gate_rejects_mixed_placement))
+'''
+junit.path = "cpu-junit.xml"
+
+[profile.gpu]
+test-threads = 1
+default-filter = '''
+  test(campaign_cuda_backend) | test(sm61)
+  | test(legacy_bf16_unquantized_linear_avoids_unsupported_dispatch)
+  | test(multitoken_decode_normalizes_rank_two_causal_mask)
+'''
+junit.path = "gpu-junit.xml"

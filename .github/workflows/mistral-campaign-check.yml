@@ -1,0 +1,34 @@
+name: Mistral campaign contracts
+on:
+  push:
+    branches: [ci/standalone-campaign-archive]
+  pull_request:
+    branches: [mirror_orch]
+    paths: [.github/campaign/**, .github/workflows/mistral-campaign-check.yml, .github/workflows/mistral-extended-sm61.yml, .github/workflows/mistral-cuda-legacy-sm61.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  contracts:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - run: python3 -B -m unittest discover -v -s .github/campaign/tests
+      - run: bash -n .github/campaign/build.sh .github/campaign/gpu.sh
+  preparation:
+    needs: contracts
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - run: rustup toolchain install 1.99.0 --profile minimal --component rustfmt
+      - name: Prepare exact independent sources without publishing branches
+        run: |
+          python3 .github/campaign/campaign.py snapshot --repo "$PWD" --target extended --image preparation-only@sha256:0000000000000000000000000000000000000000000000000000000000000000 --output "$RUNNER_TEMP/snapshot.json"
+          python3 .github/campaign/campaign.py prepare --repo "$PWD" --snapshot "$RUNNER_TEMP/snapshot.json" --output "$RUNNER_TEMP/prepared"

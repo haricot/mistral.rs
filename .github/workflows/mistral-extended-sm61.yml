@@ -1,573 +1,213 @@
 name: Mistral Extended SM61
 on:
   workflow_dispatch:
-    inputs:
-      expected_seed_sha:
-        description: Optional expected asd_runner SHA; leave empty to pin the current asd_runner head automatically
-        required: false
-        default: ""
-        type: string
-      expected_candle_sha:
-        description: Optional pinned SHA of haricot/candle:extended; leave empty to use validated Extended head
-        required: false
-        default: ""
-        type: string
-      expected_lfm25_dspark_sha:
-        description: Optional expected lfm25_dspark_standalone SHA; leave empty to pin its current head
-        required: false
-        default: ""
-        type: string
-      expected_bolt_sha:
-        description: Optional expected nemotron_bolt_dflash_standalone SHA
-        required: false
-        default: ""
-        type: string
-      expected_integration_sha:
-        description: Optional expected integration/extended-nemotron-bolt-dflash SHA
-        required: false
-        default: ""
-        type: string
-      publish_binary:
-        description: Build and publish a downloadable Linux x86_64 SM61 binary after promotion
-        required: false
-        default: false
-        type: boolean
 permissions:
   contents: read
 concurrency:
-  group: mistral-extended-sm61
+  group: mistral-standalone-campaign
   cancel-in-progress: false
-
 jobs:
   prepare:
+    name: prepare
     if: github.ref == 'refs/heads/mirror_orch'
     runs-on: ubuntu-26.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     permissions:
       contents: write
+      packages: write
     outputs:
-      seed: ${{ steps.pin.outputs.seed }}
-      candidate: ${{ steps.pin.outputs.candidate }}
-      candidate_ref: ${{ steps.pin.outputs.candidate_ref }}
-      lock: ${{ steps.pin.outputs.lock }}
-      candle: ${{ steps.pin.outputs.candle }}
-      candle_validation_ref: ${{ steps.pin.outputs.candle_validation_ref }}
-      previous_extended: ${{ steps.pin.outputs.previous_extended }}
-      lfm25_dspark: ${{ steps.pin.outputs.lfm25_dspark }}
-      bolt: ${{ steps.pin.outputs.bolt }}
-      integration_source: ${{ steps.pin.outputs.integration_source }}
+      candidate: ${{ steps.prepare.outputs.candidate }}
+      cache_key: ${{ steps.prepare.outputs.cache_key }}
+      recipe: ${{ steps.prepare.outputs.recipe }}
+      bundle_key: ${{ steps.prepare.outputs.bundle_key }}
+      environment_key: ${{ steps.prepare.outputs.environment_key }}
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # Node24
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          ref: integration/extended-nemotron-bolt-dflash
           fetch-depth: 0
           persist-credentials: true
-      - name: Resolve immutable source set and Cargo.lock
-        id: pin
-        shell: bash
+      - name: Install pinned preparation toolchain
+        run: rustup toolchain install 1.99.0 --profile minimal --component rustfmt
+      - name: Prepare independent sources and lock composition
+        id: prepare
         env:
-          EXPECTED_SEED: ${{ inputs.expected_seed_sha }}
-          EXPECTED_CANDLE: ${{ inputs.expected_candle_sha }}
-          EXPECTED_LFM25_DSPARK: ${{ inputs.expected_lfm25_dspark_sha }}
-          EXPECTED_BOLT: ${{ inputs.expected_bolt_sha }}
-          EXPECTED_INTEGRATION: ${{ inputs.expected_integration_sha }}
           GH_TOKEN: ${{ github.token }}
-          ORCHESTRATOR_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          trap 'echo "::error::Extended preparation failed at line $LINENO: $BASH_COMMAND"' ERR
-          check_pin() {
-            local label="$1" actual="$2" expected="$3"
-            [[ "$actual" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::Cannot resolve $label"; exit 3; }
-            if [[ -n "$expected" ]]; then
-              [[ "$expected" =~ ^[0-9a-f]{40}$ && "$actual" == "$expected" ]] || {
-                echo "::error::$label moved from the requested pin (actual: $actual)"; exit 3;
-              }
-            fi
-          }
-          integration_source="$(git rev-parse HEAD)"
-          remote_source="$(git ls-remote origin refs/heads/integration/extended-nemotron-bolt-dflash | cut -f1)"
-          check_pin integration_source "$integration_source" "$EXPECTED_INTEGRATION"
-          test "$remote_source" = "$integration_source"
-          seed="$(git ls-remote origin refs/heads/asd_runner | cut -f1)"
-          lfm25_dspark="$(git ls-remote origin refs/heads/lfm25_dspark_standalone | cut -f1)"
-          bolt="$(git ls-remote origin refs/heads/nemotron_bolt_dflash_standalone | cut -f1)"
-          check_pin asd_runner "$seed" "$EXPECTED_SEED"
-          check_pin lfm25_dspark "$lfm25_dspark" "$EXPECTED_LFM25_DSPARK"
-          check_pin nemotron_bolt_dflash "$bolt" "$EXPECTED_BOLT"
-          for source in "$seed" "$lfm25_dspark" "$bolt"; do
-            git cat-file -e "${source}^{commit}" || git fetch --no-tags origin "$source"
-            git merge-base --is-ancestor "$source" HEAD
-          done
-          previous_extended="$(git ls-remote origin refs/heads/extended | cut -f1)"
-          check_pin previous_extended "$previous_extended" ""
-          git merge-base --is-ancestor "$previous_extended" HEAD
-
-          candle_repo="https://github.com/haricot/candle.git"
-          candle_branch=extended
-          candle="$(git ls-remote --heads "$candle_repo" refs/heads/extended | cut -f1)"
-          check_pin candle_extended "$candle" "$EXPECTED_CANDLE"
-          candle_validation_ref=refs/tags/archive/extended/sm61-validated-40029177676-2
-          validated_candle="$(git ls-remote --tags "$candle_repo" "$candle_validation_ref" "${candle_validation_ref}^{}" |
-            awk -v ref="$candle_validation_ref" '$2==ref {base=$1} $2==ref"^{}" {peeled=$1} END {print peeled ? peeled : base}')"
-          test "$candle" = "$validated_candle"
-          gh api repos/haricot/candle/actions/runs/40029177676 |
-            jq -e '.status=="completed" and .conclusion=="success"' >/dev/null
-          candle_checkout="$RUNNER_TEMP/candle-extended"
-          git clone --quiet --no-tags --filter=blob:none --single-branch --branch extended "$candle_repo" "$candle_checkout"
-          test "$(git -C "$candle_checkout" rev-parse HEAD)" = "$candle"
-          jq -e '
-            .schema_version==1 and .kind=="extended-multi" and
-            .feature_count==(.features|length) and .integration_target=="extended" and
-            .campaign=="voice-full-40029177676" and
-            (([.features[].feature] | sort) ==
-             (["asd_core_v3_standalone","bf16_candle","cudnn_fallback_candle","embeddinggemma2",
-               "fireredvad_standalone","fp4_candle","fp8_candle","lean4_standalone",
-               "moe_simt_f16_candle","nemotron_asr_streaming_standalone","smart_turn_standalone",
-               "transcribepsy_standalone"] | sort))
-          ' "$candle_checkout/candle-integration/extended.json" >/dev/null
-          jq -e --arg candle "$candle" --arg lfm "$lfm25_dspark" --arg bolt "$bolt" '
-            .schema_version==1 and .candle_repository=="haricot/candle" and
-            .candle_branch=="extended" and .candle_sha==$candle and
-            .components.lfm25_dspark.source_sha==$lfm and
-            .components.nemotron_bolt_dflash.source_sha==$bolt and
-            ((.features | sort)==(["cuda-legacy-bf16","cuda-legacy-fp8","cuda-legacy-fp4"]|sort))
-          ' mistral-integration/sources.json >/dev/null
-          python3 - "$candle" <<'PYCODE'
-          import pathlib, sys, tomllib
-          workspace = tomllib.loads(pathlib.Path("Cargo.toml").read_text())["workspace"]["dependencies"]
-          for name in ("candle-core", "candle-nn", "candle-flash-attn-v3", "candle-metal-kernels"):
-              assert workspace[name]["git"] == "https://github.com/haricot/candle.git", name
-              assert workspace[name]["rev"] == sys.argv[1], name
-          PYCODE
-          report="$RUNNER_TEMP/mistral-asd-preflight"
+          report="$RUNNER_TEMP/campaign"
           mkdir -p "$report"
-          rustup toolchain install 1.99.0 --profile minimal --component rustfmt
-          cargo +1.99.0 fmt --all -- --check > "$report/fmt.log" 2>&1 || { cat "$report/fmt.log"; exit 1; }
-          cargo +1.99.0 metadata --locked --format-version 1 > "$RUNNER_TEMP/asd-metadata.json"
-          lock="$(sha256sum Cargo.lock | cut -d' ' -f1)"
-          tmp_sources="$(mktemp)"
-          jq --arg seed "$seed" --arg source "$integration_source" --arg ref "$candle_validation_ref" \
-             --arg campaign "mistral-extended-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" '
-            .kind="mistral-extended" | .target_branch="extended" | .seed_sha=$seed |
-            .integration_source_sha=$source | .candle_validation_ref=$ref |
-            .campaign=$campaign | .validation_state="UNVALIDATED_CANDIDATE" | .asd_required=true
-          ' mistral-integration/sources.json > "$tmp_sources"
-          mv "$tmp_sources" mistral-integration/sources.json
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add mistral-integration/sources.json
-          git commit -m "build(extended): pin Bolt and DSpark campaign $GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          candidate="$(git rev-parse HEAD)"
-          ref="integration/asd_runner-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          git push origin "HEAD:refs/heads/${ref}"
-          for name in seed previous_extended candidate lock candle candle_validation_ref lfm25_dspark bolt integration_source; do
-            echo "$name=${!name}" >> "$GITHUB_OUTPUT"
-          done
-          echo "candidate_ref=$ref" >> "$GITHUB_OUTPUT"
-          printf 'Candidate %s; source %s; lock %s; Candle %s; LFM DSpark %s; Bolt %s\n' \
-            "$candidate" "$integration_source" "$lock" "$candle" "$lfm25_dspark" "$bolt" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Preserve preflight diagnostics
+          base="$(python3 -c 'import json;print(json.load(open(".github/campaign/config.json"))["base_image"])')"
+          image_digest="$(docker buildx imagetools inspect "$base" --format '{{json .Manifest.Digest}}' | tr -d '\"')"
+          base="$base@$image_digest"
+          compiler_key="$(python3 - "$base" <<'PYCODE'
+          import hashlib,json,pathlib,sys
+          files={n:hashlib.sha256((pathlib.Path('.github/campaign')/n).read_bytes()).hexdigest() for n in ('Containerfile','install-tools.py','config.json')}
+          print(hashlib.sha256(json.dumps([sys.argv[1],files],sort_keys=True).encode()).hexdigest())
+          PYCODE
+          )"
+          registry="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/mistral-sm61-builder:$compiler_key"
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          if ! docker buildx imagetools inspect "$registry" >/dev/null 2>&1; then
+            docker build --build-arg "BASE_IMAGE=$base" -f .github/campaign/Containerfile -t "$registry" .github/campaign
+            docker push "$registry"
+          fi
+          compiler_digest="$(docker buildx imagetools inspect "$registry" --format '{{json .Manifest.Digest}}' | tr -d '\"')"
+          image="$registry@$compiler_digest"
+          python3 .github/campaign/campaign.py snapshot --repo "$PWD" --target extended --image "$image" --output "$report/snapshot.json"
+          python3 .github/campaign/campaign.py prepare --repo "$PWD" --snapshot "$report/snapshot.json" --output "$report" --publish
+          candidate="$(jq -r .candidate "$report/plan.json")"
+          echo "candidate=$candidate" >> "$GITHUB_OUTPUT"
+          echo "cache_key=$(jq -r .input_key "$report/plan.json")" >> "$GITHUB_OUTPUT"
+          echo "recipe=$(jq -r .recipe "$report/plan.json")" >> "$GITHUB_OUTPUT"
+          echo "environment_key=$(python3 -c 'import hashlib,json,sys;p=json.load(open(sys.argv[1]));print(hashlib.sha256(json.dumps([p["image"],p["recipe"],p["config"]["toolchain"],p["config"]["features"]],sort_keys=True).encode()).hexdigest())' "$report/plan.json")" >> "$GITHUB_OUTPUT"
+          if [[ extended == extended ]]; then
+            git push origin "$candidate:refs/heads/integration/asd_runner-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          fi
+          echo "bundle_key=$(python3 -c 'import hashlib,json,sys;print(hashlib.sha256(json.dumps(sorted(n["build_key"] for n in json.load(open(sys.argv[1]))["matrix"])).encode()).hexdigest())' "$report/plan.json")" >> "$GITHUB_OUTPUT"
+          cp -a .github/campaign "$report/orchestrator"
+          echo "candidate=$candidate; CUDA-enabled build, CPU runtime tests and archived physical execution" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # Node24
         with:
-          name: mistral-asd-preflight-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/mistral-asd-preflight/
-          if-no-files-found: ignore
-          retention-days: 21
-
+          name: mistral-asd-prep-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/campaign/
+          if-no-files-found: warn
+          retention-days: 30
   cpu:
+    name: cpu
     needs: prepare
     runs-on: ubuntu-26.04
-    timeout-minutes: 100
-    permissions:
-      contents: read
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          ref: ${{ needs.prepare.outputs.candidate }}
           persist-credentials: false
-      - name: Check CPU, formatting and exact lock
-        shell: bash
-        env:
-          LOCK: ${{ needs.prepare.outputs.lock }}
-          SHA: ${{ needs.prepare.outputs.candidate }}
-          LFM25_DSPARK_SHA: ${{ needs.prepare.outputs.lfm25_dspark }}
-          BOLT_SHA: ${{ needs.prepare.outputs.bolt }}
-          INTEGRATION_SOURCE_SHA: ${{ needs.prepare.outputs.integration_source }}
-        run: |
-          set -euo pipefail
-          report="$RUNNER_TEMP/mistral-asd-cpu"
-          mkdir -p "$report"
-          test "$(git rev-parse HEAD)" = "$SHA"
-          test "$(sha256sum Cargo.lock | cut -d' ' -f1)" = "$LOCK"
-          test "$(jq -r '.components.lfm25_dspark.source_sha' mistral-integration/sources.json)" = "$LFM25_DSPARK_SHA"
-          test "$(jq -r '.components.nemotron_bolt_dflash.source_sha' mistral-integration/sources.json)" = "$BOLT_SHA"
-          export CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0
-          export CARGO_PROFILE_TEST_OPT_LEVEL=1 CARGO_PROFILE_TEST_CODEGEN_UNITS=1 CARGO_PROFILE_TEST_DEBUG=0
-          rustup toolchain install 1.99.0 --profile minimal --component rustfmt
-          cargo +1.99.0 fmt --all -- --check > "$report/fmt.log" 2>&1
-          if ! cargo +1.99.0 check --locked -p mistralrs-core -p mistralrs-quant \
-            -p mistralrs-paged-attn -p mistralrs-cli > "$report/check.log" 2>&1; then
-            echo "::error::CPU check failed; final diagnostics:"
-            tail -n 120 "$report/check.log"
-            exit 1
-          fi
-          if ! cargo +1.99.0 --config=profile.test.package.mistralrs-core.opt-level=0 --config=profile.test.package.mistralrs-core.codegen-units=8 test --locked -p mistralrs-quant --lib \
-            > "$report/tests.log" 2>&1; then
-            echo "::error::CPU unit tests failed; final diagnostics:"
-            tail -n 120 "$report/tests.log"
-            exit 1
-          fi
-          if ! CARGO_BUILD_JOBS=1 cargo +1.99.0 --config=profile.test.package.mistralrs-core.opt-level=0 --config=profile.test.package.mistralrs-core.codegen-units=8 test --locked \
-            -p mistralrs-core -p mistralrs-cli --no-default-features --lib --bin mistralrs -- \
-            speculative:: models::lfm2:: bolt gemma4 pipeline::chat_template::tests flashinfer_speculative_rows_keep_gather_block_tables args::tests:: \
-            > "$report/lfm25-dspark-tests.log" 2>&1; then
-            tail -n 120 "$report/lfm25-dspark-tests.log"
-            exit 1
-          fi
-          grep -Fq 'dspark_reserves_recurrent_checkpoint_lanes_before_pipeline_build ... ok' "$report/lfm25-dspark-tests.log"
-          grep -Fq 'run_accepts_lfm_dspark_one_shot_input ... ok' "$report/lfm25-dspark-tests.log"
-          cp Cargo.lock "$report/Cargo.lock"
-          jq -n --arg sha "$SHA" --arg lock "$LOCK" --arg lfm "$LFM25_DSPARK_SHA" --arg bolt "$BOLT_SHA" --arg source "$INTEGRATION_SOURCE_SHA" \
-            '{schema_version:1,candidate_sha:$sha,lock_sha256:$lock,
-              lfm25_dspark_source_sha:$lfm,bolt_source_sha:$bolt,integration_source_sha:$source,status:"CPU_PASSED"}' \
-            > "$report/report.json"
-      - name: Preserve CPU proof
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7 / Node24
-        with:
-          name: mistral-asd-cpu-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/mistral-asd-cpu/
-          if-no-files-found: warn
-          retention-days: 90
-
+      - name: Validate preparation and publication contracts
+        run: python3 -B -m unittest discover -v -s .github/campaign/tests
   cuda_compile:
+    name: cuda_compile
     needs: [prepare, cpu]
     runs-on: ubuntu-26.04
-    timeout-minutes: 150
+    timeout-minutes: 240
     permissions:
       contents: read
+      actions: read
+      packages: read
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          ref: ${{ needs.prepare.outputs.candidate }}
+          fetch-depth: 0
           persist-credentials: false
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
         with:
-          ref: ${{ github.sha }}
-          path: .ci-orchestration
-          persist-credentials: false
-      - name: Build pinned CUDA 12.9.2 hosted compiler
-        run: |
-          set -euo pipefail
-          docker build --pull \
-            -f .ci-orchestration/.github/container/Containerfile.mistral-sm61 \
-            -t mistral-extended-cuda1292 .ci-orchestration/.github/container
-      - name: Compile Mistral.rs BF16, FP8 and FP4 for sm_61 without GPU execution
-        shell: bash
+          name: mistral-asd-prep-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/campaign
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ${{ runner.temp }}/campaign-cache
+          key: mistral-sm61-${{ needs.prepare.outputs.environment_key }}-${{ needs.prepare.outputs.cache_key }}
+          restore-keys: mistral-sm61-${{ needs.prepare.outputs.environment_key }}-
+      - name: Restore an identical verified build bundle
         env:
-          SHA: ${{ needs.prepare.outputs.candidate }}
-          LOCK: ${{ needs.prepare.outputs.lock }}
-          PUBLISH_BINARY: ${{ inputs.publish_binary }}
-          CANDLE_SHA: ${{ needs.prepare.outputs.candle }}
-          CANDLE_VALIDATION_REF: ${{ needs.prepare.outputs.candle_validation_ref }}
-          LFM25_DSPARK_SHA: ${{ needs.prepare.outputs.lfm25_dspark }}
-          BOLT_SHA: ${{ needs.prepare.outputs.bolt }}
-          INTEGRATION_SOURCE_SHA: ${{ needs.prepare.outputs.integration_source }}
+          GH_TOKEN: ${{ github.token }}
+          BUILD_BUNDLE: mistral-builds-${{ needs.prepare.outputs.bundle_key }}
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/mistral-asd-cuda" "$RUNNER_TEMP/asd-home" "$RUNNER_TEMP/asd-cargo"
-          report="$RUNNER_TEMP/mistral-asd-cuda"
-          test "$(git rev-parse HEAD)" = "$SHA"
-          test "$(sha256sum Cargo.lock | cut -d' ' -f1)" = "$LOCK"
-          test "$(jq -r '.components.lfm25_dspark.source_sha' mistral-integration/sources.json)" = "$LFM25_DSPARK_SHA"
-          test "$(jq -r '.components.nemotron_bolt_dflash.source_sha' mistral-integration/sources.json)" = "$BOLT_SHA"
-          # Keep compiler progress visible, including during slow CUDA kernel builds.
-          # This only changes future runs: the active run uses its pinned workflow SHA.
-          touch "$report/compile.log"
-          (
-            while sleep 180; do
-              printf 'CUDA build heartbeat: %s UTC; recent compiler output:\n' "$(date -u +%FT%TZ)"
-              tail -n 6 "$report/compile.log" || true
-            done
-          ) &
-          heartbeat_pid=$!
-          trap 'kill "$heartbeat_pid" 2>/dev/null || true' EXIT
-          docker run --rm --user "$(id -u):$(id -g)" \
-            --security-opt=no-new-privileges \
-            --volume "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE:rw" \
-            --volume "$RUNNER_TEMP:$RUNNER_TEMP:rw" \
-            --workdir "$GITHUB_WORKSPACE" \
-            --env "HOME=$RUNNER_TEMP/asd-home" \
-            --env "CARGO_HOME=$RUNNER_TEMP/asd-cargo" \
-            --env "RUSTUP_HOME=/opt/rustup" \
-            --env "PATH=/usr/local/cuda/bin:/opt/cargo/bin:/usr/bin:/bin" \
-            --env CUDA_HOME=/usr/local/cuda \
-            --env NVCC_CCBIN=/usr/bin/g++ \
-            --env CC=/usr/bin/gcc --env CXX=/usr/bin/g++ \
-            --env CUDA_COMPUTE_CAP=61 \
-            --env "PUBLISH_BINARY=$PUBLISH_BINARY" \
-            mistral-extended-cuda1292 bash -euc '
-              git config --global --add safe.directory "$PWD"
-              nvcc --version
-              export CUDA_COMPUTE_CAP=61 CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 ALLOW_LEGACY=bf16,fp8
-              export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_PROFILE_TEST_OPT_LEVEL=1 CARGO_PROFILE_TEST_CODEGEN_UNITS=1
-              if [[ "${PUBLISH_BINARY:-false}" == "true" ]]; then
-                cargo build --locked --release -p mistralrs-cli --no-default-features \
-                  --features cuda-legacy-bf16,cuda-legacy-fp8,cuda-legacy-fp4
-                cargo --config=profile.test.package.mistralrs-core.opt-level=0 --config=profile.test.package.mistralrs-core.codegen-units=8 test --locked --release -p mistralrs-core --no-default-features \
-                  --features cuda-legacy-bf16,cuda-legacy-fp8,cuda-legacy-fp4 \
-                  --test asd_sm61_smoke --test extended_sm61_runtime --no-run
-              else
-                cargo check --locked -p mistralrs-cli --no-default-features \
-                  --features cuda-legacy-bf16,cuda-legacy-fp8,cuda-legacy-fp4,cudnn
-                cargo --config=profile.test.package.mistralrs-core.opt-level=0 --config=profile.test.package.mistralrs-core.codegen-units=8 test --locked -p mistralrs-core --no-default-features \
-                  --features cuda-legacy-bf16,cuda-legacy-fp8,cuda-legacy-fp4 \
-                  --test asd_sm61_smoke --test extended_sm61_runtime --no-run
-              fi
-              cargo --config=profile.test.package.mistralrs-core.opt-level=0 --config=profile.test.package.mistralrs-core.codegen-units=8 test --locked -p mistralrs-core --lib --no-default-features \
-                --features cuda-legacy-bf16,cuda-legacy-fp8,cuda-legacy-fp4 --no-run
-            ' 2>&1 | tee "$report/compile.log"
-          kill "$heartbeat_pid" 2>/dev/null || true
-          trap - EXIT
-          if [[ "$PUBLISH_BINARY" == "true" ]]; then
-            test -x target/release/mistralrs
-            pkgdir="$report/package"
-            mkdir -p "$pkgdir"
-            cp target/release/mistralrs "$pkgdir/mistralrs"
-            jq -n --arg sha "$SHA" --arg lock "$LOCK" --arg candle "$CANDLE_SHA" \
-              --arg candle_validation_ref "$CANDLE_VALIDATION_REF" --arg lfm "$LFM25_DSPARK_SHA" --arg bolt "$BOLT_SHA" --arg source "$INTEGRATION_SOURCE_SHA" \
-              '{schema_version:1,candidate_sha:$sha,lock_sha256:$lock,candle_sha:$candle,
-                lfm25_dspark_source_sha:$lfm,bolt_source_sha:$bolt,integration_source_sha:$source,
-                candle_validation_ref:$candle_validation_ref,candle_branch:"extended",
-                target:"linux-x86_64-sm61",cuda:"12.9.2",
-                features:["cuda-legacy-bf16","cuda-legacy-fp8","cuda-legacy-fp4"]}' \
-              > "$pkgdir/BUILD-METADATA.json"
-            tar -C "$pkgdir" -czf "$report/mistralrs-linux-x86_64-sm61.tar.gz" \
-              mistralrs BUILD-METADATA.json
-            sha256sum "$report/mistralrs-linux-x86_64-sm61.tar.gz" \
-              > "$report/mistralrs-linux-x86_64-sm61.tar.gz.sha256"
-            rm -rf "$pkgdir"
+          mkdir -p "$RUNNER_TEMP/builds"
+          prior="$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=$BUILD_BUNDLE&per_page=100" --jq '.artifacts[] | select(.expired==false and .workflow_run.head_branch=="mirror_orch") | .id' | head -n 1)"
+          if [[ -n "$prior" ]]; then
+            gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$prior/zip" > "$RUNNER_TEMP/prior-builds.zip"
+            unzip -oq "$RUNNER_TEMP/prior-builds.zip" -d "$RUNNER_TEMP/builds"
+            valid=true
+            while read -r component; do
+              python3 "$RUNNER_TEMP/campaign/orchestrator/proof.py" verify "$RUNNER_TEMP/builds/$component" "$component" --plan "$RUNNER_TEMP/campaign/plan.json" || valid=false
+            done < <(jq -r '.matrix[].component' "$RUNNER_TEMP/campaign/plan.json")
+            if [[ "$valid" == true ]]; then
+              echo 'REUSE_BUILD=true' >> "$GITHUB_ENV"
+              echo 'Reusing matching executable archives and CPU execution proofs' >> "$GITHUB_STEP_SUMMARY"
+            fi
           fi
-          cp Cargo.lock "$report/Cargo.lock"
-          jq -n --arg sha "$SHA" --arg lock "$LOCK" --arg lfm "$LFM25_DSPARK_SHA" --arg bolt "$BOLT_SHA" --arg source "$INTEGRATION_SOURCE_SHA" \
-            '{schema_version:1,candidate_sha:$sha,lock_sha256:$lock,
-              lfm25_dspark_source_sha:$lfm,bolt_source_sha:$bolt,integration_source_sha:$source,
-              target:"sm_61",cuda:"12.9.2",gpu_executed:false,status:"CUDA_COMPILE_PASSED"}' \
-            > "$report/report.json"
-      - name: Preserve hosted CUDA proof
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - name: Compile each independent source and run CPU tests with CUDA enabled
+        if: env.REUSE_BUILD != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          plan="$RUNNER_TEMP/campaign/plan.json"
+          mkdir -p "$RUNNER_TEMP/builds" "$RUNNER_TEMP/campaign-cache" "$RUNNER_TEMP/campaign-home"
+          image="$(jq -r .image "$plan")"
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker pull "$image"
+          docker tag "$image" mistral-campaign
+          git fetch "$RUNNER_TEMP/campaign/candidate.bundle" 'refs/heads/integration/campaign/*:refs/remotes/build/*'
+          while read -r component sha key; do
+            dir="$RUNNER_TEMP/builds/$component"
+            mkdir -p "$dir"
+            docker run --rm --user "$(id -u):$(id -g)" --security-opt=no-new-privileges \
+              -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE:rw" -v "$RUNNER_TEMP:$RUNNER_TEMP:rw" \
+              -w "$GITHUB_WORKSPACE" -e "HOME=$RUNNER_TEMP/campaign-home" \
+              -e "CAMPAIGN_CACHE=$RUNNER_TEMP/campaign-cache" \
+              mistral-campaign bash "$RUNNER_TEMP/campaign/orchestrator/build.sh" "$dir" "$plan" "$component"
+          done < <(jq -r '.matrix[] | [.component,.candidate,.build_key] | @tsv' "$plan")
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: success()
         with:
-          name: mistral-asd-cuda-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/mistral-asd-cuda/
+          name: mistral-builds-${{ needs.prepare.outputs.bundle_key }}
+          path: ${{ runner.temp }}/builds/
           if-no-files-found: warn
-          retention-days: 90
-
+          retention-days: 30
+          overwrite: true
+          compression-level: 0
   gpu:
-    needs: [prepare, cpu, cuda_compile]
     name: SM61 Mistral Extended runtime (candidate=${{ needs.prepare.outputs.candidate }})
-    runs-on:
-      - mistral-extended
-      - mistral-extended-${{ github.run_id }}
-    timeout-minutes: 120
-    permissions:
-      contents: read
+    needs: [prepare, cpu, cuda_compile]
+    runs-on: [mistral-extended, "mistral-extended-${{ github.run_id }}"]
+    timeout-minutes: 60
     steps:
-      - name: Verify unified runner and Extended identity
-        shell: bash
-        env:
-          PREPARED_CANDIDATE: ${{ needs.prepare.outputs.candidate }}
-        run: |
-          set -euo pipefail
-          test "${EXPECTED_RUN_ID:-}" = "$GITHUB_RUN_ID"
-          test "${EXPECTED_CANDIDATE_SHA:-}" = "$PREPARED_CANDIDATE"
-          test "${RUNNER_REPO:-}" = "$GITHUB_REPOSITORY"
-          test "${RUNNER_NO_DEFAULT_LABELS:-}" = true
-          test "${ASD_REQUIRED:-false}" = true
-          test -s /run/haricot/asd/fallbacks/current.json
-          test -s /run/haricot/asd/profiles/current.asd
-          echo MISTRAL_EXTENDED_RUNNER_IDENTITY=PASS
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          ref: ${{ needs.prepare.outputs.candidate }}
           persist-credentials: false
-      - name: Execute model-free physical Pascal smoke test
-        shell: bash
-        env:
-          SHA: ${{ needs.prepare.outputs.candidate }}
-          LOCK: ${{ needs.prepare.outputs.lock }}
-          LFM25_DSPARK_SHA: ${{ needs.prepare.outputs.lfm25_dspark }}
-          BOLT_SHA: ${{ needs.prepare.outputs.bolt }}
-          INTEGRATION_SOURCE_SHA: ${{ needs.prepare.outputs.integration_source }}
-        run: |
-          set -euo pipefail
-          report="$RUNNER_TEMP/mistral-asd-gpu"
-          mkdir -p "$report"
-          test "$(git rev-parse HEAD)" = "$SHA"
-          test "$(sha256sum Cargo.lock | cut -d' ' -f1)" = "$LOCK"
-          test "$(jq -r '.components.lfm25_dspark.source_sha' mistral-integration/sources.json)" = "$LFM25_DSPARK_SHA"
-          test "$(jq -r '.components.nemotron_bolt_dflash.source_sha' mistral-integration/sources.json)" = "$BOLT_SHA"
-          nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader > "$report/gpu.txt"
-          grep -Eq ',[[:space:]]*6\.1([[:space:]]|$)' "$report/gpu.txt"
-          if test -x /opt/cuda129/bin/nvcc; then
-            export CUDA_HOME=/opt/cuda129 CUDA_ROOT=/opt/cuda129
-            export PATH="/opt/cuda129/bin:$PATH"
-          fi
-          export CUDA_COMPUTE_CAP=61
-          export NVCC_CCBIN=/usr/bin/g++-14
-          cargo +1.99.0 --version
-          rustc +1.99.0 --version
-          export ALLOW_LEGACY=bf16,fp8 CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0
-          export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_PROFILE_TEST_OPT_LEVEL=1 CARGO_PROFILE_TEST_CODEGEN_UNITS=1
-          nvcc --version > "$report/nvcc.txt"
-          cargo +1.99.0 --config=profile.test.package.mistralrs-core.opt-level=0 --config=profile.test.package.mistralrs-core.codegen-units=8 test --locked -p mistralrs-core --no-default-features \
-            --features cuda-legacy-bf16,cuda-legacy-fp8,cuda-legacy-fp4 \
-            --test asd_sm61_smoke --test extended_sm61_runtime -- --nocapture > "$report/smoke.log" 2>&1 || {
-              tail -n 100 "$report/smoke.log"; exit 1;
-            }
-          cargo +1.99.0 --config=profile.test.package.mistralrs-core.opt-level=0 --config=profile.test.package.mistralrs-core.codegen-units=8 test --locked -p mistralrs-core --lib --no-default-features \
-            --features cuda-legacy-bf16,cuda-legacy-fp8,cuda-legacy-fp4 -- \
-            dspark speculative_shortconv_maps_every_token_to_its_lane multitoken_decode \
-            gathered_decode_counts_each_query_token_as_a_row flashinfer_speculative_rows_keep_gather_block_tables \
-            > "$report/lfm25-dspark-tests.log" 2>&1 || {
-              tail -n 100 "$report/lfm25-dspark-tests.log"; exit 1;
-            }
-          grep -Fq 'multitoken_decode_normalizes_rank_two_causal_mask ... ok' "$report/lfm25-dspark-tests.log"
-          jq -n --arg sha "$SHA" --arg lock "$LOCK" --arg lfm "$LFM25_DSPARK_SHA" --arg bolt "$BOLT_SHA" --arg source "$INTEGRATION_SOURCE_SHA" \
-            '{schema_version:1,candidate_sha:$sha,lock_sha256:$lock,
-              lfm25_dspark_source_sha:$lfm,bolt_source_sha:$bolt,integration_source_sha:$source,lfm25_dspark_model_executed:false,bolt_model_executed:false,
-              target:"sm_61",gpu_executed:true,status:"GPU_PASSED"}' > "$report/report.json"
-      - name: Preserve physical GPU proof
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with:
+          name: mistral-asd-prep-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/campaign
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with:
+          name: mistral-builds-${{ needs.prepare.outputs.bundle_key }}
+          path: ${{ runner.temp }}/builds
+      - name: Execute hosted archives on physical Pascal
+        run: bash "$RUNNER_TEMP/campaign/orchestrator/gpu.sh" "$RUNNER_TEMP/campaign/plan.json" "$RUNNER_TEMP/builds" "$RUNNER_TEMP/gpu-proof"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: mistral-asd-gpu-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/mistral-asd-gpu/
+          path: ${{ runner.temp }}/gpu-proof/
           if-no-files-found: warn
-          retention-days: 90
-
+          retention-days: 30
   promote:
     needs: [prepare, cpu, cuda_compile, gpu]
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
       contents: write
-      actions: read
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          ref: ${{ needs.prepare.outputs.candidate }}
           fetch-depth: 0
           persist-credentials: true
-      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # Node24
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
         with:
-          pattern: mistral-asd-*-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/asd-proof
-          merge-multiple: false
-      - name: Gate on matching proofs, archive, and force-with-lease promote
-        id: promote
-        shell: bash
-        env:
-          SEED: ${{ needs.prepare.outputs.seed }}
-          PREVIOUS_EXTENDED: ${{ needs.prepare.outputs.previous_extended }}
-          SHA: ${{ needs.prepare.outputs.candidate }}
-          TEMP_REF: ${{ needs.prepare.outputs.candidate_ref }}
-          LOCK: ${{ needs.prepare.outputs.lock }}
-          CANDLE_SHA: ${{ needs.prepare.outputs.candle }}
-          CANDLE_VALIDATION_REF: ${{ needs.prepare.outputs.candle_validation_ref }}
-          LFM25_DSPARK_SHA: ${{ needs.prepare.outputs.lfm25_dspark }}
-          BOLT_SHA: ${{ needs.prepare.outputs.bolt }}
-          INTEGRATION_SOURCE_SHA: ${{ needs.prepare.outputs.integration_source }}
+          name: mistral-asd-prep-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/campaign
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with:
+          name: mistral-builds-${{ needs.prepare.outputs.bundle_key }}
+          path: ${{ runner.temp }}/proofs
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with:
+          name: mistral-asd-gpu-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/proofs/gpu
+      - name: Publish verified standalones and final branch atomically
         run: |
-          set -euo pipefail
-          for gate in cpu cuda gpu; do
-            report="$RUNNER_TEMP/asd-proof/mistral-asd-${gate}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/report.json"
-            test -s "$report"
-            jq -e --arg sha "$SHA" --arg lock "$LOCK" --arg gate "$gate" --arg lfm "$LFM25_DSPARK_SHA" --arg bolt "$BOLT_SHA" --arg source "$INTEGRATION_SOURCE_SHA" \
-              '.candidate_sha==$sha and .lock_sha256==$lock and
-              .lfm25_dspark_source_sha==$lfm and .bolt_source_sha==$bolt and .integration_source_sha==$source and
-              (( $gate=="cpu" and .status=="CPU_PASSED" ) or
-               ( $gate=="cuda" and .status=="CUDA_COMPILE_PASSED" and .gpu_executed==false ) or
-               ( $gate=="gpu" and .status=="GPU_PASSED" and .gpu_executed==true ))' \
-              "$report" >/dev/null
-          done
-          test "$(git rev-parse HEAD)" = "$SHA"
-          test "$(sha256sum Cargo.lock | cut -d' ' -f1)" = "$LOCK"
-          test "$(jq -r '.candle_sha' mistral-integration/sources.json)" = "$CANDLE_SHA"
-          test "$(jq -r '.candle_branch' mistral-integration/sources.json)" = "extended"
-          test "$(jq -r '.candle_validation_ref' mistral-integration/sources.json)" = "$CANDLE_VALIDATION_REF"
-          test "$(jq -r '.components.lfm25_dspark.source_sha' mistral-integration/sources.json)" = "$LFM25_DSPARK_SHA"
-          test "$(jq -r '.components.nemotron_bolt_dflash.source_sha' mistral-integration/sources.json)" = "$BOLT_SHA"
-
-          test "$(git ls-remote origin refs/heads/asd_runner | cut -f1)" = "$SEED"
-          test "$(git ls-remote origin refs/heads/lfm25_dspark_standalone | cut -f1)" = "$LFM25_DSPARK_SHA"
-          test "$(git ls-remote origin refs/heads/nemotron_bolt_dflash_standalone | cut -f1)" = "$BOLT_SHA"
-          test "$(git ls-remote origin refs/heads/integration/extended-nemotron-bolt-dflash | cut -f1)" = "$INTEGRATION_SOURCE_SHA"
-          remote="$(git ls-remote origin refs/heads/extended | cut -f1)"
-          if test "$remote" != "$PREVIOUS_EXTENDED" && test "$remote" != "$SHA"; then
-            echo "::error::extended moved after preparation; no promotion"; exit 3
-          fi
-          git merge-base --is-ancestor "$SEED" "$SHA"
-          git merge-base --is-ancestor "$LFM25_DSPARK_SHA" "$SHA"
-          git merge-base --is-ancestor "$BOLT_SHA" "$SHA"
-          git merge-base --is-ancestor "$PREVIOUS_EXTENDED" "$SHA"
-          validated_ref="archive/extended/sm61-validated-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          current="$(git ls-remote origin "refs/heads/$validated_ref" | cut -f1)"
-          if test -n "$current"; then
-            test "$current" = "$SHA"
-          else
-            git push origin "$SHA:refs/heads/$validated_ref"
-          fi
-          if test -n "$PREVIOUS_EXTENDED"; then
-            before_ref="archive/extended/pre-promote-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-            current="$(git ls-remote origin "refs/heads/$before_ref" | cut -f1)"
-            if test -n "$current"; then test "$current" = "$PREVIOUS_EXTENDED";
-            else git push origin "$PREVIOUS_EXTENDED:refs/heads/$before_ref"; fi
-          fi
-          if test "$remote" != "$SHA"; then
-            git push --force-with-lease="refs/heads/extended:$PREVIOUS_EXTENDED" \
-              origin "$SHA:refs/heads/extended"
-          fi
-          test "$(git ls-remote origin refs/heads/extended | cut -f1)" = "$SHA"
-
-          tag="promoted/extended/${SHA:0:12}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          if ! git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
-            git tag -a "$tag" "$SHA" \
-              -m "Mistral.rs Extended CPU + hosted SM61 CUDA + physical Pascal and LFM unit proof, run ${GITHUB_RUN_ID} attempt ${GITHUB_RUN_ATTEMPT}; Candle extended $CANDLE_SHA; LFM2.5 DSpark $LFM25_DSPARK_SHA"
-            git push origin "refs/tags/$tag"
-          fi
-
-          current="$(git ls-remote origin "refs/heads/$TEMP_REF" | cut -f1)"
-          if test "$current" = "$SHA"; then
-            git push origin ":refs/heads/$TEMP_REF"
-          fi
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "PROMOTED extended $SHA after CPU + hosted CUDA + physical SM61 proofs; Candle extended $CANDLE_SHA; LFM2.5 DSpark $LFM25_DSPARK_SHA; validated archive $validated_ref; tag $tag" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Publish promoted SM61 binary release
-        if: ${{ inputs.publish_binary }}
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.promote.outputs.tag }}
-          SHA: ${{ needs.prepare.outputs.candidate }}
-          CANDLE_SHA: ${{ needs.prepare.outputs.candle }}
-          LFM25_DSPARK_SHA: ${{ needs.prepare.outputs.lfm25_dspark }}
-          BOLT_SHA: ${{ needs.prepare.outputs.bolt }}
-          INTEGRATION_SOURCE_SHA: ${{ needs.prepare.outputs.integration_source }}
-        run: |
-          set -euo pipefail
-          pkg="$RUNNER_TEMP/asd-proof/mistral-asd-cuda-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/mistralrs-linux-x86_64-sm61.tar.gz"
-          sum="${pkg}.sha256"
-          test -s "$pkg"
-          test -s "$sum"
-          gh release create "$TAG" "$pkg#Linux x86_64 SM61 binary" "$sum#SHA-256" \
-            --verify-tag --prerelease \
-            --title "mistral.rs Extended SM61 ${SHA:0:12}" \
-            --notes "Promoted extended candidate $SHA, validated on CPU, hosted CUDA 12.9.2 SM61 compilation, and a physical Pascal SM61 GPU. Candle extended: $CANDLE_SHA. LFM2.5 DSpark source: $LFM25_DSPARK_SHA; unit tests passed, full model inference remains a separate local check. Features: cuda-legacy-bf16, cuda-legacy-fp8, cuda-legacy-fp4."
-
+          git fetch "$RUNNER_TEMP/campaign/candidate.bundle" 'refs/heads/integration/campaign/*:refs/remotes/build/*'
+          python3 "$RUNNER_TEMP/campaign/orchestrator/campaign.py" promote --repo "$PWD" --plan "$RUNNER_TEMP/campaign/plan.json" --proofs "$RUNNER_TEMP/proofs" --run-id "$GITHUB_RUN_ID"

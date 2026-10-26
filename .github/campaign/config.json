@@ -1,0 +1,21 @@
+{
+  "schema_version": 2,
+  "master_branch": "master",
+  "toolchain": "1.99.0",
+  "base_image": "nvidia/cuda:12.9.2-devel-ubuntu24.04",
+  "nextest_version": "0.9.138",
+  "nextest_sha256": "3793bf0c27607b196f502c39b2108f571de89fcda7586ae6beefa11ee177b216",
+  "sccache_version": "0.12.0",
+  "sccache_sha256": "b0e89ead6899224a4ba2b90e9073bf1ce036d95bab30f3dc33c1e1468bc4ad44",
+  "features": ["cuda-legacy-bf16", "cuda-legacy-fp8", "cuda-legacy-fp4"],
+  "components": {
+    "legacy": {"branch": "allow_old_card", "requires": [], "candle_branch": "cuda_legacy"},
+    "asd": {"branch": "asd_runner_standalone", "requires": ["legacy"], "candle_branch": "extended"},
+    "lfm25_dspark": {"branch": "lfm25_dspark_standalone", "requires": ["legacy"], "candle_branch": "extended"},
+    "nemotron_bolt_dflash": {"branch": "nemotron_bolt_dflash_standalone", "requires": ["legacy"], "candle_branch": "extended"}
+  },
+  "targets": {
+    "legacy": {"branch": "allow_old_card", "components": ["legacy"], "candle_branch": "cuda_legacy"},
+    "extended": {"branch": "extended", "components": ["legacy", "asd", "lfm25_dspark", "nemotron_bolt_dflash"], "candle_branch": "extended"}
+  }
+}
