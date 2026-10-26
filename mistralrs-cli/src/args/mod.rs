@@ -635,7 +635,7 @@ pub struct RuntimeOptions {
     #[serde(default)]
     pub mtp: bool,
 
-    /// MTP assistant model id or path.
+    /// MTP, DFlash, or DSpark assistant model id or path.
     #[arg(long)]
     #[serde(default)]
     pub mtp_model: Option<String>,
@@ -649,6 +649,11 @@ pub struct RuntimeOptions {
     #[arg(long, value_enum, default_value_t)]
     #[serde(default)]
     pub mtp_draft_sampling: MtpDraftSamplingArg,
+
+    /// Measured full-step costs for DSpark confidence-based verification.
+    #[arg(long, requires = "mtp_model")]
+    #[serde(default)]
+    pub mtp_dspark_verify_profile: Option<PathBuf>,
 
     /// Path to an MCP client configuration JSON. Also reads `MCP_CONFIG_PATH` if unset.
     #[arg(long)]
@@ -824,7 +829,7 @@ pub struct BenchRuntimeOptions {
     #[arg(long, conflicts_with = "mtp_model")]
     pub mtp: bool,
 
-    /// MTP assistant model id or path.
+    /// MTP, DFlash, or DSpark assistant model id or path.
     #[arg(long)]
     pub mtp_model: Option<String>,
 
@@ -835,6 +840,10 @@ pub struct BenchRuntimeOptions {
     /// MTP draft sampling policy. Auto uses probabilistic DFlash2 drafting when supported.
     #[arg(long, value_enum, default_value_t)]
     pub mtp_draft_sampling: MtpDraftSamplingArg,
+
+    /// Measured full-step costs for DSpark confidence-based verification.
+    #[arg(long, requires = "mtp_model")]
+    pub mtp_dspark_verify_profile: Option<PathBuf>,
 }
 
 impl BenchRuntimeOptions {
@@ -849,12 +858,14 @@ impl BenchRuntimeOptions {
         if self.mtp {
             return Some(
                 mistralrs_core::MtpConfig::builtin(self.mtp_n_predict)
-                    .with_draft_sampling_method(self.mtp_draft_sampling.into()),
+                    .with_draft_sampling_method(self.mtp_draft_sampling.into())
+                    .with_dspark_verify_profile(self.mtp_dspark_verify_profile.clone()),
             );
         }
         self.mtp_model.clone().map(|model| {
             mistralrs_core::MtpConfig::new(model, self.mtp_n_predict)
                 .with_draft_sampling_method(self.mtp_draft_sampling.into())
+                .with_dspark_verify_profile(self.mtp_dspark_verify_profile.clone())
         })
     }
 }
@@ -922,12 +933,14 @@ impl RuntimeOptions {
         if self.mtp {
             return Some(
                 mistralrs_core::MtpConfig::builtin(self.mtp_n_predict)
-                    .with_draft_sampling_method(self.mtp_draft_sampling.into()),
+                    .with_draft_sampling_method(self.mtp_draft_sampling.into())
+                    .with_dspark_verify_profile(self.mtp_dspark_verify_profile.clone()),
             );
         }
         self.mtp_model.clone().map(|model| {
             mistralrs_core::MtpConfig::new(model, self.mtp_n_predict)
                 .with_draft_sampling_method(self.mtp_draft_sampling.into())
+                .with_dspark_verify_profile(self.mtp_dspark_verify_profile.clone())
         })
     }
 }
@@ -1000,6 +1013,7 @@ impl Default for RuntimeOptions {
             mtp_model: None,
             mtp_n_predict: None,
             mtp_draft_sampling: MtpDraftSamplingArg::default(),
+            mtp_dspark_verify_profile: None,
             mcp_config: None,
             agent: false,
             enable_search: false,
@@ -1060,6 +1074,55 @@ mod tests {
     use std::{fs, path::Path};
 
     use super::*;
+
+    #[test]
+    fn run_accepts_lfm_dspark_one_shot_input() {
+        let cli = Cli::try_parse_from([
+            "mistralrs",
+            "run",
+            "-m",
+            "LiquidAI/LFM2.5-2.6B",
+            "--mtp-model",
+            "LiquidAI/LFM2.5-2.6B-DSpark",
+            "--mtp-n-predict",
+            "8",
+            "--mtp-draft-sampling",
+            "greedy",
+            "--dtype",
+            "f16",
+            "--input",
+            "Describe the model's agent capabilities.",
+        ])
+        .unwrap();
+        let Command::Run { input, runtime, .. } = cli.command else {
+            panic!("expected run command");
+        };
+        assert_eq!(
+            input.as_deref(),
+            Some("Describe the model's agent capabilities.")
+        );
+        let mtp = runtime.mtp_config().expect("missing DSpark config");
+        assert_eq!(mtp.n_predict, Some(8));
+        assert_eq!(
+            mtp.draft_sampling_method,
+            mistralrs_core::MtpDraftSamplingMethod::Greedy
+        );
+    }
+
+    #[test]
+    fn serve_rejects_one_shot_input() {
+        let error = Cli::try_parse_from([
+            "mistralrs",
+            "serve",
+            "-m",
+            "LiquidAI/LFM2.5-2.6B",
+            "--input",
+            "Hello",
+        ])
+        .err()
+        .expect("serve must reject --input");
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
 
     fn resolve_default_command(command: &str, args: &[&str]) -> anyhow::Result<ModelType> {
         let cli = Cli::try_parse_from(
@@ -1621,6 +1684,59 @@ mod tests {
         assert_eq!(
             RuntimeOptions::default().mtp_draft_sampling,
             MtpDraftSamplingArg::Auto
+        );
+    }
+    #[test]
+    fn dspark_confidence_profile_reaches_run_serve_and_bench_configuration() {
+        for command in ["run", "serve", "bench"] {
+            let cli = Cli::try_parse_from([
+                "mistralrs",
+                command,
+                "-m",
+                "LiquidAI/LFM2.5-2.6B",
+                "--mtp-model",
+                "LiquidAI/LFM2.5-2.6B-DSpark",
+                "--mtp-dspark-verify-profile",
+                "pascal-dspark.json",
+            ])
+            .unwrap();
+            let config = match cli.command {
+                Command::Run { runtime, .. } | Command::Serve { runtime, .. } => {
+                    runtime.mtp_config()
+                }
+                Command::Bench { runtime, .. } => runtime.mtp_config(),
+                _ => panic!("unexpected command"),
+            }
+            .unwrap();
+            assert_eq!(
+                config.dspark_verify_profile,
+                Some(PathBuf::from("pascal-dspark.json"))
+            );
+        }
+        assert!(Cli::try_parse_from([
+            "mistralrs",
+            "serve",
+            "-m",
+            "LiquidAI/LFM2.5-2.6B",
+            "--mtp-dspark-verify-profile",
+            "pascal-dspark.json",
+        ])
+        .is_err());
+        assert!(RuntimeOptions::default()
+            .mtp_dspark_verify_profile
+            .is_none());
+    }
+}
+
+#[cfg(test)]
+mod campaign_cpu_flag_tests {
+    use clap::Parser;
+
+    #[test]
+    fn campaign_cpu_flag_is_available() {
+        assert!(
+            super::Cli::try_parse_from(["mistralrs", "run", "-m", "local-fixture", "--cpu",])
+                .is_ok()
         );
     }
 }
