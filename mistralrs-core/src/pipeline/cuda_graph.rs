@@ -38,6 +38,8 @@ use crate::pipeline::{
 };
 use crate::speculative::SpeculativeGraphState;
 
+// cudarc exposes CUDA graph flags as a repr-transparent integer newtype.
+// Extract its numeric value for the driver's cuGraphInstantiateWithFlags(u64).
 const CUDA_GRAPH_INSTANTIATE_FLAGS: u64 =
     sys::CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH.0 as u64;
 // Matches the standard CUDA paged-attention V2 partition size.
