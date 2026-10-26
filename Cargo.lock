@@ -141,7 +141,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -152,7 +152,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -185,7 +185,7 @@ version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7eb93bbb63b9c227414f6eb3a0adfddca591a8ce1e9b60661bb08969b87e340b"
 dependencies = [
- "object",
+ "object 0.37.3",
 ]
 
 [[package]]
@@ -389,7 +389,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "miniz_oxide",
- "object",
+ "object 0.37.3",
  "rustc-demangle",
  "windows-link 0.2.1",
 ]
@@ -643,7 +643,7 @@ checksum = "ade8366b8bd5ba243f0a58f036cc0ca8a2f069cff1a2351ef1cac6b083e16fc0"
 [[package]]
 name = "candle-core"
 version = "0.11.0"
-source = "git+https://github.com/haricot/candle.git?rev=66c4651cc83f9a43e79a4aa09302aac9bc763d2c#66c4651cc83f9a43e79a4aa09302aac9bc763d2c"
+source = "git+https://github.com/haricot/candle.git?rev=40b5a8acc43b5f8ef925370ae12daddd929f39f2#40b5a8acc43b5f8ef925370ae12daddd929f39f2"
 dependencies = [
  "accelerate-src",
  "byteorder",
@@ -673,13 +673,13 @@ dependencies = [
  "tokenizers 0.23.2",
  "yoke",
  "zerocopy",
- "zip 8.6.0",
+ "zip 9.0.3",
 ]
 
 [[package]]
 name = "candle-flash-attn-v3"
 version = "0.11.0"
-source = "git+https://github.com/haricot/candle.git?rev=66c4651cc83f9a43e79a4aa09302aac9bc763d2c#66c4651cc83f9a43e79a4aa09302aac9bc763d2c"
+source = "git+https://github.com/haricot/candle.git?rev=40b5a8acc43b5f8ef925370ae12daddd929f39f2#40b5a8acc43b5f8ef925370ae12daddd929f39f2"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -692,7 +692,7 @@ dependencies = [
 [[package]]
 name = "candle-kernels"
 version = "0.11.0"
-source = "git+https://github.com/haricot/candle.git?rev=66c4651cc83f9a43e79a4aa09302aac9bc763d2c#66c4651cc83f9a43e79a4aa09302aac9bc763d2c"
+source = "git+https://github.com/haricot/candle.git?rev=40b5a8acc43b5f8ef925370ae12daddd929f39f2#40b5a8acc43b5f8ef925370ae12daddd929f39f2"
 dependencies = [
  "cudaforge",
  "sha2",
@@ -701,7 +701,7 @@ dependencies = [
 [[package]]
 name = "candle-metal-kernels"
 version = "0.11.0"
-source = "git+https://github.com/haricot/candle.git?rev=66c4651cc83f9a43e79a4aa09302aac9bc763d2c#66c4651cc83f9a43e79a4aa09302aac9bc763d2c"
+source = "git+https://github.com/haricot/candle.git?rev=40b5a8acc43b5f8ef925370ae12daddd929f39f2#40b5a8acc43b5f8ef925370ae12daddd929f39f2"
 dependencies = [
  "block2",
  "half",
@@ -716,7 +716,7 @@ dependencies = [
 [[package]]
 name = "candle-nn"
 version = "0.11.0"
-source = "git+https://github.com/haricot/candle.git?rev=66c4651cc83f9a43e79a4aa09302aac9bc763d2c#66c4651cc83f9a43e79a4aa09302aac9bc763d2c"
+source = "git+https://github.com/haricot/candle.git?rev=40b5a8acc43b5f8ef925370ae12daddd929f39f2#40b5a8acc43b5f8ef925370ae12daddd929f39f2"
 dependencies = [
  "accelerate-src",
  "candle-core",
@@ -1186,22 +1186,26 @@ dependencies = [
 
 [[package]]
 name = "cuda-async"
-version = "0.1.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e5e6c51933b111a9ce229ec0a132ed01f6dc1905689619546f92e3579d067b6"
+checksum = "a6d51fe2c9b1a89f4ac760d72a197761789f4e60db1d07d3f4d48de65a78adc9"
 dependencies = [
  "anyhow",
+ "cuda-bindings",
  "cuda-core",
+ "dashmap",
  "futures",
  "half",
+ "once_cell",
+ "rustc-hash 2.1.1",
  "thiserror 1.0.69",
 ]
 
 [[package]]
 name = "cuda-bindings"
-version = "0.1.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb536c6bd521e35942cf374515151457be1e09de2eb7d4627d4e7d7af70e618c"
+checksum = "0f42e2c99c56bf2eef9d569435bfd72a478dfaea3f178b8e5bae891875bbbe2e"
 dependencies = [
  "bindgen",
  "libloading 0.8.9",
@@ -1213,13 +1217,26 @@ dependencies = [
 
 [[package]]
 name = "cuda-core"
-version = "0.1.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "21a377120db77d05b039ff595298e9c542aaafa751de8cfe89a29bf8d0989e6f"
+checksum = "84bdb592a2844148fb13bdfbbab158879f56916bde1d1a1b6580ca27f23850cd"
 dependencies = [
  "anyhow",
  "cuda-bindings",
+ "cuda-core-derive",
  "half",
+ "oxide-artifacts",
+]
+
+[[package]]
+name = "cuda-core-derive"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a48da7d10c1078f7fbb87d7176e9476affadea148babf31946e348073872d44"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.114",
 ]
 
 [[package]]
@@ -1254,9 +1271,9 @@ dependencies = [
 
 [[package]]
 name = "cutile"
-version = "0.1.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "428ac421e843d7532b8213d17647f1bfed4ce641d9d4b234b493c63ef3aeca8c"
+checksum = "422c8fb32ac648113eb032a6d818f09b0862812224bd4a0ed563fc174f6f5264"
 dependencies = [
  "anyhow",
  "cuda-async",
@@ -1264,19 +1281,23 @@ dependencies = [
  "cutile-compiler",
  "cutile-ir",
  "cutile-macro",
+ "dashmap",
  "half",
  "linkme",
  "num-traits",
+ "once_cell",
  "proc-macro2",
  "quote",
+ "serde",
+ "serde_json",
  "syn 2.0.114",
 ]
 
 [[package]]
 name = "cutile-compiler"
-version = "0.1.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57ffebc1613d8a1c68521f3a324bfe5e4e3d1ce4915d609b8a7321faa0315f44"
+checksum = "7cbc52ad2ae4e8a4440800673f8ccde58909f25c705d82d4925e025f6c3f3565"
 dependencies = [
  "anyhow",
  "cuda-async",
@@ -1288,6 +1309,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "regex",
+ "sha2",
  "stacker",
  "syn 2.0.114",
  "uuid 1.19.0",
@@ -1295,9 +1317,9 @@ dependencies = [
 
 [[package]]
 name = "cutile-ir"
-version = "0.1.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eccd5ebe2c1939252889d3dc757b631e5a36b819e7b6249a6158ea9dfbbf7009"
+checksum = "2042f5b0e653ba62d472454ffe4278133f91b6a25a66b51e9dcbb35ac4ad950f"
 dependencies = [
  "half",
  "indexmap 2.13.0",
@@ -1306,9 +1328,9 @@ dependencies = [
 
 [[package]]
 name = "cutile-macro"
-version = "0.1.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f8c7841f202a8831094d9f768796efe36837b067e2b07ce0f3ab524d229952a"
+checksum = "16f574e698764da8e0a6b22f12dac33949bcbe48a43d94492c02f09bb8e65b6a"
 dependencies = [
  "convert_case",
  "cutile-compiler",
@@ -1316,6 +1338,7 @@ dependencies = [
  "phf 0.11.3",
  "proc-macro2",
  "quote",
+ "sha2",
  "syn 2.0.114",
 ]
 
@@ -1439,6 +1462,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dashmap"
+version = "6.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6361d5c062261c78a176addb82d4c821ae42bed6089de0e12603cd25de2059c"
+dependencies = [
+ "cfg-if",
+ "crossbeam-utils",
+ "hashbrown 0.14.5",
+ "lock_api",
+ "once_cell",
+ "parking_lot_core",
+]
+
+[[package]]
 name = "data-encoding"
 version = "2.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1464,17 +1501,6 @@ checksum = "ececcb659e7ba858fb4f10388c250a7252eb0a27373f1a72b8748afdd248e587"
 dependencies = [
  "powerfmt",
  "serde_core",
-]
-
-[[package]]
-name = "derive-new"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2cdc8d50f426189eef89dac62fabfa0abb27d5cc008f25bf4156a0203325becc"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.114",
 ]
 
 [[package]]
@@ -1618,7 +1644,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1818,7 +1844,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -2423,6 +2449,12 @@ name = "hashbrown"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a9ee70c43aaf417c914396645a0fa852624801b24ebb7ae78fe8272889ac888"
+
+[[package]]
+name = "hashbrown"
+version = "0.14.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
 
 [[package]]
 name = "hashbrown"
@@ -3512,7 +3544,7 @@ dependencies = [
 
 [[package]]
 name = "mistralrs"
-version = "0.9.2"
+version = "0.9.4"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -3538,7 +3570,7 @@ dependencies = [
 
 [[package]]
 name = "mistralrs-audio"
-version = "0.9.2"
+version = "0.9.4"
 dependencies = [
  "anyhow",
  "apodize",
@@ -3548,7 +3580,7 @@ dependencies = [
 
 [[package]]
 name = "mistralrs-cli"
-version = "0.9.2"
+version = "0.9.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -3589,7 +3621,7 @@ dependencies = [
 
 [[package]]
 name = "mistralrs-code-exec"
-version = "0.9.2"
+version = "0.9.4"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3607,7 +3639,7 @@ dependencies = [
 
 [[package]]
 name = "mistralrs-core"
-version = "0.9.2"
+version = "0.9.4"
 dependencies = [
  "accelerate-src",
  "ahash",
@@ -3629,7 +3661,6 @@ dependencies = [
  "clap",
  "csv",
  "cudaforge",
- "derive-new",
  "derive_more",
  "dirs",
  "either",
@@ -3716,7 +3747,7 @@ dependencies = [
 
 [[package]]
 name = "mistralrs-flash-attn"
-version = "0.9.2"
+version = "0.9.4"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -3727,7 +3758,7 @@ dependencies = [
 
 [[package]]
 name = "mistralrs-macros"
-version = "0.9.2"
+version = "0.9.4"
 dependencies = [
  "darling 0.23.0",
  "proc-macro2",
@@ -3737,7 +3768,7 @@ dependencies = [
 
 [[package]]
 name = "mistralrs-mcp"
-version = "0.9.2"
+version = "0.9.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3759,7 +3790,7 @@ dependencies = [
 
 [[package]]
 name = "mistralrs-metal-compile"
-version = "0.9.2"
+version = "0.9.4"
 dependencies = [
  "candle-metal-kernels",
  "objc2-metal",
@@ -3767,7 +3798,7 @@ dependencies = [
 
 [[package]]
 name = "mistralrs-paged-attn"
-version = "0.9.2"
+version = "0.9.4"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -3784,7 +3815,7 @@ dependencies = [
 
 [[package]]
 name = "mistralrs-pyo3"
-version = "0.9.2"
+version = "0.9.4"
 dependencies = [
  "accelerate-src",
  "anyhow",
@@ -3812,20 +3843,15 @@ dependencies = [
 
 [[package]]
 name = "mistralrs-quant"
-version = "0.9.2"
+version = "0.9.4"
 dependencies = [
  "bytemuck",
  "byteorder",
  "candle-core",
  "candle-metal-kernels",
  "candle-nn",
- "cuda-async",
- "cuda-bindings",
- "cuda-core",
  "cudaforge",
  "cutile",
- "cutile-compiler",
- "cutile-ir",
  "dispatch2",
  "fancy-regex 0.14.0",
  "float8",
@@ -3856,7 +3882,7 @@ dependencies = [
 
 [[package]]
 name = "mistralrs-sandbox"
-version = "0.9.2"
+version = "0.9.4"
 dependencies = [
  "anyhow",
  "itoa",
@@ -3872,7 +3898,7 @@ dependencies = [
 
 [[package]]
 name = "mistralrs-server-core"
-version = "0.9.2"
+version = "0.9.4"
 dependencies = [
  "accelerate-src",
  "anyhow",
@@ -3908,7 +3934,7 @@ dependencies = [
 
 [[package]]
 name = "mistralrs-vision"
-version = "0.9.2"
+version = "0.9.4"
 dependencies = [
  "candle-core",
  "image",
@@ -4078,7 +4104,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -4238,6 +4264,18 @@ dependencies = [
 
 [[package]]
 name = "object"
+version = "0.36.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62948e14d923ea95ea2c7c86c71013138b66525b86bdc08d2dcc262bdb497b87"
+dependencies = [
+ "crc32fast",
+ "hashbrown 0.15.5",
+ "indexmap 2.13.0",
+ "memchr",
+]
+
+[[package]]
+name = "object"
 version = "0.37.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff76201f031d8863c38aa7f905eca4f53abbfa15f609db4277d44cd8938f33fe"
@@ -4289,9 +4327,9 @@ dependencies = [
 
 [[package]]
 name = "once_cell"
-version = "1.21.3"
+version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "42f5e15c9953c5e4ccceeb2e7382a716482c34515315f7b03532b8b4e8393d2d"
+checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "once_cell_polyfill"
@@ -4342,6 +4380,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f4779c6901a562440c3786d08192c6fbda7c1c2060edd10006b05ee35d10f2d"
 dependencies = [
  "num-traits",
+]
+
+[[package]]
+name = "oxide-artifacts"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74d9a941c0c43d2dceaf25f5c9ca4c9f9cceb28dfa5e4e3cfd14e476f003e7c9"
+dependencies = [
+ "object 0.36.7",
 ]
 
 [[package]]
@@ -4812,9 +4859,9 @@ dependencies = [
 
 [[package]]
 name = "quinn-proto"
-version = "0.11.14"
+version = "0.11.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "434b42fec591c96ef50e21e886936e66d3cc3f737104fdb9b737c40ffb94c098"
+checksum = "4fcb935c5bec503c2f0e306bdd3e58bb9029dcb14fa8d9ac76e3a5256ac0763e"
 dependencies = [
  "aws-lc-rs",
  "bytes",
@@ -5433,7 +5480,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.11.0",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5492,7 +5539,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6091,7 +6138,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "psm",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6473,7 +6520,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.3",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -7535,7 +7582,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -8166,13 +8213,14 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "8.6.0"
+version = "9.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d04a6b5381502aa6087c94c669499eb1602eb9c5e8198e534de571f7154809b"
+checksum = "c2d98561b612a84ae525331a7a094429ef8a5772514ed507ff6db5f54badc971"
 dependencies = [
  "crc32fast",
  "indexmap 2.13.0",
  "memchr",
+ "nix 0.31.3",
  "typed-path",
 ]
 

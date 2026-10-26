@@ -120,6 +120,7 @@ pub mod text_models_inputs_processor {
     use super::{InputProcessorOutput, InputsProcessor, InputsProcessorType};
 
     const CUDA_GRAPH_CONTEXT_BUCKET_MIN_TOKENS: usize = 512;
+    const CUDA_GRAPH_DECODE_CONTEXT_FLOOR_TOKENS: usize = 2048;
 
     fn cuda_graph_context_bucket_tokens(
         required_tokens: usize,
@@ -221,6 +222,8 @@ pub mod text_models_inputs_processor {
         /// False only for non-final chunks of a chunked prompt; block-diffusion models skip
         /// canvas generation until the prompt is fully encoded.
         pub is_final_prompt_chunk: bool,
+        /// False when the pipeline discards this forward's logits, so models skip the lm_head.
+        pub needs_logits: bool,
     }
 
     impl PagedAttentionMeta {
@@ -272,6 +275,7 @@ pub mod text_models_inputs_processor {
         pub full_max_context_len: Option<usize>,
         pub is_first_prompt_chunk: bool,
         pub is_final_prompt_chunk: bool,
+        pub needs_logits: bool,
         pub prompt_chunk_attention_policy: MultimodalAttentionPolicy,
         pub has_noncausal_mm_context: bool,
         pub prefix_gather_workspace_limit: Option<usize>,
@@ -300,6 +304,10 @@ pub mod text_models_inputs_processor {
     }
 
     impl PagedAttentionInputMetadata {
+        pub(crate) fn is_decode_step(&self) -> bool {
+            !self.is_first_prompt_chunk && self.query_lens.is_none()
+        }
+
         pub(crate) fn has_host_staged_decode_tensors(&self) -> bool {
             self.decode_rows.is_some()
                 && self
@@ -334,6 +342,7 @@ pub mod text_models_inputs_processor {
                 slot_mappings: HashMap::from([(dev.location(), Tensor::new(&[0f32], dev)?)]),
                 is_first_prompt_chunk: true,
                 is_final_prompt_chunk: true,
+                needs_logits: true,
                 prompt_chunk_attention_policy: MultimodalAttentionPolicy::Causal,
                 has_noncausal_mm_context: false,
                 prefix_gather_workspace_limit: None,
@@ -585,6 +594,7 @@ pub mod text_models_inputs_processor {
                 full_max_context_len,
                 is_first_prompt_chunk: false,
                 is_final_prompt_chunk: self.is_final_prompt_chunk,
+                needs_logits: self.needs_logits,
                 prompt_chunk_attention_policy: MultimodalAttentionPolicy::Causal,
                 has_noncausal_mm_context: self.has_noncausal_mm_context,
                 prefix_gather_workspace_limit: self.prefix_gather_workspace_limit,
@@ -1407,6 +1417,7 @@ pub mod text_models_inputs_processor {
                 full_max_context_len,
                 is_first_prompt_chunk: chunk_offset_toks == 0 && !has_any_cache_hit,
                 is_final_prompt_chunk: paged_attn_metadata.is_final_prompt_chunk,
+                needs_logits: paged_attn_metadata.needs_logits,
                 prompt_chunk_attention_policy,
                 // Keep the slow path local to chunks whose query rows overlap a noncausal range.
                 has_noncausal_mm_context: mm_prefix_ranges_tensor.is_some()
@@ -1502,6 +1513,11 @@ pub mod text_models_inputs_processor {
             .iter()
             .map(|tokens| tokens.to_device(device)?.to_dtype(T::DTYPE))
             .collect::<candle_core::Result<Vec<_>>>()?;
+        #[cfg(feature = "cuda")]
+        if T::DTYPE == DType::U32 && device.is_cuda() {
+            return crate::cuda::input_packing::pack_completion_input(&host, &staged_device_rows)
+                .map_err(anyhow::Error::msg);
+        }
         let staged = Tensor::stack(&staged_device_rows, 0)?;
         Ok(Tensor::cat(&[&host, &staged], 1)?)
     }
@@ -1929,6 +1945,33 @@ pub mod text_models_inputs_processor {
             rows
         }
 
+        fn graph_block_table_len(
+            &self,
+            blocks: usize,
+            live_context_len: usize,
+            capacity: Option<usize>,
+        ) -> usize {
+            let minimum_blocks = if crate::perf_flags::cuda_graphs_enabled()
+                && !self.use_standard_metadata
+                && self.query_len == 1
+                && self.decode_window == 1
+            {
+                capacity
+                    .unwrap_or(CUDA_GRAPH_DECODE_CONTEXT_FLOOR_TOKENS)
+                    .min(CUDA_GRAPH_DECODE_CONTEXT_FLOOR_TOKENS)
+                    .div_ceil(self.block_size)
+            } else {
+                0
+            };
+            cuda_graph_block_table_len_with_cap(
+                blocks.max(minimum_blocks),
+                self.block_size,
+                true,
+                live_context_len,
+                capacity,
+            )
+        }
+
         #[cfg(feature = "cuda")]
         pub(crate) fn graph_key(&self) -> DecodePagedRowsGraphKey {
             let batch_size = self.batch_size();
@@ -1952,23 +1995,19 @@ pub mod text_models_inputs_processor {
                         .min(self.max_paged_context_len)
                 })
                 .or(graph_capacity);
-            let paged_block_table_len = cuda_graph_block_table_len_with_cap(
+            let paged_block_table_len = self.graph_block_table_len(
                 (0..paged_block_tables.len())
                     .map(|row| paged_block_tables.row(row).len())
                     .max()
                     .unwrap_or(1),
-                self.block_size,
-                true,
                 max_context_len,
                 paged_graph_capacity,
             );
-            let full_block_table_len = cuda_graph_block_table_len_with_cap(
+            let full_block_table_len = self.graph_block_table_len(
                 (0..self.block_tables.len())
                     .map(|row| self.block_tables.row(row).len())
                     .max()
                     .unwrap_or(1),
-                self.block_size,
-                true,
                 full_max_context_len,
                 graph_capacity,
             );
@@ -2036,6 +2075,7 @@ pub mod text_models_inputs_processor {
                 full_max_context_len: self.use_standard_metadata.then_some(full_max_context_len),
                 is_first_prompt_chunk: false,
                 is_final_prompt_chunk: true,
+                needs_logits: true,
                 prompt_chunk_attention_policy: MultimodalAttentionPolicy::Causal,
                 has_noncausal_mm_context: false,
                 prefix_gather_workspace_limit: None,
@@ -2098,10 +2138,8 @@ pub mod text_models_inputs_processor {
                         .min(self.max_paged_context_len)
                 })
                 .or(graph_capacity);
-            let max_block_table_len = cuda_graph_block_table_len_with_cap(
+            let max_block_table_len = self.graph_block_table_len(
                 max_block_table_len,
-                block_size,
-                true,
                 max_context_len,
                 paged_graph_capacity,
             );
@@ -2170,10 +2208,8 @@ pub mod text_models_inputs_processor {
             let full_tensors = if full_matches_paged {
                 None
             } else {
-                let full_max_block_table_len = cuda_graph_block_table_len_with_cap(
+                let full_max_block_table_len = self.graph_block_table_len(
                     full_max_block_table_len,
-                    block_size,
-                    true,
                     full_max_context_len,
                     graph_capacity,
                 );
@@ -2327,6 +2363,7 @@ pub mod text_models_inputs_processor {
                 full_max_context_len: requirements.context_lens.then_some(full_max_context_len),
                 is_first_prompt_chunk: false,
                 is_final_prompt_chunk: true,
+                needs_logits: true,
                 prompt_chunk_attention_policy: MultimodalAttentionPolicy::Causal,
                 has_noncausal_mm_context: false,
                 prefix_gather_workspace_limit: None,
@@ -2843,10 +2880,10 @@ pub mod text_models_inputs_processor {
             .build()
             .unwrap();
             let view = &metadata.flashinfer.unwrap().views.logical;
-            assert_eq!(view.paged_kv.indices[&Device::Cpu.location()].dims(), &[16]);
+            assert_eq!(view.paged_kv.indices[&Device::Cpu.location()].dims(), &[64]);
             assert_eq!(
                 view.tile_plan.request_indices[&Device::Cpu.location()].dims(),
-                &[2]
+                &[8]
             );
         }
 

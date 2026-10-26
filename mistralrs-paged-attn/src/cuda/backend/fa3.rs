@@ -53,12 +53,12 @@ impl Fa3PagedMetadataLayout {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, has_fa3_fp8_paged))]
     fn source_rows(self, batch_size: usize) -> Option<usize> {
         batch_size.checked_mul(self.source_rows_per_sequence)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, has_fa3_fp8_paged))]
     fn valid(self) -> bool {
         self.source_rows_per_sequence > 0
             && self.source_rows_per_sequence <= FA3_DECODE_MAX_QUERY_LEN

@@ -16,6 +16,8 @@ const WARM_CACHE_MIN_BYTES: usize = 256 * BYTES_PER_MIB;
 const WARM_CACHE_MAX_BYTES: usize = 1024 * BYTES_PER_MIB;
 const IDLE_RECLAIM_MULTIPLIER: usize = 2;
 const TRIM_COOLDOWN: Duration = Duration::from_secs(1);
+// Decode bursts never reach a prompt boundary, so the pool is also checked this often between decode steps
+const DECODE_MAINTENANCE_INTERVAL: Duration = Duration::from_millis(250);
 pub(super) const GRAPH_RECLAIM_BATCH_SIZE: usize = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,6 +51,7 @@ enum MaintenancePoint {
     Idle,
     PromptPreflight,
     PromptBoundary,
+    DecodeBoundary,
     GraphReclaimed,
 }
 
@@ -58,6 +61,7 @@ impl MaintenancePoint {
             Self::Idle => "idle",
             Self::PromptPreflight => "prompt_preflight",
             Self::PromptBoundary => "prompt_boundary",
+            Self::DecodeBoundary => "decode_boundary",
             Self::GraphReclaimed => "graph_reclaimed",
         }
     }
@@ -83,12 +87,14 @@ pub(super) struct PromptMemoryStatus {
 
 struct MaintainedDevice {
     device: Device,
+    _retention: Option<crate::pipeline::cuda_graph::CudaMemoryPoolRetention>,
     last_trim: Option<Instant>,
     capture_deferred: bool,
 }
 
 pub(super) struct CudaMemoryPoolMaintenance {
     devices: Vec<MaintainedDevice>,
+    last_decode_check: Option<Instant>,
 }
 
 impl CudaMemoryPoolMaintenance {
@@ -97,18 +103,52 @@ impl CudaMemoryPoolMaintenance {
             .into_iter()
             .map(|device| {
                 record_pending(&device, false);
+                let retention = match &device {
+                    Device::Cuda(cuda) => {
+                        match crate::pipeline::cuda_graph::retain_cuda_memory_pool(
+                            &cuda.cuda_stream(),
+                        ) {
+                            Ok(retention) => Some(retention),
+                            Err(err) => {
+                                tracing::warn!(
+                                    "Failed to retain CUDA memory pool on {}: {err}",
+                                    device.device_pretty_repr()
+                                );
+                                None
+                            }
+                        }
+                    }
+                    _ => None,
+                };
                 MaintainedDevice {
                     device,
+                    _retention: retention,
                     last_trim: None,
                     capture_deferred: false,
                 }
             })
             .collect();
-        Self { devices }
+        Self {
+            devices,
+            last_decode_check: None,
+        }
     }
 
     pub(super) fn after_prompt_step(&mut self) -> bool {
         self.maintain(MaintenancePoint::PromptBoundary, 0)
+            .graph_pressure
+    }
+
+    /// Rate-limited pool check between decode steps; true means graphs should be reclaimed.
+    pub(super) fn after_decode_step(&mut self) -> bool {
+        if self
+            .last_decode_check
+            .is_some_and(|last| last.elapsed() < DECODE_MAINTENANCE_INTERVAL)
+        {
+            return false;
+        }
+        self.last_decode_check = Some(Instant::now());
+        self.maintain(MaintenancePoint::DecodeBoundary, 0)
             .graph_pressure
     }
 
@@ -198,6 +238,19 @@ fn maintain_device(
         return Ok(maintenance_failure_outcome());
     };
     record_allocator_metrics(&maintained.device, snapshot);
+    tracing::debug!(
+        point = point.label(),
+        available_mib = snapshot.available >> 20,
+        pool_reserved_mib = snapshot
+            .async_pool
+            .map_or(0, |pool| pool.current.reserved >> 20),
+        pool_used_mib = snapshot
+            .async_pool
+            .map_or(0, |pool| pool.current.used >> 20),
+        graph_reserved_mib = snapshot.graph_pool.map_or(0, |pool| pool.reserved >> 20),
+        graph_used_mib = snapshot.graph_pool.map_or(0, |pool| pool.used >> 20),
+        "CUDA memory"
+    );
 
     let thresholds = PressureThresholds::from_snapshot(snapshot);
     let exceeds_physical_capacity = transient_bytes > snapshot.total;
@@ -272,7 +325,7 @@ fn maintain_device(
                         .warm_cache
                         .saturating_mul(IDLE_RECLAIM_MULTIPLIER)
             }
-            MaintenancePoint::PromptBoundary => {
+            MaintenancePoint::PromptBoundary | MaintenancePoint::DecodeBoundary => {
                 snapshot.available < thresholds.base_free
                     && cached > thresholds.warm_cache
                     && cooldown_elapsed
@@ -496,6 +549,7 @@ mod tests {
     };
 
     const GIB: usize = 1024 * 1024 * 1024;
+    const IDLE_TRIM_TEST_WARM_CACHE_MULTIPLIER: usize = 3;
 
     fn snapshot(available: usize, reserved: usize, used: usize) -> CudaAllocatorSnapshot {
         CudaAllocatorSnapshot {
@@ -514,6 +568,86 @@ mod tests {
                 used_high: 0,
             }),
         }
+    }
+
+    #[test]
+    #[ignore = "requires a CUDA device"]
+    fn engine_retention_preserves_maintenance_and_last_owner_restoration() -> anyhow::Result<()> {
+        let device = Device::new_cuda(0)?;
+        let alias = Device::new_cuda(0)?;
+        let threshold = |device: &Device| -> anyhow::Result<u64> {
+            Ok(MemoryUsage
+                .query_cuda_allocator(device)?
+                .expect("CUDA allocator snapshot exists")
+                .async_pool
+                .expect("CUDA async allocator is supported")
+                .release_threshold
+                .try_into()?)
+        };
+        let original = threshold(&device)?;
+        for reverse_drop in [false, true] {
+            let mut first = CudaMemoryPoolMaintenance::new(vec![device.clone()]);
+            let mut second = CudaMemoryPoolMaintenance::new(vec![alias.clone()]);
+            assert!(first.devices[0]._retention.is_some());
+            assert!(second.devices[0]._retention.is_some());
+            assert_eq!(threshold(&device)?, u64::MAX);
+            assert_eq!(threshold(&alias)?, u64::MAX);
+            for maintenance in [&mut first, &mut second] {
+                for point in [
+                    MaintenancePoint::PromptPreflight,
+                    MaintenancePoint::PromptBoundary,
+                    MaintenancePoint::Idle,
+                ] {
+                    let outcome = maintenance.maintain(point, 0);
+                    assert!(!outcome.capture_active);
+                    assert!(!outcome.reclaim_deferred);
+                    assert!(!outcome.maintenance_failed);
+                }
+            }
+            if !reverse_drop {
+                let snapshot = MemoryUsage
+                    .query_cuda_allocator(&device)?
+                    .expect("CUDA allocator snapshot exists");
+                let thresholds = PressureThresholds::from_snapshot(snapshot);
+                let scratch_bytes = thresholds.warm_cache * IDLE_TRIM_TEST_WARM_CACHE_MULTIPLIER;
+                anyhow::ensure!(
+                    snapshot.available >= scratch_bytes.saturating_add(thresholds.base_free),
+                    "idle trim test needs scratch capacity without CUDA memory pressure"
+                );
+                let used_before = snapshot.async_pool.unwrap().current.used;
+                let cuda = device.as_cuda_device()?;
+                let scratch = unsafe { cuda.alloc::<u8>(scratch_bytes) }?;
+                drop(scratch);
+                cuda.cuda_stream().synchronize()?;
+                let before = MemoryUsage
+                    .query_cuda_allocator(&device)?
+                    .expect("CUDA allocator snapshot exists")
+                    .async_pool
+                    .unwrap();
+                assert_eq!(before.current.used, used_before);
+                assert!(before.current.cached() > thresholds.warm_cache * IDLE_RECLAIM_MULTIPLIER);
+                first.when_idle();
+                let after = MemoryUsage
+                    .query_cuda_allocator(&device)?
+                    .expect("CUDA allocator snapshot exists")
+                    .async_pool
+                    .unwrap();
+                assert!(after.current.cached() < before.current.cached());
+                assert_eq!(after.current.used, before.current.used);
+                assert_eq!(threshold(&device)?, u64::MAX);
+            }
+            if reverse_drop {
+                drop(second);
+                assert_eq!(threshold(&device)?, u64::MAX);
+                drop(first);
+            } else {
+                drop(first);
+                assert_eq!(threshold(&alias)?, u64::MAX);
+                drop(second);
+            }
+            assert_eq!(threshold(&device)?, original);
+        }
+        Ok(())
     }
 
     #[test]

@@ -54,11 +54,12 @@ pub struct Qwen3_5Model {
     encoder_cache: Arc<Mutex<EncoderCacheManager>>,
     // Draft tokens per speculative step; 0 while MTP is not attached
     pub(super) mtp_n_predict: std::sync::atomic::AtomicUsize,
+    pub(super) mtp_auto_depth: std::sync::atomic::AtomicBool,
     // Draft-only lm_head at the base ISQ type; the target verifies with the promoted head
     pub(super) draft_lm_head: Mutex<Option<std::sync::Arc<dyn mistralrs_quant::QuantMethod>>>,
     // External DFlash block-diffusion drafter, replacing the built-in MTP head when attached
     pub(super) dflash: Mutex<Option<std::sync::Arc<crate::speculative::DFlashDraftModel>>>,
-    pending_prompt_tails: Mutex<std::collections::HashMap<usize, speculative::PendingPromptTail>>,
+    mtp_proposer: crate::speculative::builtin_mtp::BuiltinMtpProposer,
 }
 
 impl Qwen3_5Model {
@@ -103,9 +104,10 @@ impl Qwen3_5Model {
             vision_end_token_id: cfg.vision_end_token_id,
             encoder_cache: Arc::new(Mutex::new(EncoderCacheManager::new(32))),
             mtp_n_predict: std::sync::atomic::AtomicUsize::new(0),
+            mtp_auto_depth: std::sync::atomic::AtomicBool::new(false),
             draft_lm_head: Mutex::new(None),
             dflash: Mutex::new(None),
-            pending_prompt_tails: Mutex::new(std::collections::HashMap::new()),
+            mtp_proposer: Default::default(),
         })
     }
 
@@ -372,11 +374,9 @@ impl Qwen3_5Model {
         };
 
         let position_ids = if rope_img_grid_thw.is_none() && rope_vid_grid_thw.is_none() {
-            // Text-only rows use plain positions on all three MRoPE planes; no host round trip needed
-            match crate::vision_models::text_decode_mrope_position_ids_from_context(input_ids, ctx)?
-            {
+            match crate::vision_models::text_decode_position_ids_from_context(input_ids, ctx)? {
                 Some(position_ids) => Some(position_ids),
-                None => Some(crate::vision_models::text_mrope_position_ids(
+                None => Some(crate::vision_models::text_position_ids(
                     input_ids,
                     seqlen_offsets,
                 )?),
