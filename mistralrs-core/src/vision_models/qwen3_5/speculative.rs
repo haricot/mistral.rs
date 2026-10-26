@@ -54,7 +54,7 @@ fn dflash_speculative_batch(batch: DFlashProposalBatch) -> Result<SpeculativePro
         DFlashProposalBatch::Tokens(tokens) => {
             tokens.into_iter().map(SpeculativeProposal::new).collect()
         }
-        #[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
+        #[cfg(feature = "cuda")]
         DFlashProposalBatch::DeviceTokens(tokens) => {
             let batch = tokens.dim(0)?;
             (0..batch)

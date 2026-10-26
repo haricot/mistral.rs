@@ -521,6 +521,12 @@ impl SpeculativeAutotuner {
         });
     }
 
+    pub(crate) fn set_verification_width(&mut self, width: usize) {
+        if let Some(boundary) = &mut self.boundary {
+            boundary.depth = width;
+        }
+    }
+
     pub fn cancel_step(&mut self) {
         self.boundary = None;
     }
@@ -967,5 +973,22 @@ mod tests {
     fn a_single_candidate_is_inactive() {
         assert!(!tuner(&[3]).is_active());
         assert!(tuner(&[2, 3]).is_active());
+    }
+    #[test]
+    fn dspark_trimmed_verification_records_its_actual_width_without_resetting_the_clock() {
+        let mut tuner = SpeculativeAutotuner::default();
+        let started = Instant::now();
+        tuner.begin_step(&[7], 8, started);
+        tuner.set_verification_width(2);
+        tuner.record_verification(
+            started + std::time::Duration::from_millis(20),
+            &[DraftOutcome {
+                seq_id: 7,
+                proposed: 2,
+                accepted: 1,
+            }],
+        );
+        assert!((tuner.step_cost[&(1, 2)].secs - 0.020).abs() < 1e-9);
+        assert!(!tuner.step_cost.contains_key(&(1, 8)));
     }
 }

@@ -17,6 +17,7 @@ use candle_core::{
     Var,
 };
 use candle_core::{DType, Device, IndexOp, Module, Result, Tensor, D};
+use candle_nn::{Embedding, Linear};
 use mistralrs_quant::{
     IsqType, QuantMethod, QuantMethodConfig, QuantizeOntoGuard, ShardedVarBuilder, UnquantLinear,
 };
@@ -24,7 +25,9 @@ use serde::Deserialize;
 
 use crate::layers::{yarn_inv_freq_and_attention_factor, RmsNorm, YarnRopeConfig};
 use crate::prefix_cacher::PagedAuxiliaryPrefixState;
-use crate::speculative::{MtpConfig, MtpDraftSamplingMethod, SpeculativePrefixReplay};
+use crate::speculative::{
+    dspark_verify::DSparkVerifyProfile, MtpConfig, MtpDraftSamplingMethod, SpeculativePrefixReplay,
+};
 use crate::utils::varbuilder_utils::{from_mmaped_safetensors, DeviceForLoadTensor};
 
 #[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
@@ -228,6 +231,11 @@ pub struct DFlashConfig {
     pub sliding_window: Option<usize>,
     pub layer_types: Option<Vec<String>>,
     pub is_causal: Option<bool>,
+    #[serde(default = "default_rope_is_neox_style")]
+    pub rope_is_neox_style: bool,
+    pub markov_rank: Option<usize>,
+    pub markov_head_type: Option<String>,
+    pub enable_confidence_head: Option<bool>,
     // v1 checkpoints keep some fields at the top level instead of inside `dflash_config`
     pub block_size: Option<usize>,
     pub mask_token_id: Option<u32>,
@@ -247,7 +255,11 @@ impl DFlashConfig {
     pub fn is_dflash(&self) -> bool {
         self.architectures
             .iter()
-            .any(|a| a.contains("DFlash") || a.contains("Dflash"))
+            .any(|a| a.contains("DFlash") || a.contains("Dflash") || a.contains("DSpark"))
+    }
+
+    fn is_dspark(&self) -> bool {
+        self.architectures.iter().any(|a| a.contains("DSpark"))
     }
 
     fn is_v2(&self) -> bool {
@@ -377,6 +389,10 @@ impl DFlashConfig {
         let is_causal = self.is_causal.unwrap_or(sliding);
         (is_causal, sliding.then_some(self.sliding_window).flatten())
     }
+}
+
+const fn default_rope_is_neox_style() -> bool {
+    true
 }
 
 struct DynamicConv {
@@ -958,7 +974,7 @@ pub(crate) struct DFlashSamplingInputs<'a> {
 
 pub(crate) enum DFlashProposalBatch {
     Tokens(Vec<Vec<u32>>),
-    #[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
+    #[cfg(feature = "cuda")]
     DeviceTokens(Tensor),
     #[cfg(feature = "cuda")]
     DeviceSparse {
@@ -1293,9 +1309,12 @@ pub struct DFlashDraftModel {
     hidden_norm: RmsNorm,
     norm: RmsNorm,
     selector: Option<CandidateSelector>,
+    dspark_head: Option<DSparkHead>,
+    dspark_verify_profile: Option<DSparkVerifyProfile>,
     draft_sampling_method: MtpDraftSamplingMethod,
     inv_freq: Tensor,
     rope_attention_factor: f32,
+    rope_is_neox_style: bool,
     pub target_layer_ids: Vec<usize>,
     mask_token_id: u32,
     block_size: usize,
@@ -1315,6 +1334,87 @@ pub struct DFlashDraftModel {
     rope_table: (Tensor, Tensor),
     mask_cache: Mutex<HashMap<MaskKey, Tensor>>,
     adaptive: Mutex<Option<AdaptiveState>>,
+}
+
+struct DSparkHead {
+    markov_embedding: Embedding,
+    markov_projection: Linear,
+    confidence_projection: Option<Linear>,
+}
+
+impl DSparkHead {
+    fn load(vb: ShardedVarBuilder, cfg: &DFlashConfig) -> Result<Self> {
+        let rank = cfg
+            .markov_rank
+            .ok_or_else(|| candle_core::Error::msg("DSpark config has no markov_rank"))?;
+        let head_type = cfg.markov_head_type.as_deref().unwrap_or("vanilla");
+        if head_type != "vanilla" {
+            candle_core::bail!("unsupported DSpark Markov head type `{head_type}`");
+        }
+        let markov = vb.pp("markov_head");
+        let markov_embedding = Embedding::new(
+            markov
+                .pp("markov_w1")
+                .get((cfg.vocab_size, rank), "weight")?,
+            rank,
+        );
+        let markov_projection = Linear::new(
+            markov
+                .pp("markov_w2")
+                .get((cfg.vocab_size, rank), "weight")?,
+            None,
+        );
+        let confidence_projection = cfg
+            .enable_confidence_head
+            .unwrap_or(false)
+            .then(|| {
+                let confidence = vb.pp("confidence_head").pp("proj").set_dtype(DType::F32);
+                Result::Ok(Linear::new(
+                    confidence.get((1, cfg.hidden_size + rank), "weight")?,
+                    Some(confidence.get(1, "bias")?),
+                ))
+            })
+            .transpose()?;
+        Ok(Self {
+            markov_embedding,
+            markov_projection,
+            confidence_projection,
+        })
+    }
+
+    fn select_greedy(
+        &self,
+        hidden: &Tensor,
+        logits: &Tensor,
+        anchors: &[u32],
+        compute_confidence: bool,
+    ) -> Result<(Tensor, Option<Tensor>)> {
+        let (batch, positions, _) = hidden.dims3()?;
+        let mut previous = Tensor::from_vec(anchors.to_vec(), (batch,), hidden.device())?;
+        let mut tokens = Vec::with_capacity(positions);
+        let mut confidences = compute_confidence.then(|| Vec::with_capacity(positions));
+        for position in 0..positions {
+            let markov_hidden = self.markov_embedding.forward(&previous)?;
+            let markov_logits = self.markov_projection.forward(&markov_hidden)?;
+            let step_logits = (logits.i((.., position, ..))? + markov_logits)?;
+            let next = step_logits.argmax(D::Minus1)?;
+            if let (Some(projection), Some(values)) =
+                (&self.confidence_projection, confidences.as_mut())
+            {
+                let features =
+                    Tensor::cat(&[&hidden.i((.., position, ..))?, &markov_hidden], D::Minus1)?;
+                values.push(candle_nn::ops::sigmoid(
+                    &projection.forward(&features.to_dtype(DType::F32)?)?,
+                )?);
+            }
+            tokens.push(next.clone());
+            previous = next;
+        }
+        let confidence = confidences
+            .map(|values| Tensor::cat(&values.iter().collect::<Vec<_>>(), D::Minus1))
+            .transpose()?;
+        Ok((Tensor::stack(&tokens, 1)?, confidence))
+    }
 }
 
 #[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
@@ -2055,23 +2155,26 @@ fn linear_from_weight(
     }
 }
 
-/// Reads only the drafter's config when it identifies a DFlash checkpoint.
+fn is_dflash_family_config(value: &serde_json::Value) -> bool {
+    value
+        .get("architectures")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|architectures| {
+            architectures.iter().any(|architecture| {
+                architecture.as_str().is_some_and(|name| {
+                    name.contains("DFlash") || name.contains("Dflash") || name.contains("DSpark")
+                })
+            })
+        })
+}
+
+/// Reads only the drafter's config when it identifies a DFlash-family checkpoint.
 pub fn peek_config(config: &MtpConfig) -> Result<Option<DFlashConfig>> {
     let path = config.resolve_path()?;
     let raw = fs::read_to_string(path.join("config.json"))
         .map_err(|e| candle_core::Error::Msg(format!("failed to read MTP model config: {e}")))?;
     let value: serde_json::Value = serde_json::from_str(&raw).map_err(candle_core::Error::msg)?;
-    let is_dflash = value
-        .get("architectures")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|architectures| {
-            architectures.iter().any(|architecture| {
-                architecture
-                    .as_str()
-                    .is_some_and(|name| name.contains("DFlash") || name.contains("Dflash"))
-            })
-        });
-    if !is_dflash {
+    if !is_dflash_family_config(&value) {
         return Ok(None);
     }
     serde_json::from_value(value)
@@ -2100,17 +2203,7 @@ pub(crate) fn windowed_kv_cache_size_in_bytes(
     let raw = fs::read_to_string(path.join("config.json"))
         .map_err(|err| candle_core::Error::msg(format!("failed to read MTP config: {err}")))?;
     let value: serde_json::Value = serde_json::from_str(&raw).map_err(candle_core::Error::msg)?;
-    let is_dflash = value
-        .get("architectures")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|architectures| {
-            architectures.iter().any(|architecture| {
-                architecture
-                    .as_str()
-                    .is_some_and(|name| name.contains("DFlash") || name.contains("Dflash"))
-            })
-        });
-    if !is_dflash {
+    if !is_dflash_family_config(&value) {
         return Ok(0);
     }
     let cfg: DFlashConfig = serde_json::from_str(&raw).map_err(candle_core::Error::msg)?;
@@ -2189,9 +2282,24 @@ impl DFlashDraftModel {
         let raw = fs::read_to_string(path.join("config.json"))
             .map_err(|e| candle_core::Error::Msg(format!("failed to read DFlash config: {e}")))?;
         let cfg: DFlashConfig = serde_json::from_str(&raw).map_err(candle_core::Error::msg)?;
+        let dspark_verify_profile = config
+            .dspark_verify_profile
+            .as_deref()
+            .map(|path| {
+                if !cfg.is_dspark() || !cfg.enable_confidence_head.unwrap_or(false) {
+                    candle_core::bail!(
+                        "DSpark verify profile requires a DSpark checkpoint with a confidence head"
+                    );
+                }
+                let drafts = config
+                    .n_predict
+                    .unwrap_or(cfg.block_size().saturating_sub(1));
+                DSparkVerifyProfile::load(path, drafts)
+            })
+            .transpose()?;
         if !cfg.is_dflash() {
             candle_core::bail!(
-                "`--mtp-model` for this target must be a DFlash draft model; got architectures {:?}",
+                "`--mtp-model` for this target must be a DFlash or DSpark draft model; got architectures {:?}",
                 cfg.architectures
             );
         }
@@ -2352,6 +2460,10 @@ impl DFlashDraftModel {
             .is_v2()
             .then(|| CandidateSelector::load(vb.pp("candidate_selector"), &cfg))
             .transpose()?;
+        let dspark_head = cfg
+            .is_dspark()
+            .then(|| DSparkHead::load(vb.clone(), &cfg))
+            .transpose()?;
         let selector_capability = match selector.as_ref() {
             None => Err("a DFlash2 checkpoint with a candidate selector is required".to_string()),
             #[cfg(feature = "cuda")]
@@ -2381,9 +2493,12 @@ impl DFlashDraftModel {
             hidden_norm: RmsNorm::new(hidden, eps, vb.pp("hidden_norm"))?,
             norm: RmsNorm::new(hidden, eps, vb.pp("norm"))?,
             selector,
+            dspark_head,
+            dspark_verify_profile,
             draft_sampling_method,
             inv_freq,
             rope_attention_factor,
+            rope_is_neox_style: cfg.rope_is_neox_style,
             target_layer_ids,
             mask_token_id: cfg.mask_token_id()?,
             block_size: cfg.block_size(),
@@ -2462,7 +2577,10 @@ impl DFlashDraftModel {
         token_embedding: &Arc<dyn QuantMethod>,
         lm_head: &Arc<dyn QuantMethod>,
     ) -> Result<()> {
-        if !crate::pipeline::cuda_graph::cuda_decode_graphs_enabled() || max_n == 0 {
+        if self.dspark_head.is_some()
+            || !crate::pipeline::cuda_graph::cuda_decode_graphs_enabled()
+            || max_n == 0
+        {
             return Ok(());
         }
         let Some(pool) = &self.windowed_pool else {
@@ -2604,7 +2722,8 @@ impl DFlashDraftModel {
         } = *inputs;
         #[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
         {
-            if !crate::pipeline::cuda_graph::cuda_decode_graphs_enabled()
+            if self.dspark_head.is_some()
+                || !crate::pipeline::cuda_graph::cuda_decode_graphs_enabled()
                 || self.windowed_pool.is_none()
                 || seq_ids.is_empty()
                 || seq_ids.len() != anchors.len()
@@ -2850,6 +2969,14 @@ impl DFlashDraftModel {
         self.selector.is_some()
     }
 
+    pub(crate) fn schedules_dspark_verification(&self) -> bool {
+        self.dspark_verify_profile.is_some()
+    }
+
+    pub fn is_dspark(&self) -> bool {
+        self.dspark_head.is_some()
+    }
+
     pub fn draft_sampling_method(&self) -> MtpDraftSamplingMethod {
         self.draft_sampling_method
     }
@@ -2973,7 +3100,11 @@ impl DFlashDraftModel {
     }
 
     fn rope(&self, x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
-        candle_nn::rotary_emb::rope(&x.contiguous()?, cos, sin)
+        if self.rope_is_neox_style {
+            candle_nn::rotary_emb::rope(&x.contiguous()?, cos, sin)
+        } else {
+            candle_nn::rotary_emb::rope_i(&x.contiguous()?, cos, sin)
+        }
     }
 
     /// Projects tap features and appends context keys/values for every entry at once: the fc and
@@ -3430,7 +3561,7 @@ impl DFlashDraftModel {
                     layer.k_norm.eps() as f32,
                     &cos,
                     &sin,
-                    true,
+                    self.rope_is_neox_style,
                     output_layout,
                 )?
             };
@@ -3440,16 +3571,8 @@ impl DFlashDraftModel {
                 Some((q, Some(k))) => (q, k),
                 Some((_, None)) => unreachable!("DFlash fused Q/K omitted K output"),
                 None => {
-                    let q = candle_nn::rotary_emb::rope(
-                        &layer.q_norm.forward(&q_input)?,
-                        q_cos,
-                        q_sin,
-                    )?;
-                    let k = candle_nn::rotary_emb::rope(
-                        &layer.k_norm.forward(&k_input)?,
-                        q_cos,
-                        q_sin,
-                    )?;
+                    let q = self.rope(&layer.q_norm.forward(&q_input)?, q_cos, q_sin)?;
+                    let k = self.rope(&layer.k_norm.forward(&k_input)?, q_cos, q_sin)?;
                     match attention_layout {
                         DraftAttentionLayout::HeadsFirst => (q, k),
                         #[cfg(all(
@@ -3749,6 +3872,31 @@ impl DFlashDraftModel {
         if (self.output_multiplier - 1.0).abs() > f64::EPSILON {
             logits = (logits * self.output_multiplier)?;
         }
+        if let Some(dspark) = &self.dspark_head {
+            if sampling.is_some() {
+                candle_core::bail!(
+                    "probabilistic DSpark drafting is not supported by the vanilla Markov head"
+                );
+            }
+            let (tokens, confidence) = dspark.select_greedy(
+                hidden,
+                &logits,
+                anchors,
+                self.dspark_verify_profile.is_some(),
+            )?;
+            let tokens = if let Some(profile) = &self.dspark_verify_profile {
+                let confidence = confidence.as_ref().ok_or_else(|| {
+                    candle_core::Error::msg("DSpark confidence output is missing")
+                })?;
+                tokens.narrow(1, 0, profile.select_prefix(confidence)?)?
+            } else {
+                tokens
+            };
+            #[cfg(feature = "cuda")]
+            return Ok(DFlashProposalBatch::DeviceTokens(tokens));
+            #[cfg(not(feature = "cuda"))]
+            return Ok(DFlashProposalBatch::Tokens(tokens.to_vec2::<u32>()?));
+        }
         if let Some(sampling) = sampling {
             let selector = self.selector.as_ref().ok_or_else(|| {
                 candle_core::Error::msg(
@@ -3875,6 +4023,7 @@ mod tests {
     use std::{collections::HashSet, sync::Arc};
 
     use candle_core::{Device, Result, Tensor, D};
+    use candle_nn::{Embedding, Linear};
     use mistralrs_quant::QuantMethod;
 
     use super::{
@@ -3884,7 +4033,7 @@ mod tests {
         dflash_rope_from_positions, drain_dflash_lru_entries, gather_ctx_taps, linear_from_weight,
         resolve_dflash_sampling_policy, select_ctx_kv_rows, select_dflash_depth,
         update_dormant_sequences, DFlashConfig, DFlashGraphHostInput, DFlashSamplingInputs,
-        DFlashSequenceEviction, ADAPT_FULL_DEPTH_MAX_BATCH,
+        DFlashSequenceEviction, DSparkHead, ADAPT_FULL_DEPTH_MAX_BATCH,
     };
     #[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
     use super::{release_dflash_cuda_graph_resources, windowed_kv_checkpoint_capacity};
@@ -4349,6 +4498,70 @@ mod tests {
         .unwrap()
     }
 
+    #[test]
+    fn liquid_lfm25_dspark_config_uses_interleaved_rope_and_native_heads() {
+        let cfg: DFlashConfig = serde_json::from_str(
+            r#"{
+                "architectures": ["Lfm2DSparkDraftModel"],
+                "hidden_size": 2048,
+                "intermediate_size": 6144,
+                "num_hidden_layers": 5,
+                "num_attention_heads": 32,
+                "num_key_value_heads": 8,
+                "head_dim": 64,
+                "max_position_embeddings": 128000,
+                "rms_norm_eps": 1e-5,
+                "vocab_size": 128000,
+                "rope_theta": 10000000.0,
+                "layer_types": ["full_attention", "full_attention", "full_attention", "full_attention", "full_attention"],
+                "block_size": 9,
+                "dflash_config": {
+                    "mask_token_id": 125017,
+                    "target_layer_ids": [2, 9, 17, 21, 27],
+                    "num_target_layers": 30
+                },
+                "markov_rank": 256,
+                "rope_is_neox_style": false,
+                "enable_confidence_head": true,
+                "markov_head_type": "vanilla"
+            }"#,
+        )
+        .unwrap();
+        assert!(cfg.is_dflash());
+        assert!(cfg.is_dspark());
+        assert!(!cfg.rope_is_neox_style);
+        assert_eq!(cfg.block_size(), 9);
+        assert_eq!(cfg.target_layer_ids().unwrap(), vec![2, 9, 17, 21, 27]);
+        assert_eq!(cfg.markov_rank, Some(256));
+        assert_eq!(cfg.markov_head_type.as_deref(), Some("vanilla"));
+        assert_eq!(cfg.enable_confidence_head, Some(true));
+    }
+
+    #[test]
+    fn dspark_markov_head_conditions_each_position_on_the_previous_token() -> Result<()> {
+        let device = Device::Cpu;
+        let head = DSparkHead {
+            markov_embedding: Embedding::new(
+                Tensor::new(&[[1f32, 0.], [0., 1.], [-1., -1.]], &device)?,
+                2,
+            ),
+            markov_projection: Linear::new(
+                Tensor::new(&[[0f32, 0.], [2., 0.], [0., 3.]], &device)?,
+                None,
+            ),
+            confidence_projection: None,
+        };
+        let hidden = Tensor::zeros((1, 2, 2), candle_core::DType::F32, &device)?;
+        let logits = Tensor::zeros((1, 2, 3), candle_core::DType::F32, &device)?;
+        assert_eq!(
+            head.select_greedy(&hidden, &logits, &[0], false)?
+                .0
+                .to_vec2::<u32>()?,
+            vec![vec![1, 2]]
+        );
+        Ok(())
+    }
+
     fn qwen35_target_yarn() -> YarnRopeConfig {
         YarnRopeConfig {
             base: 10_000_000.0,
@@ -4712,6 +4925,37 @@ mod tests {
                     .capacity(),
             )
         );
+        Ok(())
+    }
+    #[test]
+    fn dspark_trained_confidence_tracks_markov_conditioning_without_changing_tokens() -> Result<()>
+    {
+        let device = Device::Cpu;
+        let head = DSparkHead {
+            markov_embedding: Embedding::new(
+                Tensor::new(&[[1f32, 0.], [0., 1.], [-1., -1.]], &device)?,
+                2,
+            ),
+            markov_projection: Linear::new(
+                Tensor::new(&[[0f32, 0.], [2., 0.], [0., 3.]], &device)?,
+                None,
+            ),
+            confidence_projection: Some(Linear::new(
+                Tensor::new(&[[0f32, 0., 2., -1.]], &device)?,
+                Some(Tensor::new(&[0f32], &device)?),
+            )),
+        };
+        let hidden = Tensor::zeros((1, 2, 2), candle_core::DType::F32, &device)?;
+        let logits = Tensor::zeros((1, 2, 3), candle_core::DType::F32, &device)?;
+        let (fixed, absent) = head.select_greedy(&hidden, &logits, &[0], false)?;
+        let (tokens, confidence) = head.select_greedy(&hidden, &logits, &[0], true)?;
+        assert_eq!(fixed.to_vec2::<u32>()?, vec![vec![1, 2]]);
+        assert_eq!(tokens.to_vec2::<u32>()?, fixed.to_vec2::<u32>()?);
+        assert!(absent.is_none());
+        let confidence = confidence.unwrap().to_vec2::<f32>()?;
+        for (actual, logit) in confidence[0].iter().zip([2f32, -1.]) {
+            assert!((actual - 1.0 / (1.0 + (-logit).exp())).abs() < 1e-6);
+        }
         Ok(())
     }
 }
