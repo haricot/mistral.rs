@@ -1,20 +1,21 @@
 {
-  "schema_version": 1,
-  "kind": "lfm25-dspark-standalone",
-  "standalone_baseline": "haricot/mistral.rs:master",
   "base_master_sha": "28ed6daca455b4ae063896014d1ea698b912c539",
-  "lfm25_dspark_source_sha": "7501527eb3633e9ea020a9b6559d11c6634287d0",
-  "lfm25_dspark_base_sha": "d3813494903e5cfca01e12df596f3fe14a5d22ba",
-  "lfm25_dspark_commit_count": 6,
-  "sm61_compatibility_source_sha": "71c0e13021a4544c1b475eff136f807e42bfe91c",
-  "candle_repository": "haricot/candle",
   "candle_branch": "extended",
+  "candle_repository": "haricot/candle",
   "candle_sha": "40b5a8acc43b5f8ef925370ae12daddd929f39f2",
   "candle_validation_ref": "refs/tags/archive/extended/sm61-validated-40029177676-2",
+  "component": "lfm25_dspark",
+  "contract_hash": "371a215171452d3fdf04fc0578d23ecc8eb852d5a973f608f727f2d0649fc0dc",
   "features": [
     "cuda-legacy-bf16",
     "cuda-legacy-fp8",
     "cuda-legacy-fp4"
   ],
-  "standalone_status": "UNVALIDATED_STANDALONE_CANDIDATE"
+  "kind": "mistral-standalone",
+  "prerequisites": {
+    "legacy": "31556971b6a655883f452d76c78ebef772f53c38"
+  },
+  "schema_version": 2,
+  "target_branch": "lfm25_dspark_standalone",
+  "toolchain": "1.99.0"
 }
