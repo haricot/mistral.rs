@@ -14,14 +14,18 @@ jobs:
     timeout-minutes: 90
     permissions:
       contents: write
-      packages: write
+      actions: read
     outputs:
       candidate: ${{ steps.prepare.outputs.candidate }}
       cache_key: ${{ steps.prepare.outputs.cache_key }}
       recipe: ${{ steps.prepare.outputs.recipe }}
       bundle_key: ${{ steps.prepare.outputs.bundle_key }}
       environment_key: ${{ steps.prepare.outputs.environment_key }}
+      compiler_artifact: ${{ steps.prepare.outputs.compiler_artifact }}
+      compiler_artifact_id: ${{ steps.prepare.outputs.compiler_artifact_id || steps.compiler_image.outputs.artifact-id }}
     steps:
+      - name: Free unused hosted toolchains for CUDA images and archives
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           fetch-depth: 0
@@ -45,14 +49,30 @@ jobs:
           print(hashlib.sha256(json.dumps([sys.argv[1],files],sort_keys=True).encode()).hexdigest())
           PYCODE
           )"
-          registry="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/mistral-sm61-builder:$compiler_key"
-          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          if ! docker buildx imagetools inspect "$registry" >/dev/null 2>&1; then
-            docker build --build-arg "BASE_IMAGE=$base" -f .github/campaign/Containerfile -t "$registry" .github/campaign
-            docker push "$registry"
+          prefix="mistral-compiler-$compiler_key-"
+          prior="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/artifacts?per_page=100" --jq ".artifacts[] | select(.expired==false and .workflow_run.head_branch==\"mirror_orch\" and (.name | startswith(\"$prefix\"))) | [.id,.name] | @tsv" | sed -n '1p')"
+          if [[ -n "$prior" ]]; then
+            read -r artifact_id artifact_name <<< "$prior"
+            image_id="sha256:${artifact_name##*-}"
+            [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]]
+            echo "compiler_artifact_id=$artifact_id" >> "$GITHUB_OUTPUT"
+            echo 'compiler_cached=true' >> "$GITHUB_OUTPUT"
+          else
+            docker build --provenance=false --build-arg "BASE_IMAGE=$base" -f .github/campaign/Containerfile -t mistral-campaign .github/campaign
+            image_id="$(docker image inspect mistral-campaign --format '{{.Id}}')"
+            artifact_name="$prefix${image_id#sha256:}"
+            mkdir -p "$RUNNER_TEMP/compiler-image"
+            docker save mistral-campaign | zstd -T2 -3 -o "$RUNNER_TEMP/compiler-image/image.tar.zst"
+            python3 - "$RUNNER_TEMP/compiler-image" "$image_id" "$compiler_key" <<'PYCODE'
+          import hashlib,json,pathlib,sys
+          root=pathlib.Path(sys.argv[1])
+          with (root/'image.tar.zst').open('rb') as stream:
+              sha=hashlib.file_digest(stream,'sha256').hexdigest()
+          (root/'compiler.json').write_text(json.dumps({'image_id':sys.argv[2],'compiler_key':sys.argv[3],'archive_sha256':sha})+'\n')
+          PYCODE
           fi
-          compiler_digest="$(docker buildx imagetools inspect "$registry" --format '{{json .Manifest.Digest}}' | tr -d '\"')"
-          image="$registry@$compiler_digest"
+          echo "compiler_artifact=$artifact_name" >> "$GITHUB_OUTPUT"
+          image="mistral-compiler@${image_id}"
           python3 .github/campaign/campaign.py snapshot --repo "$PWD" --target extended --image "$image" --output "$report/snapshot.json"
           python3 .github/campaign/campaign.py prepare --repo "$PWD" --snapshot "$report/snapshot.json" --output "$report" --publish
           candidate="$(jq -r .candidate "$report/plan.json")"
@@ -66,6 +86,15 @@ jobs:
           echo "bundle_key=$(python3 -c 'import hashlib,json,sys;print(hashlib.sha256(json.dumps(sorted(n["build_key"] for n in json.load(open(sys.argv[1]))["matrix"])).encode()).hexdigest())' "$report/plan.json")" >> "$GITHUB_OUTPUT"
           cp -a .github/campaign "$report/orchestrator"
           echo "candidate=$candidate; CUDA-enabled build, CPU runtime tests and archived physical execution" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        id: compiler_image
+        if: always() && steps.prepare.outputs.compiler_cached != 'true' && steps.prepare.outputs.compiler_artifact != ''
+        with:
+          name: ${{ steps.prepare.outputs.compiler_artifact }}
+          path: ${{ runner.temp }}/compiler-image/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
@@ -92,8 +121,9 @@ jobs:
     permissions:
       contents: read
       actions: read
-      packages: read
     steps:
+      - name: Free unused hosted toolchains for CUDA images and archives
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           fetch-depth: 0
@@ -127,6 +157,31 @@ jobs:
               echo 'Reusing matching executable archives and CPU execution proofs' >> "$GITHUB_STEP_SUMMARY"
             fi
           fi
+      - name: Restore the exact compiler image archive
+        if: env.REUSE_BUILD != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMPILER_ARTIFACT_ID: ${{ needs.prepare.outputs.compiler_artifact_id }}
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/compiler-image"
+          mkdir -p "$root"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$COMPILER_ARTIFACT_ID/zip" > "$RUNNER_TEMP/compiler-image.zip"
+          unzip -oq "$RUNNER_TEMP/compiler-image.zip" -d "$root"
+          rm "$RUNNER_TEMP/compiler-image.zip"
+          image_id="$(python3 - "$root" "$RUNNER_TEMP/campaign/plan.json" <<'PYCODE'
+          import hashlib,json,pathlib,sys
+          root=pathlib.Path(sys.argv[1]); manifest=json.loads((root/'compiler.json').read_text())
+          expected=json.load(open(sys.argv[2]))['image'].split('@',1)[1]
+          assert manifest['image_id']==expected, 'compiler image identity mismatch'
+          with (root/'image.tar.zst').open('rb') as stream:
+              assert hashlib.file_digest(stream,'sha256').hexdigest()==manifest['archive_sha256'], 'compiler archive digest mismatch'
+          print(expected)
+          PYCODE
+          )"
+          zstd -dc "$root/image.tar.zst" | docker load
+          test "$(docker image inspect mistral-campaign --format '{{.Id}}')" = "$image_id"
+          rm -rf "$root"
       - name: Compile each independent source and run CPU tests with CUDA enabled
         if: env.REUSE_BUILD != 'true'
         env:
@@ -135,10 +190,6 @@ jobs:
           set -euo pipefail
           plan="$RUNNER_TEMP/campaign/plan.json"
           mkdir -p "$RUNNER_TEMP/builds" "$RUNNER_TEMP/campaign-cache" "$RUNNER_TEMP/campaign-home"
-          image="$(jq -r .image "$plan")"
-          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          docker pull "$image"
-          docker tag "$image" mistral-campaign
           git fetch "$RUNNER_TEMP/campaign/candidate.bundle" 'refs/heads/integration/campaign/*:refs/remotes/build/*'
           while read -r component sha key; do
             dir="$RUNNER_TEMP/builds/$component"

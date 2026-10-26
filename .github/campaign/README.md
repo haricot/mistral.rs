@@ -9,7 +9,9 @@ A distribution built without CUDA is outside this campaign's validation scope.
 
 `config.json` declares independent sources, their prerequisites, the common fork
 `master`, CUDA features and pinned compiler tools. A campaign resolves every Git
-head once, resolves the CUDA base image to its registry digest, and writes
+head once, resolves the CUDA base image to its registry digest, preserves the
+final compiler image by its Docker content ID in a verified reusable GitHub
+artifact, and writes
 `snapshot.json`. Candle heads must have a matching physical validation ref.
 
 The legacy source targets Candle `cuda_legacy`. ASD, LFM2.5 DSpark and Bolt target

@@ -61,7 +61,7 @@ def recipe():
 def snapshot(repo, target, image, output):
     config = json.loads((ROOT / "config.json").read_text())
     if not re.fullmatch(r"[^\s]+@sha256:[0-9a-f]{64}", image):
-        raise RuntimeError("the CUDA base image must be resolved to an immutable registry digest")
+        raise RuntimeError("the CUDA compiler image must have an immutable SHA-256 identity")
     selected = config["targets"][target]
     branches = {config["master_branch"], selected["branch"]}
     branches.update(config["components"][name]["branch"] for name in selected["components"])
