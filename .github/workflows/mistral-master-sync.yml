@@ -6,8 +6,14 @@ on:
         description: Optional exact 40-character source master SHA, empty to use its current tip
         required: false
         type: string
+  # Run once immediately when standalone synchronization checks are deployed,
+  # then inspect master daily without launching a redundant GPU campaign.
+  push:
+    branches: [mirror_orch]
+    paths:
+      - '.github/standalone-sync/**'
   schedule:
-    - cron: '23 4 * * 1'
+    - cron: '23 4 * * *'
 permissions:
   contents: read
 concurrency:
