@@ -10,13 +10,13 @@
     "method": "master-plus-legacy-source-overlay"
   },
   "candle_repository": "haricot/candle",
-  "candle_branch": "cuda_legacy",
-  "candle_sha": "bfce966ad4d61a48801eb6af4db8b8eabebc01a8",
+  "candle_branch": "fp8_sm61_bf16_standalone",
+  "candle_sha": "9cba2e898af3d25a89257f1f2ec5acece0404dcb",
   "features": [
     "cuda-legacy-fp8"
   ],
   "toolchain": "1.99.0",
   "qualification": "PENDING",
   "runtime_proof": "NOT_EXECUTED",
-  "notes": "Standalone source candidate; independent GPU qualification required. No implicit promotion."
+  "notes": "Packed SM61 BF16/F16 W8A16 with per-expert MoE routing; original FP8 checkpoint tensors moved to host before CUDA resident allocation, no dense F16 forward. Cargo.lock must be refreshed locally."
 }
