@@ -437,7 +437,7 @@ mod tests {
         let config = MtpConfig::new(dir.path().to_string_lossy().into_owned(), Some(8));
         let cache_config = crate::PagedAttentionConfig::new(
             None,
-            crate::MemoryGpuConfig::Utilization(0.9),
+            crate::MemoryGoal::Utilization(0.9),
             crate::PagedCacheType::Auto,
         )?;
 
