@@ -74,3 +74,9 @@ synchronization with the same SHA is a no-op. Staged refs are immutable
 and reused only when their exact candidate commit SHA matches.
 This does not reuse an unrelated executable or skip required physical GPU
 tests.
+
+Candidates whose merge tree modifies `.github/workflows/**` are **not
+pushed** by the GitHub Actions token (no workflows write permission).
+The workflow archives their exact two-parent candidate commit in a
+Git bundle artifact instead and continues staging other clean candidates.
+A separately authorized review is required to publish such candidates.

@@ -104,6 +104,32 @@ class MasterImpactTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "invalid immutable"):
             st.staged_ref(self.master, self.bf16, "refs/heads/master")
 
+    def test_staging_archives_candidate_with_changed_workflow(self):
+        # Standalone merges that modify GitHub workflow files must not
+        # attempt a push without explicit workflow permission.
+        report = impact.inspect(self.repo, self.cfg)
+        self.git("switch", "bf16_mistralrs_standalone")
+        self.write(".github/workflows/ci.yml", "name: old runner\\n")
+        changed = self.commit("branch changes workflow")
+        self.git("update-ref", "refs/remotes/origin/bf16_mistralrs_standalone", changed)
+        self.git("switch", "master")
+        report = impact.inspect(self.repo, self.cfg)
+        self.assertTrue(next(x for x in report["standalones"]
+                             if x["branch"] == "bf16_mistralrs_standalone")["textual_merge_clean"])
+        refs = {
+            "master": self.master, "mirror_orch": self.master,
+            "fp8_mistralrs_standalone": self.fp8,
+            "bf16_mistralrs_standalone": changed,
+        }
+        with patch.object(st, "remote", side_effect=lambda _repo, branch: refs.get(branch)):
+            result = st.stage(self.repo, report, dry_run=False,
+                              bundle_dir=self.repo / "bundles")
+        item = result["candidates"][0]
+        self.assertEqual(item["status"], "ARCHIVED_REQUIRES_WORKFLOWS_PERMISSION")
+        self.assertIn(".github/workflows/ci.yml", item["workflow_changes"])
+        self.assertTrue(Path(item["bundle_file"]).is_file())
+        self.assertEqual(self.git("rev-parse", "refs/remotes/origin/bf16_mistralrs_standalone"), changed)
+
     def test_source_lease_change_stops_candidate_staging(self):
         report = impact.inspect(self.repo, self.cfg)
         refs = {

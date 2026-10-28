@@ -61,7 +61,7 @@ def commit_tree(repo, tree, source, master, branch):
     return run(repo, "commit-tree", tree, "-p", source, "-p", master,
                "-m", message, env=env).stdout.strip()
 
-def stage(repo, report, dry_run=False):
+def stage(repo, report, dry_run=False, bundle_dir=None):
     master = report["source_master_sha"]
     if not SHA.fullmatch(master) or report.get("mirror_contains_master") is not True:
         raise RuntimeError("master is not synchronized into mirror_orch")
@@ -106,16 +106,42 @@ def stage(repo, report, dry_run=False):
                           master, candidate["branch"])
         if not SHA.fullmatch(sha):
             raise RuntimeError("invalid new staged commit")
+        # Workflow files require an additional GitHub App permission. Do NOT
+        # attempt to bypass this protection or weaken the workflow token.
+        # Archive the exact merge object and continue to other components.
+        diff = run(repo, "diff", "--name-only", master, candidate["tree_sha"],
+                   "--", ".github/workflows").stdout.splitlines()
+        changed_workflows = sorted(set(filter(None, diff)))
         prior = remote(repo, candidate["ref"])
         if prior is not None and prior != sha:
             raise RuntimeError("immutable candidate ref collision")
-        if prior is None and not dry_run:
+        bundle_file = None
+        bundle_sha256 = None
+        if changed_workflows and prior is None and not dry_run:
+            if bundle_dir is None:
+                raise RuntimeError("workflow-file candidate requires a bundle directory")
+            bundle_dir = Path(bundle_dir)
+            bundle_dir.mkdir(parents=True, exist_ok=True)
+            local_ref = "refs/heads/integration/local-" + candidate["ref"]
+            run(repo, "update-ref", local_ref, sha)
+            archive = bundle_dir / (candidate["branch"] + ".bundle")
+            run(repo, "bundle", "create", archive, local_ref,
+                "^" + candidate["source_sha"], "^" + master)
+            run(repo, "bundle", "verify", archive)
+            bundle_file = str(archive)
+            bundle_sha256 = hashlib.sha256(archive.read_bytes()).hexdigest()
+        elif prior is None and not dry_run:
             run(repo, "push", "origin", f"{sha}:refs/heads/{candidate['ref']}")
             if remote(repo, candidate["ref"]) != sha:
                 raise RuntimeError("staged candidate publication not verified")
+        status = ("DRY_RUN" if dry_run else "ALREADY_STAGED" if prior else
+                  "ARCHIVED_REQUIRES_WORKFLOWS_PERMISSION" if changed_workflows else
+                  "STAGED_UNTESTED")
         published.append({**candidate, "candidate_sha": sha,
-                          "status": "DRY_RUN" if dry_run else
-                              ("ALREADY_STAGED" if prior else "STAGED_UNTESTED"),
+                          "status": status,
+                          "workflow_changes": changed_workflows,
+                          "bundle_file": bundle_file,
+                          "bundle_sha256": bundle_sha256,
                           "qualification": "NOT_EXECUTED",
                           "promotion": False})
     return {
@@ -137,19 +163,20 @@ def main():
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--summary", type=Path)
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--bundle-dir", type=Path)
     args = p.parse_args()
     result = stage(args.repo.resolve(), json.loads(args.report.read_text()),
-                   dry_run=args.dry_run)
+                   dry_run=args.dry_run, bundle_dir=args.bundle_dir)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, sort_keys=True, indent=2) + "\n")
     if args.summary:
         with args.summary.open("a") as f:
             f.write("\n### Immutable standalone staging (NOT QUALIFIED)\n")
             for item in result["candidates"]:
-                f.write(f"- \`{item['branch']}\`: \`{item['ref']}\`"
+                f.write(f"- `{item['branch']}`: `{item['ref']}`"
                         f" — {item['status']}\n")
             for item in result["skipped"]:
-                f.write(f"- \`{item['branch']}\`: not staged ({item['status']})\n")
+                f.write(f"- `{item['branch']}`: not staged ({item['status']})\n")
             f.write("\nNo production standalone was modified; no GPU tests ran.\n")
     print("STANDALONE_CANDIDATES_STAGED=" + str(len(result["candidates"])))
     for item in result["candidates"]:

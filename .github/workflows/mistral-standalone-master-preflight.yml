@@ -129,11 +129,14 @@ jobs:
             --repo . \
             --report "$RUNNER_TEMP/standalone-impact/mistral-standalone-impact.json" \
             --output "$RUNNER_TEMP/standalone-candidates.json" \
+            --bundle-dir "$RUNNER_TEMP/standalone-candidate-bundles" \
             --summary "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
           name: mistral-standalone-candidates-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/standalone-candidates.json
+          path: |
+            ${{ runner.temp }}/standalone-candidates.json
+            ${{ runner.temp }}/standalone-candidate-bundles/
           if-no-files-found: warn
           retention-days: 30
