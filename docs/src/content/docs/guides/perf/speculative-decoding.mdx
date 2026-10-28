@@ -63,6 +63,7 @@ You can also pass `MtpConfig::new("google/gemma-4-E4B-it-assistant", Some(6))` t
 | MTP | Qwen3.5, Qwen3.8 | Built into the checkpoint (`--mtp`) | Supported with paged attention |
 | MTP | Qwen3.8-Flash-Next | Built into the checkpoint (`--mtp`) | Safetensors/UQFF with paged attention |
 | DFlash / DFlash 2 | Qwen3.5, Qwen3.8 | DFlash draft checkpoints (`--mtp-model`) | Supported with paged attention |
+| DSpark | LFM2.5 | Native Safetensors DSpark checkpoint (`--mtp-model`) | Supported with paged attention, static full-block verification |
 
 ## Qwen3.5 / Qwen3.8
 
@@ -119,6 +120,27 @@ weights are requantized to the target's in-situ quantization type at load (overr
 Acceptance is strongly content-dependent: [incoai/Qwen3.8-27B-DFlash2](https://huggingface.co/incoai/Qwen3.8-27B-DFlash2)
 accepts ~7 of 7 drafts on math/code and much less on thinking-mode reasoning traces, which are out
 of its training distribution.
+
+## LFM2.5 DSpark
+
+LFM2.5 targets can attach Liquid AI's native Safetensors DSpark sidecar. mistral.rs detects
+`Lfm2DSparkDraftModel` from `config.json`, captures the configured LFM target layers, runs the
+five-layer attention drafter with interleaved RoPE, and applies the checkpoint's rank-256 Markov
+head sequentially across the proposed block. The target's attention KV and ShortConv state are
+committed transactionally after verification, so a rejected suffix cannot leak recurrent state.
+
+```bash
+mistralrs run -m LiquidAI/LFM2.5-2.6B \
+  --mtp-model LiquidAI/LFM2.5-2.6B-DSpark \
+  --mtp-n-predict 8 \
+  --mtp-draft-sampling greedy
+```
+
+The target and drafter are loaded from their original Safetensors checkpoints; GGUF conversion is
+not involved. Omitting `--mtp-n-predict` uses the checkpoint's full `block_size - 1` draft width.
+The confidence head is loaded and evaluated, while the current homogeneous-batch engine uses
+DSpark's exact static full-block verification mode. Compact confidence-scheduled ragged
+verification is not enabled by this mode.
 
 ## Gemma 4
 

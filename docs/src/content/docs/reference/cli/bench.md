@@ -62,6 +62,7 @@ mistralrs bench [OPTIONS] [COMMAND]
 | `--mtp-model <MTP_MODEL>` |  | MTP assistant model id or path |
 | `--mtp-n-predict <MTP_N_PREDICT>` |  | Fixed MTP draft tokens per step; omit to adapt the depth automatically |
 | `--mtp-draft-sampling <MTP_DRAFT_SAMPLING>` | `auto` | MTP draft sampling policy. Auto uses probabilistic DFlash2 drafting when supported. Possible values: `auto`, `greedy`, `probabilistic`. |
+| `--mtp-dspark-verify-profile <MTP_DSPARK_VERIFY_PROFILE>` |  | Measured full-step costs for DSpark confidence-based verification |
 | `--adapter <ADAPTER>` |  | LoRA adapter alias to benchmark. Omit to benchmark the base model |
 | `--prompt-len <PROMPT_LEN>` | `512` | Input lengths used to measure time to first token. Zero skips TTFT. Accepts comma-separated values for sweeps |
 | `--gen-len <GEN_LEN>` | `128` | Output tokens per decode request. Values below 2 skip decode metrics |
