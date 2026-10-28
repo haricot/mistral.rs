@@ -2095,7 +2095,7 @@ impl DraftWeights<'_> {
         isq: Option<IsqType>,
     ) -> Result<Arc<dyn QuantMethod>> {
         let projection_vb = vb.pp(name);
-        if isq.is_none() && projection_vb.device().is_cuda() {
+        if cfg!(feature = "cuda-legacy-fp4") && isq.is_none() && projection_vb.device().is_cuda() {
             if let Some(CheckpointLinearSpec::Nvfp4(spec)) = self.0
                 .map(|cfg| cfg.resolve_checkpoint(&projection_vb.prefix()))
                 .transpose()?
@@ -2358,7 +2358,7 @@ impl DFlashDraftModel {
         let hidden = cfg.hidden_size;
         let eps = cfg.rms_norm_eps;
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
-        let preserve_packed = isq.is_none() && cfg.quantization_config.is_some()
+        let preserve_packed = cfg!(feature = "cuda-legacy-fp4") && isq.is_none() && cfg.quantization_config.is_some()
             && device.is_cuda();
         let mut context_kv_weights = Vec::with_capacity(cfg.num_hidden_layers * 2);
         let mut context_kv_linears = Vec::with_capacity(cfg.num_hidden_layers * 2);
