@@ -47,6 +47,8 @@ pub struct BlockwiseFP8Linear {
 #[derive(Clone, Debug)]
 enum BlockwiseFp8Provider {
     Legacy,
+    #[cfg(all(feature = "cuda", feature = "cuda-legacy-fp8"))]
+    Sm61(Fp8Sm61Resident),
     #[cfg(all(feature = "cuda", feature = "cutile"))]
     CutileW8A16,
     #[cfg(all(feature = "cuda", has_cutlass_fp8_sm90_kernels))]
@@ -68,10 +70,23 @@ const FP8_SM90_PROVIDER_ENV: &str = "MISTRALRS_FP8_SM90_PROVIDER";
 #[cfg(all(feature = "cuda", has_fp8_mma_kernels))]
 static TENSOR_CORE_GEMV_PROVIDER_LOG: std::sync::Once = std::sync::Once::new();
 
+#[cfg(all(feature = "cuda", feature = "cuda-legacy-fp8"))]
+#[derive(Clone)]
+struct Fp8Sm61Resident(Arc<candle_core::quantized::fp8_linear_sm61::Fp8Sm61Linear>);
+
+#[cfg(all(feature = "cuda", feature = "cuda-legacy-fp8"))]
+impl std::fmt::Debug for Fp8Sm61Resident {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fmt.debug_tuple("Fp8Sm61Resident").field(&"packed-E4M3FN").finish()
+    }
+}
+
 impl BlockwiseFp8Provider {
     fn supports_shared_activation(&self) -> bool {
         match self {
             Self::Legacy => false,
+            #[cfg(all(feature = "cuda", feature = "cuda-legacy-fp8"))]
+            Self::Sm61(_) => false,
             #[cfg(all(feature = "cuda", feature = "cutile"))]
             Self::CutileW8A16 => false,
             #[cfg(all(feature = "cuda", has_cutlass_fp8_sm90_kernels))]
@@ -98,6 +113,46 @@ impl BlockwiseFP8Linear {
 
     fn prepare_provider(&mut self) -> Result<()> {
         self.provider = BlockwiseFp8Provider::Legacy;
+        // The legacy software backend is deliberately opt-in. Do not apply
+        // it to BF16 activations or dynamic W8A8 checkpoints until independently
+        // qualified: this first bridge is strictly W8A16 with F16 activations.
+        #[cfg(all(feature = "cuda", feature = "cuda-legacy-fp8"))]
+        if self.activation_scheme.is_none()
+            && self.dequant_dtype == DType::F16
+            && self.weight.dtype() == DType::F8E4M3
+            && self.weight_block_size.len() == 2
+        {
+            if let Device::Cuda(cuda) = self.weight.device() {
+                let (n, k) = self.weight.dims2()?;
+                if k.is_multiple_of(128) {
+                    let bytes = crate::utils::data_to_bytes::<float8::F8E4M3>(
+                        self.weight.to_device(&Device::Cpu)?
+                            .flatten_all()?.to_vec1::<float8::F8E4M3>()?,
+                    );
+                    let scales = self.weight_scale_inv.to_dtype(DType::F32)?
+                        .to_device(&Device::Cpu)?.flatten_all()?.to_vec1::<f32>()?;
+                    let bn = self.weight_block_size[0];
+                    let bk = self.weight_block_size[1];
+                    let kernel = candle_core::quantized::fp8_linear_sm61::Fp8Sm61Linear::from_bytes(
+                        cuda,
+                        n,
+                        k,
+                        &bytes,
+                        &scales,
+                        bn,
+                        bk,
+                        candle_core::quantized::fp8_linear_sm61::Fp8Sm61Mode::SimtW8A16,
+                        128,
+                    )?;
+                    self.provider = BlockwiseFp8Provider::Sm61(Fp8Sm61Resident(Arc::new(kernel)));
+                    tracing::info!(
+                        output_features = n, input_features = k,
+                        "Using packed E4M3FN SM61 SIMT W8A16; F16 activation contract"
+                    );
+                    return Ok(());
+                }
+            }
+        }
         #[cfg(all(feature = "cuda", feature = "cutile"))]
         if self.activation_scheme.is_none()
             && self.weight_block_size == [128, 128]
@@ -294,6 +349,33 @@ impl QuantMethod for BlockwiseFP8Linear {
     }
 
     fn forward_raw(&self, x: &Tensor) -> Result<Tensor> {
+        #[cfg(all(feature = "cuda", feature = "cuda-legacy-fp8"))]
+        if let BlockwiseFp8Provider::Sm61(kernel) = &self.provider {
+            if x.dtype() != DType::F16 {
+                candle_core::bail!("SM61 W8A16 FP8 provider expects F16 activations");
+            }
+            if !x.device().same_device(self.weight.device()) {
+                candle_core::bail!("SM61 FP8 weight/input device mismatch");
+            }
+            let source = x.dims();
+            let k = *source.last().ok_or_else(|| candle_core::Error::msg(
+                "SM61 FP8 input must not be scalar"
+            ))?;
+            if k == 0 {
+                candle_core::bail!("SM61 FP8 input dimension must be nonzero");
+            }
+            let rows = x.elem_count() / k;
+            let flat = x.contiguous()?.reshape((rows, k))?;
+            let output = kernel.0.forward(&flat)?.to_dtype(DType::F16)?;
+            let mut shape = source.to_vec();
+            *shape.last_mut().unwrap() = output.dim(1)?;
+            let output = output.reshape(shape)?;
+            return match &self.bias {
+                Some(bias) => output.broadcast_add(bias),
+                None => Ok(output),
+            };
+        }
+
         #[cfg(all(feature = "cuda", feature = "cutile"))]
         if matches!(self.provider, BlockwiseFp8Provider::CutileW8A16)
             && matches!(x.dtype(), DType::BF16 | DType::F16)
