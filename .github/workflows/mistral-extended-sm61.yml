@@ -1,4 +1,5 @@
 name: Mistral Extended SM61
+run-name: 'SM61 shared qualification — Extended + Legacy (one GPU session)'
 on:
   workflow_dispatch:
 permissions:

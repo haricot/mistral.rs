@@ -1,4 +1,8 @@
 name: Mistral CUDA Legacy SM61
+# Recovery/isolated qualification only: Extended already executes the Legacy archive
+# independently in its shared GPU job and can promote allow_old_card atomically.
+# Do not dispatch this after a successful Extended campaign with identical inputs.
+run-name: 'SM61 Legacy standalone — recovery only'
 on:
   workflow_dispatch:
 permissions:
