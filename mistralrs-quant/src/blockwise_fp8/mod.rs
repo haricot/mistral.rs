@@ -180,10 +180,11 @@ impl BlockwiseFP8Linear {
                         let linear = candle_core::quantized::fp8_linear_sm61::Fp8Sm61Linear::from_bytes(
                             &cuda, n, k, &bytes, &scale_values, bn, bk, mode, 128,
                         )?;
+                        let packed_gpu_bytes = linear.resident_weight_bytes();
                         self.provider = BlockwiseFp8Provider::Sm61(Fp8Sm61Resident {
                             linear: Arc::new(linear), device,
                         });
-                        tracing::info!(n, k, "SM61 FP8: packed GPU residency, BF16/F16 activations");
+                        tracing::info!(n, k, packed_gpu_bytes, "SM61 FP8: one packed GPU copy; BF16/F16 activations");
                         return Ok(());
                     }
                     if shape.len() == 3 {
@@ -205,10 +206,15 @@ impl BlockwiseFP8Linear {
                                 )?,
                             ));
                         }
+                        let packed_gpu_bytes: usize = linears.iter()
+                            .map(|linear| linear.resident_weight_bytes()).sum();
                         self.provider = BlockwiseFp8Provider::Sm61Experts(Fp8Sm61Experts {
                             linear: linears, device, out_features: n, in_features: k,
                         });
-                        tracing::info!(experts, n, k, "SM61 MoE: packed FP8 expert weights on GPU");
+                        tracing::info!(
+                            experts, n, k, packed_gpu_bytes,
+                            "SM61 MoE: one packed FP8 CUDA copy per expert"
+                        );
                         return Ok(());
                     }
                     candle_core::bail!("SM61 FP8 supports only rank-2 projections and rank-3 MoE weights");
