@@ -153,7 +153,7 @@ impl BlockwiseFP8Linear {
                 || self.activation_scheme == Some(Fp8ActivationScheme::Dynamic))
             && self.weight_block_size.len() == 2
         {
-            if let Device::Cuda(cuda) = self.weight.device() {
+            if let Device::Cuda(cuda) = self.weight.device().clone() {
                 let cc = cuda.cuda_stream().context().compute_capability()
                     .map_err(candle_core::Error::msg)?;
                 if cc == (6, 1) {
@@ -178,7 +178,7 @@ impl BlockwiseFP8Linear {
                         );
                         let scale_values = scales.flatten_all()?.to_vec1::<f32>()?;
                         let linear = candle_core::quantized::fp8_linear_sm61::Fp8Sm61Linear::from_bytes(
-                            cuda, n, k, &bytes, &scale_values, bn, bk, mode, 128,
+                            &cuda, n, k, &bytes, &scale_values, bn, bk, mode, 128,
                         )?;
                         self.provider = BlockwiseFp8Provider::Sm61(Fp8Sm61Resident {
                             linear: Arc::new(linear), device,
@@ -201,7 +201,7 @@ impl BlockwiseFP8Linear {
                             let scale_values = scale.flatten_all()?.to_vec1::<f32>()?;
                             linears.push(Arc::new(
                                 candle_core::quantized::fp8_linear_sm61::Fp8Sm61Linear::from_bytes(
-                                    cuda, n, k, &bytes, &scale_values, bn, bk, mode, 128,
+                                    &cuda, n, k, &bytes, &scale_values, bn, bk, mode, 128,
                                 )?,
                             ));
                         }
