@@ -215,6 +215,20 @@ impl BlockwiseFP8Linear {
                 }
             }
         }
+        // Feature-enabled Pascal execution must NEVER accidentally enter the
+        // legacy dequantize-and-matmul fallback for a packed FP8 checkpoint.
+        #[cfg(all(feature = "cuda", feature = "cuda-legacy-fp8"))]
+        if self.weight.dtype() == DType::F8E4M3 {
+            if let Device::Cuda(cuda) = self.weight.device() {
+                let cc = cuda.cuda_stream().context().compute_capability()
+                    .map_err(candle_core::Error::msg)?;
+                if cc == (6, 1) {
+                    candle_core::bail!(
+                        "SM61 FP8 unsupported packed geometry, dtype or activation scheme; refusing dense weight expansion"
+                    )
+                }
+            }
+        }
         #[cfg(all(feature = "cuda", feature = "cutile"))]
         if self.activation_scheme.is_none()
             && self.weight_block_size == [128, 128]
@@ -2504,6 +2518,64 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("missing FP8 weight scale"));
+        Ok(())
+    }
+}
+
+
+#[cfg(all(test, feature = "cuda", feature = "cuda-legacy-fp8"))]
+mod sm61_packed_residency_tests {
+    use super::*;
+
+    #[test]
+    fn sm61_single_packed_cuda_resident_copy() -> Result<()> {
+        let gpu = Device::new_cuda(0)?;
+        let weight = Tensor::ones((128, 128), DType::F32, &gpu)?
+            .to_dtype(DType::F8E4M3)?;
+        let scale = Tensor::ones((1, 1), DType::F32, &gpu)?;
+        let layer = BlockwiseFP8Linear::new(QuantMethodConfig::BlockwiseFP8 {
+            weight,
+            weight_scale_inv: scale,
+            bias: None,
+            dequant_dtype: DType::BF16,
+            weight_block_size: vec![128, 128],
+            activation_scheme: Some(Fp8ActivationScheme::Dynamic),
+        })?;
+        // Neither original tensor owns CUDA storage anymore.
+        assert!(matches!(layer.weight.device(), Device::Cpu));
+        assert!(matches!(layer.weight_scale_inv.device(), Device::Cpu));
+        let BlockwiseFp8Provider::Sm61(kernel) = &layer.provider else {
+            panic!("expected packed SM61 kernel")
+        };
+        // 128x128 FP8 weights + one F32 scale, never an F16 expansion.
+        assert_eq!(kernel.linear.resident_weight_bytes(), 128 * 128 + 4);
+        assert!(matches!(kernel.device, Device::Cuda(_)));
+        Ok(())
+    }
+
+    #[test]
+    fn sm61_moe_experts_single_resident_weight_each() -> Result<()> {
+        let gpu = Device::new_cuda(0)?;
+        let weight = Tensor::ones((2, 128, 128), DType::F32, &gpu)?
+            .to_dtype(DType::F8E4M3)?;
+        let scale = Tensor::ones((2, 1, 1), DType::F32, &gpu)?;
+        let layer = BlockwiseFP8Linear::new(QuantMethodConfig::BlockwiseFP8 {
+            weight,
+            weight_scale_inv: scale,
+            bias: None,
+            dequant_dtype: DType::F16,
+            weight_block_size: vec![128, 128],
+            activation_scheme: None,
+        })?;
+        assert!(matches!(layer.weight.device(), Device::Cpu));
+        assert!(matches!(layer.weight_scale_inv.device(), Device::Cpu));
+        let BlockwiseFp8Provider::Sm61Experts(experts) = &layer.provider else {
+            panic!("expected packed SM61 experts")
+        };
+        assert_eq!(experts.linear.len(), 2);
+        for linear in &experts.linear {
+            assert_eq!(linear.resident_weight_bytes(), 128 * 128 + 4);
+        }
         Ok(())
     }
 }
