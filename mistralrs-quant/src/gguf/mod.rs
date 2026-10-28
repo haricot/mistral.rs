@@ -836,6 +836,14 @@ impl QuantizedSerde for GgufMatMul {
 mod tests {
     use super::*;
 
+    #[test]
+    fn mxfp4_uqff_code_roundtrip() -> Result<()> {
+        assert_eq!(ggml_dtype_to_uqff_code(GgmlDType::Mxfp4), 39);
+        assert_eq!(ggml_dtype_from_uqff_code(39)?, GgmlDType::Mxfp4);
+        assert_eq!(gguf_dtype_label(39), "mxfp4");
+        Ok(())
+    }
+
     const TEST_EMBEDDING_DIM: usize = 256;
     const TEST_VOCAB_SIZE: usize = 8;
 

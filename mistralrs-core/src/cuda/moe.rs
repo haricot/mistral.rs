@@ -140,7 +140,14 @@ pub fn moe_gemm(
 
         #[cfg(has_moe_wmma)]
         let moe_func = if is_prefill {
-            crate::cuda::ffi::moe_gemm_wmma
+            #[cfg(has_moe_wmma)]
+            {
+                crate::cuda::ffi::moe_gemm_wmma
+            }
+            #[cfg(not(has_moe_wmma))]
+            {
+                crate::cuda::ffi::moe_gemm
+            }
         } else if size_m_i32 <= GEMV_THRESHOLD {
             crate::cuda::ffi::moe_gemv
         } else {
