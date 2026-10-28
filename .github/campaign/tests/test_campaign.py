@@ -241,6 +241,28 @@ class GitCampaignTests(unittest.TestCase):
             c.snapshot(self.repo, "extended", "nvidia/cuda:latest", self.root / "bad.json")
 
 
+class GreenitRealWorkflowContracts(unittest.TestCase):
+    def test_extended_is_single_gpu_session_with_independent_legacy_archive(self):
+        config = json.loads((ROOT / "config.json").read_text())
+        selected = config["targets"]["extended"]["components"]
+        self.assertEqual(selected.count("legacy"), 1)
+        self.assertEqual(len(set(selected)), len(selected))
+        self.assertEqual(config["targets"]["legacy"]["components"], ["legacy"])
+        workflow = (ROOT.parent / "workflows/mistral-extended-sm61.yml").read_text()
+        self.assertEqual(sum(line == "  gpu:" for line in workflow.splitlines()), 1)
+        self.assertIn(
+            'run: bash "$RUNNER_TEMP/campaign/orchestrator/gpu.sh"',
+            workflow,
+        )
+        self.assertIn("needs: [prepare, cpu, cuda_compile, gpu]", workflow)
+        runner = (ROOT / "gpu.sh").read_text()
+        self.assertIn("while read -r component sha ref;", runner)
+        self.assertIn('gpu-count "$report/$component-junit.xml"', runner)
+        promotion = (ROOT / "campaign.py").read_text()
+        self.assertIn('"push", "--atomic"', promotion)
+        self.assertIn('gpu.get("archives", {}).get(node["component"])', promotion)
+
+
 class ProofTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
