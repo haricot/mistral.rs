@@ -32,6 +32,16 @@ const DEFAULT_REVISION: &str = "main";
 
 pub async fn run_uqff(command: UqffCommand, global: GlobalOptions) -> Result<()> {
     match command {
+        UqffCommand::DraftPlan { model_path } => {
+            let config = std::fs::read_to_string(model_path.join("config.json"))?;
+            let dflash: mistralrs_core::speculative::dflash::DFlashConfig =
+                serde_json::from_str(&config)?;
+            let plan = mistralrs_core::speculative::dflash_uqff::plan_draft_uqff(
+                &dflash, mistralrs_core::IsqType::Q8_0,
+            ).map_err(|error| anyhow!("{error}"))?;
+            println!("{}", serde_json::to_string_pretty(&plan)?);
+            Ok(())
+        }
         UqffCommand::Report {
             model_id,
             quant,

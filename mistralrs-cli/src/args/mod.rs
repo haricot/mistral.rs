@@ -260,6 +260,12 @@ pub enum CacheCommand {
 
 #[derive(Subcommand, Clone)]
 pub enum UqffCommand {
+    /// Validate a local DFlash draft for future Q8_0 UQFF export; does not write artifacts
+    DraftPlan {
+        /// Local directory containing the DFlash config.json
+        #[arg(short = 'm', long)]
+        model_path: PathBuf,
+    },
     /// Print or write a UQFF report
     Report {
         /// Hugging Face model ID or local path containing UQFF files
