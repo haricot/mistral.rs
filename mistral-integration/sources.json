@@ -1,11 +1,11 @@
 {
-  "base_master_sha": "28ed6daca455b4ae063896014d1ea698b912c539",
+  "base_master_sha": "0494ee4a2e3ffbb0817142f903a535b47495c06a",
   "candle_branch": "extended",
   "candle_repository": "haricot/candle",
   "candle_sha": "40b5a8acc43b5f8ef925370ae12daddd929f39f2",
   "candle_validation_ref": "refs/tags/archive/extended/sm61-validated-40029177676-2",
   "component": "nemotron_bolt_dflash",
-  "contract_hash": "371a215171452d3fdf04fc0578d23ecc8eb852d5a973f608f727f2d0649fc0dc",
+  "contract_hash": "74832527733141040151b24656c50f4e9b0b65a65a2f04850647c688e65802e7",
   "features": [
     "cuda-legacy-bf16",
     "cuda-legacy-fp8",
@@ -13,7 +13,7 @@
   ],
   "kind": "mistral-standalone",
   "prerequisites": {
-    "legacy": "31556971b6a655883f452d76c78ebef772f53c38"
+    "legacy": "20586f4452ee841351c6c2fc4203cc96c027dc26"
   },
   "schema_version": 2,
   "target_branch": "nemotron_bolt_dflash_standalone",
