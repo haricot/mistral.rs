@@ -3,6 +3,7 @@ pub(crate) mod builtin_mtp;
 pub mod cache;
 pub mod config;
 pub mod dflash;
+pub mod dflash_uqff;
 #[cfg(test)]
 pub(crate) mod dflash_bolt_tests;
 pub mod driver;
