@@ -153,6 +153,35 @@ class GitCampaignTests(unittest.TestCase):
             branch = "extended" if name == "extended" else self.config["components"][name]["branch"]
             self.assertEqual(c.remote_head(self.repo, "origin", branch), sha)
 
+    def test_greenit_missing_legacy_gpu_proof_blocks_atomic_promotion(self):
+        """A shared Extended GPU run can promote Legacy, but never on a mere
+        claim that an Extended binary implicitly covers the Legacy binary."""
+        plan = self.prepare()
+        proofs = self.proofs(plan)
+        self.assertIn("legacy", [n["component"] for n in plan["matrix"]])
+        report_path = proofs / "gpu/report.json"
+        gpu = json.loads(report_path.read_text())
+        gpu["archives"].pop("legacy")
+        c.write_json(report_path, gpu)
+        with self.assertRaisesRegex(RuntimeError, "physical GPU did not execute"):
+            c.promote(self.repo, self.root / "first/plan.json", proofs, "123")
+        for branch in ("legacy", "extended"):
+            self.assertEqual(
+                c.remote_head(self.repo, "origin", branch),
+                self.state["leases"][branch],
+            )
+
+    def test_greenit_extended_matrix_has_no_duplicate_component(self):
+        plan = self.prepare()
+        components = [row["component"] for row in plan["matrix"]]
+        self.assertEqual(components.count("legacy"), 1)
+        self.assertEqual(components.count("extended"), 1)
+        self.assertEqual(len(components), len(set(components)))
+        self.assertEqual(
+            plan["components"]["legacy"],
+            next(row["candidate"] for row in plan["matrix"] if row["component"] == "legacy"),
+        )
+
     def test_changed_source_lease_blocks_all_publication(self):
         plan = self.prepare()
         proofs = self.proofs(plan)
