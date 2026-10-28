@@ -123,8 +123,10 @@ impl BlockwiseFP8Linear {
             && self.weight_block_size.len() == 2
         {
             if let Device::Cuda(cuda) = self.weight.device() {
+                let cc = cuda.cuda_stream().context().compute_capability()
+                    .map_err(candle_core::Error::msg)?;
                 let (n, k) = self.weight.dims2()?;
-                if k.is_multiple_of(128) {
+                if cc == (6, 1) && k.is_multiple_of(128) {
                     let bytes = crate::utils::data_to_bytes::<float8::F8E4M3>(
                         self.weight.to_device(&Device::Cpu)?
                             .flatten_all()?.to_vec1::<float8::F8E4M3>()?,
