@@ -45,3 +45,32 @@ Master Sync workflow and can also be dispatched on its own.
    one shared GPU session may cover multiple independent binaries.
 
 The script never downloads model weights and never runs GPU tests.
+
+## Immutable candidate staging (after preflight)
+
+After a successful `Mistral Master Sync`, the follow-up workflow
+fetches the exact SHA report and creates immutable refs **only** when
+`git merge-tree --write-tree` is clean. It publishes:
+
+`integration/staged-master/<master12>/<source12>/<standalone-branch>`
+
+Each staged candidate is an actual merge commit with the standalone
+source SHA and the exact master SHA as its two parents; its tree is the
+git-computed merge result. A source lease change or ref collision rejects
+staging. No source branch advances, and no compilation or GPU qualification
+is inferred from staging.
+
+Only a later isolated CI qualification should advance the real branches,
+using build archive hashes and full SM61 proof, with explicit scope.
+A failed merge remains in the conflict report, not in a staged ref.
+
+The PR-level `contracts` job uses a synthetic Git repository and runs
+CPU-only tests of merge conflict classification, source lease changes,
+staging ref uniqueness and non-mutation of tracked source refs.
+
+## GreenIT
+A single master snapshot feeds all eight read-only checks. Repeated
+synchronization with the same SHA is a no-op. Staged refs are immutable
+and reused only when their exact candidate commit SHA matches.
+This does not reuse an unrelated executable or skip required physical GPU
+tests.

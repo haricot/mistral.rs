@@ -10,6 +10,11 @@ on:
   workflow_run:
     workflows: ["Mistral Master Sync"]
     types: [completed]
+  pull_request:
+    branches: [mirror_orch]
+    paths:
+      - '.github/standalone-sync/**'
+      - '.github/workflows/mistral-standalone-master-preflight.yml'
 
 permissions:
   contents: read
@@ -19,6 +24,16 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  contracts:
+    name: Staging and conflict classifier contracts (CPU only)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - run: python3 -B -m unittest discover -v -s .github/standalone-sync -p 'test_*.py'
   inspect:
     if: >-
       github.event_name == 'workflow_dispatch' ||
