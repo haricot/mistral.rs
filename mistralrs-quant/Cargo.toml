@@ -51,6 +51,7 @@ cuda = [
     "candle-nn/cuda",
     "dep:cudaforge"
 ]
+cuda-legacy-fp4 = ["cuda", "candle-core/cuda-legacy-fp4"]
 cutile = [
     "cuda",
     "dep:cutile",

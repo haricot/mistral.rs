@@ -281,6 +281,7 @@ no-default-features = true
 # NVIDIA CUDA GPU support
 cuda = ["mistralrs-core/cuda"]
 cutile = ["cuda", "mistralrs-core/cutile"]
+cuda-legacy-fp4 = ["cuda", "mistralrs-core/cuda-legacy-fp4"]
 # cuDNN acceleration (requires cuda)
 cudnn = ["mistralrs-core/cudnn"]
 # Apple Metal GPU support (macOS/iOS)

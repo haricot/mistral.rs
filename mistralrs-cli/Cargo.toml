@@ -60,6 +60,7 @@ fuzzy-matcher = "0.3"
 default = ["code-execution"]
 cuda = ["mistralrs-core/cuda", "mistralrs-server-core/cuda"]
 cutile = ["cuda", "mistralrs-core/cutile"]
+cuda-legacy-fp4 = ["cuda", "mistralrs-core/cuda-legacy-fp4"]
 nccl = ["mistralrs-core/nccl", "mistralrs-server-core/nccl"]
 cudnn = ["mistralrs-core/cudnn", "mistralrs-server-core/cudnn"]
 flash-attn = ["cuda", "mistralrs-core/flash-attn", "mistralrs-server-core/flash-attn"]
