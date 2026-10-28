@@ -1,0 +1,62 @@
+name: Mistral standalone master compatibility
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["Mistral Master Sync"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mistral-standalone-master-preflight
+  cancel-in-progress: true
+
+jobs:
+  inspect:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'mirror_orch')
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: mirror_orch
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Fetch all exact source branch refs without modifying remote branches
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin \
+            +refs/heads/master:refs/remotes/origin/master \
+            +refs/heads/mirror_orch:refs/remotes/origin/mirror_orch
+          while IFS= read -r branch; do
+            git fetch --no-tags origin \
+              "+refs/heads/$branch:refs/remotes/origin/$branch"
+          done < <(python3 - <<'PY'
+          import json
+          config = json.load(open('.github/standalone-sync/sources.json'))
+          for name in config['tracked_standalones']:
+              print(name)
+          PY
+          )
+      - name: Read-only merge-tree and LFM3 surface impact assessment
+        shell: bash
+        run: |
+          python3 .github/standalone-sync/impact.py \
+            --repo . \
+            --config .github/standalone-sync/sources.json \
+            --output "$RUNNER_TEMP/mistral-standalone-impact.json" \
+            --summary "$GITHUB_STEP_SUMMARY" \
+            --require-mirror-current
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: mistral-standalone-master-impact-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mistral-standalone-impact.json
+          if-no-files-found: warn
+          retention-days: 14
