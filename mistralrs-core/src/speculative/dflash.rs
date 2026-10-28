@@ -18,7 +18,8 @@ use candle_core::{
 };
 use candle_core::{DType, Device, IndexOp, Module, Result, Tensor, D};
 use mistralrs_quant::{
-    IsqType, QuantMethod, QuantMethodConfig, QuantizeOntoGuard, ShardedVarBuilder, UnquantLinear,
+    CheckpointLinearSpec, IsqType, Nvfp4ActivationMode, Nvfp4Layer, QuantMethod, QuantMethodConfig,
+    QuantizeOntoGuard, QuantizedConfig, Shard, ShardedVarBuilder, UnquantLinear,
 };
 use serde::Deserialize;
 
@@ -201,6 +202,9 @@ pub struct DFlashSpecificConfig {
     pub target_layer_ids: Option<Vec<usize>>,
     pub block_size: Option<usize>,
     pub mask_token_id: Option<u32>,
+    pub causal: Option<bool>,
+    pub use_swa: Option<bool>,
+    pub swa_window_size: Option<usize>,
     pub input_embedding_scale: Option<f64>,
     pub output_multiplier: Option<f64>,
     pub selector_rank: Option<usize>,
@@ -231,6 +235,9 @@ pub struct DFlashConfig {
     // v1 checkpoints keep some fields at the top level instead of inside `dflash_config`
     pub block_size: Option<usize>,
     pub mask_token_id: Option<u32>,
+    #[serde(default)]
+    pub has_own_lm_head: bool,
+    pub quantization_config: Option<QuantizedConfig>,
     #[serde(default)]
     pub dflash_config: DFlashSpecificConfig,
 }
@@ -374,8 +381,16 @@ impl DFlashConfig {
             .map(String::as_str)
             .unwrap_or("full_attention");
         let sliding = layer_type == "sliding_attention";
-        let is_causal = self.is_causal.unwrap_or(sliding);
-        (is_causal, sliding.then_some(self.sliding_window).flatten())
+        let is_causal = self
+            .is_causal
+            .or(self.dflash_config.causal)
+            .unwrap_or(sliding);
+        let window = match self.dflash_config.use_swa {
+            Some(false) => None,
+            Some(true) => self.dflash_config.swa_window_size.or(self.sliding_window),
+            None => sliding.then_some(self.sliding_window).flatten(),
+        };
+        (is_causal, window)
     }
 }
 
@@ -1292,6 +1307,7 @@ pub struct DFlashDraftModel {
     context_k_norm_weights: Option<Tensor>,
     hidden_norm: RmsNorm,
     norm: RmsNorm,
+    own_lm_head: Option<Arc<dyn QuantMethod>>,
     selector: Option<CandidateSelector>,
     draft_sampling_method: MtpDraftSamplingMethod,
     inv_freq: Tensor,
@@ -2024,15 +2040,44 @@ impl DFlashCudaGraphState {
     }
 }
 
-fn load_linear(
-    vb: &ShardedVarBuilder,
-    shape: (usize, usize),
-    name: &str,
-    isq: Option<IsqType>,
-    device: &Device,
-) -> Result<Arc<dyn QuantMethod>> {
-    let weight = vb.pp(name).get((shape.1, shape.0), "weight")?;
-    linear_from_weight(weight, isq, device)
+struct DraftWeights<'a>(Option<&'a QuantizedConfig>);
+
+impl DraftWeights<'_> {
+    fn weight(&self, vb: &ShardedVarBuilder, shape: (usize, usize)) -> Result<Tensor> {
+        match self
+            .0
+            .map(|config| config.resolve_checkpoint(&vb.prefix()))
+            .transpose()?
+            .flatten()
+        {
+            Some(CheckpointLinearSpec::Nvfp4(spec)) => {
+                if spec.activation != Nvfp4ActivationMode::None {
+                    candle_core::bail!("DFlash portable loading supports NVFP4 W4A16, not W4A4");
+                }
+                // Decode on CPU before moving dense weights to devices without native FP4 support.
+                let cpu = vb.clone().set_device(Device::Cpu).set_dtype(DType::F32);
+                Nvfp4Layer::load(shape.1, shape.0, spec, false, Shard::default(), cpu)?
+                    .dequantize_w()?
+                    .to_dtype(vb.dtype())?
+                    .to_device(vb.device())
+            }
+            Some(_) => candle_core::bail!(
+                "DFlash checkpoint quantization requires an explicit weight decoder"
+            ),
+            None => vb.get(shape, "weight"),
+        }
+    }
+
+    fn linear(
+        &self,
+        vb: &ShardedVarBuilder,
+        shape: (usize, usize),
+        name: &str,
+        isq: Option<IsqType>,
+    ) -> Result<Arc<dyn QuantMethod>> {
+        let weight = self.weight(&vb.pp(name), (shape.1, shape.0))?;
+        linear_from_weight(weight, isq, vb.device())
+    }
 }
 
 fn linear_from_weight(
@@ -2203,6 +2248,14 @@ impl DFlashDraftModel {
             );
         }
         let target_layer_ids = cfg.target_layer_ids()?;
+        if target_layer_ids.is_empty()
+            || target_layer_ids
+                .iter()
+                .enumerate()
+                .any(|(i, id)| target_layer_ids[..i].contains(id))
+        {
+            candle_core::bail!("DFlash target taps must be nonempty and unique");
+        }
         if let Some(max) = target_layer_ids.iter().max() {
             if *max >= target_num_layers {
                 candle_core::bail!(
@@ -2256,6 +2309,7 @@ impl DFlashDraftModel {
             |_| true,
             Arc::new(|_| DeviceForLoadTensor::Base),
         )?;
+        let weights = DraftWeights(cfg.quantization_config.as_ref());
 
         // The drafter conditions on quantized target hiddens already; its own precision is a
         // tunable acceptance/speed trade (bf16 reads ~4 GB per draft block, q4k ~1.1 GB).
@@ -2277,29 +2331,26 @@ impl DFlashDraftModel {
             let (is_causal, sliding_window) = cfg.layer_attention(i);
             let q_size = cfg.num_attention_heads * head_dim;
             let kv_size = cfg.num_key_value_heads * head_dim;
-            let q_weight = vb_attn.pp("q_proj").get((q_size, hidden), "weight")?;
-            let k_weight = vb_attn.pp("k_proj").get((kv_size, hidden), "weight")?;
-            let v_weight = vb_attn.pp("v_proj").get((kv_size, hidden), "weight")?;
+            let q_weight = weights.weight(&vb_attn.pp("q_proj"), (q_size, hidden))?;
+            let k_weight = weights.weight(&vb_attn.pp("k_proj"), (kv_size, hidden))?;
+            let v_weight = weights.weight(&vb_attn.pp("v_proj"), (kv_size, hidden))?;
             let qkv_weight = Tensor::cat(&[&q_weight, &k_weight, &v_weight], 0)?;
             context_kv_weights.push(k_weight);
             context_kv_weights.push(v_weight);
 
             let vb_mlp = vb_l.pp("mlp");
-            let gate_weight = vb_mlp
-                .pp("gate_proj")
-                .get((cfg.intermediate_size, hidden), "weight")?;
-            let up_weight = vb_mlp
-                .pp("up_proj")
-                .get((cfg.intermediate_size, hidden), "weight")?;
+            let gate_weight =
+                weights.weight(&vb_mlp.pp("gate_proj"), (cfg.intermediate_size, hidden))?;
+            let up_weight =
+                weights.weight(&vb_mlp.pp("up_proj"), (cfg.intermediate_size, hidden))?;
             let gate_up_weight = Tensor::cat(&[&gate_weight, &up_weight], 0)?;
             layers.push(DFlashLayer {
                 qkv_proj: linear_from_weight(qkv_weight, isq, device)?,
-                o_proj: load_linear(
+                o_proj: weights.linear(
                     &vb_attn,
                     (cfg.num_attention_heads * head_dim, hidden),
                     "o_proj",
                     isq,
-                    device,
                 )?,
                 q_norm: RmsNorm::new(head_dim, eps, vb_attn.pp("q_norm"))?,
                 k_norm: RmsNorm::new(head_dim, eps, vb_attn.pp("k_norm"))?,
@@ -2310,12 +2361,11 @@ impl DFlashDraftModel {
                     vb_l.pp("post_attention_layernorm"),
                 )?,
                 gate_up_proj: linear_from_weight(gate_up_weight, isq, device)?,
-                down_proj: load_linear(
+                down_proj: weights.linear(
                     &vb_mlp,
                     (cfg.intermediate_size, hidden),
                     "down_proj",
                     isq,
-                    device,
                 )?,
                 attention_conv: cfg
                     .is_v2()
@@ -2341,13 +2391,11 @@ impl DFlashDraftModel {
         } else {
             None
         };
-        let fc = load_linear(
-            &vb,
-            (target_layer_ids.len() * hidden, hidden),
-            "fc",
-            isq,
-            device,
-        )?;
+        let fc = weights.linear(&vb, (target_layer_ids.len() * hidden, hidden), "fc", isq)?;
+        let own_lm_head = cfg
+            .has_own_lm_head
+            .then(|| weights.linear(&vb, (hidden, cfg.vocab_size), "lm_head", isq))
+            .transpose()?;
         let selector = cfg
             .is_v2()
             .then(|| CandidateSelector::load(vb.pp("candidate_selector"), &cfg))
@@ -2380,6 +2428,7 @@ impl DFlashDraftModel {
             context_k_norm_weights,
             hidden_norm: RmsNorm::new(hidden, eps, vb.pp("hidden_norm"))?,
             norm: RmsNorm::new(hidden, eps, vb.pp("norm"))?,
+            own_lm_head,
             selector,
             draft_sampling_method,
             inv_freq,
@@ -2860,6 +2909,10 @@ impl DFlashDraftModel {
 
     pub fn input_embedding_scale(&self) -> f64 {
         self.input_embedding_scale
+    }
+
+    pub fn own_lm_head(&self) -> Option<&Arc<dyn QuantMethod>> {
+        self.own_lm_head.as_ref()
     }
 
     /// Absolute position of the next context token a sequence expects, or None if unseen.
@@ -4347,6 +4400,40 @@ mod tests {
             }"#,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn bolt_official_native_metadata_matches_portable_loader_contract() -> Result<()> {
+        let cfg: DFlashConfig =
+            serde_json::from_str(include_str!("fixtures/bolt/native-draft-config.json"))
+                .map_err(candle_core::Error::msg)?;
+        assert_eq!(cfg.target_layer_ids()?, vec![5, 11, 17, 23, 35]);
+        assert_eq!(cfg.block_size(), 8);
+        assert!(cfg.has_own_lm_head);
+        for layer in 0..cfg.num_hidden_layers {
+            assert_eq!(cfg.layer_attention(layer), (false, Some(1024)));
+        }
+        let quant = cfg.quantization_config.as_ref().unwrap();
+        assert!(matches!(
+            quant.resolve_checkpoint("fc")?,
+            Some(mistralrs_quant::CheckpointLinearSpec::Nvfp4(_))
+        ));
+        assert!(quant.resolve_checkpoint("hidden_norm")?.is_none());
+        let header: serde_json::Value =
+            serde_json::from_str(include_str!("fixtures/bolt/native-draft-header.json"))
+                .map_err(candle_core::Error::msg)?;
+        assert_eq!(
+            header["fc.weight"]["shape"],
+            serde_json::json!([
+                cfg.hidden_size,
+                cfg.hidden_size * cfg.target_layer_ids()?.len() / 2
+            ])
+        );
+        assert_eq!(
+            header["lm_head.weight"]["shape"],
+            serde_json::json!([cfg.vocab_size, cfg.hidden_size / 2])
+        );
+        Ok(())
     }
 
     fn qwen35_target_yarn() -> YarnRopeConfig {

@@ -38,7 +38,7 @@ use crate::{
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
 
-use super::config::{Gemma4BidirectionalAttention, Gemma4TextConfig};
+use super::config::{ple_cpu_requested, Gemma4BidirectionalAttention, Gemma4TextConfig};
 
 fn gemma4_moe_weight_prefix(vb: &ShardedVarBuilder) -> &'static str {
     if contains_tensor_or_weight_source(&vb.pp("moe"), "gate_up_proj") {
@@ -1492,6 +1492,7 @@ pub struct TextModel {
     // PLE global
     embed_tokens_per_layer: Option<Arc<dyn QuantMethod>>,
     embed_tokens_per_layer_in_residual: bool,
+    ple_on_cpu: bool,
     per_layer_model_projection: Option<Arc<dyn QuantMethod>>,
     per_layer_projection_norm: Option<RmsNorm>,
     hidden_size_per_layer_input: usize,
@@ -1509,6 +1510,9 @@ pub struct TextModel {
     final_logit_softcapping: Option<f64>,
     last_spec_hidden: Mutex<Option<Tensor>>,
     store_spec_hidden: AtomicBool,
+    dflash_tap_layers: Mutex<Vec<usize>>,
+    dflash_full_taps: Mutex<Vec<Tensor>>,
+    dflash_spec_taps: Mutex<Vec<Tensor>>,
     image_token_id: Option<usize>,
     video_token_id: Option<usize>,
     bidirectional_attention: Gemma4BidirectionalAttention,
@@ -1735,15 +1739,21 @@ impl TextModel {
         // PLE global components
         let ple_dim = cfg.hidden_size_per_layer_input.unwrap_or(0);
         let ple_vocab = cfg.vocab_size_per_layer_input.unwrap_or(cfg.vocab_size);
+        let ple_on_cpu = ple_cpu_requested();
         let (embed_tokens_per_layer, per_layer_model_projection, per_layer_projection_norm) =
             if ple_dim > 0 {
-                let ple_emb = embedding(
-                    ple_vocab,
-                    cfg.num_hidden_layers * ple_dim,
+                let ple_vb = if ple_on_cpu {
+                    vb_m.pp("embed_tokens_per_layer").set_device(Device::Cpu)
+                } else {
                     mapper.set_nm_device(
                         vb_m.pp("embed_tokens_per_layer"),
                         normal_loading_metadata.loading_isq,
-                    ),
+                    )
+                };
+                let ple_emb = embedding(
+                    ple_vocab,
+                    cfg.num_hidden_layers * ple_dim,
+                    ple_vb,
                     &cfg.quantization_config,
                 )?;
 
@@ -1864,6 +1874,7 @@ impl TextModel {
             lm_head_is_tied: cfg.tie_word_embeddings,
             embed_tokens_per_layer,
             embed_tokens_per_layer_in_residual: false,
+            ple_on_cpu,
             per_layer_model_projection,
             per_layer_projection_norm,
             hidden_size_per_layer_input: ple_dim,
@@ -1879,6 +1890,9 @@ impl TextModel {
             final_logit_softcapping: cfg.final_logit_softcapping,
             last_spec_hidden: Mutex::new(None),
             store_spec_hidden: AtomicBool::new(false),
+            dflash_tap_layers: Mutex::new(Vec::new()),
+            dflash_full_taps: Mutex::new(Vec::new()),
+            dflash_spec_taps: Mutex::new(Vec::new()),
             image_token_id,
             video_token_id,
             bidirectional_attention: cfg.bidirectional_attention(),
@@ -1890,7 +1904,10 @@ impl TextModel {
 
     #[cfg(feature = "cuda")]
     pub fn supports_cuda_decode_graphs(&self) -> bool {
-        true
+        self.dflash_tap_layers
+            .lock()
+            .expect("DFlash taps poisoned")
+            .is_empty()
     }
 
     pub fn embed_tokens(&self, input_ids: &Tensor) -> Result<Tensor> {
@@ -1898,12 +1915,16 @@ impl TextModel {
     }
 
     pub fn supports_packed_prefill(&self) -> bool {
-        self.layers.iter().all(|layer| {
-            flash_backend_supports(
-                layer.self_attn.head_dim,
-                layer.self_attn.sdpa_params.softcap.is_some(),
-            )
-        })
+        self.dflash_tap_layers
+            .lock()
+            .expect("DFlash taps poisoned")
+            .is_empty()
+            && self.layers.iter().all(|layer| {
+                flash_backend_supports(
+                    layer.self_attn.head_dim,
+                    layer.self_attn.sdpa_params.softcap.is_some(),
+                )
+            })
     }
 
     pub fn last_spec_hidden(&self) -> Option<Tensor> {
@@ -1940,6 +1961,48 @@ impl TextModel {
         &*self.mapper
     }
 
+    pub(super) fn device(&self) -> &Device {
+        &self.device
+    }
+    pub(super) fn dtype(&self) -> DType {
+        self.dtype
+    }
+    pub(super) fn lm_head(&self) -> &Arc<dyn QuantMethod> {
+        &self.lm_head
+    }
+
+    pub(super) fn set_dflash_tap_layers(&self, layers: Vec<usize>) -> Result<()> {
+        for (i, &layer) in layers.iter().enumerate() {
+            if layer >= self.layers.len() || layers[..i].contains(&layer) {
+                candle_core::bail!("Gemma 4 DFlash taps must be unique, valid layer indices");
+            }
+        }
+        *self.dflash_tap_layers.lock().expect("DFlash taps poisoned") = layers;
+        self.dflash_full_taps
+            .lock()
+            .expect("DFlash taps poisoned")
+            .clear();
+        self.dflash_spec_taps
+            .lock()
+            .expect("DFlash taps poisoned")
+            .clear();
+        Ok(())
+    }
+
+    pub(super) fn dflash_full_taps(&self) -> Vec<Tensor> {
+        self.dflash_full_taps
+            .lock()
+            .expect("DFlash taps poisoned")
+            .clone()
+    }
+
+    pub(super) fn dflash_spec_taps(&self) -> Vec<Tensor> {
+        self.dflash_spec_taps
+            .lock()
+            .expect("DFlash taps poisoned")
+            .clone()
+    }
+
     /// Compute PLE per-layer inputs from both token embeddings and hidden state projection.
     /// Returns a Vec of per-layer tensors of shape [batch, seq, ple_dim].
     fn compute_ple(
@@ -1968,7 +2031,14 @@ impl TextModel {
         let (b, seq, _) = inputs_embeds.dims3()?;
 
         // 1. Token-level per-layer embeddings: [b, seq, num_layers * ple_dim]
-        let embedded = ple_emb.embedding_forward(ple_input_ids, self.dtype)?;
+        let embedded = if self.ple_on_cpu {
+            let ids = ple_input_ids.to_device(&Device::Cpu)?;
+            ple_emb
+                .embedding_forward(&ids, self.dtype)?
+                .to_device(inputs_embeds.device())?
+        } else {
+            ple_emb.embedding_forward(ple_input_ids, self.dtype)?
+        };
         // Scale by sqrt(ple_dim)
         let embedded = (embedded * (ple_dim as f64).sqrt())?;
         // Reshape to [b, seq, num_layers, ple_dim]
@@ -2006,7 +2076,12 @@ impl TextModel {
         has_bidirectional: bool,
         requires_full_prefill_queries: bool,
     ) -> Result<Option<KvSharingFastPrefillPlan>> {
-        if requires_full_prefill_queries
+        if !self
+            .dflash_tap_layers
+            .lock()
+            .expect("DFlash taps poisoned")
+            .is_empty()
+            || requires_full_prefill_queries
             || has_bidirectional
             || metadata.is_some_and(|metadata| metadata.has_noncausal_mm_context)
             || mistralrs_quant::has_active_lora_execution()
@@ -2294,6 +2369,12 @@ impl TextModel {
         let mut reduced_to_logits = false;
         let no_attention_mask = AttentionMask::None;
         let mut input_normed = None;
+        let dflash_layers = self
+            .dflash_tap_layers
+            .lock()
+            .expect("DFlash taps poisoned")
+            .clone();
+        let mut dflash_taps = vec![None; dflash_layers.len()];
 
         for (i, layer) in self.layers.iter().enumerate() {
             if let Some(plan) = fast_prefill_tail
@@ -2396,12 +2477,37 @@ impl TextModel {
             )?;
             xs = layer_out;
             input_normed = next_normed;
+            if let Some(index) = dflash_layers.iter().position(|&layer| layer == i) {
+                dflash_taps[index] = Some(xs.to_device(&self.device)?);
+            }
         }
         let xs = if let Some(normed) = input_normed {
             normed.to_device(&self.device)?
         } else {
             xs.to_device(&self.device)?.apply(&self.norm)?
         };
+        if !dflash_layers.is_empty() {
+            if let Some(index) = dflash_layers
+                .iter()
+                .position(|&layer| layer + 1 == self.layers.len())
+            {
+                dflash_taps[index] = Some(xs.clone());
+            }
+            let full = dflash_taps
+                .into_iter()
+                .map(|tap| {
+                    tap.ok_or_else(|| {
+                        candle_core::Error::msg("Gemma 4 did not capture every DFlash target layer")
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let selected = full
+                .iter()
+                .map(|tap| ctx.logits(tap))
+                .collect::<Result<Vec<_>>>()?;
+            *self.dflash_full_taps.lock().expect("DFlash taps poisoned") = full;
+            *self.dflash_spec_taps.lock().expect("DFlash taps poisoned") = selected;
+        }
         let xs = if reduced_to_logits {
             extract_logits(&xs, context_lens)?
         } else {

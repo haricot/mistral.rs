@@ -117,6 +117,45 @@ impl MtpConfig {
             .filter(|path| path.extension().is_some_and(|ext| ext == "safetensors"))
             .collect::<Vec<_>>();
         weight_paths.sort();
+        let raw: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(path.join("config.json")).map_err(candle_core::Error::msg)?,
+        )
+        .map_err(candle_core::Error::msg)?;
+        if raw
+            .get("quantization_config")
+            .and_then(|q| q.get("quant_algo"))
+            .and_then(serde_json::Value::as_str)
+            == Some("W4A16_NVFP4")
+        {
+            let tensors = unsafe {
+                mistralrs_quant::safetensors::MmapedSafetensors::multi_unique(&weight_paths)?
+            };
+            return tensors
+                .tensors()
+                .into_iter()
+                .try_fold(0usize, |total, (name, tensor)| {
+                    if !name.ends_with(".weight") {
+                        return Ok(total);
+                    }
+                    let elements = tensor
+                        .shape()
+                        .iter()
+                        .try_fold(1usize, |n, dim| n.checked_mul(*dim))
+                        .ok_or_else(|| candle_core::Error::msg("DFlash weight size overflow"))?;
+                    let expansion = if tensor.dtype() == safetensors::tensor::Dtype::U8 {
+                        2
+                    } else {
+                        1
+                    };
+                    elements
+                        .checked_mul(expansion)
+                        .and_then(|n| n.checked_mul(target_dtype.size_in_bytes()))
+                        .and_then(|n| total.checked_add(n))
+                        .ok_or_else(|| {
+                            candle_core::Error::msg("DFlash runtime weight size overflow")
+                        })
+                });
+        }
         crate::pipeline::checkpoint_runtime_size(&weight_paths, target_dtype)
             .map_err(candle_core::Error::msg)?
             .ok_or_else(|| {
