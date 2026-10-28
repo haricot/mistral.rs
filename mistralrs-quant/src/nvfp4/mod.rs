@@ -217,13 +217,12 @@ impl Nvfp4Layer {
                 let k = parts.weight.dim(1)? * VALUES_PER_BYTE;
                 let packed = parts.weight.to_device(&Device::Cpu)?
                     .flatten_all()?.to_vec1::<u8>()?;
-                // Converting exactly representable E4M3 block scales through F32
-                // recovers the original E4M3 bit pattern (scales must be finite).
-                let scale_values = parts.scales.to_dtype(DType::F32)?
-                    .to_device(&Device::Cpu)?.flatten_all()?.to_vec1::<f32>()?;
-                let scales = scale_values.into_iter()
-                    .map(|value| F8E4M3::from_f32(value).to_bits())
-                    .collect::<Vec<_>>();
+                // Reuse UQFF's lossless raw-byte conversion: FP8 scale payloads
+                // must not be numerically rounded or converted on Pascal.
+                let scales = crate::utils::data_to_bytes::<F8E4M3>(
+                    parts.scales.to_device(&Device::Cpu)?
+                        .flatten_all()?.to_vec1::<F8E4M3>()?,
+                );
                 // E7 currently accepts one global multiplier; use 1.0 and apply
                 // the checkpoint's per-output-row multipliers after the GEMV.
                 Some(candle_core::quantized::nvfp4_arch_e7::Nvfp4E7Linear::from_modelopt_bytes(
