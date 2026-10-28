@@ -52,6 +52,10 @@ def inspect_branch(repo, branch, master_sha, prefixes):
         repo, "merge-tree", "--write-tree", branch_sha, master_sha, check=False
     )
     clean = True if current else merge_result.returncode == 0
+    merge_diagnostics = [] if current else [
+        line.strip()[:350] for line in merge_result.stdout.splitlines()
+        if line.startswith(("CONFLICT ", "Auto-merging "))
+    ][:25]
     raw_meta = git(repo, "show", f"{branch_sha}:mistral-integration/sources.json",
                    check=False)
     try:
@@ -71,9 +75,11 @@ def inspect_branch(repo, branch, master_sha, prefixes):
         "high_impact_path_count": len(high_impact),
         "overlapping_paths": overlap[:30],
         "overlap_count": len(overlap),
+        "merge_diagnostics": merge_diagnostics,
         "status": "UP_TO_DATE" if current else (
-            "MERGE_REVIEW" if not clean or overlap else
-            "MERGE_CLEAN_UNTESTED"
+            "MERGE_CONFLICT" if not clean else (
+                "OVERLAP_REVIEW_UNTESTED" if overlap else "MERGE_CLEAN_UNTESTED"
+            )
         ),
         "qualification": "NOT_EXECUTED",
     }
@@ -112,6 +118,16 @@ def render_summary(report):
             f"{'clean' if node['textual_merge_clean'] else 'conflicts'} | "
             f"{node['overlap_count']} | {node['high_impact_path_count']} |"
         )
+    lines.extend(["", "### Review details"])
+    for node in report["standalones"]:
+        if node["status"] == "UP_TO_DATE":
+            continue
+        lines.extend([
+            f"**`{node['branch']}`** — {node['status']}",
+            f"Overlapping source paths: {', '.join(node['overlapping_paths'][:12]) or 'none'}",
+        ])
+        lines.extend(f"- {line}" for line in node["merge_diagnostics"][:8])
+        lines.append("")
     lines.extend([
         "",
         "**No standalone was updated.** A clean textual merge is NOT a "
@@ -146,7 +162,10 @@ def main():
           f" mirror_current={report['mirror_contains_master']}")
     for entry in report["standalones"]:
         print(f"{entry['branch']}: {entry['status']} "
-              f"overlaps={entry['overlap_count']}")
+              f"overlaps={entry['overlap_count']} "
+              f"paths={','.join(entry['overlapping_paths'][:8])}")
+        for line in entry["merge_diagnostics"][:5]:
+            print(f"  {line}")
     if args.require_mirror_current and not report["mirror_contains_master"]:
         raise RuntimeError("mirror_orch does not yet contain master: run master sync first")
 
