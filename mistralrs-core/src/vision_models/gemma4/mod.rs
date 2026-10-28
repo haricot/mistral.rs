@@ -29,6 +29,7 @@ use crate::{
 pub(crate) mod audio;
 pub(crate) mod audio_processing;
 pub mod config;
+mod dflash;
 pub(crate) mod inputs_processor;
 mod mtp;
 pub(crate) mod multimodal_embedding;
@@ -206,6 +207,7 @@ pub struct Gemma4Model {
     vision_dtype: DType,
     encoder_cache: Arc<Mutex<EncoderCacheManager>>,
     mtp: Mutex<Option<mtp::Gemma4MtpRuntime>>,
+    dflash: Mutex<Option<dflash::Gemma4DflashRuntime>>,
 }
 
 impl Gemma4Model {
@@ -334,6 +336,7 @@ impl Gemma4Model {
             vision_dtype,
             encoder_cache: Arc::new(Mutex::new(EncoderCacheManager::new(32))),
             mtp: Mutex::new(None),
+            dflash: Mutex::new(None),
         })
     }
 
@@ -1118,6 +1121,9 @@ impl SpeculativeGraphState for Gemma4SpecGraphState {
 
 impl crate::speculative::SpeculativeTargetMixin for Gemma4Model {
     fn take_speculative_graph_state(&self) -> Option<Box<dyn SpeculativeGraphState>> {
+        if self.dflash.lock().is_ok_and(|d| d.is_some()) {
+            return None;
+        }
         self.language_model.take_spec_hidden().map(|hidden| {
             Box::new(Gemma4SpecGraphState { hidden }) as Box<dyn SpeculativeGraphState>
         })
@@ -1143,9 +1149,34 @@ impl crate::speculative::SpeculativeTargetMixin for Gemma4Model {
     ) -> candle_core::Result<Option<SpeculativeAttachInfo>> {
         let SpeculativeConfig::Mtp(config) = config else {
             *self.mtp.lock().expect("MTP mutex poisoned") = None;
+            *self.dflash.lock().expect("DFlash mutex poisoned") = None;
+            self.language_model.set_dflash_tap_layers(Vec::new())?;
             self.language_model.set_store_spec_hidden(false);
             return Ok(None);
         };
+        if crate::speculative::dflash::peek_config(&config)?.is_some() {
+            let runtime = dflash::Gemma4DflashRuntime::load(
+                &config,
+                &self.cfg.text_config,
+                &self.language_model,
+            )?;
+            self.language_model
+                .set_dflash_tap_layers(runtime.drafter.target_layer_ids.clone())?;
+            let info = SpeculativeAttachInfo::mtp(
+                format!(
+                    "Gemma 4 DFlash `{}` (safetensors, taps {:?})",
+                    config.model.as_deref().unwrap_or_default(),
+                    runtime.drafter.target_layer_ids
+                ),
+                runtime.depth,
+            );
+            *self.dflash.lock().expect("DFlash mutex poisoned") = Some(runtime);
+            *self.mtp.lock().expect("MTP mutex poisoned") = None;
+            self.language_model.set_store_spec_hidden(true);
+            return Ok(Some(info));
+        }
+        *self.dflash.lock().expect("DFlash mutex poisoned") = None;
+        self.language_model.set_dflash_tap_layers(Vec::new())?;
         let Some(assistant) = config.model.clone() else {
             candle_core::bail!(
                 "Gemma 4 has no built-in MTP head; pass an assistant model with `--mtp-model`."
@@ -1166,9 +1197,13 @@ impl crate::speculative::SpeculativeTargetMixin for Gemma4Model {
 
     fn has_speculative_proposer(&self) -> bool {
         self.mtp.lock().is_ok_and(|mtp| mtp.is_some())
+            || self.dflash.lock().is_ok_and(|d| d.is_some())
     }
 
     fn speculative_plan(&self, _batch_size: usize) -> Option<SpeculativeBatchPlan> {
+        if let Some(runtime) = self.dflash.lock().expect("DFlash mutex poisoned").as_ref() {
+            return Some(runtime.plan());
+        }
         self.mtp
             .lock()
             .ok()
@@ -1185,6 +1220,9 @@ impl crate::speculative::SpeculativeTargetMixin for Gemma4Model {
     }
 
     fn speculative_graph_plans(&self) -> Vec<crate::speculative::SpeculativeGraphPlan> {
+        if self.dflash.lock().is_ok_and(|d| d.is_some()) {
+            return Vec::new();
+        }
         let Some(max_depth) = self.speculative_plan(1).map(|plan| plan.proposal_len) else {
             return Vec::new();
         };
@@ -1202,6 +1240,9 @@ impl crate::speculative::SpeculativeTargetMixin for Gemma4Model {
         &mut self,
         ctx: SpeculativeProposeBatchCtx<'_>,
     ) -> candle_core::Result<Option<SpeculativeProposalBatch>> {
+        if let Some(runtime) = self.dflash.lock().expect("DFlash mutex poisoned").as_ref() {
+            return runtime.propose(&self.language_model, ctx);
+        }
         let embedder = |token: &Tensor| self.language_model.embed_tokens(token);
         let mut guard = self.mtp.lock().expect("MTP mutex poisoned");
         let Some(runtime) = guard.as_mut() else {
@@ -1214,6 +1255,9 @@ impl crate::speculative::SpeculativeTargetMixin for Gemma4Model {
         &self,
         rows: &[(usize, usize)],
     ) -> candle_core::Result<Option<Tensor>> {
+        if self.dflash.lock().is_ok_and(|d| d.is_some()) {
+            return Ok(None);
+        }
         let hidden = self.language_model.last_spec_hidden().ok_or_else(|| {
             candle_core::Error::Msg(
                 "MTP target hidden state was not captured before proposal.".to_string(),
@@ -1259,6 +1303,45 @@ impl crate::speculative::SpeculativeTargetMixin for Gemma4Model {
             }
             shape => candle_core::bail!("MTP hidden state has unsupported shape {shape:?}"),
         }
+    }
+
+    fn supports_speculative_prompt_bootstrap(&self) -> bool {
+        self.dflash.lock().is_ok_and(|d| d.is_some())
+    }
+
+    fn speculative_prefill(
+        &mut self,
+        ctx: crate::speculative::SpeculativePrefillCtx<'_>,
+    ) -> Result<()> {
+        if let Some(runtime) = self.dflash.lock().expect("DFlash mutex poisoned").as_ref() {
+            runtime.prefill(&self.language_model, ctx)?;
+        }
+        Ok(())
+    }
+
+    fn speculative_prefix_replay(&self) -> crate::speculative::SpeculativePrefixReplay {
+        self.dflash
+            .lock()
+            .expect("DFlash mutex poisoned")
+            .as_ref()
+            .map_or(
+                crate::speculative::SpeculativePrefixReplay::NotRequired,
+                |d| d.drafter.prefix_replay(),
+            )
+    }
+
+    fn release_speculative_sequences(&mut self, seq_ids: &[usize]) -> Result<()> {
+        if let Some(runtime) = self.dflash.lock().expect("DFlash mutex poisoned").as_ref() {
+            runtime.drafter.release_seqs(seq_ids);
+        }
+        Ok(())
+    }
+
+    fn speculative_bypass(&mut self, seq_ids: &[usize]) -> Result<()> {
+        if let Some(runtime) = self.dflash.lock().expect("DFlash mutex poisoned").as_ref() {
+            runtime.drafter.mark_seqs_dormant(seq_ids);
+        }
+        Ok(())
     }
 }
 
