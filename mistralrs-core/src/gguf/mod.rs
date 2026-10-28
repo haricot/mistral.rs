@@ -4,6 +4,7 @@ mod content;
 pub(crate) mod gemma3_bindings;
 pub(crate) mod gemma3_config;
 pub(crate) mod gemma3n_bindings;
+pub(crate) mod gemma4_config;
 mod generation_config;
 mod gguf_tokenizer;
 pub(crate) mod idefics3_bindings;

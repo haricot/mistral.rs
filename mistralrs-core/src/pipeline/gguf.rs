@@ -80,7 +80,6 @@ use tracing::{debug, info, warn};
 
 const PROJECTOR_REQUIRED_ARCHITECTURES: &[&str] = &[
     "gemma3n",
-    "gemma4",
     "llama4",
     "muse-glimmer",
     "qwen2vl",
@@ -633,6 +632,36 @@ impl GGUFLoader {
                     mapper,
                     in_situ_quant,
                     paged_attn_config,
+                },
+            );
+        }
+        if architecture.eq_ignore_ascii_case("gemma4") {
+            let external = read_external_config(paths)?;
+            let names = archive.tensors().keys().cloned().collect::<Vec<_>>();
+            let config = crate::gguf::gemma4_config::prepare_gemma4_text_config(
+                external.as_deref(),
+                archive.metadata(),
+                &names,
+            )?;
+            let config = stamp_qk_rope_layout(&config, RopePairing::HalfSplit)?;
+            let bindings = build_gemma4_bindings(&archive)?;
+            return self.load_native_synthesized_multimodal(
+                archive,
+                NativeNormalLoadArgs {
+                    paths,
+                    dtype,
+                    device,
+                    silent,
+                    mapper,
+                    in_situ_quant,
+                    paged_attn_config,
+                },
+                SynthesizedMultimodalSource {
+                    config,
+                    bindings,
+                    loader_type: MultimodalLoaderType::Gemma4,
+                    preprocessor_config: None,
+                    projector_files: &[],
                 },
             );
         }
@@ -1776,7 +1805,7 @@ mod tests {
         assert!(!requires_multimodal_projector("QWEN35"));
         assert!(!requires_multimodal_projector("gemma3"));
         assert!(requires_multimodal_projector("gemma3n"));
-        assert!(requires_multimodal_projector("gemma4"));
+        assert!(!requires_multimodal_projector("gemma4"));
         assert!(!requires_multimodal_projector("qwen35moe"));
         assert!(!requires_multimodal_projector("mistral3"));
         assert!(requires_multimodal_projector("muse-glimmer"));

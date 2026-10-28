@@ -9476,11 +9476,12 @@ impl DeviceMappedModelLoader for Gemma4Loader {
                 dtype,
                 weight_pack_factor,
             )?;
-            let embed_tokens_per_layer = if ple_dim > 0 {
-                ple_vocab * tc.num_hidden_layers * ple_dim / ple_embedding_pack_factor
-            } else {
-                0
-            };
+            let embed_tokens_per_layer =
+                if ple_dim > 0 && !crate::vision_models::gemma4::config::ple_cpu_requested() {
+                    ple_vocab * tc.num_hidden_layers * ple_dim / ple_embedding_pack_factor
+                } else {
+                    0
+                };
             let per_layer_model_projection = if ple_dim > 0 {
                 tc.hidden_size * tc.num_hidden_layers * ple_dim / weight_pack_factor
             } else {
