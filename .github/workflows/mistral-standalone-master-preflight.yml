@@ -44,6 +44,8 @@ jobs:
               print(name)
           PY
           )
+      - name: Verify upstream impact contracts (CPU only)
+        run: python3 -B -m unittest discover -v -s .github/standalone-sync -p 'test_*.py'
       - name: Read-only merge-tree and LFM3 surface impact assessment
         shell: bash
         run: |

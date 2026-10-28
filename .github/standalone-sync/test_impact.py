@@ -63,7 +63,7 @@ class MasterImpactTests(unittest.TestCase):
         self.assertFalse(report["gpu_tests_executed"])
         self.assertEqual(report["promotions"], [])
         result = {entry["branch"]: entry for entry in report["standalones"]}
-        self.assertEqual(result["fp8_mistralrs_standalone"]["status"], "MERGE_REVIEW")
+        self.assertEqual(result["fp8_mistralrs_standalone"]["status"], "MERGE_CONFLICT")
         self.assertFalse(result["fp8_mistralrs_standalone"]["textual_merge_clean"])
         self.assertEqual(result["fp8_mistralrs_standalone"]["overlapping_paths"], ["Cargo.toml"])
         self.assertEqual(result["bf16_mistralrs_standalone"]["status"], "MERGE_CLEAN_UNTESTED")
@@ -82,7 +82,7 @@ class MasterImpactTests(unittest.TestCase):
         summary = impact.render_summary(report)
         self.assertIn("No standalone was updated", summary)
         self.assertIn("NOT", summary)
-        self.assertIn("MERGE_REVIEW", summary)
+        self.assertIn("MERGE_CONFLICT", summary)
 
 
 if __name__ == "__main__":
