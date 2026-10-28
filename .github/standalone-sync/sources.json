@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "master_branch": "master",
+  "orchestrator_branch": "mirror_orch",
+  "tracked_standalones": [
+    "allow_old_card",
+    "asd_runner_standalone",
+    "lfm25_dspark_standalone",
+    "nemotron_bolt_dflash_standalone",
+    "fp8_mistralrs_standalone",
+    "bf16_mistralrs_standalone",
+    "fp4_mistralrs_standalone",
+    "UQFF_draft_standalone"
+  ],
+  "high_impact_prefixes": [
+    "Cargo.toml",
+    "Cargo.lock",
+    "mistralrs-core/src/models/",
+    "mistralrs-core/src/gguf/",
+    "mistralrs-core/src/engine/",
+    "mistralrs-core/src/memory_plan.rs",
+    "mistralrs-core/src/attention/",
+    "mistralrs-core/src/kv_cache/",
+    "mistralrs-core/src/gdn/",
+    "mistralrs-quant/src/",
+    "mistralrs-quant/kernels/",
+    "mistralrs-paged-attn/",
+    "mistralrs-cli/src/"
+  ]
+}
