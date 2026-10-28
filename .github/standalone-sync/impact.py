@@ -100,7 +100,7 @@ def inspect(repo, config):
 def render_summary(report):
     lines = [
         "### Mistral master → standalone compatibility (read only)",
-        f"Master: \`{report['source_master_sha']}\`",
+        f"Master: `{report['source_master_sha']}`",
         f"Mirror contains master: **{report['mirror_contains_master']}**",
         "",
         "| Branch | State | Textual merge | Overlap paths | High-impact upstream paths |",
@@ -108,7 +108,7 @@ def render_summary(report):
     ]
     for node in report["standalones"]:
         lines.append(
-            f"| \`{node['branch']}\` | {node['status']} | "
+            f"| `{node['branch']}` | {node['status']} | "
             f"{'clean' if node['textual_merge_clean'] else 'conflicts'} | "
             f"{node['overlap_count']} | {node['high_impact_path_count']} |"
         )

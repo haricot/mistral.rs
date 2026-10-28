@@ -5,7 +5,9 @@ test-threads = 2
 [profile.cpu]
 default-filter = '''
   test(campaign_cpu_backend) | test(campaign_force_cpu) | test(campaign_cpu_flag) | test(args::tests::)
-  | ((test(speculative::) | test(models::lfm2::) | test(bolt) | test(gemma4)
+  | ((test(speculative::) | test(models::lfm2::) | test(models::lfm3::)
+       | test(gguf::lfm3_vl_) | test(gguf::normal_registry::tests::)
+       | test(engine::memory::tests::) | test(bolt) | test(gemma4)
        | test(pipeline::chat_template::tests) | test(flashinfer_speculative_rows_keep_gather_block_tables)
        | test(uqff::tests::) | test(gguf::tests::) | test(test_fp8_vector_quant_cpu)
        | test(test_fp8_vector_dequant))
