@@ -1,21 +1,24 @@
 {
+  "asd_required": true,
   "base_master_sha": "0494ee4a2e3ffbb0817142f903a535b47495c06a",
   "candle_branch": "extended",
   "candle_repository": "haricot/candle",
   "candle_sha": "40b5a8acc43b5f8ef925370ae12daddd929f39f2",
   "candle_validation_ref": "refs/tags/archive/extended/sm61-validated-40029177676-2",
-  "component": "asd",
+  "components": {
+    "asd": "7fc7f79361b626350f835da1425ff8862cefc931",
+    "legacy": "20586f4452ee841351c6c2fc4203cc96c027dc26",
+    "lfm25_dspark": "abf4306d2f94c03eadc6f372cc6dee49991dcdf9",
+    "nemotron_bolt_dflash": "4a8114dca13d7f28b44333f4aea9733fe893ed0f"
+  },
   "contract_hash": "74832527733141040151b24656c50f4e9b0b65a65a2f04850647c688e65802e7",
   "features": [
     "cuda-legacy-bf16",
     "cuda-legacy-fp8",
     "cuda-legacy-fp4"
   ],
-  "kind": "mistral-standalone",
-  "prerequisites": {
-    "legacy": "20586f4452ee841351c6c2fc4203cc96c027dc26"
-  },
+  "kind": "mistral-extended",
   "schema_version": 2,
-  "target_branch": "asd_runner_standalone",
+  "target_branch": "extended",
   "toolchain": "1.99.0"
 }
