@@ -5,6 +5,8 @@ import tempfile
 import unittest
 from pathlib import Path
 import impact
+import stage as st
+from unittest.mock import patch
 
 
 class MasterImpactTests(unittest.TestCase):
@@ -76,6 +78,43 @@ class MasterImpactTests(unittest.TestCase):
         self.git("update-ref", "refs/remotes/origin/mirror_orch", self.base)
         report = impact.inspect(self.repo, self.cfg)
         self.assertFalse(report["mirror_contains_master"])
+
+    def test_stages_only_clean_merge_candidates_without_promotion(self):
+        report = impact.inspect(self.repo, self.cfg)
+        refs = {
+            "master": self.master,
+            "mirror_orch": self.master,
+            "fp8_mistralrs_standalone": self.fp8,
+            "bf16_mistralrs_standalone": self.bf16,
+        }
+        with patch.object(st, "remote", side_effect=lambda _repo, branch: refs.get(branch)):
+            result = st.stage(self.repo, report, dry_run=True)
+        self.assertEqual([x["branch"] for x in result["candidates"]],
+                         ["bf16_mistralrs_standalone"])
+        self.assertEqual(result["promotions"], [])
+        self.assertFalse(result["source_branches_modified"])
+        self.assertEqual(result["candidates"][0]["qualification"], "NOT_EXECUTED")
+        self.assertEqual(self.git("rev-parse", "refs/remotes/origin/fp8_mistralrs_standalone"), self.fp8)
+        self.assertEqual(self.git("rev-parse", "refs/remotes/origin/bf16_mistralrs_standalone"), self.bf16)
+
+    def test_ref_uses_both_master_and_source_to_avoid_stale_reuse(self):
+        first = st.staged_ref(self.master, self.bf16, "bf16_mistralrs_standalone")
+        second = st.staged_ref(self.master, self.fp8, "bf16_mistralrs_standalone")
+        self.assertNotEqual(first, second)
+        with self.assertRaisesRegex(RuntimeError, "invalid immutable"):
+            st.staged_ref(self.master, self.bf16, "refs/heads/master")
+
+    def test_source_lease_change_stops_candidate_staging(self):
+        report = impact.inspect(self.repo, self.cfg)
+        refs = {
+            "master": self.master,
+            "mirror_orch": self.master,
+            "fp8_mistralrs_standalone": self.fp8,
+            "bf16_mistralrs_standalone": self.base,
+        }
+        with patch.object(st, "remote", side_effect=lambda _repo, branch: refs.get(branch)):
+            with self.assertRaisesRegex(RuntimeError, "source branch moved"):
+                st.stage(self.repo, report, dry_run=True)
 
     def test_read_only_summary_never_claims_qualification(self):
         report = impact.inspect(self.repo, self.cfg)

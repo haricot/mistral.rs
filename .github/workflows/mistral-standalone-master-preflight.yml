@@ -2,9 +2,19 @@ name: Mistral standalone master compatibility
 
 on:
   workflow_dispatch:
+    inputs:
+      stage_candidates:
+        description: Create immutable (unqualified) candidates for merge-clean branches
+        type: boolean
+        default: true
   workflow_run:
     workflows: ["Mistral Master Sync"]
     types: [completed]
+  pull_request:
+    branches: [mirror_orch]
+    paths:
+      - '.github/standalone-sync/**'
+      - '.github/workflows/mistral-standalone-master-preflight.yml'
 
 permissions:
   contents: read
@@ -14,6 +24,16 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  contracts:
+    name: Staging and conflict classifier contracts (CPU only)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - run: python3 -B -m unittest discover -v -s .github/standalone-sync -p 'test_*.py'
   inspect:
     if: >-
       github.event_name == 'workflow_dispatch' ||
@@ -62,3 +82,58 @@ jobs:
           path: ${{ runner.temp }}/mistral-standalone-impact.json
           if-no-files-found: warn
           retention-days: 14
+
+  stage:
+    name: Stage immutable merge-clean standalone candidates (no promotion)
+    needs: inspect
+    if: >-
+      needs.inspect.result == 'success' &&
+      (github.event_name == 'workflow_run' || inputs.stage_candidates == true)
+    permissions:
+      contents: write
+      actions: read
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: mirror_orch
+          fetch-depth: 0
+          persist-credentials: true
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with:
+          name: mistral-standalone-master-impact-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/standalone-impact
+      - name: Resolve pinned source commits without rewriting source branches
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/standalone-impact/mistral-standalone-impact.json"
+          git fetch --no-tags origin \
+            +refs/heads/master:refs/remotes/origin/master \
+            +refs/heads/mirror_orch:refs/remotes/origin/mirror_orch
+          while IFS= read -r branch; do
+            git fetch --no-tags origin \
+              "+refs/heads/$branch:refs/remotes/origin/$branch"
+          done < <(python3 - "$report" <<'PY'
+          import json,sys
+          data=json.load(open(sys.argv[1]))
+          for entry in data['standalones']:
+              print(entry['branch'])
+          PY
+          )
+      - name: Publish immutable candidates only for textually merge-clean branches
+        shell: bash
+        run: |
+          python3 .github/standalone-sync/stage.py \
+            --repo . \
+            --report "$RUNNER_TEMP/standalone-impact/mistral-standalone-impact.json" \
+            --output "$RUNNER_TEMP/standalone-candidates.json" \
+            --summary "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: mistral-standalone-candidates-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/standalone-candidates.json
+          if-no-files-found: warn
+          retention-days: 30
