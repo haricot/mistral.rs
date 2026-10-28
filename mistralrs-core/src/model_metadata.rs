@@ -138,6 +138,11 @@ impl NormalLoaderType {
                 modalities: m,
                 examples: &[ex!("Qwen/Qwen3-30B-A3B")],
             },
+            Self::Flint => ArchMetadata {
+                families: &["Flint"],
+                modalities: m,
+                examples: &[ex!("RecursiveSI/flint")],
+            },
             Self::SmolLm3 => ArchMetadata {
                 families: &["SmolLM3"],
                 modalities: m,
@@ -184,6 +189,11 @@ impl NormalLoaderType {
                     ex!("LiquidAI/LFM2-1.2B", "LFM2"),
                 ],
             },
+            Self::Lfm3 => ArchMetadata {
+                families: &["LFM3"],
+                modalities: m,
+                examples: &[ex!("LiquidAI/LFM3-1.7B")],
+            },
             Self::Lfm2Moe => ArchMetadata {
                 families: &["LFM2 MoE", "LFM2.5 MoE"],
                 modalities: m,
@@ -226,6 +236,11 @@ impl MultimodalLoaderType {
                     ex!("LiquidAI/LFM2.5-VL-1.6B", "1.6B"),
                     ex!("LiquidAI/LFM2.5-VL-450M", "450M"),
                 ],
+            },
+            Self::Lfm3Vl => ArchMetadata {
+                families: &["LFM3-VL"],
+                modalities: &[Text, Vision, Video],
+                examples: &[ex!("LiquidAI/LFM3-VL-2B")],
             },
             Self::VLlama => ArchMetadata {
                 families: &["Llama 3.2 Vision"],
@@ -405,6 +420,7 @@ impl NormalLoaderType {
             Self::GLM4MoeLite => "Glm4MoeLiteForCausalLM",
             Self::GLM4Moe => "Glm4MoeForCausalLM",
             Self::Qwen3Moe => "Qwen3MoeForCausalLM",
+            Self::Flint => "FlintForCausalLM",
             Self::SmolLm3 => "SmolLM3ForCausalLM",
             Self::GraniteMoeHybrid => "GraniteMoeHybridForCausalLM",
             Self::GptOss => "GptOssForCausalLM",
@@ -413,6 +429,7 @@ impl NormalLoaderType {
             Self::Qwen3Next => "Qwen3NextForCausalLM",
             Self::Qwen3_5 => "Qwen3_5ForCausalLM",
             Self::Lfm2 => "Lfm2ForCausalLM",
+            Self::Lfm3 => "Lfm3ForCausalLM",
             Self::Lfm2Moe => "Lfm2MoeForCausalLM",
         }
     }
@@ -426,6 +443,7 @@ impl MultimodalLoaderType {
             Self::LLaVANext => "LlavaNextForConditionalGeneration",
             Self::LLaVA => "LlavaForConditionalGeneration",
             Self::Lfm2Vl => "Lfm2VlForConditionalGeneration",
+            Self::Lfm3Vl => "Lfm3VlForConditionalGeneration",
             Self::VLlama => "MllamaForConditionalGeneration",
             Self::Qwen2VL => "Qwen2VLForConditionalGeneration",
             Self::Idefics3 => "Idefics3ForConditionalGeneration",
