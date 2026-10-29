@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import os
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -34,6 +35,14 @@ def build(directory):
     proof["cpu_test_count"] = test_count(directory / "cpu-junit.xml", "campaign_cpu_backend")
     test_count(directory / "cpu-junit.xml", "campaign_force_cpu_selects_cpu")
     test_count(directory / "cpu-junit.xml", "campaign_cpu_flag_is_available")
+    if os.environ.get("MISTRALRS_LFM3_REQUIRED") == "true":
+        for required in (
+            "models::lfm3::tests::",
+            "gguf::lfm3_vl_config::tests::",
+            "lfm3_conv::tests::cpu_prefill_decode_and_cached_chunks_match_reference",
+        ):
+            test_count(directory / "cpu-junit.xml", required)
+        proof["lfm3_cpu_qualified"] = True
     proof["status"] = "BUILD_AND_CPU_PASSED"
     proof["features"] = ["cuda-legacy-bf16", "cuda-legacy-fp8", "cuda-legacy-fp4"]
     proof["profile"] = "campaign"
@@ -76,7 +85,7 @@ def main():
     elif args.mode == "gpu-count":
         print(test_count(args.path, "campaign_cuda_backend"))
     elif args.mode == "gpu-required":
-        if args.component != "asd_sm61_smoke":
+        if args.component not in ("asd_sm61_smoke", "cuda_prefill_decode_and_cached_chunks_match_reference"):
             raise RuntimeError("unsupported required GPU test")
         print(test_count(args.path, args.component))
     else:

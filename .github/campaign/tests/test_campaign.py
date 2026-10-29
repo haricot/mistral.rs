@@ -179,6 +179,17 @@ class GitCampaignTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "ASD provenance"):
             c.promote(self.repo, self.root / "first/plan.json", proofs, "123")
 
+    def test_real_lfm3_model_parity_is_required_before_promotion(self):
+        config = json.loads((c.ROOT / "config.json").read_text())
+        modes = config["lfm3_qualification"]["require_full_model_evidence"]
+        self.assertEqual(modes, ["lfm3-text", "lfm3-vl", "lfm3-gguf"])
+        plan = self.prepare()
+        proof = self.proofs(plan)
+        plan["config"]["lfm3_qualification"] = config["lfm3_qualification"]
+        c.write_json(self.root / "first/plan.json", plan)
+        with self.assertRaisesRegex(RuntimeError, "physical SM61 LFM3"):
+            c.promote(self.repo, self.root / "first/plan.json", proof, "123")
+
     def test_other_gpu_archive_blocks_publication(self):
         plan = self.prepare()
         proofs = self.proofs(plan)

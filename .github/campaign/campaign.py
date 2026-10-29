@@ -424,6 +424,21 @@ def promote(repo, plan_path, proofs, run_id):
         if any(not SHA.fullmatch(gpu.get("asd_profiles", {}).get(n, ""))
                for n in ("current.json", "current.asd")):
             raise RuntimeError("Extended ASD profile SHA256 evidence missing")
+    # LFM3 arrived on master with text, VL and GGUF paths. Exercising
+    # only a synthetic convolution is not a substitute for model parity.
+    lfm3 = plan["config"].get("lfm3_qualification", {})
+    if lfm3:
+        if any(gpu.get("lfm3_conv_gpu_counts", {}).get(node["component"], 0) < 1
+               for node in plan["matrix"]):
+            raise RuntimeError("physical SM61 LFM3 convolution parity proof is missing")
+        if gpu.get("full_models_executed") is not True:
+            raise RuntimeError("real LFM3 model validation is required before promotion")
+        for mode in lfm3.get("require_full_model_evidence", []):
+            result = gpu.get("model_results", {}).get(mode, {})
+            if (result.get("status") != "PASS"
+                    or result.get("candidate") != plan["candidate"]
+                    or not SHA.fullmatch(result.get("artifact_sha256", ""))):
+                raise RuntimeError(f"missing model-level LFM3 qualification: {mode}")
     for node in plan["matrix"]:
         proof = verify_artifact(Path(proofs) / node["component"], node)
         if gpu.get("archives", {}).get(node["component"]) != proof["files"]["tests.tar.zst"]:
