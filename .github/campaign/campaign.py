@@ -191,9 +191,9 @@ def merge(repo, source, lock_source):
             git(repo, "add", "Cargo.toml")
     # Scope: only LFM2.5 DSpark against the newer LFM3 master. Never
     # replace entire upstream attention/CLI files or silently choose ours.
-    if Path(repo).name == "lfm25_dspark":
+    if Path(repo).name in ("lfm25_dspark", "nemotron_bolt_dflash"):
         from resolve_dspark import resolve_known_conflicts
-        resolve_known_conflicts(repo, set(conflicts))
+        resolve_known_conflicts(repo, set(conflicts), Path(repo).name)
     for path in set(conflicts) & METADATA_CONFLICTS:
         version = git(repo, "show", f"{lock_source if path == 'Cargo.lock' else 'HEAD'}:{path}", check=False)
         dest = repo / path

@@ -10,10 +10,16 @@ import difflib
 import subprocess
 from pathlib import Path
 
-ALLOWED = frozenset((
-    "mistralrs-cli/src/args/mod.rs",
-    "mistralrs-core/src/paged_attention/layers/paged_attention.rs",
-))
+PROFILES = {
+    "lfm25_dspark": frozenset((
+        "mistralrs-cli/src/args/mod.rs",
+        "mistralrs-core/src/paged_attention/layers/paged_attention.rs",
+    )),
+    "nemotron_bolt_dflash": frozenset((
+        "mistralrs-core/src/gguf/mod.rs",
+    )),
+}
+ALLOWED = frozenset().union(*PROFILES.values())
 
 def command(repo, *args):
     p = subprocess.run(["git", "-C", str(repo), *args], text=True, capture_output=True)
@@ -81,10 +87,28 @@ def transplant(base, feature, upstream, path):
         removed, added = base[i1:i2], feature[j1:j2]
         if tag == "delete" or len(removed) > 3:
             raise RuntimeError(f"DSpark functional repair: destructive delta {path}@{i1+1}")
-        if added and contiguous_positions(result, added):
+        # Do not deduplicate by searching the *whole file*: MTP config
+        # contains identical changes in distinct Run/Serve/Bench blocks.
+        # First resolve the precise old-context location.
+        try:
+            location = find_location(result, base, i1, i2, removed, path)
+        except RuntimeError:
+            if not removed:
+                raise
+            # Upstream may already contain this exact replacement. Accept
+            # it only when its surrounding base context matches this hunk.
+            existing = contiguous_positions(result, added)
+            if len(existing) != 1:
+                raise
+            left, right = context_scores(result, base, i1, i2,
+                                         existing[0], len(added))
+            if left + right < 3:
+                raise
             audit.append((i1+1, "already-present"))
             continue
-        location = find_location(result, base, i1, i2, removed, path)
+        if added and result[location:location+len(added)] == added:
+            audit.append((i1+1, "already-present"))
+            continue
         result[location:location+len(removed)] = added
         audit.append((i1+1, "applied"))
     result_text = "".join(result)
@@ -93,8 +117,10 @@ def transplant(base, feature, upstream, path):
             raise RuntimeError(f"DSpark functional repair: unresolved marker in {path}")
     return result_text, list(reversed(audit))
 
-def resolve_known_conflicts(repo, conflicts):
-    selected = sorted(conflicts & ALLOWED)
+def resolve_known_conflicts(repo, conflicts, profile):
+    if profile not in PROFILES:
+        raise RuntimeError("unknown LFM3 reconciliation profile")
+    selected = sorted(conflicts & PROFILES[profile])
     for path in selected:
         base = read_index(repo, 1, path)
         feature = read_index(repo, 2, path)
