@@ -34,11 +34,12 @@ class DsparkReconcileTests(unittest.TestCase):
         self.assertEqual(merged.count("extra\n"), 2)
 
     def test_bolt_gguf_module_is_not_overwritten_by_lfm3(self):
-        base = ["mod base;\n","mod legacy;\n","mod newer;\n","mod end;\n"]
+        base = ["mod base;\n","mod legacy;\n","mod early;\n",
+                "mod other;\n","mod newer;\n","mod end;\n"]
         feature = ["mod base;\n","mod legacy;\n","mod gemma4_config;\n",
-                   "mod newer;\n","mod end;\n"]
+                   "mod early;\n","mod other;\n","mod newer;\n","mod end;\n"]
         upstream = ["mod base;\n","mod legacy;\n","mod lfm3_config;\n",
-                    "mod newer;\n","mod end;\n"]
+                    "mod early;\n","mod other;\n","mod newer;\n","mod end;\n"]
         merged, _ = transplant(base, feature, upstream,
                                "mistralrs-core/src/gguf/mod.rs")
         self.assertIn("mod gemma4_config;", merged)
