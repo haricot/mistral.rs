@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "purpose": "one-shot-LFM3-SM61-Extended-qualification",
+  "master_sha": "0494ee4a2e3ffbb0817142f903a535b47495c06a",
+  "asd_source_sha": "0617c899a608a2b3169808c2bdba3fcf669042c8",
+  "promotion": "FORBIDDEN_UNTIL_REAL_LFM3_MODELS_PASS",
+  "models_required": ["lfm3-text", "lfm3-vl", "lfm3-gguf"],
+  "gpu": "physical-Pascal-sm_61",
+  "run_count": 1
+}
