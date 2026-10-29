@@ -1,4 +1,5 @@
 import importlib.util
+import tempfile
 import sys
 import unittest
 from pathlib import Path
@@ -6,10 +7,60 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from resolve_dspark import transplant, ALLOWED
+from campaign import migrate_lfm3_speculative_memory_test_api
 
 PATH = "mistralrs-cli/src/args/mod.rs"
 
 class DsparkReconcileTests(unittest.TestCase):
+    def make_speculative_fixture(self, root_export=True, implementation="fn placeholder() {}"):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        repo = Path(temporary.name)
+        path = repo / "mistralrs-core/src/speculative/config.rs"
+        path.parent.mkdir(parents=True)
+        path.write_text(implementation + "\\n#[cfg(test)]\\nmod tests {\\n"
+                        " let first = crate::MemoryGpuConfig::Utilization(0.9);\\n"
+                        " let second = crate::MemoryGpuConfig::Utilization(0.8);\\n"
+                        "}\\n")
+        lib = repo / "mistralrs-core/src/lib.rs"
+        lib.write_text("pub use memory_plan::{ExecutionMemoryLimits, MemoryGoal};\\n"
+                       if root_export else "mod memory_plan;\\n")
+        return repo, path
+
+    def test_migrates_only_removed_memory_gpu_test_enum(self):
+        repo, path = self.make_speculative_fixture()
+        self.assertEqual(migrate_lfm3_speculative_memory_test_api(repo), 2)
+        value = path.read_text()
+        self.assertIn("fn placeholder() {}", value)
+        self.assertEqual(value.count("crate::MemoryGoal::Utilization("), 2)
+        self.assertNotIn("MemoryGpuConfig", value)
+        self.assertEqual(migrate_lfm3_speculative_memory_test_api(repo), 0)
+
+    def test_rejects_missing_lfm3_memorygoal_export(self):
+        repo, path = self.make_speculative_fixture(root_export=False)
+        value = path.read_text()
+        with self.assertRaisesRegex(RuntimeError, "not exported"):
+            migrate_lfm3_speculative_memory_test_api(repo)
+        self.assertEqual(path.read_text(), value)
+
+    def test_rejects_outdated_runtime_memory_api(self):
+        repo, path = self.make_speculative_fixture(
+            implementation="fn runtime() { crate::MemoryGpuConfig::Utilization(0.9); }"
+        )
+        value = path.read_text()
+        with self.assertRaisesRegex(RuntimeError, "outside DSpark tests"):
+            migrate_lfm3_speculative_memory_test_api(repo)
+        self.assertEqual(path.read_text(), value)
+
+    def test_rejects_unrecognized_old_memory_gpu_variant(self):
+        repo, path = self.make_speculative_fixture()
+        path.write_text(path.read_text().replace(
+            "let second = crate::MemoryGpuConfig::Utilization(0.8);",
+            "let second = crate::MemoryGpuConfig::Bytes(100);"
+        ))
+        with self.assertRaisesRegex(RuntimeError, "unrecognized historical"):
+            migrate_lfm3_speculative_memory_test_api(repo)
+
     def test_preserves_upstream_and_feature_additions(self):
         base = ["header\n", "before\n", "scope\n", "last\n", "footer\n"]
         feature = ["header\n", "before\n", "new dspark\n", "scope\n", "last\n", "footer\n"]

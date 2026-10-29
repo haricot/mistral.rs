@@ -208,6 +208,37 @@ def merge(repo, source, lock_source):
         raise RuntimeError(f"unresolved functional merge into {repo}:\n{remaining}\n{result.stderr}")
 
 
+def migrate_lfm3_speculative_memory_test_api(repo):
+    """Reconcile test-only MemoryGpuConfig -> MemoryGoal after upstream LFM3.
+
+    Never introduce the removed enum as an alias and never change runtime
+    implementation code. This is deliberately limited to the DSpark candidate.
+    """
+    repo = Path(repo)
+    source = repo / "mistralrs-core/src/speculative/config.rs"
+    root = repo / "mistralrs-core/src/lib.rs"
+    if not source.exists():
+        return 0
+    original = source.read_text()
+    old = "crate::MemoryGpuConfig::Utilization("
+    if old not in original:
+        return 0
+    if not root.exists() or "pub use memory_plan::{ExecutionMemoryLimits, MemoryGoal};" not in root.read_text():
+        raise RuntimeError("cannot migrate DSpark test: MemoryGoal is not exported by LFM3 root")
+    implementation, marker, test_module = original.partition("#[cfg(test)]")
+    if not marker or "crate::MemoryGpuConfig::" in implementation:
+        raise RuntimeError("outdated MemoryGpuConfig is used outside DSpark tests")
+    if test_module.count("crate::MemoryGpuConfig::") != test_module.count(old):
+        raise RuntimeError("unrecognized historical MemoryGpuConfig test API")
+    count = test_module.count(old)
+    patched = implementation + marker + test_module.replace(old, "crate::MemoryGoal::Utilization(")
+    if "crate::MemoryGpuConfig::" in patched:
+        raise RuntimeError("unmigrated MemoryGpuConfig API survived")
+    source.write_text(patched)
+    print(f"LFM3_DSPARK_MEMORY_GOAL_TEST_API=MIGRATED count={count}", flush=True)
+    return count
+
+
 def commit(repo, parents, message):
     git(repo, "add", "-A")
     tree = git(repo, "write-tree")
@@ -299,7 +330,7 @@ def prepare(repo, snapshot_path, output, publish=False):
                     "candle_branch": component["candle_branch"], "candle_sha": candle["sha"],
                     "candle_validation_ref": candle["validation_ref"],
                     "features": cfg["features"], "toolchain": cfg["toolchain"],
-                    "contract_hash": digest({n: file_hash(ROOT / n) for n in ["campaign_backends.rs", "force_cpu_test.rs", "cpu_flag_test.rs", "config.json", "campaign.py"]})}
+                    "contract_hash": digest({n: file_hash(ROOT / n) for n in ["campaign_backends.rs", "force_cpu_test.rs", "cpu_flag_test.rs", "config.json", "campaign.py", "resolve_dspark.py"]})}
         previous = source_contract(repo, original)
         ref, cached = prepared_ref(repo, name, {"source": original, "contract": identity})
         if cached:
@@ -316,6 +347,8 @@ def prepare(repo, snapshot_path, output, publish=False):
                 merge(node, parent, state["master"])
                 if git(node, "rev-parse", "-q", "--verify", "MERGE_HEAD", check=False):
                     commit(node, [git(node, "rev-parse", "HEAD"), parent], f"merge standalone prerequisite {parent}")
+            if name == "lfm25_dspark":
+                migrate_lfm3_speculative_memory_test_api(node)
             pin_candle(node, candle["sha"])
             install_contract(node, identity)
             resolve_lock(node, cfg["toolchain"])
