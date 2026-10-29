@@ -1,6 +1,11 @@
 name: Mistral Extended SM61
 on:
   workflow_dispatch:
+  # One-shot LFM3 qualification. This does not run on every master sync.
+  push:
+    branches: [mirror_orch]
+    paths:
+      - '.github/campaign/lfm3-sm61-qualification.once'
 permissions:
   contents: read
 concurrency:
@@ -74,15 +79,15 @@ jobs:
           echo "compiler_artifact=$artifact_name" >> "$GITHUB_OUTPUT"
           image="mistral-compiler@${image_id}"
           python3 .github/campaign/campaign.py snapshot --repo "$PWD" --target extended --image "$image" --output "$report/snapshot.json"
-          python3 .github/campaign/campaign.py prepare --repo "$PWD" --snapshot "$report/snapshot.json" --output "$report" --publish
+          python3 .github/campaign/campaign.py prepare --repo "$PWD" --snapshot "$report/snapshot.json" --output "$report"
           candidate="$(jq -r .candidate "$report/plan.json")"
           echo "candidate=$candidate" >> "$GITHUB_OUTPUT"
           echo "cache_key=$(jq -r .input_key "$report/plan.json")" >> "$GITHUB_OUTPUT"
           echo "recipe=$(jq -r .recipe "$report/plan.json")" >> "$GITHUB_OUTPUT"
           echo "environment_key=$(python3 -c 'import hashlib,json,sys;p=json.load(open(sys.argv[1]));print(hashlib.sha256(json.dumps([p["image"],p["config"]["toolchain"],p["config"]["features"],"sm61","bf16,fp8"],sort_keys=True).encode()).hexdigest())' "$report/plan.json")" >> "$GITHUB_OUTPUT"
-          if [[ extended == extended ]]; then
-            git push origin "$candidate:refs/heads/integration/asd_runner-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          fi
+          # Do not push unqualified commits (which may contain workflow
+          # files). The immutable candidate.bundle is sufficient for all
+          # exact archived CPU/GPU tests. Publish only after full qualification.
           echo "bundle_key=$(python3 -c 'import hashlib,json,sys;print(hashlib.sha256(json.dumps(sorted(n["build_key"] for n in json.load(open(sys.argv[1]))["matrix"])).encode()).hexdigest())' "$report/plan.json")" >> "$GITHUB_OUTPUT"
           cp -a .github/campaign "$report/orchestrator"
           echo "candidate=$candidate; CUDA-enabled build, CPU runtime tests and archived physical execution" >> "$GITHUB_STEP_SUMMARY"
