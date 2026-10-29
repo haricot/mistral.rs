@@ -277,6 +277,10 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
   promote:
+    # A one-shot push qualifies only. Promotion requires a separate
+    # deliberate dispatch AND complete real-model evidence from the
+    # pinned candidate; never publish source branches from this push.
+    if: github.event_name == 'workflow_dispatch'
     needs: [prepare, cpu, cuda_compile, gpu]
     runs-on: ubuntu-26.04
     timeout-minutes: 20
