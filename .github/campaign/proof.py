@@ -57,7 +57,7 @@ def verify_build(directory, expected):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=["identity", "build", "verify", "gpu-count", "config"])
+    parser.add_argument("mode", choices=["identity", "build", "verify", "gpu-count", "gpu-required", "config"])
     parser.add_argument("path", type=Path)
     parser.add_argument("component", nargs="?")
     parser.add_argument("--plan", type=Path)
@@ -75,6 +75,10 @@ def main():
         build(args.path)
     elif args.mode == "gpu-count":
         print(test_count(args.path, "campaign_cuda_backend"))
+    elif args.mode == "gpu-required":
+        if args.component != "asd_sm61_smoke":
+            raise RuntimeError("unsupported required GPU test")
+        print(test_count(args.path, args.component))
     else:
         plan = json.loads(args.plan.read_text())
         verify_build(args.path, node(plan, args.component))

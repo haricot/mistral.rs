@@ -164,6 +164,21 @@ class GitCampaignTests(unittest.TestCase):
         self.assertEqual(c.remote_head(self.repo, "origin", "extended"), self.state["leases"]["extended"])
         self.assertEqual(c.remote_head(self.repo, "origin", "b"), self.state["leases"]["b"])
 
+    def test_real_extended_campaign_requires_asd(self):
+        cfg = json.loads((c.ROOT / "config.json").read_text())
+        self.assertIn("asd", cfg["targets"]["extended"]["components"])
+        self.assertEqual(cfg["components"]["asd"]["branch"], "asd_runner_standalone")
+        self.assertEqual(cfg["components"]["asd"]["requires"], ["legacy"])
+
+    def test_extended_gpu_proof_without_asd_is_rejected(self):
+        plan = self.prepare()
+        proofs = self.proofs(plan)
+        plan["config"]["targets"]["extended"]["components"].append("asd")
+        plan["components"]["asd"] = plan["components"]["a"]
+        c.write_json(self.root / "first/plan.json", plan)
+        with self.assertRaisesRegex(RuntimeError, "ASD provenance"):
+            c.promote(self.repo, self.root / "first/plan.json", proofs, "123")
+
     def test_other_gpu_archive_blocks_publication(self):
         plan = self.prepare()
         proofs = self.proofs(plan)
