@@ -12,7 +12,6 @@ on:
   push:
     branches: [mirror_orch, ci/cuda-environment-publish]
     paths:
-      - .github/workflows/mistral-cuda-ci-image.yml
       - .github/campaign/cuda-image.json
       - .github/campaign/Containerfile
       - .github/campaign/config.json
@@ -44,6 +43,7 @@ jobs:
     concurrency:
       group: ci-cuda-environment-${{ github.repository }}-${{ needs.validate.outputs.environment_key }}
       cancel-in-progress: false
+      queue: max
     runs-on: ubuntu-26.04
     timeout-minutes: 180
     permissions:
