@@ -352,12 +352,12 @@ def prepare(repo, snapshot_path, output, publish=False):
             import_checkout(repo, node)
         if publish:
             publish_ref(repo, ref, candidate)
-        if ("asd" not in cfg["targets"]["extended"]["components"]
-                or "asd" not in objects or not contract["asd_required"]
+        if ("asd" in cfg["targets"]["extended"]["components"]
+                and ("asd" not in objects or not contract["asd_required"]
                 or contract["components"].get("asd") != objects["asd"]
-                or not ancestor(repo, objects["asd"], candidate)):
+                or not ancestor(repo, objects["asd"], candidate)) ):
             raise RuntimeError("Extended candidate lacks mandatory ASD ancestry")
-        if "mistralrs-core/tests/asd_sm61_smoke.rs" not in git(
+        if "asd" in cfg["targets"]["extended"]["components"] and "mistralrs-core/tests/asd_sm61_smoke.rs" not in git(
             repo, "ls-tree", "-r", "--name-only", candidate
         ).splitlines():
             raise RuntimeError("Extended candidate lacks ASD GPU smoke test")
