@@ -355,7 +355,7 @@ def prepare(repo, snapshot_path, output, publish=False):
         if ("asd" in cfg["targets"]["extended"]["components"]
                 and ("asd" not in objects or not contract["asd_required"]
                 or contract["components"].get("asd") != objects["asd"]
-                or not ancestor(repo, objects["asd"], candidate)) ):
+                or not ancestor(repo, objects["asd"], candidate))):
             raise RuntimeError("Extended candidate lacks mandatory ASD ancestry")
         if "asd" in cfg["targets"]["extended"]["components"] and "mistralrs-core/tests/asd_sm61_smoke.rs" not in git(
             repo, "ls-tree", "-r", "--name-only", candidate
@@ -406,7 +406,8 @@ def promote(repo, plan_path, proofs, run_id):
             or gpu.get("status") != "GPU_PASSED" or gpu.get("target") != "sm_61"
             or gpu.get("gpu_executed") is not True):
         raise RuntimeError("physical GPU proof does not match campaign")
-    if plan["target"] == "extended":
+    if (plan["target"] == "extended"
+            and "asd" in plan["config"]["targets"]["extended"]["components"]):
         matrices = {item["component"] for item in plan["matrix"]}
         if ("asd" not in plan["config"]["targets"]["extended"]["components"]
                 or "asd" not in plan["components"]
