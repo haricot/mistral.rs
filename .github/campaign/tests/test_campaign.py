@@ -164,6 +164,35 @@ class GitCampaignTests(unittest.TestCase):
         self.assertEqual(c.remote_head(self.repo, "origin", "extended"), self.state["leases"]["extended"])
         self.assertEqual(c.remote_head(self.repo, "origin", "b"), self.state["leases"]["b"])
 
+    def test_another_campaign_may_already_have_promoted_the_exact_same_component(self):
+        plan = self.prepare()
+        proofs = self.proofs(plan)
+        c.git(self.repo, "push", "origin", f'{plan["components"]["legacy"]}:refs/heads/legacy')
+        self.real_remote = c.remote_head
+        with patch.object(c, "remote_head", side_effect=self.remote_with_candle):
+            c.promote(self.repo, self.root / "first/plan.json", proofs, "123")
+        self.assertEqual(c.remote_head(self.repo, "origin", "extended"), plan["candidate"])
+
+    def test_model_evidence_uses_sha256_and_cannot_be_substituted_with_a_commit_sha(self):
+        plan = self.prepare()
+        proofs = self.proofs(plan)
+        plan["config"]["lfm3_qualification"] = {"require_full_model_evidence": ["lfm3-text", "lfm3-vl", "lfm3-gguf"]}
+        c.write_json(self.root / "first/plan.json", plan)
+        path = proofs / "gpu/report.json"
+        gpu = json.loads(path.read_text())
+        gpu.update(full_models_executed=True, lfm3_conv_gpu_counts={n["component"]: 1 for n in plan["matrix"]},
+                   model_results={name: {"status": "PASS", "candidate": plan["candidate"], "artifact_sha256": "a" * 40}
+                                  for name in plan["config"]["lfm3_qualification"]["require_full_model_evidence"]})
+        c.write_json(path, gpu)
+        with self.assertRaisesRegex(RuntimeError, "model-level LFM3"):
+            c.promote(self.repo, self.root / "first/plan.json", proofs, "123")
+        for result in gpu["model_results"].values():
+            result["artifact_sha256"] = "a" * 64
+        c.write_json(path, gpu)
+        self.real_remote = c.remote_head
+        with patch.object(c, "remote_head", side_effect=self.remote_with_candle):
+            c.promote(self.repo, self.root / "first/plan.json", proofs, "123")
+
     def test_real_extended_campaign_requires_asd(self):
         cfg = json.loads((c.ROOT / "config.json").read_text())
         self.assertIn("asd", cfg["targets"]["extended"]["components"])

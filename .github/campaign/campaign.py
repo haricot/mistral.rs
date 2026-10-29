@@ -11,6 +11,7 @@ import tomllib
 from pathlib import Path
 
 SHA = re.compile(r"[0-9a-f]{40}\Z")
+SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 CANDLE_CRATES = ("candle-core", "candle-nn", "candle-flash-attn-v3", "candle-metal-kernels")
 ROOT = Path(__file__).resolve().parent
 META = "mistral-integration/sources.json"
@@ -454,7 +455,7 @@ def promote(repo, plan_path, proofs, run_id):
             raise RuntimeError("Extended ASD provenance/runtime evidence is missing")
         if any(gpu.get("asd_test_counts", {}).get(n, 0) < 1 for n in ("asd", "extended")):
             raise RuntimeError("Extended ASD GPU smoke proof missing")
-        if any(not SHA.fullmatch(gpu.get("asd_profiles", {}).get(n, ""))
+        if any(not SHA256.fullmatch(gpu.get("asd_profiles", {}).get(n, ""))
                for n in ("current.json", "current.asd")):
             raise RuntimeError("Extended ASD profile SHA256 evidence missing")
     # LFM3 arrived on master with text, VL and GGUF paths. Exercising
@@ -470,7 +471,7 @@ def promote(repo, plan_path, proofs, run_id):
             result = gpu.get("model_results", {}).get(mode, {})
             if (result.get("status") != "PASS"
                     or result.get("candidate") != plan["candidate"]
-                    or not SHA.fullmatch(result.get("artifact_sha256", ""))):
+                    or not SHA256.fullmatch(result.get("artifact_sha256", ""))):
                 raise RuntimeError(f"missing model-level LFM3 qualification: {mode}")
     for node in plan["matrix"]:
         proof = verify_artifact(Path(proofs) / node["component"], node)
@@ -478,19 +479,22 @@ def promote(repo, plan_path, proofs, run_id):
             raise RuntimeError("physical GPU did not execute the hosted archive")
         if gpu.get("test_counts", {}).get(node["component"], 0) < 1:
             raise RuntimeError("physical GPU test execution is missing")
-    for branch, expected in plan["leases"].items():
-        if remote_head(repo, "origin", branch) != expected:
-            raise RuntimeError(f"source lease changed: {branch}")
-    for branch, candle in plan["candle"].items():
-        if remote_head(repo, "https://github.com/haricot/candle.git", branch) != candle["sha"]:
-            raise RuntimeError("Candle changed during qualification")
     changes = {plan["config"]["components"][n]["branch"]: sha
                for n, sha in plan["components"].items() if n != "extended"}
     changes[plan["config"]["targets"][plan["target"]]["branch"]] = plan["candidate"]
+    checked_leases = {}
+    for branch, expected in plan["leases"].items():
+        current = remote_head(repo, "origin", branch)
+        if current != expected and current != changes.get(branch):
+            raise RuntimeError(f"source lease changed: {branch}")
+        checked_leases[branch] = current
+    for branch, candle in plan["candle"].items():
+        if remote_head(repo, "https://github.com/haricot/candle.git", branch) != candle["sha"]:
+            raise RuntimeError("Candle changed during qualification")
     args = ["git", "-C", repo, "push", "--atomic", "origin"]
     for branch, sha in changes.items():
         old = plan["leases"][branch]
-        args.extend([f"--force-with-lease=refs/heads/{branch}:{old}", f"{sha}:refs/heads/{branch}"])
+        args.extend([f"--force-with-lease=refs/heads/{branch}:{checked_leases[branch]}", f"{sha}:refs/heads/{branch}"])
         args.append(f"{old}:refs/tags/archive/campaign/{run_id}/{branch}")
     command(args)
 
