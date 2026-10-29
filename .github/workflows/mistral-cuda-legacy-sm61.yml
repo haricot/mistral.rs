@@ -216,8 +216,6 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
   promote:
-    # Qualification pushes stage evidence; publication requires a deliberate dispatch.
-    if: github.event_name == 'workflow_dispatch'
     needs: [prepare, cpu, cuda_compile, gpu]
     runs-on: ubuntu-26.04
     timeout-minutes: 20
