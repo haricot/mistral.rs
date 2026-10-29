@@ -292,6 +292,50 @@ class ProofTests(unittest.TestCase):
         path.write_text('<testsuite><testcase name="campaign_cpu_backend"/></testsuite>')
         self.assertEqual(p.test_count(path, "campaign_cpu_backend"), 1)
 
+    def test_gpu_required_counts_only_matching_passed_cases(self):
+        path = self.root / "gpu-junit.xml"
+        path.write_text(
+            '<testsuites><testsuite>'
+            '<testcase name="campaign_cuda_backend"/>'
+            '<testcase name="cuda_prefill_decode_and_cached_chunks_match_reference"/>'
+            '<testcase name="asd_sm61_smoke"/>'
+            '<testcase name="other_sm61_test"/>'
+            '<testcase name="asd_sm61_smoke_skipped"><skipped/></testcase>'
+            '</testsuite></testsuites>'
+        )
+        self.assertEqual(p.test_count(path, "campaign_cuda_backend"), 4)
+        self.assertEqual(p.test_count(path, "asd_sm61_smoke", matching_only=True), 1)
+        self.assertEqual(p.test_count(
+            path, "cuda_prefill_decode_and_cached_chunks_match_reference",
+            matching_only=True
+        ), 1)
+
+    def test_gpu_required_refuses_only_skipped_or_failing_tests(self):
+        path = self.root / "gpu-junit.xml"
+        path.write_text(
+            '<testsuite><testcase name="campaign_cuda_backend"/>'
+            '<testcase name="asd_sm61_smoke"><skipped/></testcase></testsuite>'
+        )
+        with self.assertRaisesRegex(RuntimeError, "required test did not execute"):
+            p.test_count(path, "asd_sm61_smoke", matching_only=True)
+        path.write_text(
+            '<testsuite><testcase name="campaign_cuda_backend"/>'
+            '<testcase name="asd_sm61_smoke"><failure/></testcase></testsuite>'
+        )
+        with self.assertRaisesRegex(RuntimeError, "JUnit contains failing tests"):
+            p.test_count(path, "asd_sm61_smoke", matching_only=True)
+
+    def test_gpu_required_exact_count_with_two_matching_cases(self):
+        path = self.root / "gpu-junit.xml"
+        path.write_text(
+            '<testsuite><testcase name="asd_sm61_smoke"/>'
+            '<testcase name="other::asd_sm61_smoke"/>'
+            '<testcase name="cuda_prefill_decode_and_cached_chunks_match_reference"/>'
+            '<testcase name="campaign_cuda_backend"/></testsuite>'
+        )
+        self.assertEqual(p.test_count(path, "asd_sm61_smoke", matching_only=True), 2)
+        self.assertEqual(p.test_count(path, "campaign_cuda_backend"), 4)
+
     def test_only_candle_source_conflicts_are_resolved_automatically(self):
         text = ('[workspace.dependencies]\n<<<<<<< HEAD\n'
                 'candle-core = {git="old",version="0.11.0",rev="a"}\n=======\n'

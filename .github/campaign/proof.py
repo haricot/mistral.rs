@@ -18,15 +18,21 @@ def node(plan, component):
     return matches[0]
 
 
-def test_count(path, required):
+def test_count(path, required, *, matching_only=False):
+    """Require executed passing test; count either full suite or matching tests.
+
+    A proof for one named test must never count unrelated successes.
+    The legacy CPU/GPU aggregate counters retain their existing semantics.
+    """
     root = ET.parse(path).getroot()
     cases = list(root.iter("testcase"))
-    passed = [c for c in cases if c.find("skipped") is None]
     if any(c.find("failure") is not None or c.find("error") is not None for c in cases):
         raise RuntimeError("JUnit contains failing tests")
-    if not passed or not any(required in c.get("name", "") for c in passed):
+    passed = [c for c in cases if c.find("skipped") is None]
+    matches = [c for c in passed if required in c.get("name", "")]
+    if not matches:
         raise RuntimeError(f"required test did not execute: {required}")
-    return len(passed)
+    return len(matches) if matching_only else len(passed)
 
 
 def build(directory):
@@ -87,7 +93,7 @@ def main():
     elif args.mode == "gpu-required":
         if args.component not in ("asd_sm61_smoke", "cuda_prefill_decode_and_cached_chunks_match_reference"):
             raise RuntimeError("unsupported required GPU test")
-        print(test_count(args.path, args.component))
+        print(test_count(args.path, args.component, matching_only=True))
     else:
         plan = json.loads(args.plan.read_text())
         verify_build(args.path, node(plan, args.component))
