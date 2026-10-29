@@ -1,100 +1,57 @@
 name: Mistral CUDA Legacy SM61
 on:
   workflow_dispatch:
+  push:
+    branches: [mirror_orch]
+    paths: ['.github/campaign/cuda-reuse-legacy.once']
 permissions:
   contents: read
+  packages: read
 concurrency:
-  group: mistral-standalone-campaign
+  group: mistral-legacy-campaign
   cancel-in-progress: false
 jobs:
+  cuda_image:
+    uses: ./.github/workflows/mistral-cuda-ci-image.yml
+    permissions:
+      contents: read
+      packages: write
+
   prepare:
+    needs: cuda_image
     name: Rebase historical PR and stage immutable candidate
     if: github.ref == 'refs/heads/mirror_orch'
     runs-on: ubuntu-26.04
     timeout-minutes: 90
     permissions:
-      contents: write
+      contents: read
       actions: read
+      packages: read
+    env:
+      CI_CUDA_IMAGE: ${{ needs.cuda_image.outputs.image }}
+      CAMPAIGN_TARGET: legacy
     outputs:
       candidate: ${{ steps.prepare.outputs.candidate }}
       cache_key: ${{ steps.prepare.outputs.cache_key }}
       recipe: ${{ steps.prepare.outputs.recipe }}
       bundle_key: ${{ steps.prepare.outputs.bundle_key }}
       environment_key: ${{ steps.prepare.outputs.environment_key }}
-      compiler_artifact: ${{ steps.prepare.outputs.compiler_artifact }}
-      compiler_artifact_id: ${{ steps.prepare.outputs.compiler_artifact_id || steps.compiler_image.outputs.artifact-id }}
     steps:
       - name: Free unused hosted toolchains for CUDA images and archives
         run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           fetch-depth: 0
-          persist-credentials: true
-      - name: Install pinned preparation toolchain
-        run: rustup toolchain install 1.99.0 --profile minimal --component rustfmt
+          persist-credentials: false
+      - name: Pull the verified immutable CUDA environment
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker pull "$CI_CUDA_IMAGE"
       - name: Prepare independent sources and lock composition
         id: prepare
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          report="$RUNNER_TEMP/campaign"
-          mkdir -p "$report"
-          base="$(python3 -c 'import json;print(json.load(open(".github/campaign/config.json"))["base_image"])')"
-          image_digest="$(docker buildx imagetools inspect "$base" --format '{{json .Manifest.Digest}}' | tr -d '\"')"
-          base="$base@$image_digest"
-          compiler_key="$(python3 - "$base" <<'PYCODE'
-          import hashlib,json,pathlib,sys
-          files={n:hashlib.sha256((pathlib.Path('.github/campaign')/n).read_bytes()).hexdigest() for n in ('Containerfile','install-tools.py','config.json')}
-          print(hashlib.sha256(json.dumps([sys.argv[1],files],sort_keys=True).encode()).hexdigest())
-          PYCODE
-          )"
-          prefix="mistral-compiler-$compiler_key-"
-          prior="$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/artifacts?per_page=100" --jq ".artifacts[] | select(.expired==false and .workflow_run.head_branch==\"mirror_orch\" and (.name | startswith(\"$prefix\"))) | [.id,.name] | @tsv" | sed -n '1p')"
-          if [[ -n "$prior" ]]; then
-            read -r artifact_id artifact_name <<< "$prior"
-            image_id="sha256:${artifact_name##*-}"
-            [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]]
-            echo "compiler_artifact_id=$artifact_id" >> "$GITHUB_OUTPUT"
-            echo 'compiler_cached=true' >> "$GITHUB_OUTPUT"
-          else
-            docker build --provenance=false --build-arg "BASE_IMAGE=$base" -f .github/campaign/Containerfile -t mistral-campaign .github/campaign
-            image_id="$(docker image inspect mistral-campaign --format '{{.Id}}')"
-            artifact_name="$prefix${image_id#sha256:}"
-            mkdir -p "$RUNNER_TEMP/compiler-image"
-            docker save mistral-campaign | zstd -T2 -3 -o "$RUNNER_TEMP/compiler-image/image.tar.zst"
-            python3 - "$RUNNER_TEMP/compiler-image" "$image_id" "$compiler_key" <<'PYCODE'
-          import hashlib,json,pathlib,sys
-          root=pathlib.Path(sys.argv[1])
-          with (root/'image.tar.zst').open('rb') as stream:
-              sha=hashlib.file_digest(stream,'sha256').hexdigest()
-          (root/'compiler.json').write_text(json.dumps({'image_id':sys.argv[2],'compiler_key':sys.argv[3],'archive_sha256':sha})+'\n')
-          PYCODE
-          fi
-          echo "compiler_artifact=$artifact_name" >> "$GITHUB_OUTPUT"
-          image="mistral-compiler@${image_id}"
-          python3 .github/campaign/campaign.py snapshot --repo "$PWD" --target legacy --image "$image" --output "$report/snapshot.json"
-          python3 .github/campaign/campaign.py prepare --repo "$PWD" --snapshot "$report/snapshot.json" --output "$report" --publish
-          candidate="$(jq -r .candidate "$report/plan.json")"
-          echo "candidate=$candidate" >> "$GITHUB_OUTPUT"
-          echo "cache_key=$(jq -r .input_key "$report/plan.json")" >> "$GITHUB_OUTPUT"
-          echo "recipe=$(jq -r .recipe "$report/plan.json")" >> "$GITHUB_OUTPUT"
-          echo "environment_key=$(python3 -c 'import hashlib,json,sys;p=json.load(open(sys.argv[1]));print(hashlib.sha256(json.dumps([p["image"],p["config"]["toolchain"],p["config"]["features"],"sm61","bf16,fp8"],sort_keys=True).encode()).hexdigest())' "$report/plan.json")" >> "$GITHUB_OUTPUT"
-          if [[ legacy == extended ]]; then
-            git push origin "$candidate:refs/heads/integration/asd_runner-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          fi
-          echo "bundle_key=$(python3 -c 'import hashlib,json,sys;print(hashlib.sha256(json.dumps(sorted(n["build_key"] for n in json.load(open(sys.argv[1]))["matrix"])).encode()).hexdigest())' "$report/plan.json")" >> "$GITHUB_OUTPUT"
-          cp -a .github/campaign "$report/orchestrator"
-          echo "candidate=$candidate; CUDA-enabled build, CPU runtime tests and archived physical execution" >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        id: compiler_image
-        if: always() && steps.prepare.outputs.compiler_cached != 'true' && steps.prepare.outputs.compiler_artifact != ''
-        with:
-          name: ${{ steps.prepare.outputs.compiler_artifact }}
-          path: ${{ runner.temp }}/compiler-image/
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 30
+        run: bash .github/campaign/prepare-hosted.sh
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
@@ -115,12 +72,15 @@ jobs:
         run: python3 -B -m unittest discover -v -s .github/campaign/tests
   cuda_compile:
     name: Hosted SM61 CUDA 12.9.2 compile (no GPU)
-    needs: [prepare, cpu]
+    needs: [prepare, cpu, cuda_image]
     runs-on: ubuntu-26.04
     timeout-minutes: 240
     permissions:
       contents: read
       actions: read
+      packages: read
+    env:
+      CI_CUDA_IMAGE: ${{ needs.cuda_image.outputs.image }}
     steps:
       - name: Free unused hosted toolchains for CUDA images and archives
         run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet
@@ -160,36 +120,18 @@ jobs:
               echo 'Reusing matching executable archives and CPU execution proofs' >> "$GITHUB_STEP_SUMMARY"
             fi
           fi
-      - name: Restore the exact compiler image archive
+      - name: Pull the exact verified compiler image
         if: env.REUSE_BUILD != 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
-          COMPILER_ARTIFACT_ID: ${{ needs.prepare.outputs.compiler_artifact_id }}
+          GHCR_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
-          root="$RUNNER_TEMP/compiler-image"
-          mkdir -p "$root"
-          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$COMPILER_ARTIFACT_ID/zip" > "$RUNNER_TEMP/compiler-image.zip"
-          unzip -oq "$RUNNER_TEMP/compiler-image.zip" -d "$root"
-          rm "$RUNNER_TEMP/compiler-image.zip"
-          image_id="$(python3 - "$root" "$RUNNER_TEMP/campaign/plan.json" <<'PYCODE'
-          import hashlib,json,pathlib,sys
-          root=pathlib.Path(sys.argv[1]); manifest=json.loads((root/'compiler.json').read_text())
-          expected=json.load(open(sys.argv[2]))['image'].split('@',1)[1]
-          assert manifest['image_id']==expected, 'compiler image identity mismatch'
-          with (root/'image.tar.zst').open('rb') as stream:
-              assert hashlib.file_digest(stream,'sha256').hexdigest()==manifest['archive_sha256'], 'compiler archive digest mismatch'
-          print(expected)
-          PYCODE
-          )"
-          zstd -dc "$root/image.tar.zst" | docker load
-          test "$(docker image inspect mistral-campaign --format '{{.Id}}')" = "$image_id"
-          rm -rf "$root"
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker pull "$CI_CUDA_IMAGE"
       - name: Verify hosted CPU loader before expensive compilation
         if: env.REUSE_BUILD != 'true'
         run: |
           docker run --rm --user "$(id -u):$(id -g)" --entrypoint python3 \
-            -v "$RUNNER_TEMP:$RUNNER_TEMP:ro" mistral-campaign \
+            -v "$RUNNER_TEMP:$RUNNER_TEMP:ro" "$CI_CUDA_IMAGE" \
             "$RUNNER_TEMP/campaign/orchestrator/cpu-runtime.py" -- \
             python3 -c 'import ctypes; assert ctypes.CDLL("libcuda.so.1").cuInit(0) == 34'
       - name: Compile each independent source and run CPU tests with CUDA enabled
@@ -208,7 +150,7 @@ jobs:
               -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE:rw" -v "$RUNNER_TEMP:$RUNNER_TEMP:rw" \
               -w "$GITHUB_WORKSPACE" -e "HOME=$RUNNER_TEMP/campaign-home" \
               -e "CAMPAIGN_CACHE=$RUNNER_TEMP/campaign-cache" \
-              mistral-campaign "$RUNNER_TEMP/campaign/orchestrator/build.sh" "$dir" "$plan" "$component"
+              "$CI_CUDA_IMAGE" "$RUNNER_TEMP/campaign/orchestrator/build.sh" "$dir" "$plan" "$component"
           done < <(jq -r '.matrix[] | [.component,.candidate,.build_key] | @tsv' "$plan")
       - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
         if: always() && env.REUSE_BUILD != 'true' && steps.compile_cache.outputs.cache-primary-key != ''
@@ -250,6 +192,10 @@ jobs:
         with:
           name: mistral-builds-${{ needs.prepare.outputs.bundle_key }}
           path: ${{ runner.temp }}/builds
+      - name: Verify the pinned Candle physical qualifications before executing downloaded code
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 "$RUNNER_TEMP/campaign/orchestrator/verify-candle.py" "$RUNNER_TEMP/campaign/plan.json"
       - name: Prepare nextest extraction directories
         shell: bash
         run: |
@@ -270,6 +216,8 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
   promote:
+    # Qualification pushes stage evidence; publication requires a deliberate dispatch.
+    if: github.event_name == 'workflow_dispatch'
     needs: [prepare, cpu, cuda_compile, gpu]
     runs-on: ubuntu-26.04
     timeout-minutes: 20
