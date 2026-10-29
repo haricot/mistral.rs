@@ -1,104 +1,87 @@
 name: Mistral CI CUDA 12.9.2 SM61 image
 on:
   workflow_dispatch:
+  workflow_call:
+    outputs:
+      image:
+        description: Independently tested immutable CUDA compiler image
+        value: ${{ jobs.publish.outputs.image }}
+      environment_key:
+        description: Hash of the CUDA environment inputs
+        value: ${{ jobs.publish.outputs.environment_key }}
   push:
-    branches: [mirror_orch]
+    branches: [mirror_orch, ci/cuda-environment-publish]
     paths:
       - .github/workflows/mistral-cuda-ci-image.yml
+      - .github/campaign/cuda-image.json
       - .github/campaign/Containerfile
       - .github/campaign/config.json
       - .github/campaign/install-tools.py
+      - .github/campaign/cuda-image-smoke.sh
+      - .github/scripts/ci-cuda-image.py
+      - .github/scripts/ci-cuda-image-selftest.py
 permissions:
   contents: read
-concurrency:
-  group: mistral-ci-image-${{ github.ref }}
-  cancel-in-progress: false
-
 jobs:
   validate:
-    name: Independently validate the pinned image inputs
+    name: Independently validate CUDA environment reuse
     runs-on: ubuntu-26.04
     timeout-minutes: 15
+    outputs:
+      environment_key: ${{ steps.identity.outputs.environment_key }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           persist-credentials: false
-      - name: Check compiler recipe agrees with version and checksum pins
-        run: |
-          python3 - <<'PYCODE'
-          import json
-          from pathlib import Path
-          config = json.loads(Path(".github/campaign/config.json").read_text())
-          recipe = Path(".github/campaign/Containerfile").read_text()
-          assert config["toolchain"] == "1.99.0"
-          assert config["base_image"] == "nvidia/cuda:12.9.2-devel-ubuntu24.04"
-          assert "ARG RUST_TOOLCHAIN=1.99.0" in recipe
-          assert "ARG BASE_IMAGE=nvidia/cuda:12.9.2-devel-ubuntu24.04" in recipe
-          assert "COPY install-tools.py" in recipe
-          for name in ("nextest", "sccache"):
-              assert len(config[f"{name}_sha256"]) == 64
-              int(config[f"{name}_sha256"], 16)
-          print("MISTRAL_CI_IMAGE_RECIPE=PASS")
-          PYCODE
-      - name: Existing campaign contracts remain independently tested
-        run: python3 -B -m unittest discover -v -s .github/campaign/tests
+      - run: python3 .github/scripts/ci-cuda-image-selftest.py
+      - run: python3 -B -m unittest discover -v -s .github/campaign/tests
+      - id: identity
+        run: python3 .github/scripts/ci-cuda-image.py identity --spec .github/campaign/cuda-image.json
 
   publish:
-    name: Build, smoke-test and publish immutable CUDA image
+    name: Resolve or publish the verified CUDA environment
     needs: validate
+    concurrency:
+      group: ci-cuda-environment-${{ github.repository }}-${{ needs.validate.outputs.environment_key }}
+      cancel-in-progress: false
     runs-on: ubuntu-26.04
     timeout-minutes: 180
     permissions:
       contents: read
       packages: write
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+      environment_key: ${{ steps.image.outputs.environment_key }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           persist-credentials: false
-      - name: Resolve exact NVIDIA base digest and build compiler image
-        shell: bash
-        run: |
-          set -euo pipefail
-          base="$(python3 -c 'import json;print(json.load(open(".github/campaign/config.json"))["base_image"])')"
-          rust="$(python3 -c 'import json;print(json.load(open(".github/campaign/config.json"))["toolchain"])')"
-          digest="$(docker buildx imagetools inspect "$base" --format '{{json .Manifest.Digest}}' | tr -d '"')"
-          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          echo "NVIDIA base $base@$digest" >> "$GITHUB_STEP_SUMMARY"
-          docker build --pull \
-            --build-arg "BASE_IMAGE=$base@$digest" \
-            --build-arg "RUST_TOOLCHAIN=$rust" \
-            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
-            --file .github/campaign/Containerfile \
-            --tag mistral-ci-sm61:candidate .github/campaign
-      - name: Independently smoke-test Rust, nextest, sccache and CUDA
-        shell: bash
-        run: |
-          set -euo pipefail
-          docker run --rm --entrypoint /bin/bash mistral-ci-sm61:candidate -c '
-            set -euo pipefail
-            rustc --version | grep -q "rustc 1.99.0"
-            cargo --version | grep -q "cargo 1.99.0"
-            cargo-nextest nextest --version | grep -q "0.9.138"
-            sccache --version | grep -q "0.12.0"
-            nvcc --version | grep -q "release 12.9"
-          '
-          docker run --rm --entrypoint python3 \
-            -v "$GITHUB_WORKSPACE/.github/campaign:/campaign:ro" mistral-ci-sm61:candidate \
-            /campaign/cpu-runtime.py -- \
-            python3 -c 'import ctypes; assert ctypes.CDLL("libcuda.so.1").cuInit(0) == 34'
-      - name: Publish to GHCR only after independent tests passed
-        shell: bash
+      - name: Authenticate the repository package publisher
         env:
           GHCR_TOKEN: ${{ github.token }}
+        run: echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - name: Reuse matching inputs or build and independently smoke-test a new environment
+        id: image
+        run: python3 .github/scripts/ci-cuda-image.py ensure --spec .github/campaign/cuda-image.json --output "$RUNNER_TEMP/cuda-image-first.json"
+      - name: Prove the next identical resolution reuses the exact published image
         run: |
-          set -euo pipefail
-          image="ghcr.io/haricot/mistral-ci-sm61"
-          tag="$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          docker tag mistral-ci-sm61:candidate "$image:$tag"
-          docker push "$image:$tag"
-          digest="$(docker buildx imagetools inspect "$image:$tag" --format '{{json .Manifest.Digest}}' | tr -d '"')"
-          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          echo "MISTRAL_CI_IMAGE=PASS image=$image@$digest"
-          echo "Image (use digest for P2): $image@$digest" >> "$GITHUB_STEP_SUMMARY"
-          echo "P1 only: existing Mistral Extended jobs are unchanged and still use their current compiler archive." >> "$GITHUB_STEP_SUMMARY"
+          python3 .github/scripts/ci-cuda-image.py ensure --spec .github/campaign/cuda-image.json --output "$RUNNER_TEMP/cuda-image-second.json"
+          python3 - <<'PY'
+          import json,os
+          from pathlib import Path
+          root=Path(os.environ["RUNNER_TEMP"])
+          first=json.loads((root/"cuda-image-first.json").read_text())
+          second=json.loads((root/"cuda-image-second.json").read_text())
+          assert second["rebuilt"] is False
+          assert first["image"] == second["image"]
+          assert first["environment_key"] == second["environment_key"]
+          with open(os.environ["GITHUB_STEP_SUMMARY"],"a") as out:
+              out.write("CUDA_ENVIRONMENT_REUSE=PASS image="+second["image"]+"\\n")
+          PY
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: cuda-environment-${{ github.run_id }}-${{ github.run_attempt }}-mistral
+          path: ${{ runner.temp }}/cuda-image-*.json
+          if-no-files-found: warn
+          retention-days: 30

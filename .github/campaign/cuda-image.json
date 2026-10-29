@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "repository": "haricot/mistral.rs",
+  "image": "ghcr.io/haricot/mistral-ci-sm61",
+  "base_image": "nvidia/cuda:12.9.2-devel-ubuntu24.04@sha256:16656a1ef115bca9e1f820c6349876f1486d2b3c9a0e615773799fe402960dc5",
+  "recipe": ".github/campaign/Containerfile",
+  "context": ".github/campaign",
+  "files": [
+    ".github/campaign/Containerfile",
+    ".github/campaign/install-tools.py"
+  ],
+  "build_args": {
+    "RUST_TOOLCHAIN": "1.99.0"
+  },
+  "config": {
+    "path": ".github/campaign/config.json",
+    "keys": [
+      "toolchain",
+      "base_image",
+      "nextest_version",
+      "nextest_sha256",
+      "sccache_version",
+      "sccache_sha256"
+    ]
+  },
+  "smoke": ".github/campaign/cuda-image-smoke.sh",
+  "bootstrap": {
+    "environment_key": "60758ceb3c7992bacc657d2da0adcb2805f80e7f307df64133149918163c7f57",
+    "image": "ghcr.io/haricot/mistral-ci-sm61@sha256:1ea7476aee23aed947918bb7159aaf82ae9f4e98caec19db1160768000354eee"
+  }
+}
