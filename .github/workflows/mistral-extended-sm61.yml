@@ -236,6 +236,8 @@ jobs:
   gpu:
     name: SM61 Mistral Extended runtime (candidate=${{ needs.prepare.outputs.candidate }})
     needs: [prepare, cpu, cuda_compile]
+    env:
+      ASD_REQUIRED: "true"
     runs-on: [mistral-extended, "mistral-extended-${{ github.run_id }}"]
     timeout-minutes: 60
     steps:

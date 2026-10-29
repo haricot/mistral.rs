@@ -352,6 +352,15 @@ def prepare(repo, snapshot_path, output, publish=False):
             import_checkout(repo, node)
         if publish:
             publish_ref(repo, ref, candidate)
+        if ("asd" in cfg["targets"]["extended"]["components"]
+                and ("asd" not in objects or not contract["asd_required"]
+                or contract["components"].get("asd") != objects["asd"]
+                or not ancestor(repo, objects["asd"], candidate))):
+            raise RuntimeError("Extended candidate lacks mandatory ASD ancestry")
+        if "asd" in cfg["targets"]["extended"]["components"] and "mistralrs-core/tests/asd_sm61_smoke.rs" not in git(
+            repo, "ls-tree", "-r", "--name-only", candidate
+        ).splitlines():
+            raise RuntimeError("Extended candidate lacks ASD GPU smoke test")
         objects["extended"] = candidate
     matrix = []
     for name, sha in objects.items():
@@ -397,6 +406,19 @@ def promote(repo, plan_path, proofs, run_id):
             or gpu.get("status") != "GPU_PASSED" or gpu.get("target") != "sm_61"
             or gpu.get("gpu_executed") is not True):
         raise RuntimeError("physical GPU proof does not match campaign")
+    if (plan["target"] == "extended"
+            and "asd" in plan["config"]["targets"]["extended"]["components"]):
+        matrices = {item["component"] for item in plan["matrix"]}
+        if ("asd" not in plan["config"]["targets"]["extended"]["components"]
+                or "asd" not in plan["components"]
+                or not {"asd", "extended"}.issubset(matrices)
+                or gpu.get("asd_required") is not True):
+            raise RuntimeError("Extended ASD provenance/runtime evidence is missing")
+        if any(gpu.get("asd_test_counts", {}).get(n, 0) < 1 for n in ("asd", "extended")):
+            raise RuntimeError("Extended ASD GPU smoke proof missing")
+        if any(not SHA.fullmatch(gpu.get("asd_profiles", {}).get(n, ""))
+               for n in ("current.json", "current.asd")):
+            raise RuntimeError("Extended ASD profile SHA256 evidence missing")
     for node in plan["matrix"]:
         proof = verify_artifact(Path(proofs) / node["component"], node)
         if gpu.get("archives", {}).get(node["component"]) != proof["files"]["tests.tar.zst"]:
