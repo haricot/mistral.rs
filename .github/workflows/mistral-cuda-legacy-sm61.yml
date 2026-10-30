@@ -51,6 +51,8 @@ jobs:
           docker pull "$CI_CUDA_IMAGE"
       - name: Prepare independent sources and lock composition
         id: prepare
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: bash .github/campaign/prepare-hosted.sh
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()

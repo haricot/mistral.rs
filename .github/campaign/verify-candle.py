@@ -23,7 +23,8 @@ def verify(plan):
     for branch, entry in plan["candle"].items():
         kind = "legacy" if branch == "cuda_legacy" else "extended"
         refname = entry["validation_ref"]
-        match = re.fullmatch(r"refs/(?:heads|tags)/archive/" + kind + r"/sm61-validated-(\d+)(?:-\d+)?", refname)
+        prefix = r"(?:refs/(?:heads|tags)/archive/|refs/tags/archive/candle-pruned-\d{8}/archive/)"
+        match = re.fullmatch(prefix + kind + r"/sm61-validated-(\d+)(?:-\d+)?", refname)
         if not match or not re.fullmatch("[a-f0-9]{40}", entry["sha"]):
             raise RuntimeError("invalid Candle physical proof identity")
         ref = get("/git/ref/" + refname.removeprefix("refs/"))

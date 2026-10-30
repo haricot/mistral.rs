@@ -5,6 +5,7 @@ report="$RUNNER_TEMP/campaign"
 mkdir -p "$report" "$RUNNER_TEMP/prepare-home" "$RUNNER_TEMP/prepare-cargo"
 python3 .github/campaign/campaign.py snapshot --repo "$PWD" --target "$CAMPAIGN_TARGET" \
   --image "$CI_CUDA_IMAGE" --output "$report/snapshot.json"
+python3 .github/campaign/verify-candle.py "$report/snapshot.json"
 docker run --rm --user "$(id -u):$(id -g)" --security-opt=no-new-privileges \
   --volume "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE:rw" \
   --volume "$RUNNER_TEMP:$RUNNER_TEMP:rw" --workdir "$GITHUB_WORKSPACE" \
