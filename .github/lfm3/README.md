@@ -82,8 +82,21 @@ pushes remain in effect. Missing initial model evidence still refuses promotion.
 
 Local validation:
 
+GGUF uses its embedded tokenizer fallback instead of forcing the Text
+`tokenizer.json`. The local Text snapshot remains the explicit base-model
+asset directory; upstream vocabulary checks remain enabled.
+
+The collection-only `resume_measurements_run` input can reuse the established
+Text/VL observations from the pinned measurement harness revision. Preparation
+verifies the original workflow, hosted jobs, artifact digests, model policy,
+candidate identities, ASD hashes and raw references. Hosted compilation must
+produce byte-identical executables before a GPU job becomes eligible. Reused
+cases retain their original run, GPU, driver and archive digest in the report;
+only GGUF runs again. This does not authorize promotion or change tolerance.
+
 ```bash
 python3 -B -m unittest discover -v -s .github/lfm3/tests
 python3 -B -m unittest discover -v -s .github/campaign/tests
 ```
+
 

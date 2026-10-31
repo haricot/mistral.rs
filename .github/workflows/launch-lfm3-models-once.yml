@@ -14,5 +14,6 @@ jobs:
       - name: Dispatch the full supplementary campaign without rerunning original GPU jobs
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh workflow run lfm3-model-sm61-qualification.yml --repo haricot/mistral.rs --ref mirror_orch -f legacy_run=41080696084 -f extended_run=41080753574 -f collection_only=true
+        run: gh workflow run lfm3-model-sm61-qualification.yml --repo haricot/mistral.rs --ref mirror_orch -f legacy_run=41080696084 -f extended_run=41080753574 -f collection_only=true -f resume_measurements_run=41220084110
+
 

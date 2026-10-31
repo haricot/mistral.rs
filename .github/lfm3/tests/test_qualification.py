@@ -279,7 +279,118 @@ class QualificationTests(unittest.TestCase):
                 self.collection(observed, corrupt_binary=True)
             observed.assert_not_called()
 
+    def test_gguf_does_not_force_the_external_tokenizer(self):
+        paths = {m: self.root / m for m in q.MODES}
+        for path in paths.values(): path.mkdir()
+        q.write(paths["text"] / "config.json", {"num_hidden_layers": 32})
+        q.write(paths["vl"] / "config.json", {"text_config": {"num_hidden_layers": 32}})
+        for mode in q.MODES:
+            with self.subTest(mode=mode), mock.patch.object(q.subprocess, "Popen") as launch:
+                launch.return_value.poll.return_value = None
+                with mock.patch.object(q, "http", side_effect=[{"data": [{"id": "unit-test"}]}, {"choices": []}]):
+                    q.infer(self.root / "unit-test-binary", mode, "cuda", paths, self.policy, self.root / (mode + ".log"))
+                args = launch.call_args.args[0]
+                if mode == "gguf":
+                    self.assertNotIn("--tokenizer", args)
+                    self.assertEqual(args[args.index("--tok-model-id") + 1], str(paths["text"]))
+                    self.assertEqual(args[args.index("--format") + 1], "gguf")
+                else:
+                    self.assertEqual(args[args.index("--tokenizer") + 1], str(paths[mode] / "tokenizer.json"))
+                launch.return_value.terminate.assert_called_once()
+
+    def resumed_fixture(self):
+        context, previous = self.report()
+        output = self.root / "resumed"
+        directory = output / "reused-measurements"
+        directory.mkdir(parents=True)
+        context.update(collection_only=True, resumed_measurements={"run_id": 123, "artifact": {"digest": "sha256:" + "d" * 64}})
+        previous.update(run_id="123", run_attempt="1")
+        for runtime in q.RUNTIMES:
+            candidate = q.digest(runtime)[:40]
+            context["runtimes"][runtime]["candidate"] = candidate
+            binary = output / "binaries" / runtime / "mistralrs"
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(b"unit-test-only")
+            build = {**context["runtimes"][runtime], "candidate": candidate,
+                     "binary_sha256": q.sha(binary), "cargo_check": "PASS"}
+            q.write(binary.parent / "build.json", build)
+            previous["runtimes"][runtime].update(build)
+            for mode in ("text", "vl"):
+                for device in ("cpu", "cuda"):
+                    name = f"{runtime}-{mode}-{device}"
+                    q.write(directory / (name + ".json"), self.evidence(device))
+                    (directory / (name + ".log")).write_text("unit-test server log")
+                    for suffix in (".json", ".log"):
+                        previous["files"][name + suffix] = q.sha(directory / (name + suffix))
+        q.write(directory / "report.json", previous)
+        report = {**previous, "run_id": "456", "runtimes": {}, "files": {}, "status": "COLLECTING"}
+        return output, context, report
+
+    def test_resumed_collection_executes_only_four_gguf_inferences(self):
+        output, context, report = self.resumed_fixture()
+        with mock.patch.object(q, "infer", side_effect=lambda _b, _m, d, *_: self.evidence(d)) as infer:
+            with contextlib.redirect_stdout(io.StringIO()):
+                complete, passed = q.collect_models(output, context, {}, report)
+        self.assertTrue(complete and passed)
+        self.assertEqual(infer.call_count, 4)
+        self.assertTrue(all(call.args[1] == "gguf" for call in infer.call_args_list))
+        for runtime in q.RUNTIMES:
+            models = report["runtimes"][runtime]["models"]
+            for mode in ("text", "vl"):
+                self.assertEqual(models[mode]["evidence_origin"]["run_id"], "123")
+                self.assertTrue(models[mode]["evidence_origin"]["reused"])
+            self.assertEqual(models["gguf"]["evidence_origin"]["run_id"], "456")
+        with self.assertRaises(RuntimeError): q.check_report(output / "model-proof", context)
+
+    def test_reused_measurement_requires_identical_binary_sha256(self):
+        output, context, report = self.resumed_fixture()
+        proof = q.read(output / "binaries/legacy/build.json")
+        proof["binary_sha256"] = "f" * 64
+        (output / "model-proof").mkdir()
+        with self.assertRaisesRegex(RuntimeError, "exact executable"):
+            q.reuse_case(output, context, "legacy", "text", proof)
+
+    def test_reused_measurement_rejects_changed_raw_json(self):
+        output, context, report = self.resumed_fixture()
+        (output / "model-proof").mkdir()
+        (output / "reused-measurements/legacy-text-cpu.json").write_text("{}")
+        with self.assertRaisesRegex(RuntimeError, "raw observation"):
+            q.reuse_case(output, context, "legacy", "text", q.read(output / "binaries/legacy/build.json"))
+
+    def test_measurement_reuse_never_enables_strict_promotion(self):
+        with mock.patch.object(q, "api") as api:
+            with self.assertRaisesRegex(RuntimeError, "limited to collection-only"):
+                q.prepare_measurement_reuse(self.root, {"collection_only": False}, 123)
+            api.assert_not_called()
+
+    def test_preparation_validates_and_restores_original_measurements(self):
+        output, context, _ = self.resumed_fixture()
+        source = output / "reused-measurements"
+        previous = q.read(source / "report.json")
+        previous["files"] = {name: value for name, value in previous["files"].items() if (source / name).is_file()}
+        for runtime in q.RUNTIMES:
+            previous["runtimes"][runtime]["image"] = self.policy["image"]
+        q.write(source / "report.json", previous)
+        destination = self.root / "new-preparation"
+        destination.mkdir()
+        prior = {"path": q.WORKFLOW, "event": "workflow_dispatch", "head_branch": "mirror_orch",
+                 "status": "completed", "head_sha": q.MEASUREMENT_SOURCE_SHA, "run_attempt": 1}
+        jobs = [{"name": n, "conclusion": "success"} for n in ("prepare", "cpu", "cuda_compile")]
+        jobs.append({"name": "SM61 Mistral Extended runtime (candidate=" + context["runtimes"]["extended"]["candidate"] + ")",
+                     "id": 1234, "status": "completed"})
+        def download(artifact, path):
+            if artifact["id"] == 1: q.write(path / "context.json", context)
+            else: q.shutil.copytree(source, path)
+        def artifact(_run, prefix): return {"id": 1 if prefix.startswith("mistral-asd-prep-") else 2}
+        with mock.patch.object(q, "api", side_effect=[prior, {"jobs": jobs, "total_count": len(jobs)}]):
+            with mock.patch.object(q, "artifact_for", side_effect=artifact), mock.patch.object(q, "download_artifact", side_effect=download):
+                with contextlib.redirect_stdout(io.StringIO()): q.prepare_measurement_reuse(destination, context, 123)
+        self.assertEqual(context["resumed_measurements"]["run_id"], 123)
+        self.assertEqual(context["resumed_measurements"]["gpu_job_id"], 1234)
+        self.assertFalse((destination / "previous-preparation").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

@@ -27,6 +27,7 @@ REQUEST_TIMEOUT = 600
 IMAGE_EDGE = 64
 HEX256 = re.compile(r"[0-9a-f]{64}\Z")
 MODEL_ERRORS = (RuntimeError, ValueError, KeyError, IndexError, TypeError, OSError, subprocess.CalledProcessError)
+MEASUREMENT_SOURCE_SHA = "b804e46bb4322f1c3b64887c50feda83f0947ade"
 
 
 def sha(path):
@@ -201,7 +202,60 @@ def check_report(directory, context):
     return report
 
 
-def prepare(repo, output, legacy_run, extended_run, collection_only=False):
+def prepare_measurement_reuse(output, ctx, run_id):
+    if not ctx["collection_only"]:
+        raise RuntimeError("partial measurement reuse is limited to collection-only campaigns")
+    prior = api(f"/actions/runs/{run_id}")
+    if (prior["path"] != WORKFLOW or prior["event"] != "workflow_dispatch" or prior["head_branch"] != "mirror_orch"
+            or prior["status"] != "completed" or prior["head_sha"] != MEASUREMENT_SOURCE_SHA):
+        raise RuntimeError("unrecognized original measurement harness or active campaign")
+    jobs = api(f"/actions/runs/{run_id}/jobs?per_page=100")
+    if len(jobs["jobs"]) != jobs["total_count"]:
+        raise RuntimeError("incomplete measurement job inventory")
+    for name in ("prepare", "cpu", "cuda_compile"):
+        found = [j for j in jobs["jobs"] if j["name"] == name]
+        if len(found) != 1 or found[0]["conclusion"] != "success":
+            raise RuntimeError("original measurement hosted gates did not pass")
+    prep = artifact_for(run_id, "mistral-asd-prep-")
+    previous = output / "previous-preparation"
+    download_artifact(prep, previous)
+    old = read(previous / "context.json")
+    if old.get("policy") != ctx["policy"] or old.get("asd_profiles") != ctx["asd_profiles"] or not old.get("collection_only"):
+        raise RuntimeError("measurement policy, weights or ASD profiles changed")
+    artifact = artifact_for(run_id, "lfm3-model-measurements-")
+    directory = output / "reused-measurements"
+    download_artifact(artifact, directory)
+    report = read(directory / "report.json")
+    if (report.get("run_id") != str(run_id) or report.get("run_attempt") != str(prior["run_attempt"])
+            or report.get("fingerprint") != old["fingerprint"] or report.get("asd_profiles") != ctx["asd_profiles"]
+            or report.get("sm") != ctx["policy"]["sm"] or not report.get("gpu_uuid") or not report.get("driver")):
+        raise RuntimeError("measurement report provenance mismatch")
+    physical = [j for j in jobs["jobs"] if j["name"] == "SM61 Mistral Extended runtime (candidate=" + ctx["runtimes"]["extended"]["candidate"] + ")"]
+    if len(physical) != 1 or physical[0]["status"] != "completed":
+        raise RuntimeError("original measurement physical job is missing or active")
+    for name, expected in report["files"].items():
+        if Path(name).name != name or not HEX256.fullmatch(expected) or sha(directory / name) != expected:
+            raise RuntimeError("reused measurement SHA256 mismatch")
+    for runtime in RUNTIMES:
+        origin = report["runtimes"][runtime]
+        if (origin["candidate"] != ctx["runtimes"][runtime]["candidate"]
+                or origin["fingerprint"] != old["runtimes"][runtime]["fingerprint"]
+                or origin["image"] != ctx["policy"]["image"] or origin["cargo_check"] != "PASS"
+                or not HEX256.fullmatch(origin["binary_sha256"])):
+            raise RuntimeError("reused executable provenance changed")
+        for mode in ("text", "vl"):
+            case = origin["models"][mode]
+            numeric = measure(read(directory / f"{runtime}-{mode}-cpu.json"),
+                              read(directory / f"{runtime}-{mode}-cuda.json"), ctx["policy"])
+            if case.get("errors") or case["weights"] != ctx["policy"]["models"][mode] or any(case.get(k) != v for k, v in numeric.items()):
+                raise RuntimeError("reused Text/VL references are incomplete or changed")
+    ctx["resumed_measurements"] = {"run_id": run_id, "head_sha": prior["head_sha"], "artifact": artifact,
+                                    "preparation_artifact": prep, "gpu_job_id": physical[0]["id"]}
+    shutil.rmtree(previous)
+    print(f"LFM3_MEASUREMENTS_REUSED={run_id} modes=text,vl original numeric verdicts retained")
+
+
+def prepare(repo, output, legacy_run, extended_run, collection_only=False, resume_measurements_run=0):
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
     policy = read(ROOT / "models.json")
@@ -218,6 +272,8 @@ def prepare(repo, output, legacy_run, extended_run, collection_only=False):
     ctx["fingerprint"] = digest({"runtimes": {r: ctx["runtimes"][r]["fingerprint"] for r in RUNTIMES},
                                   "asd_profiles": ctx["asd_profiles"]})
     ctx["reuse_models"] = False
+    if resume_measurements_run:
+        prepare_measurement_reuse(output, ctx, resume_measurements_run)
     name = "lfm3-model-proof-" + ctx["fingerprint"]
     data = {"artifacts": []} if collection_only else api("/actions/artifacts?name=" + name + "&per_page=100")
     for artifact in data["artifacts"]:
@@ -268,6 +324,10 @@ def build(repo, output, target):
     dest = output / "binaries" / target
     dest.mkdir(parents=True, exist_ok=True)
     shutil.copy2(Path(env["CARGO_TARGET_DIR"]) / "campaign/mistralrs", dest / "mistralrs")
+    if ctx.get("resumed_measurements"):
+        previous = read(output / "reused-measurements/report.json")
+        if sha(dest / "mistralrs") != previous["runtimes"][target]["binary_sha256"]:
+            raise RuntimeError("compiled executable changed; previous model measurements cannot be reused")
     subprocess.run(["python3", ROOT.parent / "campaign/cpu-runtime.py", "--", dest / "mistralrs", "serve", "--help"],
                    check=True, stdout=subprocess.DEVNULL)
     write(dest / "build.json", {"schema": 1, **ctx["runtimes"][target], "binary_sha256": sha(dest / "mistralrs"),
@@ -311,10 +371,11 @@ def infer(binary, mode, device, paths, policy, log):
         port = sock.getsockname()[1]
     args = [str(binary), "serve", "-m", str(paths[mode]), "--dtype", policy["dtype"],
             "--host", "127.0.0.1", "--port", str(port), "--no-ui", "--paged-attn", "off",
-            "--max-model-len", str(policy["max_model_len"]), "--tokenizer", str(paths["text"] / "tokenizer.json")]
+            "--max-model-len", str(policy["max_model_len"])]
     if mode == "vl":
-        args[-1] = str(paths["vl"] / "tokenizer.json")
-        args += ["--max-edge", "128", "--max-num-images", "1"]
+        args += ["--tokenizer", str(paths["vl"] / "tokenizer.json"), "--max-edge", "128", "--max-num-images", "1"]
+    elif mode == "text":
+        args += ["--tokenizer", str(paths["text"] / "tokenizer.json")]
     if mode == "gguf":
         args += ["--format", "gguf", "-f", "LFM3-1.7B-Q4_K_M.gguf", "--tok-model-id", str(paths["text"])]
     if device == "cpu":
@@ -455,6 +516,30 @@ def save_measurements(dest, report):
     write(dest / "report.json", report)
 
 
+def reuse_case(output, ctx, runtime, mode, build_proof):
+    directory = output / "reused-measurements"
+    old = read(directory / "report.json")
+    origin = old["runtimes"][runtime]
+    if (origin["candidate"] != build_proof["candidate"] or origin["binary_sha256"] != build_proof["binary_sha256"]
+            or old["asd_profiles"] != ctx["asd_profiles"]):
+        raise RuntimeError("reused model observations do not match the exact executable or ASD profile")
+    pair = {}
+    for device in ("cpu", "cuda"):
+        name = f"{runtime}-{mode}-{device}"
+        for suffix in (".json", ".log"):
+            filename = name + suffix
+            if filename not in old["files"] or sha(directory / filename) != old["files"][filename]:
+                raise RuntimeError("reused raw observation or server log changed")
+            shutil.copy2(directory / filename, output / "model-proof" / filename)
+        pair[device] = read(directory / (name + ".json"))
+    case = measure(pair["cpu"], pair["cuda"], ctx["policy"])
+    case.update(weights=ctx["policy"]["models"][mode], errors={}, evidence_origin={
+        "run_id": old["run_id"], "run_attempt": old["run_attempt"], "gpu_uuid": old["gpu_uuid"],
+        "driver": old["driver"], "candidate": origin["candidate"], "binary_sha256": origin["binary_sha256"],
+        "artifact_sha256": ctx["resumed_measurements"]["artifact"]["digest"], "reused": True})
+    return case
+
+
 def collect_models(output, ctx, paths, report):
     dest = output / "model-proof"
     dest.mkdir(exist_ok=True)
@@ -468,9 +553,17 @@ def collect_models(output, ctx, paths, report):
         binary.chmod(0o755)
         actual = report["runtimes"][runtime] = {**build_proof, "models": {}}
         for mode in MODES:
+            if ctx.get("resumed_measurements") and mode in ("text", "vl"):
+                actual["models"][mode] = reuse_case(output, ctx, runtime, mode, build_proof)
+                print(f"LFM3_MODEL_REUSED={runtime}-{mode} original_run={ctx['resumed_measurements']['run_id']} "
+                      f"status={actual['models'][mode]['status']}", flush=True)
+                save_measurements(dest, report)
+                continue
             pair = {}
             result = actual["models"][mode] = {"status": "COLLECTING", "cpu_executed": False,
-                "cuda_executed": False, "weights": ctx["policy"]["models"][mode], "errors": {}}
+                "cuda_executed": False, "weights": ctx["policy"]["models"][mode], "errors": {},
+                "evidence_origin": {"run_id": report.get("run_id"), "run_attempt": report.get("run_attempt"),
+                                    "gpu_uuid": report.get("gpu_uuid"), "driver": report.get("driver"), "reused": False}}
             for device in ("cpu", "cuda"):
                 name = f"{runtime}-{mode}-{device}"
                 print("LFM3_MODEL_EXECUTE=" + name, flush=True)
@@ -502,8 +595,8 @@ def collect_models(output, ctx, paths, report):
     lines = ["# LFM3 physical measurements", "", f"Collection complete: {complete}. Numeric verdict: {report['numeric_status']}.",
              f"Collection only: {report['collection_only']}. Promotion eligible: {report['promotion_eligible']}.", "",
              f"Unchanged absolute logprob tolerance: {ctx['policy']['logprob_abs_tolerance']}.", "",
-             "| Runtime | Model | CPU/CUDA executed | Greedy equal | Max generated logprob error | Max common top logprob error | Max common top probability error | Verdict |",
-             "| --- | --- | --- | --- | --- | --- | --- | --- |"]
+             "| Runtime | Model | CPU/CUDA executed | Greedy equal | Max generated logprob error | Max common top logprob error | Max common top probability error | Evidence run | Verdict |",
+             "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
     for runtime in RUNTIMES:
         for mode in MODES:
             x = report["runtimes"][runtime]["models"][mode]
@@ -511,7 +604,9 @@ def collect_models(output, ctx, paths, report):
             values = [runtime, mode, f"{x['cpu_executed']}/{x['cuda_executed']}", metrics.get("greedy_tokens_equal", "n/a")]
             values += [f"{metrics[k]:.7g}" if k in metrics else "n/a" for k in
                        ("max_generated_logprob_error", "max_common_top_logprob_error", "max_common_top_probability_error")]
-            lines.append("| " + " | ".join(map(str, values + [x["status"]])) + " |")
+            evidence = x["evidence_origin"]
+            origin = str(evidence["run_id"]) + (" (reused)" if evidence["reused"] else "")
+            lines.append("| " + " | ".join(map(str, values + [origin, x["status"]])) + " |")
     for runtime in RUNTIMES:
         for mode in MODES:
             x = report["runtimes"][runtime]["models"][mode]
@@ -628,9 +723,10 @@ def main():
     p.add_argument("--target", choices=RUNTIMES)
     p.add_argument("--evidence-run", type=int)
     p.add_argument("--collection-only", action="store_true")
+    p.add_argument("--resume-measurements-run", type=int, default=0)
     a = p.parse_args()
     if a.action == "prepare":
-        prepare(a.repo, a.output, a.legacy_run, a.extended_run, a.collection_only)
+        prepare(a.repo, a.output, a.legacy_run, a.extended_run, a.collection_only, a.resume_measurements_run)
     elif a.action == "build":
         build(a.repo, a.output, a.target)
     elif a.action == "execute":
@@ -646,4 +742,5 @@ if __name__ == "__main__":
         main()
     except (RuntimeError, ValueError, KeyError, OSError, subprocess.CalledProcessError) as error:
         raise SystemExit("LFM3_QUALIFICATION_REJECT=" + str(error))
+
 
