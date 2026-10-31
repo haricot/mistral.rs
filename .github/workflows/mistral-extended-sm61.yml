@@ -1,4 +1,5 @@
 name: Mistral Extended SM61
+run-name: 'SM61 shared qualification — Extended + Legacy (one GPU session)'
 on:
   workflow_dispatch:
   # One-shot LFM3 qualification. This does not run on every master sync.
