@@ -223,6 +223,7 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: write
+      actions: read
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
@@ -240,7 +241,13 @@ jobs:
         with:
           name: mistral-legacy-gpu-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/proofs/gpu
+      - name: Restore complete model evidence for unchanged runtime inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git fetch "$RUNNER_TEMP/campaign/candidate.bundle" 'refs/heads/integration/campaign/*:refs/remotes/build/*'
+          python3 .github/lfm3/restore.py --repo "$PWD" --plan "$RUNNER_TEMP/campaign/plan.json" --proofs "$RUNNER_TEMP/proofs"
       - name: Publish verified standalones and final branch atomically
         run: |
           git fetch "$RUNNER_TEMP/campaign/candidate.bundle" 'refs/heads/integration/campaign/*:refs/remotes/build/*'
-          python3 "$RUNNER_TEMP/campaign/orchestrator/campaign.py" promote --repo "$PWD" --plan "$RUNNER_TEMP/campaign/plan.json" --proofs "$RUNNER_TEMP/proofs" --run-id "$GITHUB_RUN_ID"
+          python3 .github/campaign/campaign.py promote --repo "$PWD" --plan "$RUNNER_TEMP/campaign/plan.json" --proofs "$RUNNER_TEMP/proofs" --run-id "$GITHUB_RUN_ID"

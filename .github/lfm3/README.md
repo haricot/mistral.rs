@@ -33,6 +33,14 @@ invalidate model execution. Reused reports retain their actual execution run,
 candidate, GPU and driver; reuse does not fabricate a new execution. Original
 per-candidate CPU and physical kernel proofs remain mandatory.
 
+The normal Legacy and Extended promotion jobs also restore complete model
+evidence automatically when their final runtime fingerprint matches. Original
+candidate-specific CPU and CUDA proofs still have to pass. A missing or stale
+model proof refuses publication; it never becomes a kernel-only validation.
+Legacy retains its existing automatic promotion policy after all gates pass;
+Extended retains its explicit dispatch policy. Model artifacts are retained
+for 90 days, and unavailable evidence cannot satisfy the gate.
+
 The updated runner supplies these commands, from its extracted directory:
 
 ```bash
