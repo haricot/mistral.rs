@@ -313,10 +313,11 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         run: |
           set -euo pipefail
+          # GitHub artifact downloads normalize file permissions.
+          chmod +x "$RUNNER_TEMP/extended-release-r1/mistralrs"
           python3 "$RUNNER_TEMP/campaign/orchestrator/release_r1.py" verify \
             --plan "$RUNNER_TEMP/campaign/plan.json" \
             --dir "$RUNNER_TEMP/extended-release-r1"
-          chmod +x "$RUNNER_TEMP/extended-release-r1/mistralrs"
           "$RUNNER_TEMP/extended-release-r1/mistralrs" --help \
             > "$RUNNER_TEMP/gpu-proof/release-r1-help.txt"
           ldd "$RUNNER_TEMP/extended-release-r1/mistralrs" \
@@ -396,6 +397,7 @@ jobs:
           path: ${{ runner.temp }}/extended-release-r1
       - name: Verify release digest and candidate identity
         run: |
+          chmod +x "$RUNNER_TEMP/extended-release-r1/mistralrs"
           python3 .github/campaign/release_r1.py verify \
             --plan "$RUNNER_TEMP/campaign/plan.json" \
             --dir "$RUNNER_TEMP/extended-release-r1"
