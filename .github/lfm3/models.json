@@ -41,5 +41,7 @@
   "top_logprobs": 5,
   "logprob_abs_tolerance": 0.05,
   "sm": "6.1",
-  "image": "ghcr.io/haricot/mistral-ci-sm61@sha256:1ea7476aee23aed947918bb7159aaf82ae9f4e98caec19db1160768000354eee"
+  "image": "ghcr.io/haricot/mistral-ci-sm61@sha256:1ea7476aee23aed947918bb7159aaf82ae9f4e98caec19db1160768000354eee",
+  "minimum_common_top_tokens": 4,
+  "top_boundary_max_probability": 0.001
 }

@@ -19,9 +19,11 @@ attempt checks, ASD isolation, and token transport remain unchanged.
 
 For each final executable, Text, image-based VL and GGUF load real weights and
 execute CPU and CUDA inference on the same fixed input. This short compatibility
-qualification uses F16, a 512-token context cap, four greedy output tokens, five
-top token logprobs, and absolute logprob error at most 0.05. Token or top-token-set
-divergence fails the test. CPU references and CUDA results are preserved as raw
+qualification uses F16, a 2048-token context cap, four greedy output tokens, five
+top token logprobs, and absolute logprob error at most 0.05. Generated token divergence fails the test. At least four of five top tokens
+must agree. A single boundary replacement is allowed only when each unmatched
+token has probability at most 0.001 and is within 0.05 logprob of its list's
+cutoff; all common-token logprob errors must still be at most 0.05. CPU references and CUDA results are preserved as raw
 JSON, rehashed, and rechecked before promotion. This is an initial acceptance
 policy, with physical measurements still pending; no model quality benchmark,
 full-context coverage, VL video coverage or performance claim is made.

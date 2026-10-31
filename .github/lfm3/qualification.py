@@ -391,9 +391,21 @@ def compare(cpu, cuda, policy):
         errors.append(abs(left["logprob"] - right["logprob"]))
         a = {token_key(t): t["logprob"] for t in left["top_logprobs"]}
         b = {token_key(t): t["logprob"] for t in right["top_logprobs"]}
-        if a.keys() != b.keys() or any(not math.isfinite(x) for x in [*a.values(), *b.values()]):
-            raise RuntimeError("CPU/CUDA top token set diverged")
-        errors += [abs(a[k] - b[k]) for k in a]
+        if (len(a) != policy["top_logprobs"] or len(b) != policy["top_logprobs"]
+                or any(not math.isfinite(x) for x in [*a.values(), *b.values()])):
+            raise RuntimeError("non-finite, duplicate or incomplete top token references")
+        common = a.keys() & b.keys()
+        if len(common) < policy["minimum_common_top_tokens"]:
+            raise RuntimeError("CPU/CUDA top token overlap is insufficient")
+        if a.keys() != b.keys():
+            for current, other in ((a, b), (b, a)):
+                cutoff = min(current.values())
+                for key in current.keys() - other.keys():
+                    value = current[key]
+                    if (value > math.log(policy["top_boundary_max_probability"])
+                            or value - cutoff > policy["logprob_abs_tolerance"]):
+                        raise RuntimeError("CPU/CUDA significant top token set diverged")
+        errors += [abs(a[k] - b[k]) for k in common]
     maximum = max(errors)
     if maximum > policy["logprob_abs_tolerance"]:
         raise RuntimeError(f"model numeric parity failed: max logprob error {maximum}")

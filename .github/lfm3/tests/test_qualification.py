@@ -102,6 +102,25 @@ class QualificationTests(unittest.TestCase):
         cuda["response"]["choices"][0]["logprobs"]["content"][0]["token"] = "other"
         with self.assertRaises(RuntimeError): q.compare(self.evidence("cpu"), cuda, self.policy)
 
+    def test_low_probability_fifth_token_boundary_swap_is_accepted(self):
+        cpu, cuda = self.evidence("cpu"), self.evidence("cuda")
+        for item in (cpu, cuda):
+            item["response"]["choices"][0]["logprobs"]["content"][0]["top_logprobs"][-1]["logprob"] = -8.0
+        cuda["response"]["choices"][0]["logprobs"]["content"][0]["top_logprobs"][-1]["token"] = "boundary"
+        self.assertEqual(q.compare(cpu, cuda, self.policy)["status"], "PASS")
+
+    def test_significant_fifth_token_swap_is_rejected(self):
+        cuda = self.evidence("cuda")
+        cuda["response"]["choices"][0]["logprobs"]["content"][0]["top_logprobs"][-1]["token"] = "other"
+        with self.assertRaises(RuntimeError): q.compare(self.evidence("cpu"), cuda, self.policy)
+
+    def test_multiple_top_token_replacements_are_rejected(self):
+        cuda = self.evidence("cuda")
+        for token in cuda["response"]["choices"][0]["logprobs"]["content"][0]["top_logprobs"][-2:]:
+            token["token"] = "different" + token["token"]
+            token["logprob"] = -9.0
+        with self.assertRaises(RuntimeError): q.compare(self.evidence("cpu"), cuda, self.policy)
+
     def test_stale_runtime_fingerprint_is_rejected(self):
         context, report = self.report()
         report["runtimes"]["legacy"]["fingerprint"] = "c" * 64
