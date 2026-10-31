@@ -35,6 +35,23 @@ invalidate model execution. Reused reports retain their actual execution run,
 candidate, GPU and driver; reuse does not fabricate a new execution. Original
 per-candidate CPU and physical kernel proofs remain mandatory.
 
+With the explicit `collection_only=true` workflow input, all six model pairs
+are attempted even after a numerical mismatch or a model server error. Each
+device's raw JSON and log is retained, along with an incremental `report.json`
+and a final `summary.md` also visible in the GitHub job summary. Metrics separate
+greedy token identity, generated token logprob error, common top-token logprob
+error and absolute probability error. Positions after a greedy divergence are
+marked as having different prefixes and cannot calibrate parity.
+
+A complete collection can finish successfully while its numeric verdict is
+FAIL under the unchanged 0.05 threshold. Its report status is COLLECTED and its
+artifact prefix is `lfm3-model-measurements-`, never a promotable model proof.
+Execution errors or missing numeric references still fail the workflow after
+the remaining cases have been attempted. Both the local launcher and promotion
+verifier refuse collection-only evidence, including a collection whose six
+numeric comparisons happen to pass. Acceptance is evaluated from the retained
+measurements separately; this mode does not adjust the threshold automatically.
+
 The normal Legacy and Extended promotion jobs also restore complete model
 evidence automatically when their final runtime fingerprint matches. Original
 candidate-specific CPU and CUDA proofs still have to pass. A missing or stale
@@ -69,3 +86,4 @@ Local validation:
 python3 -B -m unittest discover -v -s .github/lfm3/tests
 python3 -B -m unittest discover -v -s .github/campaign/tests
 ```
+

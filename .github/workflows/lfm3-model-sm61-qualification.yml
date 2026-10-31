@@ -10,6 +10,10 @@ on:
         type: string
         default: '41080753574'
         required: true
+      collection_only:
+        description: Collect all six comparisons without authorizing promotion
+        type: boolean
+        default: false
 permissions:
   contents: read
   actions: read
@@ -43,7 +47,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           LEGACY_RUN: ${{ inputs.legacy_run }}
           EXTENDED_RUN: ${{ inputs.extended_run }}
-        run: python3 .github/lfm3/qualification.py prepare --output "$RUNNER_TEMP/qualification" --legacy-run "$LEGACY_RUN" --extended-run "$EXTENDED_RUN"
+          COLLECTION_ONLY: ${{ inputs.collection_only }}
+        run: |
+          args=()
+          if [[ "$COLLECTION_ONLY" == true ]]; then args+=(--collection-only); fi
+          python3 .github/lfm3/qualification.py prepare --output "$RUNNER_TEMP/qualification" --legacy-run "$LEGACY_RUN" --extended-run "$EXTENDED_RUN" "${args[@]}"
       - name: Recheck the pinned Candle physical proofs
         env:
           GH_TOKEN: ${{ github.token }}
@@ -150,12 +158,13 @@ jobs:
         run: |
           python3 "$RUNNER_TEMP/qualification/campaign/verify-candle.py" "$RUNNER_TEMP/qualification/campaigns/legacy/plan.json"
           python3 "$RUNNER_TEMP/qualification/campaign/verify-candle.py" "$RUNNER_TEMP/qualification/campaigns/extended/plan.json"
-      - name: Real Text VL GGUF CPU references and sequential physical CUDA comparisons
+      - name: Collect all Text VL GGUF CPU and sequential physical CUDA comparisons
         run: python3 "$RUNNER_TEMP/qualification/lfm3/qualification.py" execute --output "$RUNNER_TEMP/qualification"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
-          name: lfm3-model-proof-${{ needs.prepare.outputs.fingerprint }}
+          name: ${{ inputs.collection_only && 'lfm3-model-measurements' || 'lfm3-model-proof' }}-${{ needs.prepare.outputs.fingerprint }}
           path: ${{ runner.temp }}/qualification/model-proof/
           if-no-files-found: warn
           retention-days: 90
+

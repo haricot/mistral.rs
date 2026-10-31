@@ -26,6 +26,7 @@ READY_TIMEOUT = 900
 REQUEST_TIMEOUT = 600
 IMAGE_EDGE = 64
 HEX256 = re.compile(r"[0-9a-f]{64}\Z")
+MODEL_ERRORS = (RuntimeError, ValueError, KeyError, IndexError, TypeError, OSError, subprocess.CalledProcessError)
 
 
 def sha(path):
@@ -161,7 +162,8 @@ def check_report(directory, context):
     if context["fingerprint"] != digest({"runtimes": {r: context["runtimes"][r]["fingerprint"] for r in RUNTIMES},
                                          "asd_profiles": context["asd_profiles"]}):
         raise RuntimeError("combined runtime fingerprint mismatch")
-    if (report.get("schema") != 1 or report.get("fingerprint") != context["fingerprint"]
+    if (context.get("collection_only") is True or report.get("collection_only") is True
+            or report.get("schema") != 1 or report.get("fingerprint") != context["fingerprint"]
             or report.get("full_models_executed") is not True or report.get("status") != "PASS"
             or report.get("sm") != "6.1" or not report.get("gpu_uuid") or not report.get("driver")
             or report.get("asd_profiles") != context["asd_profiles"]):
@@ -199,11 +201,11 @@ def check_report(directory, context):
     return report
 
 
-def prepare(repo, output, legacy_run, extended_run):
+def prepare(repo, output, legacy_run, extended_run, collection_only=False):
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
     policy = read(ROOT / "models.json")
-    ctx = {"schema": 1, "policy": policy, "runtimes": {}}
+    ctx = {"schema": 1, "policy": policy, "runtimes": {}, "collection_only": collection_only}
     for target, run_id in (("legacy", legacy_run), ("extended", extended_run)):
         directory = output / "campaigns" / target
         plan = fetch_campaign(repo, target, run_id, directory)
@@ -217,7 +219,7 @@ def prepare(repo, output, legacy_run, extended_run):
                                   "asd_profiles": ctx["asd_profiles"]})
     ctx["reuse_models"] = False
     name = "lfm3-model-proof-" + ctx["fingerprint"]
-    data = api("/actions/artifacts?name=" + name + "&per_page=100")
+    data = {"artifacts": []} if collection_only else api("/actions/artifacts?name=" + name + "&per_page=100")
     for artifact in data["artifacts"]:
         if artifact["expired"]:
             continue
@@ -365,7 +367,7 @@ def token_key(token):
     return json.dumps([token["token"], token.get("bytes")], sort_keys=True)
 
 
-def compare(cpu, cuda, policy):
+def measure(cpu, cuda, policy):
     if (cpu.get("device") != "cpu" or cuda.get("device") != "cuda" or cpu.get("request") != cuda.get("request")
             or cpu.get("fixture_sha256") != cuda.get("fixture_sha256")):
         raise RuntimeError("CPU/CUDA requests, image fixture or device identities differ")
@@ -381,22 +383,29 @@ def compare(cpu, cuda, policy):
         if len(tokens) < minimum:
             raise RuntimeError("numeric token references are missing")
         observations.append(tokens)
-    errors = []
-    for left, right in zip(*observations, strict=True):
-        if token_key(left) != token_key(right):
-            raise RuntimeError("CPU/CUDA greedy decode diverged")
+    if len(observations[0]) != len(observations[1]):
+        raise RuntimeError("CPU/CUDA decode lengths differ")
+    violations, positions, generated_errors, top_errors, probability_errors = [], [], [], [], []
+    common_counts = []
+    same_prefix = True
+    for index, (left, right) in enumerate(zip(*observations, strict=True)):
+        equal = token_key(left) == token_key(right)
+        if not equal:
+            violations.append("CPU/CUDA greedy decode diverged")
         for item in (left, right):
             if not math.isfinite(item["logprob"]) or len(item.get("top_logprobs", [])) < policy["top_logprobs"]:
                 raise RuntimeError("non-finite or incomplete numeric reference")
-        errors.append(abs(left["logprob"] - right["logprob"]))
+        generated_error = abs(left["logprob"] - right["logprob"])
+        generated_errors.append(generated_error)
         a = {token_key(t): t["logprob"] for t in left["top_logprobs"]}
         b = {token_key(t): t["logprob"] for t in right["top_logprobs"]}
         if (len(a) != policy["top_logprobs"] or len(b) != policy["top_logprobs"]
                 or any(not math.isfinite(x) for x in [*a.values(), *b.values()])):
             raise RuntimeError("non-finite, duplicate or incomplete top token references")
         common = a.keys() & b.keys()
+        common_counts.append(len(common))
         if len(common) < policy["minimum_common_top_tokens"]:
-            raise RuntimeError("CPU/CUDA top token overlap is insufficient")
+            violations.append("CPU/CUDA top token overlap is insufficient")
         if a.keys() != b.keys():
             for current, other in ((a, b), (b, a)):
                 cutoff = min(current.values())
@@ -404,14 +413,121 @@ def compare(cpu, cuda, policy):
                     value = current[key]
                     if (value > math.log(policy["top_boundary_max_probability"])
                             or value - cutoff > policy["logprob_abs_tolerance"]):
-                        raise RuntimeError("CPU/CUDA significant top token set diverged")
-        errors += [abs(a[k] - b[k]) for k in common]
-    maximum = max(errors)
+                        violations.append("CPU/CUDA significant top token set diverged")
+        top = []
+        for key in sorted(common):
+            error = abs(a[key] - b[key])
+            probability_error = abs(math.exp(a[key]) - math.exp(b[key]))
+            top_errors.append(error)
+            probability_errors.append(probability_error)
+            top.append({"token": json.loads(key), "cpu_logprob": a[key], "cuda_logprob": b[key],
+                        "logprob_error": error, "cpu_probability": math.exp(a[key]),
+                        "cuda_probability": math.exp(b[key]), "probability_error": probability_error})
+        positions.append({"index": index, "same_prefix": same_prefix, "greedy_equal": equal,
+                          "cpu_token": json.loads(token_key(left)), "cuda_token": json.loads(token_key(right)),
+                          "generated_logprob_error": generated_error, "common_top_tokens": top,
+                          "cpu_only": [{"token": json.loads(k), "logprob": a[k]} for k in sorted(a.keys() - b.keys())],
+                          "cuda_only": [{"token": json.loads(k), "logprob": b[k]} for k in sorted(b.keys() - a.keys())]})
+        same_prefix = same_prefix and equal
+    maximum = max(generated_errors + top_errors)
     if maximum > policy["logprob_abs_tolerance"]:
-        raise RuntimeError(f"model numeric parity failed: max logprob error {maximum}")
-    return {"status": "PASS", "cpu_executed": True, "cuda_executed": True,
+        violations.append(f"model numeric parity failed: max logprob error {maximum}")
+    return {"status": "FAIL" if violations else "PASS", "cpu_executed": True, "cuda_executed": True,
             "prefill_tokens": cpu["response"]["usage"]["prompt_tokens"],
-            "decode_tokens": len(observations[0]), "max_logprob_error": maximum}
+            "decode_tokens": len(observations[0]), "max_logprob_error": maximum,
+            "violations": list(dict.fromkeys(violations)),
+            "metrics": {"greedy_tokens_equal": same_prefix, "max_generated_logprob_error": max(generated_errors),
+                        "max_common_top_logprob_error": max(top_errors, default=0),
+                        "max_common_top_probability_error": max(probability_errors, default=0),
+                        "minimum_common_top_tokens": min(common_counts), "positions": positions}}
+
+
+def compare(cpu, cuda, policy):
+    result = measure(cpu, cuda, policy)
+    if result["status"] != "PASS":
+        raise RuntimeError("; ".join(result["violations"]))
+    return result
+
+
+def save_measurements(dest, report):
+    report["files"] = {p.name: sha(p) for p in dest.iterdir()
+                       if p.suffix in (".json", ".log", ".md") and p.name != "report.json"}
+    write(dest / "report.json", report)
+
+
+def collect_models(output, ctx, paths, report):
+    dest = output / "model-proof"
+    dest.mkdir(exist_ok=True)
+    for runtime in RUNTIMES:
+        directory = output / "binaries" / runtime
+        build_proof = read(directory / "build.json")
+        binary = directory / "mistralrs"
+        if (sha(binary) != build_proof["binary_sha256"] or build_proof["fingerprint"] != ctx["runtimes"][runtime]["fingerprint"]
+                or build_proof["cargo_check"] != "PASS" or build_proof["candidate"] != ctx["runtimes"][runtime]["candidate"]):
+            raise RuntimeError("compiled runtime verification failed")
+        binary.chmod(0o755)
+        actual = report["runtimes"][runtime] = {**build_proof, "models": {}}
+        for mode in MODES:
+            pair = {}
+            result = actual["models"][mode] = {"status": "COLLECTING", "cpu_executed": False,
+                "cuda_executed": False, "weights": ctx["policy"]["models"][mode], "errors": {}}
+            for device in ("cpu", "cuda"):
+                name = f"{runtime}-{mode}-{device}"
+                print("LFM3_MODEL_EXECUTE=" + name, flush=True)
+                try:
+                    pair[device] = infer(binary, mode, device, paths, ctx["policy"], dest / (name + ".log"))
+                    write(dest / (name + ".json"), pair[device])
+                    result[device + "_executed"] = True
+                except MODEL_ERRORS as error:
+                    result["errors"][device] = str(error)
+                    print(f"LFM3_MODEL_EXECUTION_ERROR={name} reason={error}", flush=True)
+                save_measurements(dest, report)
+            if len(pair) == 2:
+                try:
+                    result.update(measure(pair["cpu"], pair["cuda"], ctx["policy"]))
+                except MODEL_ERRORS as error:
+                    result["errors"]["references"] = str(error)
+            if result["errors"]:
+                result["status"] = "ERROR"
+            print(f"LFM3_MODEL_RESULT={runtime}-{mode} status={result['status']} "
+                  f"max_logprob_error={result.get('max_logprob_error', 'unavailable')}", flush=True)
+            save_measurements(dest, report)
+    results = [report["runtimes"][r]["models"][m] for r in RUNTIMES for m in MODES]
+    complete = all(x["cpu_executed"] and x["cuda_executed"] and not x["errors"] for x in results)
+    passed = all(x["status"] == "PASS" for x in results)
+    report.update(collection_complete=complete, full_models_executed=complete,
+                  collection_only=ctx.get("collection_only", False), numeric_status="PASS" if passed else "FAIL",
+                  promotion_eligible=passed and not ctx.get("collection_only", False))
+    report["status"] = ("COLLECTED" if report["collection_only"] else "PASS") if complete and (passed or report["collection_only"]) else "FAIL"
+    lines = ["# LFM3 physical measurements", "", f"Collection complete: {complete}. Numeric verdict: {report['numeric_status']}.",
+             f"Collection only: {report['collection_only']}. Promotion eligible: {report['promotion_eligible']}.", "",
+             f"Unchanged absolute logprob tolerance: {ctx['policy']['logprob_abs_tolerance']}.", "",
+             "| Runtime | Model | CPU/CUDA executed | Greedy equal | Max generated logprob error | Max common top logprob error | Max common top probability error | Verdict |",
+             "| --- | --- | --- | --- | --- | --- | --- | --- |"]
+    for runtime in RUNTIMES:
+        for mode in MODES:
+            x = report["runtimes"][runtime]["models"][mode]
+            metrics = x.get("metrics", {})
+            values = [runtime, mode, f"{x['cpu_executed']}/{x['cuda_executed']}", metrics.get("greedy_tokens_equal", "n/a")]
+            values += [f"{metrics[k]:.7g}" if k in metrics else "n/a" for k in
+                       ("max_generated_logprob_error", "max_common_top_logprob_error", "max_common_top_probability_error")]
+            lines.append("| " + " | ".join(map(str, values + [x["status"]])) + " |")
+    for runtime in RUNTIMES:
+        for mode in MODES:
+            x = report["runtimes"][runtime]["models"][mode]
+            for reason in [*x.get("violations", []), *x["errors"].values()]:
+                lines.append(f"\n{runtime}/{mode}: {reason}")
+    lines += ["", "Raw JSON and logs are retained per device. Probability errors are absolute, not percentages.",
+              "After a greedy divergence, later positions use different prefixes and cannot calibrate parity.",
+              "A collection-only report cannot authorize promotion, even when all numeric checks pass.", ""]
+    summary = "\n".join(lines)
+    (dest / "summary.md").write_text(summary)
+    if os.environ.get("GITHUB_STEP_SUMMARY"):
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as stream:
+            stream.write(summary)
+    save_measurements(dest, report)
+    print(summary, flush=True)
+    return complete, passed
 
 
 def execute(output):
@@ -434,29 +550,19 @@ def execute(output):
     paths = model_paths(ctx["policy"])
     dest = output / "model-proof"
     dest.mkdir(exist_ok=True)
-    report = {"schema": 1, "status": "PASS", "full_models_executed": True, "sm": sm,
+    report = {"schema": 1, "status": "COLLECTING", "full_models_executed": False, "sm": sm,
               "gpu_uuid": uuid, "driver": driver, "run_id": os.environ["GITHUB_RUN_ID"],
               "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"], "fingerprint": ctx["fingerprint"],
               "asd_profiles": ctx["asd_profiles"], "runtimes": {}, "files": {}}
-    for runtime in RUNTIMES:
-        directory = output / "binaries" / runtime
-        build_proof = read(directory / "build.json")
-        binary = directory / "mistralrs"
-        if (sha(binary) != build_proof["binary_sha256"] or build_proof["fingerprint"] != ctx["runtimes"][runtime]["fingerprint"]
-                or build_proof["cargo_check"] != "PASS" or build_proof["candidate"] != ctx["runtimes"][runtime]["candidate"]):
-            raise RuntimeError("compiled runtime verification failed")
-        binary.chmod(0o755)
-        actual = report["runtimes"][runtime] = {**build_proof, "models": {}}
-        for mode in MODES:
-            pair = {}
-            for device in ("cpu", "cuda"):
-                name = f"{runtime}-{mode}-{device}"
-                print("LFM3_MODEL_EXECUTE=" + name, flush=True)
-                pair[device] = infer(binary, mode, device, paths, ctx["policy"], dest / (name + ".log"))
-                write(dest / (name + ".json"), pair[device])
-            actual["models"][mode] = compare(pair["cpu"], pair["cuda"], ctx["policy"]) | {"weights": ctx["policy"]["models"][mode]}
-    report["files"] = {p.name: sha(p) for p in dest.iterdir() if p.suffix in (".json", ".log") and p.name != "report.json"}
-    write(dest / "report.json", report)
+    complete, passed = collect_models(output, ctx, paths, report)
+    if not complete:
+        raise RuntimeError("all six model cases attempted; collection incomplete, see model-proof/summary.md")
+    print("LFM3_COLLECTION_COMPLETE=6/6", flush=True)
+    if ctx.get("collection_only"):
+        print("LFM3_MEASUREMENTS_COLLECTED=PASS LFM3_PROMOTION_ALLOWED=false", flush=True)
+        return
+    if not passed:
+        raise RuntimeError("all six model cases collected; numeric qualification refused, see model-proof/summary.md")
     check_report(dest, ctx)
     print("LFM3_FULL_MODEL_QUALIFICATION=PASS")
 
@@ -485,6 +591,8 @@ def promote(repo, output, evidence_run):
     output = Path(output).resolve()
     download_artifact(artifact_for(evidence_run, "mistral-asd-prep-"), output)
     ctx = read(output / "context.json")
+    if ctx.get("collection_only"):
+        raise RuntimeError("measurement collection is not an accepted numeric qualification")
     model_dir = output / "model-evidence"
     model_dir.mkdir(exist_ok=True)
     shutil.copy2(output / "context.json", model_dir / "context.json")
@@ -519,9 +627,10 @@ def main():
     p.add_argument("--extended-run", type=int, default=41080753574)
     p.add_argument("--target", choices=RUNTIMES)
     p.add_argument("--evidence-run", type=int)
+    p.add_argument("--collection-only", action="store_true")
     a = p.parse_args()
     if a.action == "prepare":
-        prepare(a.repo, a.output, a.legacy_run, a.extended_run)
+        prepare(a.repo, a.output, a.legacy_run, a.extended_run, a.collection_only)
     elif a.action == "build":
         build(a.repo, a.output, a.target)
     elif a.action == "execute":
@@ -537,3 +646,4 @@ if __name__ == "__main__":
         main()
     except (RuntimeError, ValueError, KeyError, OSError, subprocess.CalledProcessError) as error:
         raise SystemExit("LFM3_QUALIFICATION_REJECT=" + str(error))
+

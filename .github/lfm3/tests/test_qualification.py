@@ -1,10 +1,13 @@
 import copy
+import contextlib
 import importlib.util
+import io
 import json
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("qualification", ROOT / "qualification.py")
@@ -157,6 +160,126 @@ class QualificationTests(unittest.TestCase):
         changed["config"]["features"].append("cudnn")
         self.assertNotEqual(q.source_fingerprint(repo, lock, plan, self.policy), q.source_fingerprint(repo, lock, changed, self.policy))
 
+    def collection(self, infer, collection_only=True, corrupt_binary=False):
+        context, report = self.report()
+        context["collection_only"] = collection_only
+        output = self.root / "collection"
+        output.mkdir()
+        for runtime in q.RUNTIMES:
+            context["runtimes"][runtime]["candidate"] = q.digest(runtime)[:40]
+            directory = output / "binaries" / runtime
+            directory.mkdir(parents=True)
+            binary = directory / "mistralrs"
+            binary.write_bytes(b"unit-test-only")
+            q.write(directory / "build.json", {**context["runtimes"][runtime],
+                    "binary_sha256": q.sha(binary), "cargo_check": "PASS"})
+            if corrupt_binary:
+                binary.write_bytes(b"tampered")
+        report.update(status="COLLECTING", full_models_executed=False, runtimes={}, files={})
+        with mock.patch.object(q, "infer", side_effect=infer) as observed, contextlib.redirect_stdout(io.StringIO()):
+            complete, passed = q.collect_models(output, context, {}, report)
+        return context, report, output / "model-proof", observed, complete, passed
+
+    def test_collection_finishes_all_six_after_numeric_failure(self):
+        def infer(binary, mode, device, *_):
+            data = self.evidence(device)
+            if binary.parent.name == "legacy" and mode == "text" and device == "cuda":
+                data["response"]["choices"][0]["logprobs"]["content"][0]["logprob"] += 0.1
+            return data
+        context, report, dest, observed, complete, passed = self.collection(infer)
+        self.assertEqual(observed.call_count, 12)
+        self.assertTrue(complete)
+        self.assertFalse(passed)
+        self.assertEqual(report["status"], "COLLECTED")
+        self.assertEqual(report["numeric_status"], "FAIL")
+        self.assertTrue(report["full_models_executed"])
+        self.assertEqual(len(list(dest.glob("*-cpu.json"))), 6)
+        self.assertEqual(len(list(dest.glob("*-cuda.json"))), 6)
+        self.assertIn("legacy | text", (dest / "summary.md").read_text())
+        self.assertIn("extended | gguf", (dest / "summary.md").read_text())
+        with self.assertRaises(RuntimeError): q.check_report(dest, context)
+
+    def test_collection_continues_after_model_server_error(self):
+        def infer(binary, mode, device, *_):
+            if binary.parent.name == "legacy" and mode == "vl" and device == "cpu":
+                raise OSError("HTTP Error 500: Internal Server Error")
+            return self.evidence(device)
+        _, report, dest, observed, complete, passed = self.collection(infer)
+        self.assertEqual(observed.call_count, 12)
+        self.assertFalse(complete or passed)
+        self.assertEqual(report["status"], "FAIL")
+        self.assertFalse(report["full_models_executed"])
+        case = report["runtimes"]["legacy"]["models"]["vl"]
+        self.assertFalse(case["cpu_executed"])
+        self.assertTrue(case["cuda_executed"])
+        self.assertIn("HTTP Error 500", case["errors"]["cpu"])
+        self.assertEqual(q.read(dest / "report.json"), report)
+
+    def test_invalid_numeric_reference_does_not_stop_remaining_models(self):
+        def infer(binary, mode, device, *_):
+            data = self.evidence(device)
+            if binary.parent.name == "legacy" and mode == "vl" and device == "cuda":
+                data["response"]["usage"]["completion_tokens"] = 0
+            return data
+        _, report, _, observed, complete, passed = self.collection(infer)
+        self.assertEqual(observed.call_count, 12)
+        self.assertFalse(complete or passed)
+        self.assertIn("references", report["runtimes"]["legacy"]["models"]["vl"]["errors"])
+
+    def test_greedy_divergence_marks_later_prefixes_as_incomparable(self):
+        cpu, cuda = self.evidence("cpu"), self.evidence("cuda")
+        cuda["response"]["choices"][0]["logprobs"]["content"][1]["token"] = "other"
+        result = q.measure(cpu, cuda, self.policy)
+        self.assertEqual(result["status"], "FAIL")
+        self.assertFalse(result["metrics"]["greedy_tokens_equal"])
+        self.assertTrue(result["metrics"]["positions"][1]["same_prefix"])
+        self.assertFalse(result["metrics"]["positions"][2]["same_prefix"])
+
+    def test_generated_and_alternative_numeric_errors_are_separate(self):
+        cpu, cuda = self.evidence("cpu"), self.evidence("cuda")
+        cuda["response"]["choices"][0]["logprobs"]["content"][0]["top_logprobs"][1]["logprob"] += 0.08
+        result = q.measure(cpu, cuda, self.policy)
+        self.assertEqual(result["metrics"]["max_generated_logprob_error"], 0)
+        self.assertAlmostEqual(result["metrics"]["max_common_top_logprob_error"], 0.08)
+        self.assertGreater(result["metrics"]["max_common_top_probability_error"], 0)
+        self.assertEqual(result["status"], "FAIL")
+
+    def test_successful_collection_only_never_authorizes_promotion(self):
+        context, report, dest, _, complete, passed = self.collection(lambda _b, _m, d, *_: self.evidence(d))
+        self.assertTrue(complete and passed)
+        self.assertEqual(report["status"], "COLLECTED")
+        self.assertFalse(report["promotion_eligible"])
+        report["status"] = "PASS"
+        q.write(dest / "report.json", report)
+        with self.assertRaises(RuntimeError): q.check_report(dest, context)
+
+    def test_strict_qualification_still_rejects_collected_numeric_failure(self):
+        def infer(_b, _m, device, *_):
+            data = self.evidence(device)
+            if device == "cuda":
+                data["response"]["choices"][0]["logprobs"]["content"][0]["logprob"] += 0.1
+            return data
+        context, report, dest, observed, complete, passed = self.collection(infer, collection_only=False)
+        self.assertEqual(observed.call_count, 12)
+        self.assertTrue(complete)
+        self.assertFalse(passed)
+        self.assertEqual(report["status"], "FAIL")
+        with self.assertRaises(RuntimeError): q.check_report(dest, context)
+
+    def test_strict_success_rechecks_all_raw_references(self):
+        context, report, dest, _, complete, passed = self.collection(
+            lambda _b, _m, d, *_: self.evidence(d), collection_only=False)
+        self.assertTrue(complete and passed)
+        self.assertTrue(report["promotion_eligible"])
+        self.assertEqual(q.check_report(dest, context)["status"], "PASS")
+
+    def test_collection_keeps_binary_sha256_gate(self):
+        with mock.patch.object(q, "infer") as observed:
+            with self.assertRaisesRegex(RuntimeError, "compiled runtime verification failed"):
+                self.collection(observed, corrupt_binary=True)
+            observed.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
+
