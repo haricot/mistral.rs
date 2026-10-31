@@ -36,7 +36,7 @@
     }
   },
   "dtype": "f16",
-  "max_model_len": 512,
+  "max_model_len": 2048,
   "max_tokens": 4,
   "top_logprobs": 5,
   "logprob_abs_tolerance": 0.05,
