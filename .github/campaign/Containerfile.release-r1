@@ -1,0 +1,15 @@
+# Runtime only: no CUDA compiler, Rust toolchain, build cache or model weights.
+FROM nvidia/cuda:12.9.2-runtime-ubuntu24.04
+LABEL org.opencontainers.image.source="https://github.com/haricot/mistral.rs"
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates libssl3t64 libgomp1 python3 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --chmod=0555 mistralrs /usr/local/bin/mistralrs
+RUN mkdir -p /agent/work /agent/skills /data/hf \
+    && chown -R 10001:10001 /agent /data
+ENV HF_HOME=/data/hf
+WORKDIR /agent/work
+USER 10001:10001
+EXPOSE 1234
+ENTRYPOINT ["/usr/local/bin/mistralrs"]
+CMD ["--help"]
