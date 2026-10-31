@@ -1,0 +1,17 @@
+name: Dispatch the dedicated supplementary LFM3 qualification once
+on:
+  push:
+    branches: [mirror_orch]
+    paths: [.github/lfm3/launch.once]
+permissions:
+  contents: read
+  actions: write
+jobs:
+  launch:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Dispatch the full supplementary campaign without rerunning original GPU jobs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run lfm3-model-sm61-qualification.yml --repo haricot/mistral.rs --ref mirror_orch -f legacy_run=41080696084 -f extended_run=41080753574

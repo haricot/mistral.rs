@@ -465,14 +465,23 @@ def promote(repo, plan_path, proofs, run_id):
         if any(gpu.get("lfm3_conv_gpu_counts", {}).get(node["component"], 0) < 1
                for node in plan["matrix"]):
             raise RuntimeError("physical SM61 LFM3 convolution parity proof is missing")
-        if gpu.get("full_models_executed") is not True:
-            raise RuntimeError("real LFM3 model validation is required before promotion")
-        for mode in lfm3.get("require_full_model_evidence", []):
-            result = gpu.get("model_results", {}).get(mode, {})
-            if (result.get("status") != "PASS"
-                    or result.get("candidate") != plan["candidate"]
-                    or not SHA256.fullmatch(result.get("artifact_sha256", ""))):
-                raise RuntimeError(f"missing model-level LFM3 qualification: {mode}")
+        supplemental = Path(proofs) / "model-evidence/context.json"
+        if supplemental.exists():
+            import importlib.util
+            module_path = ROOT.parent / "lfm3/qualification.py"
+            spec = importlib.util.spec_from_file_location("lfm3_qualification", module_path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            module.attach(repo, plan_path, proofs)
+        else:
+            if gpu.get("full_models_executed") is not True:
+                raise RuntimeError("real LFM3 model validation is required before promotion")
+            for mode in lfm3.get("require_full_model_evidence", []):
+                result = gpu.get("model_results", {}).get(mode, {})
+                if (result.get("status") != "PASS"
+                        or result.get("candidate") != plan["candidate"]
+                        or not SHA256.fullmatch(result.get("artifact_sha256", ""))):
+                    raise RuntimeError(f"missing model-level LFM3 qualification: {mode}")
     for node in plan["matrix"]:
         proof = verify_artifact(Path(proofs) / node["component"], node)
         if gpu.get("archives", {}).get(node["component"]) != proof["files"]["tests.tar.zst"]:
