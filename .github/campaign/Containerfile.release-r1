@@ -1,5 +1,5 @@
 # Runtime only: no CUDA compiler, Rust toolchain, build cache or model weights.
-FROM nvidia/cuda:12.9.2-runtime-ubuntu24.04
+FROM nvidia/cuda:12.9.2-runtime-ubuntu24.04@sha256:6d2a0dabc50c3bf14d27fc66822b6b1f94a325807ace17bd1997762307790587
 LABEL org.opencontainers.image.source="https://github.com/haricot/mistral.rs"
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates libssl3t64 libgomp1 python3 \
