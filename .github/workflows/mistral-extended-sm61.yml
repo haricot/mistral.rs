@@ -180,9 +180,100 @@ jobs:
           retention-days: 30
           overwrite: true
           compression-level: 0
+  release_compile:
+    # One optimized binary for Extended only. Never build standalone release variants.
+    # Qualification-only pushes still use the inexpensive campaign profile.
+    name: Extended-Release-R1 single build
+    if: github.event_name == 'workflow_dispatch'
+    needs: [prepare, cpu, cuda_compile, cuda_image]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 240
+    permissions:
+      contents: read
+      actions: read
+      packages: read
+    env:
+      CI_CUDA_IMAGE: ${{ needs.cuda_image.outputs.image }}
+    steps:
+      - name: Free unused hosted toolchains for CUDA
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with:
+          name: mistral-asd-prep-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/campaign
+      - name: Verify release packaging contracts offline
+        run: python3 -B -m unittest discover -v -s .github/campaign/tests -p test_release_r1.py
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ${{ runner.temp }}/campaign-cache
+          key: mistral-sm61-${{ needs.prepare.outputs.environment_key }}-${{ needs.prepare.outputs.cache_key }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            mistral-sm61-${{ needs.prepare.outputs.environment_key }}-${{ needs.prepare.outputs.cache_key }}-
+            mistral-sm61-${{ needs.prepare.outputs.environment_key }}-
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        id: release_cache
+        with:
+          path: ${{ runner.temp }}/extended-release-r1
+          key: extended-release-r1-${{ needs.prepare.outputs.environment_key }}-${{ needs.prepare.outputs.candidate }}-${{ needs.prepare.outputs.recipe }}
+      - name: Verify cached optimized executable provenance
+        if: steps.release_cache.outputs.cache-hit == 'true'
+        run: |
+          python3 .github/campaign/release_r1.py verify \
+            --plan "$RUNNER_TEMP/campaign/plan.json" \
+            --dir "$RUNNER_TEMP/extended-release-r1"
+      - name: Pull immutable compiler only on release cache miss
+        if: steps.release_cache.outputs.cache-hit != 'true'
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker pull "$CI_CUDA_IMAGE"
+      - name: Build exact Extended candidate once in optimized release mode
+        if: steps.release_cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/extended-release-r1" "$RUNNER_TEMP/campaign-cache" "$RUNNER_TEMP/release-home"
+          git fetch "$RUNNER_TEMP/campaign/candidate.bundle" 'refs/heads/integration/campaign/*:refs/remotes/release/*'
+          docker run --rm --user "$(id -u):$(id -g)" --security-opt=no-new-privileges \
+            --entrypoint /bin/bash \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE:rw" -v "$RUNNER_TEMP:$RUNNER_TEMP:rw" \
+            -w "$GITHUB_WORKSPACE" -e "HOME=$RUNNER_TEMP/release-home" \
+            -e "CAMPAIGN_CACHE=$RUNNER_TEMP/campaign-cache" \
+            "$CI_CUDA_IMAGE" \
+            "$RUNNER_TEMP/campaign/orchestrator/release-r1.sh" \
+            "$RUNNER_TEMP/campaign/plan.json" \
+            "$RUNNER_TEMP/extended-release-r1" "$GITHUB_WORKSPACE"
+      - name: Verify the exact release executable again
+        run: |
+          python3 "$RUNNER_TEMP/campaign/orchestrator/release_r1.py" verify \
+            --plan "$RUNNER_TEMP/campaign/plan.json" \
+            --dir "$RUNNER_TEMP/extended-release-r1"
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        if: steps.release_cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ runner.temp }}/extended-release-r1
+          key: extended-release-r1-${{ needs.prepare.outputs.environment_key }}-${{ needs.prepare.outputs.candidate }}-${{ needs.prepare.outputs.recipe }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: mistral-extended-release-r1-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/extended-release-r1/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
   gpu:
     name: SM61 Mistral Extended runtime (candidate=${{ needs.prepare.outputs.candidate }})
-    needs: [prepare, cpu, cuda_compile]
+    needs: [prepare, cpu, cuda_compile, release_compile]
+    # A qualification-only push must not wait for a release build.
+    if: >-
+      always() && needs.prepare.result == 'success' &&
+      needs.cpu.result == 'success' &&
+      needs.cuda_compile.result == 'success' &&
+      (needs.release_compile.result == 'success' ||
+       (github.event_name == 'push' && needs.release_compile.result == 'skipped'))
     env:
       ASD_REQUIRED: "true"
     runs-on: [mistral-extended, "mistral-extended-${{ github.run_id }}"]
@@ -213,6 +304,23 @@ jobs:
           lscpu > "$RUNNER_TEMP/gpu-proof/cpu.txt"
       - name: Execute hosted archives on physical Pascal
         run: bash "$RUNNER_TEMP/campaign/orchestrator/gpu.sh" "$RUNNER_TEMP/campaign/plan.json" "$RUNNER_TEMP/builds" "$RUNNER_TEMP/gpu-proof"
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          name: mistral-extended-release-r1-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/extended-release-r1
+      - name: Verify the identical optimized executable on physical Pascal
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          set -euo pipefail
+          python3 "$RUNNER_TEMP/campaign/orchestrator/release_r1.py" verify \
+            --plan "$RUNNER_TEMP/campaign/plan.json" \
+            --dir "$RUNNER_TEMP/extended-release-r1"
+          chmod +x "$RUNNER_TEMP/extended-release-r1/mistralrs"
+          "$RUNNER_TEMP/extended-release-r1/mistralrs" --help \
+            > "$RUNNER_TEMP/gpu-proof/release-r1-help.txt"
+          ldd "$RUNNER_TEMP/extended-release-r1/mistralrs" \
+            > "$RUNNER_TEMP/gpu-proof/release-r1-ldd.txt"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
@@ -261,3 +369,73 @@ jobs:
         run: |
           git fetch "$RUNNER_TEMP/campaign/candidate.bundle" 'refs/heads/integration/campaign/*:refs/remotes/build/*'
           python3 .github/campaign/campaign.py promote --repo "$PWD" --plan "$RUNNER_TEMP/campaign/plan.json" --proofs "$RUNNER_TEMP/proofs" --run-id "$GITHUB_RUN_ID"
+
+  release_publish:
+    # OCI publication requires the normal explicit promotion gate, including
+    # physical SM61 validation and complete real-model LFM3 evidence.
+    name: Extended-Release-R1 OCI and native archive
+    if: github.event_name == 'workflow_dispatch'
+    needs: [prepare, cpu, cuda_compile, release_compile, gpu, promote]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 75
+    permissions:
+      contents: read
+      actions: read
+      packages: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with:
+          name: mistral-asd-prep-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/campaign
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with:
+          name: mistral-extended-release-r1-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/extended-release-r1
+      - name: Verify release digest and candidate identity
+        run: |
+          python3 .github/campaign/release_r1.py verify \
+            --plan "$RUNNER_TEMP/campaign/plan.json" \
+            --dir "$RUNNER_TEMP/extended-release-r1"
+      - name: Create portable native archive and proof
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/release-archive"
+          archive="$RUNNER_TEMP/release-archive/mistralrs-extended-sm61-cuda12.9.2-x86_64.tar.zst"
+          tar -C "$RUNNER_TEMP/extended-release-r1" -I 'zstd -T2' \
+            -cf "$archive" mistralrs release.json
+          sha256sum "$archive" > "$archive.sha256"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: mistral-extended-native-r1-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-archive/
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+      - name: Publish minimal runtime OCI image from that same executable
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          candidate="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["candidate"])' "$RUNNER_TEMP/campaign/plan.json")"
+          recipe="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["recipe"][:12])' "$RUNNER_TEMP/campaign/plan.json")"
+          binary_sha="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["binary_sha256"])' "$RUNNER_TEMP/extended-release-r1/release.json")"
+          image="ghcr.io/haricot/mistralrs-extended-sm61:r1-$candidate-$recipe"
+          echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          if docker manifest inspect "$image" >/dev/null 2>&1; then
+            docker pull "$image"
+            actual="$(docker image inspect "$image" --format '{{ index .Config.Labels "org.haricot.binary-sha256" }}')"
+            test "$actual" = "$binary_sha"
+            echo "EXTENDED_RELEASE_R1_OCI_REUSED=$image" >> "$GITHUB_STEP_SUMMARY"
+          else
+            docker build \
+              --label "org.haricot.binary-sha256=$binary_sha" \
+              --label "org.opencontainers.image.revision=$candidate" \
+              -f .github/campaign/Containerfile.release-r1 \
+              -t "$image" "$RUNNER_TEMP/extended-release-r1"
+            docker push "$image"
+            echo "EXTENDED_RELEASE_R1_OCI_PUBLISHED=$image" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "EXTENDED_RELEASE_R1_ARCHIVE_BINARY_SHA256=$binary_sha" >> "$GITHUB_STEP_SUMMARY"
