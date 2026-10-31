@@ -266,7 +266,8 @@ def build(repo, output, target):
     dest = output / "binaries" / target
     dest.mkdir(parents=True, exist_ok=True)
     shutil.copy2(Path(env["CARGO_TARGET_DIR"]) / "campaign/mistralrs", dest / "mistralrs")
-    subprocess.run([dest / "mistralrs", "serve", "--help"], check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(["python3", ROOT.parent / "campaign/cpu-runtime.py", "--", dest / "mistralrs", "serve", "--help"],
+                   check=True, stdout=subprocess.DEVNULL)
     write(dest / "build.json", {"schema": 1, **ctx["runtimes"][target], "binary_sha256": sha(dest / "mistralrs"),
                                 "image": plan["image"], "cargo_check": "PASS"})
 

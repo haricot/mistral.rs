@@ -97,6 +97,7 @@ jobs:
           key: lfm3-cli-${{ needs.prepare.outputs.fingerprint }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             lfm3-cli-${{ needs.prepare.outputs.fingerprint }}-
+            lfm3-cli-
             mistral-sm61-${{ needs.prepare.outputs.environment_key }}-${{ needs.prepare.outputs.cache_key }}-
             mistral-sm61-${{ needs.prepare.outputs.environment_key }}-
       - name: Compile only the two additional CLI executables
