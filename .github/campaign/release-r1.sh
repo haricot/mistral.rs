@@ -22,7 +22,11 @@ features="$(python3 -c 'import json,sys; p=json.load(open(sys.argv[1])); print("
 expected_lock="$(python3 -c 'import json,sys; p=json.load(open(sys.argv[1])); print(next(n["lock"] for n in p["matrix"] if n["component"]=="extended"))' "$plan")"
 test "$(sha256sum "$source_dir/Cargo.lock" | cut -d' ' -f1)" = "$expected_lock"
 cd "$source_dir"
+cargo check --locked --release -p mistralrs-cli --bin mistralrs --no-default-features --features "$features"
 cargo build --locked --release -p mistralrs-cli --bin mistralrs --no-default-features --features "$features"
 install -m 0755 "$CARGO_TARGET_DIR/release/mistralrs" "$output/mistralrs"
-python3 "$(dirname "$0")/release-r1.py" record --plan "$plan" --dir "$output"
-python3 "$(dirname "$0")/cpu-runtime.py" -- "$output/mistralrs" --help
+mkdir -p "$output/loader-only"
+install -m 0444 "${CUDA_HOME:-/usr/local/cuda}/lib64/stubs/libcuda.so" "$output/loader-only/libcuda.so.1"
+python3 "$(dirname "$0")/release_r1.py" record --plan "$plan" --dir "$output"
+python3 "$(dirname "$0")/cpu-runtime.py" --stub "${CUDA_HOME:-/usr/local/cuda}/lib64/stubs/libcuda.so" -- "$output/mistralrs" --help
+

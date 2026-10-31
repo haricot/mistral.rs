@@ -32,3 +32,5 @@ with open(os.environ["GITHUB_STEP_SUMMARY"],"a") as stream:
     stream.write("Prepared immutable candidate "+plan["candidate"]+" with "+plan["image"]+"\n")
 PY
 cp -a .github/campaign "$report/orchestrator"
+cp -a .github/lfm3 "$report/lfm3"
+
