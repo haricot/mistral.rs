@@ -104,6 +104,14 @@ class QualificationScopeTests(unittest.TestCase):
         expression = expression.replace("&&", " and ").replace("||", " or ").replace("true", "True").replace("false", "False")
         return eval(" ".join(expression.split()), {"__builtins__": {}}, {"event": event, "ref": ref, "qualification_only": qualification_only})
 
+    def test_marker_push_prepares_release_without_publishing(self):
+        branch = "refs/heads/ci/extended-release-r1-single-build"
+        self.assertTrue(self.enabled("prepare", "push", branch, False))
+        for name in ("promote", "release_publish"):
+            self.assertFalse(self.enabled(name, "push", branch, False))
+        for name in ("release_compile", "release_image"):
+            self.assertIn("github.ref == '" + branch + "'", self.job(name))
+
     def test_branch_qualification_cannot_promote_or_publish(self):
         branch = "refs/heads/ci/extended-release-r1-single-build"
         self.assertTrue(self.enabled("prepare", "workflow_dispatch", branch, True))

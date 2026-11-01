@@ -1,14 +1,19 @@
 name: Mistral CUDA Legacy SM61
 on:
   workflow_dispatch:
+    inputs:
+      qualification_only:
+        type: boolean
+        default: false
   push:
-    branches: [mirror_orch]
+    branches: [mirror_orch, ci/extended-release-r1-single-build]
     paths: ['.github/campaign/cuda-reuse-legacy.once']
 permissions:
   contents: read
   packages: read
 concurrency:
-  group: mistral-legacy-campaign
+  group: mistral-legacy-campaign-${{ github.ref }}
+  queue: max
   cancel-in-progress: false
 jobs:
   cuda_image:
@@ -20,7 +25,10 @@ jobs:
   prepare:
     needs: cuda_image
     name: Rebase historical PR and stage immutable candidate
-    if: github.ref == 'refs/heads/mirror_orch'
+    if: >-
+      github.ref == 'refs/heads/mirror_orch' ||
+      (github.ref == 'refs/heads/ci/extended-release-r1-single-build' &&
+       (github.event_name == 'push' || inputs.qualification_only == true))
     runs-on: ubuntu-26.04
     timeout-minutes: 90
     permissions:
@@ -218,6 +226,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
   promote:
+    if: github.ref == 'refs/heads/mirror_orch' && inputs.qualification_only != true
     needs: [prepare, cpu, cuda_compile, gpu]
     runs-on: ubuntu-26.04
     timeout-minutes: 20

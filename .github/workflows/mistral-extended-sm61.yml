@@ -8,7 +8,7 @@ on:
         default: false
   # One-shot LFM3 qualification. This does not run on every master sync.
   push:
-    branches: [mirror_orch]
+    branches: [mirror_orch, ci/extended-release-r1-single-build]
     paths:
       - '.github/campaign/lfm3-sm61-qualification.once'
       - '.github/campaign/cuda-reuse-extended.once'
@@ -31,7 +31,7 @@ jobs:
     name: prepare
     if: >-
       github.ref == 'refs/heads/mirror_orch' ||
-      (github.event_name == 'workflow_dispatch' && inputs.qualification_only == true &&
+      ((github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.qualification_only == true)) &&
        github.ref == 'refs/heads/ci/extended-release-r1-single-build')
     runs-on: ubuntu-26.04
     timeout-minutes: 90
@@ -193,7 +193,7 @@ jobs:
     # One optimized binary for Extended only. Never build standalone release variants.
     # Qualification-only pushes still use the inexpensive campaign profile.
     name: Extended-Release-R1 single build
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/ci/extended-release-r1-single-build'
     needs: [prepare, cpu, cuda_compile, cuda_image]
     runs-on: ubuntu-26.04
     timeout-minutes: 240
@@ -275,7 +275,7 @@ jobs:
           compression-level: 0
   release_image:
     name: Assemble and verify the exact release runtime image
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/ci/extended-release-r1-single-build'
     needs: [prepare, release_compile]
     runs-on: ubuntu-26.04
     timeout-minutes: 75
@@ -338,15 +338,15 @@ jobs:
   gpu:
     name: SM61 Mistral Extended runtime (candidate=${{ needs.prepare.outputs.candidate }})
     needs: [prepare, cpu, cuda_compile, release_compile, release_image]
-    # A qualification-only push must not wait for a release build.
+    # The review branch also qualifies the final optimized executable.
     if: >-
       always() && needs.prepare.result == 'success' &&
       needs.cpu.result == 'success' &&
       needs.cuda_compile.result == 'success' &&
       (needs.release_compile.result == 'success' ||
-       (github.event_name == 'push' && needs.release_compile.result == 'skipped')) &&
+       (github.event_name == 'push' && github.ref == 'refs/heads/mirror_orch' && needs.release_compile.result == 'skipped')) &&
       (needs.release_image.result == 'success' ||
-       (github.event_name == 'push' && needs.release_image.result == 'skipped'))
+       (github.event_name == 'push' && github.ref == 'refs/heads/mirror_orch' && needs.release_image.result == 'skipped'))
     env:
       ASD_REQUIRED: "true"
     runs-on: [mistral-extended, "mistral-extended-${{ github.run_id }}"]
@@ -378,17 +378,17 @@ jobs:
       - name: Execute hosted archives on physical Pascal
         run: bash "$RUNNER_TEMP/campaign/orchestrator/gpu.sh" "$RUNNER_TEMP/campaign/plan.json" "$RUNNER_TEMP/builds" "$RUNNER_TEMP/gpu-proof"
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/ci/extended-release-r1-single-build'
         with:
           name: mistral-extended-release-r1-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/extended-release-r1
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/ci/extended-release-r1-single-build'
         with:
           name: mistral-extended-oci-proof-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/release-image
       - name: Execute Text VL and GGUF with the delivered release binary on CPU and CUDA
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/ci/extended-release-r1-single-build'
         run: |
           set -euo pipefail
           chmod +x "$RUNNER_TEMP/extended-release-r1/mistralrs"

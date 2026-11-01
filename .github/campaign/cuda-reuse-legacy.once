@@ -1,2 +1,4 @@
-CUDA environment reuse and archived SM61 qualification: legacy
-Candle archived-proof verification repaired after run 40970151424; hosted preflight before GPU.
+master-fp4-r1-20261101
+master=eec0d063e8375e9d6958483122e35047d385a39d
+fp4=2b36d29b2784bcd34c22cfde61088678a3dab3b8
+qualification-only; final-campaign physical validation pending

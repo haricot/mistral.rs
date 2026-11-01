@@ -67,5 +67,12 @@
       "lfm3-vl",
       "lfm3-gguf"
     ]
+  },
+  "fp4_integration": {
+    "standalone_branch": "fp4_mistralrs_standalone",
+    "legacy_dispatch_branch": "fix/allow_old_card-nvfp4-legacy",
+    "shared_dispatch_path": "mistralrs-quant/src/nvfp4/mod.rs",
+    "extended_component": "nemotron_bolt_dflash",
+    "physical_qualification": "final-campaign-only"
   }
 }

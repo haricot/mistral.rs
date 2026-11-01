@@ -63,6 +63,16 @@ while read -r component sha ref; do
   if [[ "$asd_required" == true && ( "$component" == asd || "$component" == extended ) ]]; then
     python3 "$script_dir/proof.py" gpu-required "$report/$component-junit.xml" asd_sm61_smoke > "$report/$component-asd-count.txt"
   fi
+  if [[ "$(python3 -c 'import json,sys;print(str(bool(json.load(open(sys.argv[1])).get("integrations",{}).get("fp4"))).lower())' "$plan")" == true ]]; then
+    python3 "$script_dir/proof.py" gpu-required "$report/$component-junit.xml" campaign_cuda_nvfp4_sm61_w4a16 > "$report/$component-fp4-count.txt"
+  fi
+  python3 - "$report" "$component" <<'PYCLEAN'
+import shutil,sys
+from pathlib import Path
+root=Path(sys.argv[1]).resolve(); target=root/("target-"+sys.argv[2])
+assert target.parent == root and not target.is_symlink()
+shutil.rmtree(target)
+PYCLEAN
 done < <(python3 -c 'import json,sys;[print(n["component"],n["candidate"],n["ref"]) for n in json.load(open(sys.argv[1]))["matrix"]]' "$plan")
 python3 - "$plan" "$builds" "$report" "$GITHUB_RUN_ID" <<'PY'
 import json,sys
@@ -87,6 +97,10 @@ if plan["config"].get("lfm3_qualification",{}).get("require_sm61_causal_conv_par
     for name in counts:
         lfm3_conv_gpu_counts[name]=int((report/(name+"-lfm3-count.txt")).read_text())
         assert lfm3_conv_gpu_counts[name]>0
-out={"schema_version":2,"candidate":plan["candidate"],"run_id":sys.argv[4],"target":"sm_61","status":"GPU_PASSED","gpu_executed":True,"archives":archives,"test_counts":counts,"asd_required":asd_required,"asd_profiles":asd_profiles,"asd_test_counts":asd_counts,"lfm3_conv_gpu_counts":lfm3_conv_gpu_counts,"full_models_executed":False}
+fp4_counts={}
+if plan.get("integrations",{}).get("fp4"):
+    fp4_counts={name:int((report/(name+"-fp4-count.txt")).read_text()) for name in counts}
+    assert all(n>0 for n in fp4_counts.values())
+out={"fp4_test_counts":fp4_counts,"schema_version":2,"candidate":plan["candidate"],"run_id":sys.argv[4],"target":"sm_61","status":"GPU_PASSED","gpu_executed":True,"archives":archives,"test_counts":counts,"asd_required":asd_required,"asd_profiles":asd_profiles,"asd_test_counts":asd_counts,"lfm3_conv_gpu_counts":lfm3_conv_gpu_counts,"full_models_executed":False}
 (report/"report.json").write_text(json.dumps(out,sort_keys=True,indent=2)+"\n")
 PY

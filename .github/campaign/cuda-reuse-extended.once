@@ -1,2 +1,4 @@
-CUDA environment reuse and archived SM61 qualification: extended
-Replace preparation 40969865016 containing the same invalidly rejected archived Candle Legacy proof.
+master-fp4-release-r1-20261101
+master=eec0d063e8375e9d6958483122e35047d385a39d
+fp4=2b36d29b2784bcd34c22cfde61088678a3dab3b8
+qualification-only; single final release build; final-campaign physical validation pending
