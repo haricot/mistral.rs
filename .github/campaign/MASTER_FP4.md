@@ -11,3 +11,5 @@ The CUDA SDK identity inputs are unchanged. Source changes rebuild the affected 
 A push to either `cuda-reuse-legacy.once` or `cuda-reuse-extended.once` on `ci/extended-release-r1-single-build` starts a complete qualification campaign. The Extended campaign also compiles the final optimized executable and assembles its runtime image. This review branch cannot promote source branches or publish the image. A source or preparation correction requires a new marker push, never a GPU-only retry with artifacts from an older attempt.
 
 GPU archives are extracted and removed one component at a time; compressed archives, JUnit reports and hashes remain available. ASD isolation, immutable candidates, SHA256 verification, full LFM3 evidence and numerical acceptance requirements are unchanged. VL/GGUF thresholds are not relaxed by this preparation.
+
+The scalar FP8 capability is separate from the SM80 MMA capability. `grouped_fp8.cu` is excluded for targets below SM80; its Rust module and dispatch sites use `has_fp8_mma_kernels`. The per-tensor CPU fallback and scalar/blockwise FP8 kernels remain enabled under their existing capabilities.

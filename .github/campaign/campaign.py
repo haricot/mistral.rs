@@ -378,7 +378,7 @@ def prepare(repo, snapshot_path, output, publish=False):
                     "candle_branch": component["candle_branch"], "candle_sha": candle["sha"],
                     "candle_validation_ref": candle["validation_ref"],
                     "features": cfg["features"], "toolchain": cfg["toolchain"],
-                    "contract_hash": digest({n: file_hash(ROOT / n) for n in ["campaign_backends.rs", "force_cpu_test.rs", "cpu_flag_test.rs", "config.json", "campaign.py", "resolve_dspark.py", "compat_mxfp4.py"]})}
+                    "contract_hash": digest({n: file_hash(ROOT / n) for n in ["campaign_backends.rs", "force_cpu_test.rs", "cpu_flag_test.rs", "config.json", "campaign.py", "resolve_dspark.py", "compat_mxfp4.py", "compat_sm61.py"]})}
         identity["resolution_hash"] = resolution_digest(name)
         fp4 = state.get("integrations", {}).get("fp4")
         fp4_parents = []
@@ -415,6 +415,8 @@ def prepare(repo, snapshot_path, output, publish=False):
             install_contract(node, identity)
             from compat_mxfp4 import install
             adapted = install(node)
+            from compat_sm61 import install as install_sm61
+            adapted = install_sm61(node) or adapted
             if fp4_parents or adapted or name in ("lfm25_dspark", "nemotron_bolt_dflash"):
                 command(["cargo", f'+{cfg["toolchain"]}', "fmt", "--all"], cwd=node)
             resolve_lock(node, cfg["toolchain"])
@@ -459,7 +461,9 @@ def prepare(repo, snapshot_path, output, publish=False):
             pin_candle(node, contract["candle_sha"])
             install_contract(node, contract)
             from compat_mxfp4 import install
-            if install(node):
+            from compat_sm61 import install as install_sm61
+            adapted = install(node)
+            if install_sm61(node) or adapted:
                 command(["cargo", f'+{cfg["toolchain"]}', "fmt", "--all"], cwd=node)
             resolve_lock(node, cfg["toolchain"])
             candidate = commit(node, [git(node, "rev-parse", "HEAD")], "build: lock Extended standalone composition")
