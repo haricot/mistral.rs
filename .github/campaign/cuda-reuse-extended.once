@@ -1,4 +1,4 @@
-master-fp4-sm61-grouped-fp8-fix-extended-20261101
+master-fp4-explicit-cpu-cuda-roundtrip-extended-20261101
 master=eec0d063e8375e9d6958483122e35047d385a39d
 fp4=2b36d29b2784bcd34c22cfde61088678a3dab3b8
-qualification-only; complete preparation; scalar FP8 retained; grouped FP8 MMA gated to SM80
+qualification-only; complete preparation; explicit CPU test and physical CUDA test

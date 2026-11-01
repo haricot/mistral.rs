@@ -13,3 +13,5 @@ A push to either `cuda-reuse-legacy.once` or `cuda-reuse-extended.once` on `ci/e
 GPU archives are extracted and removed one component at a time; compressed archives, JUnit reports and hashes remain available. ASD isolation, immutable candidates, SHA256 verification, full LFM3 evidence and numerical acceptance requirements are unchanged. VL/GGUF thresholds are not relaxed by this preparation.
 
 The scalar FP8 capability is separate from the SM80 MMA capability. `grouped_fp8.cu` is excluded for targets below SM80; its Rust module and dispatch sites use `has_fp8_mma_kernels`. The per-tensor CPU fallback and scalar/blockwise FP8 kernels remain enabled under their existing capabilities.
+
+The FP8 roundtrip test explicitly uses CPU in the hosted CPU profile. A separate `cuda_sm61_roundtrip_f8e4m3` test runs the same body on the physical GPU. Enabling the CUDA feature is not interpreted as proof of a device on a hosted runner; the CPU CUDA-link stub remains an error-returning loader aid.

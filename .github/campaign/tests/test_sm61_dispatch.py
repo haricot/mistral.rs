@@ -38,6 +38,8 @@ class Sm61DispatchTests(unittest.TestCase):
         self.write("src/pertensor_fp8/mod.rs", '\n'.join(OLD+f'\nfn grouped_{i}() {{}}' for i in range(4))+
                    '\n#[cfg(all(feature = "cuda", not(has_blockwise_fp8_kernels)))]\nfn cpu_fallback() {}\n')
 
+        self.write("src/fp8/quantize.rs", '    fn test_roundtrip_f8e4m3() -> Result<()> {\n        let dev = Device::cuda_if_available(0)?;\n        exercise(&dev)\n    }\n')
+
     def write(self, name, text):
         path = self.root / "mistralrs-quant" / name
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -82,3 +84,57 @@ class Sm61DispatchTests(unittest.TestCase):
         self.write("build.rs", 'let excluded_files = vec![];\n')
         with self.assertRaisesRegex(RuntimeError, 'exclusion contract'):
             patch.install(self.root)
+
+
+class Fp8TestRoutingTests(unittest.TestCase):
+    SOURCE = '''#[derive(Debug)]
+enum Device { Cpu, Cuda }
+type Result<T> = std::result::Result<T, &'static str>;
+impl Device {
+    fn cuda_if_available(_: usize) -> Result<Self> { panic!("CUDA runtime called from CPU test") }
+    fn new_cuda(_: usize) -> Result<Self> { Err("physical CUDA test must not run here") }
+}
+mod tests {
+    use super::*;
+    #[test]
+    #[cfg(not(feature = "metal"))]
+    fn test_roundtrip_f8e4m3() -> Result<()> {
+        let dev = Device::cuda_if_available(0)?;
+        assert!(matches!(dev, Device::Cpu));
+        Ok(())
+    }
+}
+'''
+
+    def test_common_roundtrip_body_is_preserved_and_split_is_idempotent(self):
+        fixed, changed = patch.split_fp8_roundtrip(self.SOURCE)
+        self.assertTrue(changed)
+        self.assertIn('assert!(matches!(dev, Device::Cpu));', fixed)
+        self.assertIn('roundtrip_f8e4m3_on_device(Device::Cpu)', fixed)
+        self.assertIn('roundtrip_f8e4m3_on_device(Device::new_cuda(0)?)', fixed)
+        self.assertEqual(patch.split_fp8_roundtrip(fixed), (fixed, False))
+        filters = (ROOT/'nextest.toml').read_text()
+        self.assertIn('!test(cuda)', filters.split('[profile.gpu]')[0])
+        self.assertIn('test(sm61)', filters.split('[profile.gpu]')[1])
+
+    def test_unknown_upstream_roundtrip_requires_an_audit(self):
+        with self.assertRaisesRegex(RuntimeError, 'roundtrip test'):
+            patch.split_fp8_roundtrip(self.SOURCE.replace('cuda_if_available(0)', 'cuda_if_available(1)'))
+
+    def test_cpu_execution_does_not_initialize_cuda_with_cuda_feature_enabled(self):
+        import shutil, subprocess
+        if not shutil.which('rustc'):
+            self.skipTest('rustc is unavailable')
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root/'routing.rs'
+            binary = root/'routing'
+            for expected_success, text in ((False, self.SOURCE), (True, patch.split_fp8_roundtrip(self.SOURCE)[0])):
+                source.write_text(text)
+                subprocess.run(['rustc', '--edition=2021', '--test', '--cfg', 'feature="cuda"', str(source), '-o', str(binary)], check=True, capture_output=True, text=True)
+                result = subprocess.run([binary, '--exact', 'tests::test_roundtrip_f8e4m3'], capture_output=True, text=True)
+                self.assertEqual(result.returncode == 0, expected_success, result.stdout + result.stderr)
+                if expected_success:
+                    self.assertIn('1 passed', result.stdout)
+                else:
+                    self.assertIn('CUDA runtime called from CPU test', result.stdout)

@@ -41,4 +41,28 @@ def install(repo):
         if patched:
             path.write_text(text)
         changed = changed or patched
-    return changed
+    path = repo / "mistralrs-quant/src/fp8/quantize.rs"
+    text, patched = split_fp8_roundtrip(path.read_text())
+    if patched:
+        path.write_text(text)
+    return changed or patched
+
+
+def split_fp8_roundtrip(text):
+    old = """    fn test_roundtrip_f8e4m3() -> Result<()> {
+        let dev = Device::cuda_if_available(0)?;
+"""
+    new = """    fn test_roundtrip_f8e4m3() -> Result<()> {
+        roundtrip_f8e4m3_on_device(Device::Cpu)
+    }
+
+    #[test]
+    #[cfg(all(feature = "cuda", not(feature = "metal")))]
+    fn cuda_sm61_roundtrip_f8e4m3() -> Result<()> {
+        roundtrip_f8e4m3_on_device(Device::new_cuda(0)?)
+    }
+
+    #[cfg(not(feature = "metal"))]
+    fn roundtrip_f8e4m3_on_device(dev: Device) -> Result<()> {
+"""
+    return replace_exact(text, old, new, 1, "FP8 CPU/CUDA roundtrip test")
