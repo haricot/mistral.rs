@@ -4,6 +4,11 @@ use mistralrs_quant::QuantizedConfig;
 
 use crate::{layers::Activation, serde_default_fn};
 
+pub(crate) fn ple_cpu_requested() -> bool {
+    std::env::var("MISTRALRS_GEMMA4_PLE_CPU")
+        .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+}
+
 // ── Rope parameter structs ──────────────────────────────────────────────────
 
 #[derive(Debug, Clone, serde::Deserialize)]
