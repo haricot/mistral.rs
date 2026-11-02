@@ -1,22 +1,33 @@
 {
+  "asd_required": true,
   "base_master_sha": "095991a7d680a6994e6f1554156ebef5d09db049",
   "candle_branch": "extended",
   "candle_repository": "haricot/candle",
   "candle_sha": "e0dbd926ae211ee19cf1ac0f6ae4b0cbabc00646",
   "candle_validation_ref": "refs/heads/archive/extended/sm61-validated-41036699911-1",
-  "component": "asd",
+  "components": {
+    "asd": "e3ce54f7a7f65b6046407fb206d294f5070dad21",
+    "legacy": "e4f7349cf973b5603ccbfe344e90c4d019a62754",
+    "lfm25_dspark": "c0e7282e2bfc6e50979811749c8e24d11fcb5a9a",
+    "nemotron_bolt_dflash": "9ff03fa63e624cf919108480df9b6ff3b1f4f4b2"
+  },
   "contract_hash": "0347882005859e18b7e1a9363805537d2d2b716c58a4a281c42770273770df1e",
   "features": [
     "cuda-legacy-bf16",
     "cuda-legacy-fp8",
     "cuda-legacy-fp4"
   ],
-  "kind": "mistral-standalone",
-  "prerequisites": {
-    "legacy": "e4f7349cf973b5603ccbfe344e90c4d019a62754"
+  "integrations": {
+    "fp4": {
+      "legacy_dispatch": "02c3708f480a3293ef2745f549d7159dcfc1f310",
+      "physical_qualification": "final-campaign-only",
+      "shared_dispatch_blob": "629cc55973a299825f8f84e91c980d08dd8958cf",
+      "standalone": "2b36d29b2784bcd34c22cfde61088678a3dab3b8"
+    }
   },
-  "resolution_hash": "7a9688cd54be5016dc0ed3b84f28c0d1a050c50728107313c87b8acde87b28e9",
+  "kind": "mistral-extended",
+  "resolution_hash": "ba2d5a8d46b9a6e09930702f56c443d327077df17a2afa4b9c7307be632f83cf",
   "schema_version": 2,
-  "target_branch": "asd_runner_standalone",
+  "target_branch": "extended",
   "toolchain": "1.99.0"
 }
