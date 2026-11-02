@@ -1,4 +1,4 @@
-master-fp4-explicit-cpu-cuda-roundtrip-extended-20261101
+master-fp4-nvfp4-launch-shape-extended-20261102
 master=eec0d063e8375e9d6958483122e35047d385a39d
 fp4=2b36d29b2784bcd34c22cfde61088678a3dab3b8
-qualification-only; complete preparation; explicit CPU test and physical CUDA test
+qualification-only; complete preparation; K=32 NVFP4 fixture; CPU validates Pascal payload

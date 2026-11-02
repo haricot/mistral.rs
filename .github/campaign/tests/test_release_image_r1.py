@@ -129,6 +129,25 @@ class QualificationScopeTests(unittest.TestCase):
         self.assertIn("release_image", self.job("gpu"))
         self.assertIn("verify-gpu", self.job("release_publish"))
 
+    def test_review_fix_can_prepare_without_cancelling_a_previous_gpu_waiter(self):
+        template = re.search(r"^  group: (.+)$", self.workflow, re.M).group(1)
+
+        def group(ref, sha):
+            def render(match):
+                expression = match.group(1).replace("github.ref", "ref").replace("github.sha", "sha")
+                expression = expression.replace("&&", " and ").replace("||", " or ")
+                return eval(expression.strip(), {"__builtins__": {}}, {"ref": ref, "sha": sha})
+            return re.sub(r"\$\{\{(.*?)\}\}", render, template)
+
+        review = "refs/heads/ci/extended-release-r1-single-build"
+        self.assertNotEqual(group(review, "a" * 40), group(review, "b" * 40))
+        mirror = "refs/heads/mirror_orch"
+        for sha in ("a" * 40, "b" * 40):
+            self.assertEqual(group(mirror, sha), "mistral-extended-campaign-" + mirror)
+        concurrency = self.workflow.split("concurrency:\n", 1)[1].split("jobs:\n", 1)[0]
+        self.assertIn("  queue: max\n", concurrency)
+        self.assertIn("  cancel-in-progress: false\n", concurrency)
+
 
 if __name__ == "__main__":
     unittest.main()

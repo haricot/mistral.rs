@@ -16,7 +16,7 @@ permissions:
   contents: read
   packages: read
 concurrency:
-  group: mistral-extended-campaign-${{ github.ref }}
+  group: mistral-extended-campaign-${{ github.ref == 'refs/heads/ci/extended-release-r1-single-build' && github.sha || github.ref }}
   queue: max
   cancel-in-progress: false
 jobs:
