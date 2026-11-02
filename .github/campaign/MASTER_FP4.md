@@ -29,6 +29,15 @@ SM80+, and missing kernels, CPU, MLA and unsupported legacy architectures retain
 their existing rejection. CPU tests exercise the capability matrix; the physical
 profile also checks the real device gate.
 
+The software SM61 FP8 cache selects the standard paged-attention backend before
+cache sizing and allocation in both text and multimodal pipelines. The same
+metadata then controls cache layout, execution plans and decode. FlashInfer HND
+is retained for FP16; native FP8 builds are unchanged. A physical regression
+uses the production CacheEngine, the hybrid layer mask and GQA decode with an
+FP8 cache, in addition to the synthetic benchmark. The real-model Text benchmark
+must also complete with both FP16 and FP8; a passing synthetic cache test cannot
+substitute for it.
+
 Every physical component writes and reads an FP8 paged cache, using nontrivial
 slot mappings and unequal K/V scales. Exactly representable fixtures check all
 stored values and compare decode against a CPU softmax reference and FP16.

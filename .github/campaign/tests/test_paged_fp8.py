@@ -36,6 +36,11 @@ class PagedFp8Tests(unittest.TestCase):
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content)
+        for name in ('mistralrs-core/src/paged_attention/config.rs', 'mistralrs-core/src/paged_attention/mod.rs',
+                     'mistralrs-core/src/pipeline/normal.rs', 'mistralrs-core/src/pipeline/multimodal.rs'):
+            path = self.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text((ROOT.parents[1] / name).read_text())
 
     def test_patch_is_idempotent_and_binds_runtime_to_explicit_sm61_build(self):
         self.fixture()
@@ -51,6 +56,7 @@ class PagedFp8Tests(unittest.TestCase):
         self.assertEqual(before, {str(p):p.read_bytes() for p in self.root.rglob('*') if p.is_file()})
         if shutil.which('rustfmt'):
             subprocess.run(['rustfmt', '--edition', '2021', str(self.root / 'mistralrs-core/src/paged_attention/cache_engine.rs')], check=True)
+            subprocess.run(['rustfmt', '--edition', '2021', str(self.root / 'mistralrs-core/src/paged_attention/config.rs')], check=True)
             self.assertFalse(patch.install(self.root))
 
     def test_changed_upstream_gate_requires_review(self):
@@ -93,6 +99,22 @@ class PagedFp8Tests(unittest.TestCase):
 
     def test_slower_fp8_is_recorded_without_inventing_a_performance_gate(self):
         self.assertEqual(len(self.verify(self.report())), 64)
+
+    def test_final_campaign_requires_real_production_layout_test_beside_synthetic_measurements(self):
+        fingerprint = self.verify(self.report())
+        plan = {'matrix':[{'component':'legacy', 'candidate':'a'*40}]}
+        record = {'test_count':1, 'sha256':fingerprint}
+        gpu = {'run_attempt':'1', 'fp8_kv':{'legacy':record}}
+        for count in (None, 0):
+            if count is not None:
+                record['production_layout_test_count'] = count
+            with self.subTest(count=count), self.assertRaisesRegex(RuntimeError, 'physical FP8 KV proof'):
+                fp8_kv.verify_campaign(plan, self.root, gpu, '123')
+        record['production_layout_test_count'] = 1
+        fp8_kv.verify_campaign(plan, self.root, gpu, '123')
+        record['sha256'] = '0'*64
+        with self.assertRaisesRegex(RuntimeError, 'physical FP8 KV proof'):
+            fp8_kv.verify_campaign(plan, self.root, gpu, '123')
 
     def test_tampered_measurements_and_other_attempts_are_rejected(self):
         for change in ('attempt', 'candidate', 'memory', 'nan', 'median', 'parity', 'scope'):

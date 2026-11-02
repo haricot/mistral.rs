@@ -47,6 +47,6 @@ def verify_campaign(plan, directory, gpu, run_id):
         name = node["component"]
         record = evidence.get(name, {})
         path = Path(directory) / (name + "-fp8-kv.json")
-        if (record.get("test_count", 0) < 1
+        if (record.get("test_count", 0) < 1 or record.get("production_layout_test_count", 0) < 1
                 or verify(path, node, run_id, gpu.get("run_attempt")) != record.get("sha256")):
             raise RuntimeError("final-campaign physical FP8 KV proof is missing")

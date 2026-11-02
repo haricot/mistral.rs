@@ -96,7 +96,7 @@ def main():
     elif args.mode == "gpu-count":
         print(test_count(args.path, "campaign_cuda_backend"))
     elif args.mode == "gpu-required":
-        if args.component not in ("asd_sm61_smoke", "cuda_prefill_decode_and_cached_chunks_match_reference", "campaign_cuda_nvfp4_sm61_w4a16", "campaign_cuda_fp8_kv_sm61_correctness_and_performance"):
+        if args.component not in ("asd_sm61_smoke", "cuda_prefill_decode_and_cached_chunks_match_reference", "campaign_cuda_nvfp4_sm61_w4a16", "campaign_cuda_fp8_kv_sm61_correctness_and_performance", "campaign_cuda_fp8_kv_sm61_production_cache_layout"):
             raise RuntimeError("unsupported required GPU test")
         print(test_count(args.path, args.component, matching_only=True))
     else:

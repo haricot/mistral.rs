@@ -61,6 +61,7 @@ while read -r component sha ref; do
   python3 "$script_dir/proof.py" gpu-count "$report/$component-junit.xml" > "$report/$component-count.txt"
   if [[ "$(python3 -c 'import json,sys;print(str(json.load(open(sys.argv[1]))["config"].get("fp8_kv_qualification",False)).lower())' "$plan")" == true ]]; then
     python3 "$script_dir/proof.py" gpu-required "$report/$component-junit.xml" campaign_cuda_fp8_kv_sm61_correctness_and_performance > "$report/$component-fp8-kv-count.txt"
+    python3 "$script_dir/proof.py" gpu-required "$report/$component-junit.xml" campaign_cuda_fp8_kv_sm61_production_cache_layout > "$report/$component-fp8-layout-count.txt"
   fi
   if [[ "$(python3 -c 'import json,sys;print(str(json.load(open(sys.argv[1]))["config"].get("lfm3_qualification",{}).get("require_sm61_causal_conv_parity",False)).lower())' "$plan")" == true ]]; then
     python3 "$script_dir/proof.py" gpu-required "$report/$component-junit.xml" cuda_prefill_decode_and_cached_chunks_match_reference > "$report/$component-lfm3-count.txt"
@@ -113,8 +114,9 @@ if plan["config"].get("fp8_kv_qualification"):
     for node in plan["matrix"]:
         name=node["component"]
         fingerprint=verify(report/(name+"-fp8-kv.json"),node,sys.argv[4],os.environ["GITHUB_RUN_ATTEMPT"])
-        fp8_kv[name]={"sha256":fingerprint,"test_count":int((report/(name+"-fp8-kv-count.txt")).read_text())}
+        fp8_kv[name]={"sha256":fingerprint,"test_count":int((report/(name+"-fp8-kv-count.txt")).read_text()),"production_layout_test_count":int((report/(name+"-fp8-layout-count.txt")).read_text())}
         assert fp8_kv[name]["test_count"]>0
+        assert fp8_kv[name]["production_layout_test_count"]>0
 out={"fp8_kv":fp8_kv,"run_attempt":os.environ["GITHUB_RUN_ATTEMPT"],"fp4_test_counts":fp4_counts,"schema_version":2,"candidate":plan["candidate"],"run_id":sys.argv[4],"target":"sm_61","status":"GPU_PASSED","gpu_executed":True,"archives":archives,"test_counts":counts,"asd_required":asd_required,"asd_profiles":asd_profiles,"asd_test_counts":asd_counts,"lfm3_conv_gpu_counts":lfm3_conv_gpu_counts,"full_models_executed":False}
 (report/"report.json").write_text(json.dumps(out,sort_keys=True,indent=2)+"\n")
 PY

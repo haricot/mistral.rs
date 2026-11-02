@@ -413,7 +413,7 @@ def prepare(repo, snapshot_path, output, publish=False):
                     "candle_branch": component["candle_branch"], "candle_sha": candle["sha"],
                     "candle_validation_ref": candle["validation_ref"],
                     "features": cfg["features"], "toolchain": cfg["toolchain"],
-                    "contract_hash": digest({n: file_hash(ROOT / n) for n in ["campaign_backends.rs", "force_cpu_test.rs", "cpu_flag_test.rs", "config.json", "campaign.py", "resolve_dspark.py", "compat_mxfp4.py", "compat_sm61.py", "compat_paged_fp8.py", "paged_fp8_support.rs", "campaign_paged_fp8.rs"]})}
+                    "contract_hash": digest({n: file_hash(ROOT / n) for n in ["campaign_backends.rs", "force_cpu_test.rs", "cpu_flag_test.rs", "config.json", "campaign.py", "resolve_dspark.py", "compat_mxfp4.py", "compat_sm61.py", "compat_paged_fp8.py", "paged_fp8_support.rs", "campaign_paged_fp8.rs", "legacy_fp8_backend.rs"]})}
         identity["resolution_hash"] = resolution_digest(name)
         fp4 = state.get("integrations", {}).get("fp4")
         fp4_parents = []
