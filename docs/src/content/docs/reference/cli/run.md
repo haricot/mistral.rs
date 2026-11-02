@@ -69,6 +69,7 @@ mistralrs run [OPTIONS] [COMMAND]
 | `--mtp-model <MTP_MODEL>` |  | Separate MTP draft model, as a Hugging Face ID or local path |
 | `--mtp-n-predict <MTP_N_PREDICT>` |  | Fixed MTP draft tokens per step; omit to adapt the depth automatically |
 | `--mtp-draft-sampling <MTP_DRAFT_SAMPLING>` | `auto` | How the MTP drafter picks the tokens it proposes<br>`auto`: Probabilistic when the drafter supports it, otherwise greedy<br>`greedy`: Always propose the most likely token<br>`probabilistic`: Sample proposals from the draft distribution; fails if unsupported |
+| `--mtp-dspark-verify-profile <MTP_DSPARK_VERIFY_PROFILE>` |  | Measured full-step costs for DSpark confidence-based verification |
 | `--mcp-config <MCP_CONFIG>` |  | Path to an MCP client configuration JSON. Also reads `MCP_CONFIG_PATH` if unset |
 | `--agent` | `false` | Run as a local agent that can search the web and run Python and shell commands, each session in its own temp directory. Same as `--enable-search --enable-code-execution --enable-shell` |
 | `--enable-search` | `false` | Give the model a web search tool. Also loads a small embedding model to rank results |

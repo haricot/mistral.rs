@@ -1,0 +1,22 @@
+{
+  "base_master_sha": "095991a7d680a6994e6f1554156ebef5d09db049",
+  "candle_branch": "extended",
+  "candle_repository": "haricot/candle",
+  "candle_sha": "e0dbd926ae211ee19cf1ac0f6ae4b0cbabc00646",
+  "candle_validation_ref": "refs/heads/archive/extended/sm61-validated-41036699911-1",
+  "component": "lfm25_dspark",
+  "contract_hash": "0347882005859e18b7e1a9363805537d2d2b716c58a4a281c42770273770df1e",
+  "features": [
+    "cuda-legacy-bf16",
+    "cuda-legacy-fp8",
+    "cuda-legacy-fp4"
+  ],
+  "kind": "mistral-standalone",
+  "prerequisites": {
+    "legacy": "e4f7349cf973b5603ccbfe344e90c4d019a62754"
+  },
+  "resolution_hash": "d52dd22c559335bdb2d551b49bdf028d6ffc75843cb7b49a987f3823143e3f1f",
+  "schema_version": 2,
+  "target_branch": "lfm25_dspark_standalone",
+  "toolchain": "1.99.0"
+}
