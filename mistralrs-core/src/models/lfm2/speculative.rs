@@ -154,7 +154,9 @@ impl Model {
             ids.extend(std::iter::repeat_n(drafter.mask_token_id(), n_predict));
         }
         let ids = Tensor::from_vec(ids, (anchors.len(), block), &self.device)?;
-        let mut embedding = self.embed_tokens.embedding_forward(&ids, self.dtype)?;
+        let mut embedding = self
+            .embed_tokens
+            .embedding_forward(&ids, self.dtype.into())?;
         if (drafter.input_embedding_scale() - 1.0).abs() > f64::EPSILON {
             embedding = (embedding * drafter.input_embedding_scale())?;
         }
