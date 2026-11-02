@@ -4,9 +4,11 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import re
 import subprocess
+import statistics
 from pathlib import Path
 
 SCHEMA = "haricot-extended-release-r1"
@@ -16,6 +18,7 @@ DIGEST = re.compile(r"^[0-9a-f]{64}$")
 ROOT = Path(__file__).resolve().parent
 IMAGE_SCHEMA = "haricot-extended-release-image-r1"
 GPU_SCHEMA = "haricot-extended-release-gpu-r1"
+PAGED_BENCH_TOKENS = 32
 
 
 def hash_file(path):
@@ -156,8 +159,29 @@ def collect_gpu(plan_file, directory, proofs, image_directory):
         report["models"][mode] = result
         q.write(destination / "report.json", report)
     complete = all(not x["errors"] for x in report["models"].values())
+    paged_complete = True
+    if json.loads(Path(plan_file).read_text())["config"].get("fp8_kv_qualification"):
+        benchmark = {"status": "ERROR", "model": "text", "weights": policy["models"]["text"],
+                     "binary_sha256": manifest["binary_sha256"], "cases": {}, "errors": {},
+                     "performance_threshold": None, "numeric_acceptance": "separate unchanged Text/VL/GGUF policy"}
+        for cache in ("auto", "f8e4m3"):
+            print("RELEASE_PAGED_KV_EXECUTE=" + cache, flush=True)
+            try:
+                observation = q.infer(Path(directory) / "mistralrs", "text", "cuda", paths,
+                                      {**policy, "max_tokens": PAGED_BENCH_TOKENS},
+                                      destination / ("paged-kv-" + cache + ".log"), paged_cache_type=cache)
+                q.write(destination / ("paged-kv-" + cache + ".json"), observation)
+                benchmark["cases"][cache] = paged_summary(observation, cache, q)
+            except q.MODEL_ERRORS as error:
+                benchmark["errors"][cache] = str(error)
+        paged_complete = not benchmark["errors"] and len(benchmark["cases"]) == 2
+        if paged_complete:
+            benchmark["status"] = "PASS"
+            benchmark["request_speed_ratio_fp16_over_fp8"] = (benchmark["cases"]["auto"]["median_request_seconds"]
+                                                               / benchmark["cases"]["f8e4m3"]["median_request_seconds"])
+        report["paged_fp8"] = benchmark
     passed = complete and all(x["status"] == "PASS" for x in report["models"].values())
-    report.update(full_models_executed=complete, status="PASS" if passed else "COLLECTED" if complete else "ERROR")
+    report.update(full_models_executed=complete, status="PASS" if passed and paged_complete else "COLLECTED" if complete and paged_complete else "ERROR")
     report["files"] = {p.name: hash_file(p) for p in destination.iterdir() if p.name != "report.json"}
     q.write(destination / "report.json", report)
     summary = "\nRelease binary SHA256: " + manifest["binary_sha256"] + "\n\n"
@@ -169,7 +193,31 @@ def collect_gpu(plan_file, directory, proofs, image_directory):
     print(summary)
     if not complete:
         raise ValueError("release model execution incomplete; all three models were attempted")
+    if not paged_complete:
+        raise ValueError("real Text FP16/FP8 paged KV benchmark incomplete; both cache modes were attempted")
     return report
+
+
+def paged_summary(observation, cache, q):
+    measured = observation["paged_kv"]
+    command = measured["command"]
+    if (observation.get("device") != "cuda" or measured["cache_type"] != cache
+            or measured["warmup"] != q.KV_BENCH_WARMUP
+            or observation["request"]["max_tokens"] != PAGED_BENCH_TOKENS
+            or any(command[command.index(flag) + 1] != value for flag, value in (
+                ("--paged-attn", "on"), ("--pa-cache-type", cache), ("--kv-cache", "2048tokens"),
+                ("--prefix-cache-n", "0"), ("--max-num-batched-tokens", "128"),
+                ("--max-prefill-chunk-tokens", "128")))):
+        raise ValueError("paged KV benchmark command or protocol mismatch")
+    samples = measured["samples"]
+    timings = [x["wall_seconds"] for x in samples]
+    if (len(timings) != q.KV_BENCH_REPEATS or any(not math.isfinite(x) or x <= 0 for x in timings)
+            or any(x["response"]["usage"].get(name, 0) < 1 for x in samples
+                   for name in ("prompt_tokens", "completion_tokens"))):
+        raise ValueError("missing real-model paged KV timing samples")
+    return {"median_request_seconds": statistics.median(timings),
+            "completion_tokens": [x["response"]["usage"]["completion_tokens"] for x in samples],
+            "prompt_tokens": [x["response"]["usage"]["prompt_tokens"] for x in samples]}
 
 
 def verify_gpu(plan_file, directory, proofs, image_directory):
@@ -194,11 +242,26 @@ def verify_gpu(plan_file, directory, proofs, image_directory):
             or set(report.get("models", {})) != set(q.MODES)):
         raise ValueError("accepted release-specific model and image qualification is missing")
     mandatory = {f"{m}-{d}.json" for m in q.MODES for d in ("cpu", "cuda")}
+    if json.loads(Path(plan_file).read_text())["config"].get("fp8_kv_qualification"):
+        benchmark = report.get("paged_fp8", {})
+        if (benchmark.get("status") != "PASS" or benchmark.get("errors")
+                or benchmark.get("binary_sha256") != manifest["binary_sha256"]):
+            raise ValueError("real Text FP16/FP8 paged KV benchmark is missing")
+        mandatory.update({"paged-kv-auto.json", "paged-kv-f8e4m3.json"})
     if not mandatory.issubset(report.get("files", {})):
         raise ValueError("raw release CPU/CUDA references are missing")
     for name, expected_hash in report["files"].items():
         if Path(name).name != name or not DIGEST.fullmatch(expected_hash) or hash_file(destination / name) != expected_hash:
             raise ValueError("release model evidence SHA256 mismatch")
+    if json.loads(Path(plan_file).read_text())["config"].get("fp8_kv_qualification"):
+        benchmark = report["paged_fp8"]
+        for cache in ("auto", "f8e4m3"):
+            actual = paged_summary(q.read(destination / ("paged-kv-" + cache + ".json")), cache, q)
+            if benchmark.get("cases", {}).get(cache) != actual:
+                raise ValueError("paged KV summary differs from raw measurements")
+        ratio = benchmark["cases"]["auto"]["median_request_seconds"] / benchmark["cases"]["f8e4m3"]["median_request_seconds"]
+        if benchmark.get("request_speed_ratio_fp16_over_fp8") != ratio:
+            raise ValueError("paged KV speed ratio differs from raw measurements")
     for mode in q.MODES:
         case = report["models"][mode]
         numeric = q.compare(q.read(destination / f"{mode}-cpu.json"), q.read(destination / f"{mode}-cuda.json"), policy)

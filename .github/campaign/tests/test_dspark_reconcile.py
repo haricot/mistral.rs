@@ -12,6 +12,17 @@ from campaign import migrate_lfm3_speculative_memory_test_api
 PATH = "mistralrs-cli/src/args/mod.rs"
 
 class DsparkReconcileTests(unittest.TestCase):
+    def test_audited_upstream_mtp_comment_keeps_functional_dspark_edits(self):
+        old = "    /// MTP assistant model id or path.\n"
+        new = "    /// Separate MTP draft model, as a Hugging Face ID or local path.\n"
+        feature_comment = "    /// MTP, DFlash, or DSpark assistant model id or path.\n"
+        base = ["first\n", old, "field\n", "middle\n", old, "other\n"]
+        feature = [x.replace(old, feature_comment) for x in base]
+        upstream = [x.replace(old, new) for x in base]
+        merged, decisions = transplant(base, feature, upstream, PATH)
+        self.assertEqual(merged, "".join(upstream))
+        self.assertEqual([x[1] for x in decisions], ["upstream-comment-retained"] * 2)
+
     def make_speculative_fixture(self, root_export=True, implementation="fn placeholder() {}"):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)

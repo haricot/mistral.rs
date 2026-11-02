@@ -1,5 +1,12 @@
 # Master and FP4 campaign preparation
 
+The selected base is `095991a7d680a6994e6f1554156ebef5d09db049`.
+The snapshot rejects a moved master. The four physically validated Candle
+dependencies retain their immutable fork commits and actual version 0.11.0.
+The master's zip 9.1.3 is pinned to its official v9.1.3 commit in a separate
+Git source, so Candle's registry zip 9.0.3 can coexist without removing the new
+skill archive header-consistency check.
+
 The preparation pins `master` and both FP4 source refs in the snapshot. Legacy merges the generic packed NVFP4 dispatch from `fix/allow_old_card-nvfp4-legacy`; its source blob must match `fp4_mistralrs_standalone`. The Bolt/DFlash component also merges the complete standalone FP4 source. All four existing standalone components remain independent except for their declared Legacy prerequisite. Extended composes those exact candidates.
 
 FP4 has no independent physical qualification prerequisite. Each final campaign runs an analytic W4A16 reference on CPU and the packed Pascal E7 implementation with F16/BF16 activations on SM61. The embedding test checks packed MXFP4 gather against Candle's dequantized reference. These are kernel and format tests; they do not qualify a complete FP4 model. The legacy dispatch rejects W4A4 and rank-three expert weights explicitly.
@@ -15,3 +22,20 @@ GPU archives are extracted and removed one component at a time; compressed archi
 The scalar FP8 capability is separate from the SM80 MMA capability. `grouped_fp8.cu` is excluded for targets below SM80; its Rust module and dispatch sites use `has_fp8_mma_kernels`. The per-tensor CPU fallback and scalar/blockwise FP8 kernels remain enabled under their existing capabilities.
 
 The FP8 roundtrip test explicitly uses CPU in the hosted CPU profile. A separate `cuda_sm61_roundtrip_f8e4m3` test runs the same body on the physical GPU. Enabling the CUDA feature is not interpreted as proof of a device on a hosted runner; the CPU CUDA-link stub remains an error-returning loader aid.
+
+FP8 KV admission accepts SM61 only when the paged-attention build actually
+compiled its explicit legacy FP8 path for SM61. Ordinary builds still require
+SM80+, and missing kernels, CPU, MLA and unsupported legacy architectures retain
+their existing rejection. CPU tests exercise the capability matrix; the physical
+profile also checks the real device gate.
+
+Every physical component writes and reads an FP8 paged cache, using nontrivial
+slot mappings and unequal K/V scales. Exactly representable fixtures check all
+stored values and compare decode against a CPU softmax reference and FP16.
+The 0.01 attention tolerance is the existing upstream paged-attention fixture
+tolerance; it does not change any full-model numeric policy. The benchmark uses
+128, 2048 and 8192 tokens, four warmups and nine alternating FP16/FP8 samples of
+eight calls each, with synchronization around host timing. It records raw write
+and decode times, medians and allocated cache bytes. API/launch overhead is
+included. No speedup threshold is required. These are synthetic cache tests,
+separate from the real-model measurements in the Extended release job.

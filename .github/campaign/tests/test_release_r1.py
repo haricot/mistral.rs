@@ -161,8 +161,11 @@ class ReleaseR1Tests(unittest.TestCase):
         (proofs / "release-r1/report.json").write_text(json.dumps(report))
         with self.assertRaises(RuntimeError): r.verify_gpu(self.plan_file, self.root, proofs, image)
 
-    def collect_fixture(self, execution_error=False):
+    def collect_fixture(self, execution_error=False, paged=False):
         image, proofs, _ = self.model_fixture()
+        if paged:
+            self.plan["config"]["fp8_kv_qualification"] = True
+            self.plan_file.write_text(json.dumps(self.plan))
         q = r.model_module()
         reference = {device: q.read(proofs / f"release-r1/text-{device}.json") for device in ("cpu", "cuda")}
         actual_hash = r.hash_file
@@ -171,9 +174,17 @@ class ReleaseR1Tests(unittest.TestCase):
             if value == "/run/haricot/asd/fallbacks/current.json": return "d" * 64
             if value == "/run/haricot/asd/profiles/current.asd": return "e" * 64
             return actual_hash(path)
-        def infer(_binary, mode, device, *_):
+        def infer(_binary, mode, device, *_, **options):
             if execution_error and mode == "gguf" and device == "cuda": raise OSError("unit-test model error")
             data = json.loads(json.dumps(reference[device]))
+            if options.get("paged_cache_type") is not None:
+                cache = options["paged_cache_type"]
+                data["request"]["max_tokens"] = r.PAGED_BENCH_TOKENS
+                data["paged_kv"] = {"cache_type":cache, "warmup":q.KV_BENCH_WARMUP,
+                    "command":["--paged-attn","on","--pa-cache-type",cache,"--kv-cache","2048tokens",
+                               "--prefix-cache-n","0","--max-num-batched-tokens","128","--max-prefill-chunk-tokens","128"],
+                    "samples":[{"wall_seconds":1.0 if cache == "auto" else 2.0,"response":data["response"]}
+                               for _ in range(q.KV_BENCH_REPEATS)]}
             if mode == "vl" and device == "cuda": data["response"]["choices"][0]["logprobs"]["content"][0]["logprob"] += 0.1
             return data
         env = {"GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1", "EXPECTED_RUN_ID": "123",
@@ -187,7 +198,7 @@ class ReleaseR1Tests(unittest.TestCase):
                         result = q.read(proofs / "release-r1/report.json")
                     else:
                         result = r.collect_gpu(self.plan_file, self.root, proofs, image)
-        self.assertEqual(observed.call_count, 6)
+        self.assertEqual(observed.call_count, 8 if paged else 6)
         self.assertTrue(all(call.args[0] == self.executable for call in observed.call_args_list))
         return result, image, proofs
 
@@ -197,6 +208,16 @@ class ReleaseR1Tests(unittest.TestCase):
         self.assertIn("code-execution", result["release"]["features"])
         self.assertTrue(result["full_models_executed"])
         self.assertEqual(result["status"], "COLLECTED")
+        with self.assertRaises(ValueError): r.verify_gpu(self.plan_file, self.root, proofs, image)
+
+    def test_release_paged_benchmark_keeps_actual_token_counts_without_relaxing_model_verdicts(self):
+        result, image, proofs = self.collect_fixture(paged=True)
+        self.assertTrue(result["full_models_executed"])
+        self.assertEqual(result["status"], "COLLECTED")
+        self.assertEqual(result["paged_fp8"]["status"], "PASS")
+        self.assertEqual(result["paged_fp8"]["request_speed_ratio_fp16_over_fp8"], 0.5)
+        self.assertIn("paged-kv-f8e4m3.json", result["files"])
+        self.assertEqual(result["models"]["vl"]["status"], "FAIL")
         with self.assertRaises(ValueError): r.verify_gpu(self.plan_file, self.root, proofs, image)
 
     def test_release_collection_keeps_execution_errors_distinct_from_numeric_drift(self):

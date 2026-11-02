@@ -1,6 +1,8 @@
 {
   "schema_version": 2,
   "master_branch": "master",
+  "master_sha": "095991a7d680a6994e6f1554156ebef5d09db049",
+  "candle_version": "0.11.0",
   "toolchain": "1.99.0",
   "base_image": "nvidia/cuda:12.9.2-devel-ubuntu24.04",
   "nextest_version": "0.9.138",
@@ -68,6 +70,7 @@
       "lfm3-gguf"
     ]
   },
+  "fp8_kv_qualification": true,
   "fp4_integration": {
     "standalone_branch": "fp4_mistralrs_standalone",
     "legacy_dispatch_branch": "fix/allow_old_card-nvfp4-legacy",

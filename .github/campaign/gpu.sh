@@ -52,11 +52,16 @@ while read -r component sha ref; do
   test "$(git rev-parse HEAD)" = "$sha"
   chmod +x "$dir/cargo-nextest"
   python3 "$script_dir/proof.py" config "$report/nextest-$component.toml" gpu --junit "$report/$component-junit.xml"
+  export HARICOT_FP8_KV_REPORT="$report/$component-fp8-kv.json"
+  export HARICOT_FP8_KV_CANDIDATE="$sha" HARICOT_FP8_KV_COMPONENT="$component"
   "$dir/cargo-nextest" nextest run --archive-file "$dir/tests.tar.zst" \
     --workspace-remap "$PWD" --extract-to "$report/target-$component" \
     --config-file "$report/nextest-$component.toml" --profile gpu --no-tests=fail \
     > "$report/$component.log" 2>&1 || { tail -n 100 "$report/$component.log"; exit 1; }
   python3 "$script_dir/proof.py" gpu-count "$report/$component-junit.xml" > "$report/$component-count.txt"
+  if [[ "$(python3 -c 'import json,sys;print(str(json.load(open(sys.argv[1]))["config"].get("fp8_kv_qualification",False)).lower())' "$plan")" == true ]]; then
+    python3 "$script_dir/proof.py" gpu-required "$report/$component-junit.xml" campaign_cuda_fp8_kv_sm61_correctness_and_performance > "$report/$component-fp8-kv-count.txt"
+  fi
   if [[ "$(python3 -c 'import json,sys;print(str(json.load(open(sys.argv[1]))["config"].get("lfm3_qualification",{}).get("require_sm61_causal_conv_parity",False)).lower())' "$plan")" == true ]]; then
     python3 "$script_dir/proof.py" gpu-required "$report/$component-junit.xml" cuda_prefill_decode_and_cached_chunks_match_reference > "$report/$component-lfm3-count.txt"
   fi
@@ -75,7 +80,7 @@ shutil.rmtree(target)
 PYCLEAN
 done < <(python3 -c 'import json,sys;[print(n["component"],n["candidate"],n["ref"]) for n in json.load(open(sys.argv[1]))["matrix"]]' "$plan")
 python3 - "$plan" "$builds" "$report" "$GITHUB_RUN_ID" <<'PY'
-import json,sys
+import json,os,sys
 from pathlib import Path
 plan=json.load(open(sys.argv[1])); builds=Path(sys.argv[2]); report=Path(sys.argv[3])
 archives={n["component"]:json.load(open(builds/n["component"]/"build.json"))["files"]["tests.tar.zst"] for n in plan["matrix"]}
@@ -101,6 +106,15 @@ fp4_counts={}
 if plan.get("integrations",{}).get("fp4"):
     fp4_counts={name:int((report/(name+"-fp4-count.txt")).read_text()) for name in counts}
     assert all(n>0 for n in fp4_counts.values())
-out={"fp4_test_counts":fp4_counts,"schema_version":2,"candidate":plan["candidate"],"run_id":sys.argv[4],"target":"sm_61","status":"GPU_PASSED","gpu_executed":True,"archives":archives,"test_counts":counts,"asd_required":asd_required,"asd_profiles":asd_profiles,"asd_test_counts":asd_counts,"lfm3_conv_gpu_counts":lfm3_conv_gpu_counts,"full_models_executed":False}
+fp8_kv={}
+if plan["config"].get("fp8_kv_qualification"):
+    sys.path.insert(0,str(Path(sys.argv[1]).parent/"orchestrator"))
+    from fp8_kv import verify
+    for node in plan["matrix"]:
+        name=node["component"]
+        fingerprint=verify(report/(name+"-fp8-kv.json"),node,sys.argv[4],os.environ["GITHUB_RUN_ATTEMPT"])
+        fp8_kv[name]={"sha256":fingerprint,"test_count":int((report/(name+"-fp8-kv-count.txt")).read_text())}
+        assert fp8_kv[name]["test_count"]>0
+out={"fp8_kv":fp8_kv,"run_attempt":os.environ["GITHUB_RUN_ATTEMPT"],"fp4_test_counts":fp4_counts,"schema_version":2,"candidate":plan["candidate"],"run_id":sys.argv[4],"target":"sm_61","status":"GPU_PASSED","gpu_executed":True,"archives":archives,"test_counts":counts,"asd_required":asd_required,"asd_profiles":asd_profiles,"asd_test_counts":asd_counts,"lfm3_conv_gpu_counts":lfm3_conv_gpu_counts,"full_models_executed":False}
 (report/"report.json").write_text(json.dumps(out,sort_keys=True,indent=2)+"\n")
 PY

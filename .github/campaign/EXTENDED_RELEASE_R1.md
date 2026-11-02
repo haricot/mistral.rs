@@ -19,6 +19,16 @@ candidate, profile, features, model policy, harness and original ASD report.
 All three models are attempted. Numeric mismatches produce a collected report;
 promotion still requires every comparison to pass the unchanged policy.
 
+When FP8 KV qualification is enabled, the same delivered executable also runs
+the pinned Text model with paged attention enabled, first with FP16 KV and then
+with F8E4M3 KV. Both use 2048 cache tokens, one sequence, 128-token batching and
+prefill chunks, and disabled prefix reuse. One warmup precedes three timed
+requests of up to 32 generated tokens. Raw responses, actual token counts,
+commands, logs and request timings are retained and hashed. Timings include
+prefill and decode but exclude model loading; a throughput improvement is not
+assumed. This extra Text benchmark is separate from the unchanged CPU/CUDA
+Text/VL/GGUF numeric acceptance tests, which still disable paged attention.
+
 The PR branch can be qualified before merge:
 
 ```bash

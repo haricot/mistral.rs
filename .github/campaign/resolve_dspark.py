@@ -85,6 +85,12 @@ def transplant(base, feature, upstream, path):
         if tag == "equal":
             continue
         removed, added = base[i1:i2], feature[j1:j2]
+        if (path == "mistralrs-cli/src/args/mod.rs"
+                and removed == ["    /// MTP assistant model id or path.\n"]
+                and added == ["    /// MTP, DFlash, or DSpark assistant model id or path.\n"]
+                and upstream.count("    /// Separate MTP draft model, as a Hugging Face ID or local path.\n") == 2):
+            audit.append((i1+1, "upstream-comment-retained"))
+            continue
         if tag == "delete" or len(removed) > 3:
             raise RuntimeError(f"DSpark functional repair: destructive delta {path}@{i1+1}")
         # Do not deduplicate by searching the *whole file*: MTP config

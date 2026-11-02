@@ -1,4 +1,4 @@
-master-fp4-nvfp4-launch-shape-legacy-20261102
-master=eec0d063e8375e9d6958483122e35047d385a39d
+master-fp8-kv-sm61-legacy-20261102
+master=095991a7d680a6994e6f1554156ebef5d09db049
 fp4=2b36d29b2784bcd34c22cfde61088678a3dab3b8
-qualification-only; complete preparation; K=32 NVFP4 fixture; CPU validates Pascal payload
+qualification-only; complete preparation; compiled SM61 software FP8 KV gate; deterministic cache parity and synchronized FP16/FP8 timings

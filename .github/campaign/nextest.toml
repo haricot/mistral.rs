@@ -4,7 +4,7 @@ test-threads = 2
 
 [profile.cpu]
 default-filter = '''
-  test(campaign_cpu_backend) | test(campaign_cpu_nvfp4) | test(campaign_cpu_mxfp4) | test(campaign_force_cpu) | test(campaign_cpu_flag) | test(args::tests::)
+  test(campaign_cpu_backend) | test(campaign_cpu_nvfp4) | test(campaign_cpu_mxfp4) | test(campaign_cpu_fp8_kv) | test(campaign_force_cpu) | test(campaign_cpu_flag) | test(args::tests::) | test(skills::tests::)
   | ((test(speculative::) | test(models::lfm2::) | test(models::lfm3::)
        | test(gguf::lfm3_vl_) | test(vision_models::lfm3_vl::)
        | test(lfm3_conv::tests::cpu_prefill_decode_and_cached_chunks_match_reference)
