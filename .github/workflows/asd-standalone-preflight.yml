@@ -1,0 +1,68 @@
+name: MEXT G2 — ASD Standalone CPU Preflight
+
+on:
+  push:
+    branches:
+      - asd_runner_standalone
+  pull_request:
+    branches:
+      - master
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'mistral-integration/**'
+      - 'mistralrs-*/**'
+      - 'mistralrs/**'
+      - '.github/workflows/asd-standalone-preflight.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cpu-preflight:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    env:
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          toolchain: stable
+          components: rustfmt,clippy
+      - name: Verify pinned Candle Extended provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          candle="$(jq -r '.candle_sha' mistral-integration/sources.json)"
+          test "$(jq -r '.candle_branch' mistral-integration/sources.json)" = extended
+          test "$candle" = 66c4651cc83f9a43e79a4aa09302aac9bc763d2c
+          test "$(jq -r '.standalone_status' mistral-integration/sources.json)" = UNVALIDATED_STANDALONE_CANDIDATE
+          grep -Fq "$candle" Cargo.lock
+          test "$(grep -Fc "rev = \"$candle\"" Cargo.toml)" = 4
+      - name: Check Cargo.lock against exact Candle dependency graph
+        run: cargo +stable metadata --locked --format-version 1 > "$RUNNER_TEMP/mistral-metadata.json"
+      - name: Check formatting
+        run: cargo +stable fmt --all -- --check
+      - name: CPU typecheck (not a GPU validation)
+        run: cargo +stable check --locked --no-default-features -p mistralrs-core
+      - name: Regression guard — workspace async-trait version and resolved lock
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import tomllib
+          from pathlib import Path
+          workspace = tomllib.loads(Path("Cargo.toml").read_text())
+          lock = tomllib.loads(Path("Cargo.lock").read_text())
+          mcp = tomllib.loads(Path("mistralrs-mcp/Cargo.toml").read_text())
+          assert workspace["workspace"]["dependencies"]["async-trait"] == "0.1.92"
+          assert mcp["dependencies"]["async-trait"]["workspace"] is True
+          versions = [pkg["version"] for pkg in lock["package"] if pkg["name"] == "async-trait"]
+          assert versions == ["0.1.92"], f"Unexpected resolved async-trait: {versions}"
+          print("MEXT_G2_ASYNC_TRAIT_0_1_92=PASS")
+          PY
+      - name: Targeted MCP Clippy with warnings denied
+        run: cargo +stable clippy --locked -p mistralrs-mcp --tests --examples -- -D warnings
