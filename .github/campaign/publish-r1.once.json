@@ -1,0 +1,54 @@
+{
+  "schema": "haricot-qualified-r1-publication-v1",
+  "repository": "haricot/mistral.rs",
+  "requested_by": "haricot",
+  "decision": "publish-the-successfully-executed-release",
+  "non_blocking_numeric_models": [
+    "vl",
+    "gguf"
+  ],
+  "run_id": 41479428911,
+  "run_attempt": 1,
+  "source_sha": "356fe07730ea817ef00a8552f9cdc5a01e0b3d7b",
+  "candidate": "3966d0ad0ba5d1964e418a3c37d665c46a84a9aa",
+  "binary_sha256": "64d07d305ca40f73b072e9a57322b3fafefa3e6f637e27f55026f27da9a8c261",
+  "gpu_job_id": 125432545783,
+  "artifacts": [
+    {
+      "id": 13159087328,
+      "name": "mistral-asd-prep-41479428911-1",
+      "digest": "sha256:ccc27832f54bbd9086e93f7bf4c1bb1bc210c357a2c6b5407f3e413c190453ba",
+      "destination": "preparation"
+    },
+    {
+      "id": 13162171401,
+      "name": "mistral-builds-0e88afdd8c53a045406e5e5ba12f2697d358fcef9e0397403bf7bcf185869819",
+      "digest": "sha256:c3a309dd5c58bfe1b35310e590fdc0155dd3a6a85998fc48e24df37beb23dfa7",
+      "destination": "builds"
+    },
+    {
+      "id": 13172706810,
+      "name": "mistral-asd-gpu-41479428911-1",
+      "digest": "sha256:9ebe16ac8b334582a098010c80484d0486c3ee03acd833bdeca61b02d88f1b56",
+      "destination": "gpu"
+    },
+    {
+      "id": 13163063213,
+      "name": "mistral-extended-release-r1-41479428911-1",
+      "digest": "sha256:ec1c3438d19bc7273b1fcc21249340bffb8a81f36c965ec3974144546fc8f2d8",
+      "destination": "release"
+    },
+    {
+      "id": 13164266571,
+      "name": "mistral-extended-oci-proof-41479428911-1",
+      "digest": "sha256:dd6d27a8e1bac6fd8e552f1ad0d7a0ebe3650ea518f5304677c901a0456f795d",
+      "destination": "image"
+    },
+    {
+      "id": 13163143751,
+      "name": "mistral-extended-oci-image-41479428911-1",
+      "digest": "sha256:2bd3f5cf257754e77313d589ce72205cc23dd5647191c5553d21f68da37f068d",
+      "destination": "image"
+    }
+  ]
+}

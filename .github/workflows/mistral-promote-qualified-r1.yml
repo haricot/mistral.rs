@@ -1,0 +1,53 @@
+name: Promote and publish the qualified Extended R1 without rebuilding
+on:
+  push:
+    branches: [mirror_orch]
+    paths: ['.github/campaign/publish-r1.once.json']
+permissions:
+  contents: read
+concurrency:
+  group: mistral-qualified-r1-publication
+  cancel-in-progress: false
+  queue: max
+jobs:
+  publish:
+    if: github.repository == 'haricot/mistral.rs' && github.actor == 'haricot'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      actions: read
+      packages: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+      - name: Check the publication contracts without model execution
+        run: python3 -B -m unittest discover -v -s .github/scripts/tests -p test_promote_qualified_r1.py
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: 356fe07730ea817ef00a8552f9cdc5a01e0b3d7b
+          path: .qualified-r1
+          persist-credentials: false
+      - name: Free unused hosted toolchains for verified release archives
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+      - name: Authenticate the existing image publisher
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - name: Verify original artifacts, promote atomically and publish the same binary and OCI image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 -B .github/scripts/promote-qualified-r1.py \
+            --repo "$GITHUB_WORKSPACE" \
+            --qualified "$GITHUB_WORKSPACE/.qualified-r1" \
+            --receipt .github/campaign/publish-r1.once.json \
+            --work "$RUNNER_TEMP/qualified-r1-publication"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: mistral-r1-publication-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/qualified-r1-publication/publication/
+          if-no-files-found: warn
+          retention-days: 90
