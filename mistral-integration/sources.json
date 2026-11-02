@@ -1,20 +1,27 @@
 {
-  "base_master_sha": "28ed6daca455b4ae063896014d1ea698b912c539",
+  "base_master_sha": "095991a7d680a6994e6f1554156ebef5d09db049",
   "candle_branch": "extended",
   "candle_repository": "haricot/candle",
-  "candle_sha": "40b5a8acc43b5f8ef925370ae12daddd929f39f2",
-  "candle_validation_ref": "refs/tags/archive/extended/sm61-validated-40029177676-2",
+  "candle_sha": "e0dbd926ae211ee19cf1ac0f6ae4b0cbabc00646",
+  "candle_validation_ref": "refs/heads/archive/extended/sm61-validated-41036699911-1",
   "component": "nemotron_bolt_dflash",
-  "contract_hash": "371a215171452d3fdf04fc0578d23ecc8eb852d5a973f608f727f2d0649fc0dc",
+  "contract_hash": "0347882005859e18b7e1a9363805537d2d2b716c58a4a281c42770273770df1e",
   "features": [
     "cuda-legacy-bf16",
     "cuda-legacy-fp8",
     "cuda-legacy-fp4"
   ],
+  "fp4": {
+    "legacy_dispatch": "02c3708f480a3293ef2745f549d7159dcfc1f310",
+    "physical_qualification": "final-campaign-only",
+    "shared_dispatch_blob": "629cc55973a299825f8f84e91c980d08dd8958cf",
+    "standalone": "2b36d29b2784bcd34c22cfde61088678a3dab3b8"
+  },
   "kind": "mistral-standalone",
   "prerequisites": {
-    "legacy": "31556971b6a655883f452d76c78ebef772f53c38"
+    "legacy": "e4f7349cf973b5603ccbfe344e90c4d019a62754"
   },
+  "resolution_hash": "c88fc8f29c44f035cc1f27ccf81461b69577f32d7476e4426a46f1a0b0878ad5",
   "schema_version": 2,
   "target_branch": "nemotron_bolt_dflash_standalone",
   "toolchain": "1.99.0"

@@ -146,7 +146,7 @@ static ARCH_SPECS: &[GgufArchSpec] = &[
         .text(GgufTextRoute::Synthesized(synthesize_gemma3_text))
         .validate_multimodal_config(ensure_gemma3_vision_config),
     GgufArchSpec::new(&["gemma4"])
-        .text(GgufTextRoute::ProjectorRequired)
+        .text(GgufTextRoute::Synthesized(synthesize_gemma4_text))
         .multimodal(GgufMultimodalRoute::Resolve(resolve_gemma4)),
     GgufArchSpec::new(&["qwen2vl", "qwen3vl", "qwen3vlmoe"])
         .text(GgufTextRoute::ProjectorRequired)
@@ -185,4 +185,42 @@ fn resolve_qwen_multimodal(archive: &GgufArchive, _dtype: DType) -> Result<Nativ
         bindings: build_qwen_multimodal_bindings(archive)?,
         rope_pairing: RopePairing::HalfSplit,
     })
+}
+
+fn synthesize_gemma4_text(inputs: &GgufSynthesisInputs<'_>) -> Result<SynthesizedGguf> {
+    let archive = inputs.archive;
+    let names = archive.tensors().keys().cloned().collect::<Vec<_>>();
+    let config = super::gemma4_config::prepare_gemma4_text_config(
+        inputs.external_config,
+        archive.metadata(),
+        &names,
+    )?;
+    Ok(SynthesizedGguf {
+        config,
+        bindings: build_gemma4_bindings(archive)?,
+        loader_type: MultimodalLoaderType::Gemma4,
+        processor_config: None,
+        preprocessor_config: None,
+        rope_pairing: RopePairing::HalfSplit,
+    })
+}
+
+#[cfg(test)]
+mod campaign_gemma4_text_route_tests {
+    use super::*;
+    #[test]
+    fn gemma4_keeps_text_synthesis_and_multimodal_resolution() {
+        assert!(matches!(
+            arch_spec("gemma4").text,
+            GgufTextRoute::Synthesized(_)
+        ));
+        assert!(matches!(
+            arch_spec("GEMMA4").multimodal,
+            GgufMultimodalRoute::Resolve(_)
+        ));
+        assert!(matches!(
+            arch_spec("qwen3vl").text,
+            GgufTextRoute::ProjectorRequired
+        ));
+    }
 }

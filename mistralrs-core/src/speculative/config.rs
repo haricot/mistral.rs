@@ -181,10 +181,13 @@ impl MtpConfig {
         let path = self.resolve_path()?;
         let raw: serde_json::Value = serde_json::from_str(
             &fs::read_to_string(path.join("config.json")).map_err(candle_core::Error::msg)?,
-        ).map_err(candle_core::Error::msg)?;
-        if raw.get("quantization_config")
+        )
+        .map_err(candle_core::Error::msg)?;
+        if raw
+            .get("quantization_config")
             .and_then(|q| q.get("quant_algo"))
-            .and_then(serde_json::Value::as_str) != Some("W4A16_NVFP4")
+            .and_then(serde_json::Value::as_str)
+            != Some("W4A16_NVFP4")
         {
             return self.external_weight_size_in_bytes(target_dtype);
         }
@@ -197,31 +200,42 @@ impl MtpConfig {
         if weights.is_empty() {
             candle_core::bail!("DFlash packed checkpoint has no safetensors");
         }
-        let tensors = unsafe {
-            mistralrs_quant::safetensors::MmapedSafetensors::multi_unique(&weights)?
-        };
-        tensors.tensors().into_iter().try_fold(0usize, |total, (name, tensor)| {
-            let raw_bytes = tensor.data().len();
-            let resident = if name.ends_with(".weight")
-                && tensor.dtype() == safetensors::tensor::Dtype::U8
-            {
-                let rows = tensor.shape().first().copied().unwrap_or(0);
-                raw_bytes.checked_mul(2)
-                    .and_then(|bytes| rows.checked_mul(4).and_then(|scales| bytes.checked_add(scales)))
-            } else if tensor.dtype() == safetensors::tensor::Dtype::F8_E4M3 {
-                raw_bytes.checked_mul(2)
-            } else if name.ends_with(".weight") {
-                let elements = tensor.shape().iter().try_fold(1usize,
-                    |n, dim| n.checked_mul(*dim));
-                elements.and_then(|n| n.checked_mul(target_dtype.size_in_bytes()))
-                    .map(|runtime_bytes| runtime_bytes.max(raw_bytes))
-            } else {
-                Some(raw_bytes)
-            };
-            total.checked_add(
-                resident.ok_or_else(|| candle_core::Error::msg("packed DFlash resident size overflow"))?
-            ).ok_or_else(|| candle_core::Error::msg("packed DFlash memory reservation overflow"))
-        })
+        let tensors =
+            unsafe { mistralrs_quant::safetensors::MmapedSafetensors::multi_unique(&weights)? };
+        tensors
+            .tensors()
+            .into_iter()
+            .try_fold(0usize, |total, (name, tensor)| {
+                let raw_bytes = tensor.data().len();
+                let resident = if name.ends_with(".weight")
+                    && tensor.dtype() == safetensors::tensor::Dtype::U8
+                {
+                    let rows = tensor.shape().first().copied().unwrap_or(0);
+                    raw_bytes.checked_mul(2).and_then(|bytes| {
+                        rows.checked_mul(4)
+                            .and_then(|scales| bytes.checked_add(scales))
+                    })
+                } else if tensor.dtype() == safetensors::tensor::Dtype::F8_E4M3 {
+                    raw_bytes.checked_mul(2)
+                } else if name.ends_with(".weight") {
+                    let elements = tensor
+                        .shape()
+                        .iter()
+                        .try_fold(1usize, |n, dim| n.checked_mul(*dim));
+                    elements
+                        .and_then(|n| n.checked_mul(target_dtype.size_in_bytes()))
+                        .map(|runtime_bytes| runtime_bytes.max(raw_bytes))
+                } else {
+                    Some(raw_bytes)
+                };
+                total
+                    .checked_add(resident.ok_or_else(|| {
+                        candle_core::Error::msg("packed DFlash resident size overflow")
+                    })?)
+                    .ok_or_else(|| {
+                        candle_core::Error::msg("packed DFlash memory reservation overflow")
+                    })
+            })
     }
 }
 
@@ -291,11 +305,12 @@ pub fn reserve_external_mtp_memory_with_runtime(
         cache_config.recurrent_checkpoint_lanes_auto = mtp_config.n_predict.is_none();
     }
     #[cfg(feature = "cuda-legacy-fp4")]
-    let use_packed = device.is_cuda() && match std::env::var("MISTRALRS_DFLASH_ISQ").ok().as_deref() {
-        Some("none" | "bf16") => true,
-        Some(_) => false,
-        None => mtp_config.draft_lm_head_isq.is_none(),
-    };
+    let use_packed = device.is_cuda()
+        && match std::env::var("MISTRALRS_DFLASH_ISQ").ok().as_deref() {
+            Some("none" | "bf16") => true,
+            Some(_) => false,
+            None => mtp_config.draft_lm_head_isq.is_none(),
+        };
     #[cfg(feature = "cuda-legacy-fp4")]
     let bytes = if use_packed {
         mtp_config.external_packed_weight_size_in_bytes(dtype)?
