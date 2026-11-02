@@ -62,6 +62,7 @@ mistralrs bench [OPTIONS] [COMMAND]
 | `--mtp-model <MTP_MODEL>` |  | Separate MTP draft model, as a Hugging Face ID or local path |
 | `--mtp-n-predict <MTP_N_PREDICT>` |  | Fixed MTP draft tokens per step; omit to adapt the depth automatically |
 | `--mtp-draft-sampling <MTP_DRAFT_SAMPLING>` | `auto` | How the MTP drafter picks the tokens it proposes<br>`auto`: Probabilistic when the drafter supports it, otherwise greedy<br>`greedy`: Always propose the most likely token<br>`probabilistic`: Sample proposals from the draft distribution; fails if unsupported |
+| `--mtp-dspark-verify-profile <MTP_DSPARK_VERIFY_PROFILE>` |  | Measured full-step costs for DSpark confidence-based verification |
 | `--adapter <ADAPTER>` |  | LoRA adapter alias to benchmark. Omit to benchmark the base model |
 | `--prompt-len <PROMPT_LEN>` | `512` | Prompt lengths for measuring time to first token (TTFT); `0` skips it. Comma-separate for sweeps |
 | `--gen-len <GEN_LEN>` | `128` | Output tokens per decode request. Values below 2 skip decode metrics |

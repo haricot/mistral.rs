@@ -809,9 +809,15 @@ where
         );
     }
 
+    let verification_width = proposal_batch.verification_width(proposal_len)?;
+    target
+        .speculative_autotuner()
+        .lock()
+        .expect("speculative autotuner poisoned")
+        .set_verification_width(verification_width);
     let mut bypassed = Vec::new();
     for (idx, proposal) in active_indices.iter().zip(proposal_batch.proposals) {
-        if proposal.tokens.len() == proposal_len {
+        if proposal.tokens.len() == verification_width {
             seqs[*idx].set_staged_speculative(proposal.tokens, proposal.distribution);
         } else {
             bypassed.push(*seqs[*idx].id());
