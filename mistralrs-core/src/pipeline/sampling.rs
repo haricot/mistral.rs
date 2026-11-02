@@ -85,7 +85,7 @@ fn activate_required_tool_call_grammar(
         tracing::warn!("Cannot force required tool call: llguidance is unavailable");
         return;
     };
-    crate::tools::specialize_required_tool_call_grammar(&mut grm, factory.tok_env().tok_trie());
+    crate::tools::specialize_tool_call_grammar(&mut grm, factory.tok_env().tok_trie());
     match crate::pipeline::llg::constraint_from_llg_grammar(factory, grm) {
         Ok(matcher) => {
             seq.recognizer = SequenceRecognizer::Llguidance(Box::new(matcher));
@@ -203,9 +203,13 @@ pub(crate) async fn finish_or_add_toks_to_seq(
     // delimiters like <tool_call>, [TOOL_CALLS], <|python_tag|>) or when think tag
     // mode is enabled (so <think>/<\/think> delimiters are visible in the output).
     let include_special = seq.tool_call_state.is_some() || seq.needs_special_tokens();
-    let mut completion_bytes = tok_env
-        .tok_trie()
-        .decode_ext(&[logprobs.token], include_special);
+    let mut completion_bytes = if this.response_token_is_hidden(logprobs.token) {
+        Vec::new()
+    } else {
+        tok_env
+            .tok_trie()
+            .decode_ext(&[logprobs.token], include_special)
+    };
     if include_special {
         let guard = seq
             .special_text_guard
@@ -255,8 +259,9 @@ pub(crate) async fn finish_or_add_toks_to_seq(
             .as_mut()
             .and_then(|state| state.maybe_activate_continuation_grammar(text.as_deref()));
 
-        if let Some(grm) = grm {
+        if let Some(mut grm) = grm {
             if let Some(ref factory) = metadata.llg_factory {
+                crate::tools::specialize_tool_call_grammar(&mut grm, factory.tok_env().tok_trie());
                 match crate::pipeline::llg::constraint_from_llg_grammar(factory, grm) {
                     Ok(matcher) => {
                         tracing::debug!("Activated tool call grammar");
@@ -277,7 +282,10 @@ pub(crate) async fn finish_or_add_toks_to_seq(
     }
 
     if is_done.is_some() {
+        this.finalize_response(seq)?;
         seq.flush_stop_pending_bytes();
+    } else if seq.get_mut_group().is_streaming {
+        this.prepare_streaming_response(seq)?;
     }
 
     // Handle streaming requests
@@ -318,7 +326,14 @@ pub(crate) async fn finish_or_add_toks_to_seq(
                 Ok(Some(seq.get_final_delta()))
             } else {
                 seq.get_delta()
-            };
+            }
+            .map(|delta| {
+                if seq.generated_audio().is_some() {
+                    Some(delta.unwrap_or_default())
+                } else {
+                    delta
+                }
+            });
             if let Some(mut delta) = crate::handle_seq_error_stateaware_ok!(delta_result, seq) {
                 if seq.get_mut_group().is_chat {
                     let has_external_reasoning_parser = seq.reasoning_mode().is_some();
@@ -386,6 +401,7 @@ pub(crate) async fn finish_or_add_toks_to_seq(
                                     role: "assistant".to_string(),
                                     tool_calls: None,
                                     reasoning_content: None,
+                                    audio: None,
                                 },
                                 index: seq.get_response_index(),
                                 finish_reason: if idx + 1 == emission_count {
@@ -410,6 +426,7 @@ pub(crate) async fn finish_or_add_toks_to_seq(
                                         role: "assistant".to_string(),
                                         tool_calls: None,
                                         reasoning_content: None,
+                                        audio: None,
                                     },
                                     index: seq.get_response_index(),
                                     finish_reason: None,
@@ -418,12 +435,33 @@ pub(crate) async fn finish_or_add_toks_to_seq(
                                 });
                             }
                         }
+                        let generated_audio = seq.take_generated_audio().map(|mut audio| {
+                            if is_done.is_some()
+                                && seq.audio_output().is_some_and(|output| {
+                                    output.mode == crate::ChatAudioMode::TextAudio
+                                })
+                            {
+                                audio.transcript = if seq.has_reasoning_state() {
+                                    Some(seq.get_response_content().unwrap_or_default())
+                                } else {
+                                    Some(seq.completion_text())
+                                };
+                            }
+                            audio
+                        });
+                        if seq
+                            .audio_output()
+                            .is_some_and(|output| output.mode == crate::ChatAudioMode::Audio)
+                        {
+                            content_delta = None;
+                        }
                         seq.add_streaming_chunk_choice_to_group(crate::ChunkChoice {
                             delta: crate::Delta {
                                 content: fixup_sentencepiece!(Option content_delta),
                                 role: "assistant".to_string(),
                                 tool_calls: Some(tool_calls).filter(|v| !v.is_empty()),
                                 reasoning_content: reasoning_delta,
+                                audio: generated_audio,
                             },
                             index: seq.get_response_index(),
                             finish_reason: is_done.map(|reason| reason.to_string()),
@@ -606,15 +644,25 @@ pub(crate) async fn finish_or_add_toks_to_seq(
                     reason = StopReason::ToolCalls;
                 }
 
+                let audio_only = seq
+                    .audio_output()
+                    .is_some_and(|output| output.mode == crate::ChatAudioMode::Audio);
+                let audio = seq.take_generated_audio().map(|mut audio| {
+                    if !audio_only {
+                        audio.transcript = text_new.clone();
+                    }
+                    audio
+                });
                 let choice = crate::Choice {
                     finish_reason: fixup_sentencepiece!(reason),
                     stop_sequence: response_stop_sequence(Some(reason), hidden_stop.as_deref()),
                     index: seq.get_response_index(),
                     message: crate::ResponseMessage {
-                        content: text_new,
+                        content: text_new.filter(|_| !audio_only),
                         role: "assistant".to_string(),
                         tool_calls: Some(tool_calls).filter(|v| !v.is_empty()),
                         reasoning_content,
+                        audio,
                     },
                     logprobs: logprobs.map(|l| crate::Logprobs { content: Some(l) }),
                 };
@@ -1818,7 +1866,7 @@ mod tests {
                     Some(crate::tools::ToolCallFormat::Flint),
                     &tools,
                 );
-                crate::tools::specialize_required_tool_call_grammar(&mut grammar, &trie);
+                crate::tools::specialize_tool_call_grammar(&mut grammar, &trie);
                 let mut matcher =
                     crate::pipeline::llg::constraint_from_llg_grammar(&factory, grammar).unwrap();
                 let mut call = vec![trie.get_special_token("<tool_call>").unwrap()];
