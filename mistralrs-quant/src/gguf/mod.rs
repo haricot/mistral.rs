@@ -884,6 +884,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mxfp4_uqff_code_roundtrip() -> Result<()> {
+        assert_eq!(ggml_dtype_to_uqff_code(GgmlDType::Mxfp4), 39);
+        assert_eq!(ggml_dtype_from_uqff_code(39)?, GgmlDType::Mxfp4);
+        assert_eq!(gguf_dtype_label(39), "mxfp4");
+        Ok(())
+    }
+
+    #[test]
     fn from_raw_uqff_rejects_weight_shorter_than_shape() {
         // 4x64 F32 needs 1024 bytes, so a 16-byte weight must be rejected.
         let err = GgufMatMul::from_raw_uqff(0, vec![0u8; 16], vec![4, 64], None, &Device::Cpu)

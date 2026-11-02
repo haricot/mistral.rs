@@ -692,7 +692,7 @@ checksum = "ade8366b8bd5ba243f0a58f036cc0ca8a2f069cff1a2351ef1cac6b083e16fc0"
 [[package]]
 name = "candle-core"
 version = "0.11.0"
-source = "git+https://github.com/haricot/candle.git?rev=bfce966ad4d61a48801eb6af4db8b8eabebc01a8#bfce966ad4d61a48801eb6af4db8b8eabebc01a8"
+source = "git+https://github.com/haricot/candle.git?rev=e0dbd926ae211ee19cf1ac0f6ae4b0cbabc00646#e0dbd926ae211ee19cf1ac0f6ae4b0cbabc00646"
 dependencies = [
  "accelerate-src",
  "byteorder",
@@ -715,6 +715,9 @@ dependencies = [
  "rand_distr 0.5.1",
  "rayon",
  "safetensors",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.18",
  "tokenizers 0.23.2",
  "yoke",
@@ -725,7 +728,7 @@ dependencies = [
 [[package]]
 name = "candle-flash-attn-v3"
 version = "0.11.0"
-source = "git+https://github.com/haricot/candle.git?rev=bfce966ad4d61a48801eb6af4db8b8eabebc01a8#bfce966ad4d61a48801eb6af4db8b8eabebc01a8"
+source = "git+https://github.com/haricot/candle.git?rev=e0dbd926ae211ee19cf1ac0f6ae4b0cbabc00646#e0dbd926ae211ee19cf1ac0f6ae4b0cbabc00646"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -738,15 +741,16 @@ dependencies = [
 [[package]]
 name = "candle-kernels"
 version = "0.11.0"
-source = "git+https://github.com/haricot/candle.git?rev=bfce966ad4d61a48801eb6af4db8b8eabebc01a8#bfce966ad4d61a48801eb6af4db8b8eabebc01a8"
+source = "git+https://github.com/haricot/candle.git?rev=e0dbd926ae211ee19cf1ac0f6ae4b0cbabc00646#e0dbd926ae211ee19cf1ac0f6ae4b0cbabc00646"
 dependencies = [
  "cudaforge",
+ "sha2 0.10.9",
 ]
 
 [[package]]
 name = "candle-metal-kernels"
 version = "0.11.0"
-source = "git+https://github.com/haricot/candle.git?rev=bfce966ad4d61a48801eb6af4db8b8eabebc01a8#bfce966ad4d61a48801eb6af4db8b8eabebc01a8"
+source = "git+https://github.com/haricot/candle.git?rev=e0dbd926ae211ee19cf1ac0f6ae4b0cbabc00646#e0dbd926ae211ee19cf1ac0f6ae4b0cbabc00646"
 dependencies = [
  "block2",
  "half",
@@ -761,7 +765,7 @@ dependencies = [
 [[package]]
 name = "candle-nn"
 version = "0.11.0"
-source = "git+https://github.com/haricot/candle.git?rev=bfce966ad4d61a48801eb6af4db8b8eabebc01a8#bfce966ad4d61a48801eb6af4db8b8eabebc01a8"
+source = "git+https://github.com/haricot/candle.git?rev=e0dbd926ae211ee19cf1ac0f6ae4b0cbabc00646#e0dbd926ae211ee19cf1ac0f6ae4b0cbabc00646"
 dependencies = [
  "accelerate-src",
  "candle-core",

@@ -9,7 +9,9 @@
   "kind": "mistral-source-preparation",
   "master": "095991a7d680a6994e6f1554156ebef5d09db049",
   "qualification": "cpu-preparation-only",
-  "requires": {},
+  "requires": {
+    "legacy_v2": "eddf08bbd2fdbf9a9b583ace7baf812c0e79bdf1"
+  },
   "schema_version": 1,
   "source_key": "dda875af7eb334c14d15de7d22a05d8a1ddf7fbf1975fe2e6ba34a13c4bdc82c",
   "sources": {
@@ -21,5 +23,5 @@
     "master": "095991a7d680a6994e6f1554156ebef5d09db049",
     "nemotron_bolt_dflash_standalone": "9ff03fa63e624cf919108480df9b6ff3b1f4f4b2"
   },
-  "target": "legacy_v2"
+  "target": "contrib/lfm25_dspark"
 }
