@@ -5,10 +5,12 @@ import importlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import zipfile
 
 REPOSITORY = "haricot/mistral.rs"
@@ -19,6 +21,7 @@ GATES = (
     "prepare", "cpu", "cuda_compile", "Extended-Release-R1 single build",
     "Assemble and verify the exact release runtime image",
 )
+RUNTIME_REPOSITORY = "ghcr.io/haricot/mistral-ci-sm61"
 
 
 def require(condition, message):
@@ -166,6 +169,25 @@ with tempfile.TemporaryDirectory(prefix='haricot-source-promotion-') as temporar
     destination.write_text(source)
 
 
+def publish_runtime(image, directory, publisher):
+    with tempfile.TemporaryDirectory(prefix="qualified-image-") as temporary:
+        archive = Path(temporary) / "image.tar"
+        with archive.open("wb") as stream:
+            subprocess.run(["zstd", "-d", "--stdout", str(directory / image["archive"])], check=True, stdout=stream)
+        subprocess.run(["docker", "load", "--input", str(archive)], check=True)
+    manifest = image["release"]
+    require(publisher.inspect_payload(image["image_id"], manifest) == image["image_id"], "runtime image changed")
+    tag = RUNTIME_REPOSITORY + ":runtime-r1-" + manifest["candidate"] + "-" + image["image_id"].split(":")[1][:16]
+    subprocess.run(["docker", "tag", image["image_id"], tag], check=True)
+    output = run("docker", "push", tag)
+    digests = re.findall(r"digest:\s*(sha256:[0-9a-f]{64})", output)
+    require(bool(digests), "registry did not return the published manifest digest")
+    result = {"image":RUNTIME_REPOSITORY + "@" + digests[-1], "tag":tag, "image_id":image["image_id"],
+              "binary_sha256":manifest["binary_sha256"], "candidate":manifest["candidate"]}
+    (directory / "published.json").write_text(json.dumps(result,sort_keys=True,indent=2)+'\n')
+    print("EXTENDED_RELEASE_R1_OCI_PUBLISHED=" + result["image"], flush=True)
+
+
 def verify_payloads(work, qualified, receipt):
     sys.path.insert(0, str(qualified / ".github/campaign"))
     campaign = importlib.import_module("campaign")
@@ -247,7 +269,7 @@ def publish(repo, qualified, receipt_file, work):
     (output / "source-promotion.json").write_text(json.dumps(transaction,sort_keys=True,indent=2)+'\n')
     write_source_helper(output / "promote-source-r1.py", plan, receipt)
     print("SOURCE_PROMOTION=" + transaction["status"], flush=True)
-    publisher.publish(work / "preparation/plan.json", work / "release", work / "image")
+    publish_runtime(image, work / "image", publisher)
     native = output / "mistralrs-extended-sm61-cuda12.9.2-x86_64.tar.zst"
     run("tar", "--sort=name", "--mtime=@0", "--owner=0", "--group=0", "--numeric-owner",
         "-C", work / "release", "-I", "zstd -T2", "-cf", native, "mistralrs", "release.json")
