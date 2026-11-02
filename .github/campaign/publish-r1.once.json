@@ -50,5 +50,6 @@
       "digest": "sha256:2bd3f5cf257754e77313d589ce72205cc23dd5647191c5553d21f68da37f068d",
       "destination": "image"
     }
-  ]
+  ],
+  "publication_revision": 2
 }

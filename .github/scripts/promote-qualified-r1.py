@@ -132,6 +132,40 @@ def push_arguments(repo, plan, receipt, current):
     return arguments
 
 
+def write_source_helper(destination, plan, receipt):
+    config = {"changes":branch_updates(plan), "leases":plan["leases"], "candle":plan["candle"],
+              "run_id":receipt["run_id"], "candidate":plan["candidate"]}
+    source = '''#!/usr/bin/env python3
+import json,subprocess,tempfile
+from pathlib import Path
+CONFIG=json.loads(REPLACE_CONFIG)
+GIT=['git','-c','credential.helper=','-c','credential.helper=!gh auth git-credential']
+def run(*args):
+ return subprocess.check_output(list(map(str,args)),text=True).strip()
+subprocess.run(['gh','auth','status'],check=True)
+with tempfile.TemporaryDirectory(prefix='haricot-source-promotion-') as temporary:
+ repo=Path(temporary)/'repo.git'
+ subprocess.run([*GIT,'init','--bare','-q',str(repo)],check=True)
+ subprocess.run([*GIT,'-C',str(repo),'remote','add','origin','https://github.com/haricot/mistral.rs.git'],check=True)
+ subprocess.run([*GIT,'-C',str(repo),'fetch','origin',CONFIG['candidate']],check=True)
+ current={}
+ for branch,expected in CONFIG['leases'].items():
+  current[branch]=run(*GIT,'-C',repo,'ls-remote','--heads','origin','refs/heads/'+branch).split()[0]
+  if current[branch] not in (expected,CONFIG['changes'].get(branch)):
+   raise SystemExit('Source lease changed: '+branch)
+ for branch,expected in CONFIG['candle'].items():
+  actual=run(*GIT,'ls-remote','--heads','https://github.com/haricot/candle.git','refs/heads/'+branch).split()[0]
+  if actual!=expected['sha']:raise SystemExit('Candle lease changed: '+branch)
+ args=[*GIT,'-C',str(repo),'push','--atomic','origin']
+ for branch,candidate in CONFIG['changes'].items():
+  args += ['--force-with-lease=refs/heads/'+branch+':'+current[branch],candidate+':refs/heads/'+branch,
+           CONFIG['leases'][branch]+':refs/tags/archive/campaign/'+str(CONFIG['run_id'])+'/'+branch]
+ subprocess.run(args,check=True)
+ print('SOURCE_PROMOTION=PASS')
+'''.replace('REPLACE_CONFIG', repr(json.dumps(config,sort_keys=True)))
+    destination.write_text(source)
+
+
 def verify_payloads(work, qualified, receipt):
     sys.path.insert(0, str(qualified / ".github/campaign"))
     campaign = importlib.import_module("campaign")
@@ -200,11 +234,20 @@ def publish(repo, qualified, receipt_file, work):
     for branch, candle in plan["candle"].items():
         actual = run("git", "ls-remote", "--heads", "https://github.com/haricot/candle.git", "refs/heads/" + branch).split()[0]
         require(actual == candle["sha"], "Candle changed after qualification")
-    subprocess.run(push_arguments(repo, plan, receipt, current), check=True)
-    print("SOURCE_PROMOTION=PASS " + json.dumps(branch_updates(plan)), flush=True)
-    publisher.publish(work / "preparation/plan.json", work / "release", work / "image")
     output = work / "publication"
     output.mkdir(exist_ok=True)
+    transaction = {"changes":branch_updates(plan), "previous":current, "run_id":receipt["run_id"]}
+    try:
+        subprocess.run(push_arguments(repo, plan, receipt, current), check=True, capture_output=True, text=True)
+        transaction["status"] = "PASS"
+    except subprocess.CalledProcessError as error:
+        if 'without `workflows` permission' not in error.stderr:
+            raise
+        transaction.update(status="PENDING_GITHUB_WORKFLOWS_PERMISSION", reason=error.stderr)
+    (output / "source-promotion.json").write_text(json.dumps(transaction,sort_keys=True,indent=2)+'\n')
+    write_source_helper(output / "promote-source-r1.py", plan, receipt)
+    print("SOURCE_PROMOTION=" + transaction["status"], flush=True)
+    publisher.publish(work / "preparation/plan.json", work / "release", work / "image")
     native = output / "mistralrs-extended-sm61-cuda12.9.2-x86_64.tar.zst"
     run("tar", "--sort=name", "--mtime=@0", "--owner=0", "--group=0", "--numeric-owner",
         "-C", work / "release", "-I", "zstd -T2", "-cf", native, "mistralrs", "release.json")
@@ -219,7 +262,8 @@ def publish(repo, qualified, receipt_file, work):
                      "\n\nCPU, CUDA, ASD and real Text/VL/GGUF executions are retained in the qualification artifacts. "
                      "VL/GGUF numerical observations are informational under the repository owner's publication decision.\n")
     previous = subprocess.run(["gh", "api", "/repos/" + REPOSITORY + "/releases/tags/" + tag], capture_output=True, text=True)
-    files = [native, output / (native.name + ".sha256"), output / "published.json", output / "promotion.json"]
+    files = [native, output / (native.name + ".sha256"), output / "published.json", output / "promotion.json",
+             output / "source-promotion.json", output / "promote-source-r1.py"]
     if previous.returncode:
         run("gh", "release", "create", tag, "--repo", REPOSITORY, "--target", plan["candidate"],
             "--title", "Extended Release R1 (CUDA SM61)", "--notes-file", notes, "--latest=false", *files)
