@@ -1,3 +1,4 @@
+pub(crate) mod arch_registry;
 pub(crate) mod base_model;
 mod chat_template;
 mod content;
@@ -5,9 +6,15 @@ pub(crate) mod gemma3_bindings;
 pub(crate) mod gemma3_config;
 pub(crate) mod gemma3n_bindings;
 pub(crate) mod gemma4_config;
+mod generation_config;
 mod gguf_tokenizer;
 pub(crate) mod idefics3_bindings;
 mod lfm2_vl_bindings;
+mod lfm3_audio_bindings;
+pub(crate) mod lfm3_audio_config;
+pub(crate) mod lfm3_d1_config;
+mod lfm3_vl_bindings;
+pub(crate) mod lfm3_vl_config;
 pub(crate) mod llama4_bindings;
 mod mistral3_bindings;
 mod multimodal_binding_utils;
@@ -24,6 +31,7 @@ use strum::EnumString;
 use anyhow::{Context, Result};
 pub(crate) use chat_template::{get_gguf_chat_template, get_gguf_chat_template_from_metadata};
 pub(crate) use content::Content;
+pub(crate) use generation_config::generation_config_from_metadata;
 pub(crate) use gguf_tokenizer::{
     convert_gguf_metadata_to_hf_tokenizer, validate_external_gguf_tokenizer,
     GgufTokenizerConversion,
