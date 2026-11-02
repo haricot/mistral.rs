@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "base_repository": "haricot/mistral.rs",
+  "base_revision": "28ed6daca455b4ae063896014d1ea698b912c539",
+  "candle_repository": "haricot/candle",
+  "candle_branch": "extended",
+  "candle_revision": "40b5a8acc43b5f8ef925370ae12daddd929f39f2",
+  "target": {
+    "repository": "nvidia/NVIDIA-Nemotron-3.5-Bolt-E4B-4GB",
+    "revision": "1db54d5b12533ff1bcaa8e42cf4c667988a1f1be",
+    "file": "Nemotron-3.5-Bolt-E4B-Q4_K_M.gguf"
+  },
+  "draft": {
+    "repository": "nvidia/NVIDIA-Nemotron-3.5-Bolt-E4B-BF16-DFlash-NVFP4",
+    "revision": "913d13c49fbbb2b477dce78552a31ab650d5b693",
+    "file": "model.safetensors",
+    "storage": "W4A16_NVFP4",
+    "portable_execution": "decoded floating point weights, F16 on Pascal"
+  },
+  "reference_modelopt": "https://github.com/NVIDIA/Model-Optimizer/blob/main/modelopt/torch/speculative/plugins/modeling_dflash.py",
+  "metadata_fixture_sha256": {
+    "native-draft-header.json": "83ae4dfc94c9f0656e57b68e31c34ca2d85ee21ac0ca072af46d74367c0410d2",
+    "target-gguf-metadata.json": "cbb304287b9aa23e3f952cd872874a9a60e16e8805bdcec9ef43cc70f290f6f7",
+    "target-hf-text-config.json": "abe2c5462b2ab1170a9aea0e1d0e7519c14016566c1a7c01dbdba745a3bf85cf",
+    "native-draft-config.json": "6447bf78b308f9210cfb7eaba0906fe1695f428075db9cb1e1f5d03a2527d3ad"
+  },
+  "qualification": {
+    "full_model_inference": false,
+    "physical_sm61_runtime": false,
+    "extended_promotion": false
+  },
+  "target_hf_config": {
+    "repository": "nvidia/NVIDIA-Nemotron-3.5-Bolt-E4B-BF16",
+    "revision": "49843eed8db1f1c616c47af75cfd36e07aec0667"
+  }
+}
