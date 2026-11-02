@@ -42,7 +42,11 @@ def sha(path):
 
 
 def run(*args, **kwargs):
-    return subprocess.run(list(map(str, args)), check=True, text=True, capture_output=True, **kwargs).stdout.strip()
+    try:
+        return subprocess.run(list(map(str, args)), check=True, text=True, capture_output=True, **kwargs).stdout.strip()
+    except subprocess.CalledProcessError as error:
+        print(error.stderr, file=sys.stderr, flush=True)
+        raise
 
 
 def api(path):
