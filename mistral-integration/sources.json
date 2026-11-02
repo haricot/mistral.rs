@@ -1,11 +1,11 @@
 {
-  "base_master_sha": "28ed6daca455b4ae063896014d1ea698b912c539",
+  "base_master_sha": "095991a7d680a6994e6f1554156ebef5d09db049",
   "candle_branch": "extended",
   "candle_repository": "haricot/candle",
-  "candle_sha": "40b5a8acc43b5f8ef925370ae12daddd929f39f2",
-  "candle_validation_ref": "refs/tags/archive/extended/sm61-validated-40029177676-2",
+  "candle_sha": "e0dbd926ae211ee19cf1ac0f6ae4b0cbabc00646",
+  "candle_validation_ref": "refs/heads/archive/extended/sm61-validated-41036699911-1",
   "component": "asd",
-  "contract_hash": "371a215171452d3fdf04fc0578d23ecc8eb852d5a973f608f727f2d0649fc0dc",
+  "contract_hash": "0347882005859e18b7e1a9363805537d2d2b716c58a4a281c42770273770df1e",
   "features": [
     "cuda-legacy-bf16",
     "cuda-legacy-fp8",
@@ -13,8 +13,9 @@
   ],
   "kind": "mistral-standalone",
   "prerequisites": {
-    "legacy": "31556971b6a655883f452d76c78ebef772f53c38"
+    "legacy": "e4f7349cf973b5603ccbfe344e90c4d019a62754"
   },
+  "resolution_hash": "7a9688cd54be5016dc0ed3b84f28c0d1a050c50728107313c87b8acde87b28e9",
   "schema_version": 2,
   "target_branch": "asd_runner_standalone",
   "toolchain": "1.99.0"
