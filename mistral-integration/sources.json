@@ -1,0 +1,25 @@
+{
+  "features": [
+    "cuda-legacy-bf16",
+    "cuda-legacy-fp8",
+    "cuda-legacy-fp4"
+  ],
+  "full_models_executed": false,
+  "gpu_validated": false,
+  "kind": "mistral-source-preparation",
+  "master": "095991a7d680a6994e6f1554156ebef5d09db049",
+  "qualification": "cpu-preparation-only",
+  "requires": {},
+  "schema_version": 1,
+  "source_key": "dda875af7eb334c14d15de7d22a05d8a1ddf7fbf1975fe2e6ba34a13c4bdc82c",
+  "sources": {
+    "bf16_mistralrs_standalone": "825732afe09100f4fed75ea39192ad5d9438e95c",
+    "fp4_mistralrs_standalone": "2b36d29b2784bcd34c22cfde61088678a3dab3b8",
+    "fp8_mistralrs_standalone": "ba2b93cb8a7a326bcbc33d4ed1fa192b05c165a0",
+    "legacy": "e4f7349cf973b5603ccbfe344e90c4d019a62754",
+    "lfm25_dspark_standalone": "c0e7282e2bfc6e50979811749c8e24d11fcb5a9a",
+    "master": "095991a7d680a6994e6f1554156ebef5d09db049",
+    "nemotron_bolt_dflash_standalone": "9ff03fa63e624cf919108480df9b6ff3b1f4f4b2"
+  },
+  "target": "legacy_v2"
+}
