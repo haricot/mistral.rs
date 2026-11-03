@@ -66,7 +66,12 @@ def snapshot(repo, target, image, output):
     selected = config["targets"][target]
     branches = {config["master_branch"], selected["branch"]}
     branches.update(config["components"][name]["branch"] for name in selected["components"])
+    fp4 = config.get("fp4_integration")
+    if fp4:
+        branches.update((fp4["standalone_branch"], fp4["legacy_dispatch_branch"]))
     heads = {b: remote_head(repo, "origin", b) for b in sorted(branches)}
+    if config.get("master_sha") and heads[config["master_branch"]] != config["master_sha"]:
+        raise RuntimeError("master moved from the explicitly selected campaign base")
     for branch, sha in heads.items():
         git(repo, "fetch", "--no-tags", "origin", f"refs/heads/{branch}:refs/remotes/campaign/{branch}")
         if git(repo, "rev-parse", f"refs/remotes/campaign/{branch}") != sha:
@@ -100,12 +105,23 @@ def snapshot(repo, target, image, output):
     value = {"schema_version": 2, "target": target, "config": config,
              "master": heads[config["master_branch"]], "leases": heads, "sources": sources, "candle": candle,
              "image": image, "recipe": recipe(), "orchestrator": git(repo, "rev-parse", "HEAD")}
+    if fp4:
+        if fp4["physical_qualification"] != "final-campaign-only":
+            raise RuntimeError("FP4 must be qualified in the final campaign")
+        full = heads[fp4["standalone_branch"]]
+        shared = heads[fp4["legacy_dispatch_branch"]]
+        blob = git(repo, "rev-parse", f"{full}:{fp4['shared_dispatch_path']}")
+        if blob != git(repo, "rev-parse", f"{shared}:{fp4['shared_dispatch_path']}"):
+            raise RuntimeError("FP4 generic dispatch differs from standalone")
+        value["integrations"] = {"fp4": {"standalone": full, "legacy_dispatch": shared,
+                                  "shared_dispatch_blob": blob,
+                                  "physical_qualification": fp4["physical_qualification"]}}
     value["input_key"] = digest({k: v for k, v in value.items() if k != "orchestrator"})
     write_json(output, value)
     return value
 
 
-def pin_candle(repo, sha):
+def pin_candle(repo, sha, validated_version=None):
     path = repo / "Cargo.toml"
     text = path.read_text()
     dependencies = tomllib.loads(text)["workspace"]["dependencies"]
@@ -116,6 +132,10 @@ def pin_candle(repo, sha):
         version = entry.get("version")
         if not isinstance(version, str):
             raise RuntimeError(f"missing Candle workspace version: {name}")
+        if validated_version is not None:
+            if version not in (validated_version, "0.11.1") or validated_version != "0.11.0":
+                raise RuntimeError("unreviewed Candle API version migration")
+            entry = {**entry, "version": validated_version}
         entry = {**entry, "git": "https://github.com/haricot/candle.git", "rev": sha}
         for key in ("branch", "tag", "path", "registry"):
             entry.pop(key, None)
@@ -126,6 +146,17 @@ def pin_candle(repo, sha):
             text, flags=re.M)
         if count != 1:
             raise RuntimeError(f"expected one workspace dependency: {name}")
+    if validated_version == "0.11.0":
+        zip_entry = dependencies.get("zip", {})
+        if zip_entry.get("version") == "9.1.3":
+            source = {"git": "https://github.com/zip-rs/zip2.git",
+                      "rev": "af2ed2a3e12af1fdd733b1886b3e9067bf510be5"}
+            if any(key in zip_entry and zip_entry[key] != value for key, value in source.items()):
+                raise RuntimeError("unreviewed zip source migration")
+            fields = ", ".join(f"{key} = {json.dumps(value)}" for key, value in {**zip_entry, **source}.items())
+            text, count = re.subn(r"^zip = .*?$", "zip = { " + fields + " }", text, flags=re.M)
+            if count != 1:
+                raise RuntimeError("expected one zip workspace dependency")
     path.write_text(text)
 
 
@@ -164,6 +195,24 @@ def install_contract(repo, contract):
 
 def resolve_candle_conflicts(text):
     def resolve(match):
+        blocks = [match.group(n) for n in (1, 2)]
+        for index, block in enumerate(blocks):
+            lines = [line.strip() for line in block.splitlines() if line.strip()]
+            if not lines or not all(line.startswith("# candle-") for line in lines):
+                continue
+            try:
+                comments = tomllib.loads("\n".join(line[2:] for line in lines))
+                pinned = tomllib.loads(blocks[1 - index])
+            except tomllib.TOMLDecodeError:
+                continue
+            if set(comments) != set(CANDLE_CRATES) or set(pinned) != set(CANDLE_CRATES):
+                continue
+            if all(isinstance(side[name], dict) and side[name].get("version") == "0.11.0"
+                   for side in (comments, pinned) for name in CANDLE_CRATES):
+                outside = text[:match.start()] + text[match.end():]
+                if all(re.search(rf'^{name} = {{ version = "0.11.1" }}$', outside, re.M)
+                       for name in CANDLE_CRATES):
+                    return block
         try:
             sides = [tomllib.loads(match.group(n)) for n in (1, 2)]
         except tomllib.TOMLDecodeError:
@@ -190,6 +239,13 @@ def merge(repo, source, lock_source):
         if "<<<<<<< " not in resolved:
             path.write_text(resolved)
             git(repo, "add", "Cargo.toml")
+    retired = "mistralrs-quant/src/vector_fp8/ops.rs"
+    lib = repo / "mistralrs-quant/src/lib.rs"
+    if (retired in conflicts and "mod vector_fp8;" not in lib.read_text()
+            and "mod fp8;" in lib.read_text()
+            and (repo / "mistralrs-quant/src/fp8/quantize.rs").is_file()
+            and (repo / "mistralrs-quant/src/scalar_fp8/ops.rs").is_file()):
+        git(repo, "rm", "-f", retired)
     # Scope: only LFM2.5 DSpark against the newer LFM3 master. Never
     # replace entire upstream attention/CLI files or silently choose ours.
     if Path(repo).name in ("lfm25_dspark", "nemotron_bolt_dflash"):
@@ -268,6 +324,9 @@ def ancestor(repo, older, newer):
 
 def prepared_ref(repo, name, inputs):
     ref = f"integration/prepared/{digest(inputs)}/{name}"
+    local = git(repo, "rev-parse", "-q", "--verify", f"refs/heads/{ref}", check=False)
+    if local:
+        return ref, local
     found = git(repo, "ls-remote", "origin", f"refs/heads/{ref}")
     if found:
         sha = found.split()[0]
@@ -288,16 +347,25 @@ def checkout(repo, node, original, scope):
     git(node, "switch", "--detach", original)
     git(node, "config", "user.name", IDENTITY["GIT_AUTHOR_NAME"])
     git(node, "config", "user.email", IDENTITY["GIT_AUTHOR_EMAIL"])
-    cache = ROOT / "rr-cache" / scope
-    if cache.exists():
-        shutil.copytree(cache, node / ".git/rr-cache", dirs_exist_ok=True)
+    for folder in ("common", scope):
+        cache = ROOT / "rr-cache" / folder
+        if cache.exists():
+            shutil.copytree(cache, node / ".git/rr-cache", dirs_exist_ok=True)
 
 
 def import_checkout(repo, node):
     objects = Path(git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")) / "objects"
     for shard in (node / ".git/objects").iterdir():
         if shard.is_dir() and (re.fullmatch(r"[0-9a-f]{2}", shard.name) or shard.name == "pack"):
-            shutil.copytree(shard, objects / shard.name, dirs_exist_ok=True)
+            destination = objects / shard.name
+            destination.mkdir(exist_ok=True)
+            for source in shard.iterdir():
+                target = destination / source.name
+                if target.exists():
+                    if file_hash(source) != file_hash(target):
+                        raise RuntimeError("immutable Git object collision during import")
+                else:
+                    shutil.copy2(source, target)
     git(repo, "cat-file", "-e", git(node, "rev-parse", "HEAD") + "^{commit}")
     shutil.rmtree(node)
 
@@ -307,6 +375,20 @@ def resolve_lock(repo, toolchain):
     result = command([*args, "--offline"], cwd=repo, check=False)
     if result.returncode:
         command(args, cwd=repo)
+
+
+def resolution_digest(scope):
+    paths = [p for folder in ("common", scope)
+             for p in (ROOT / "rr-cache" / folder).rglob("*")
+             if p.is_file() and re.fullmatch(r"(?:preimage|postimage)(?:\.\d+)?", p.name)]
+    return digest({str(p.relative_to(ROOT)): file_hash(p) for p in sorted(paths)})
+
+
+def cache_prepared_ref(repo, ref, sha):
+    previous = git(repo, "rev-parse", "-q", "--verify", f"refs/heads/{ref}", check=False)
+    if previous and previous != sha:
+        raise RuntimeError("immutable local preparation collision")
+    git(repo, "update-ref", f"refs/heads/{ref}", sha)
 
 
 def prepare(repo, snapshot_path, output, publish=False):
@@ -331,31 +413,57 @@ def prepare(repo, snapshot_path, output, publish=False):
                     "candle_branch": component["candle_branch"], "candle_sha": candle["sha"],
                     "candle_validation_ref": candle["validation_ref"],
                     "features": cfg["features"], "toolchain": cfg["toolchain"],
-                    "contract_hash": digest({n: file_hash(ROOT / n) for n in ["campaign_backends.rs", "force_cpu_test.rs", "cpu_flag_test.rs", "config.json", "campaign.py", "resolve_dspark.py"]})}
+                    "contract_hash": digest({n: file_hash(ROOT / n) for n in ["campaign_backends.rs", "force_cpu_test.rs", "cpu_flag_test.rs", "config.json", "campaign.py", "resolve_dspark.py", "compat_mxfp4.py", "compat_sm61.py", "compat_paged_fp8.py", "paged_fp8_support.rs", "campaign_paged_fp8.rs", "legacy_fp8_backend.rs"]})}
+        identity["resolution_hash"] = resolution_digest(name)
+        fp4 = state.get("integrations", {}).get("fp4")
+        fp4_parents = []
+        if fp4 and name == "legacy":
+            fp4_parents = [fp4["legacy_dispatch"]]
+            identity["fp4"] = {k: v for k, v in fp4.items() if k != "standalone"}
+        elif fp4 and name == cfg["fp4_integration"]["extended_component"]:
+            fp4_parents = [fp4["standalone"]]
+            identity["fp4"] = fp4
         previous = source_contract(repo, original)
         ref, cached = prepared_ref(repo, name, {"source": original, "contract": identity})
         if cached:
             if source_contract(repo, cached) != identity or not ancestor(repo, original, cached):
                 raise RuntimeError("prepared standalone provenance mismatch")
+            print(f"CAMPAIGN_COMPONENT={name} preparation=REUSED candidate={cached}", flush=True)
             sha = cached
         elif previous == identity and ancestor(repo, state["master"], original):
             sha = original
         else:
             node = work_root / name
             checkout(repo, node, original, name)
-            parents = [original, state["master"], *prerequisites.values()]
+            print(f"CAMPAIGN_COMPONENT={name} preparation=COMPOSE master={state["master"]}", flush=True)
+            parents = [original, *fp4_parents, state["master"], *prerequisites.values()]
             for parent in parents[1:]:
                 merge(node, parent, state["master"])
                 if git(node, "rev-parse", "-q", "--verify", "MERGE_HEAD", check=False):
                     commit(node, [git(node, "rev-parse", "HEAD"), parent], f"merge standalone prerequisite {parent}")
             if name == "lfm25_dspark":
                 migrate_lfm3_speculative_memory_test_api(node)
-            pin_candle(node, candle["sha"])
+            if name in ("lfm25_dspark", "nemotron_bolt_dflash"):
+                from resolve_dspark import migrate_bolt_apis
+                migrate_bolt_apis(node)
+            pin_candle(node, candle["sha"], cfg.get("candle_version"))
             install_contract(node, identity)
+            from compat_mxfp4 import install
+            adapted = install(node)
+            from compat_sm61 import install as install_sm61
+            adapted = install_sm61(node) or adapted
+            from compat_paged_fp8 import install as install_paged_fp8
+            adapted = install_paged_fp8(node) or adapted
+            if fp4_parents or adapted or name in ("lfm25_dspark", "nemotron_bolt_dflash"):
+                command(["cargo", f'+{cfg["toolchain"]}', "fmt", "--all"], cwd=node)
             resolve_lock(node, cfg["toolchain"])
             command(["cargo", f'+{cfg["toolchain"]}', "fmt", "--all", "--", "--check"], cwd=node)
             sha = commit(node, [git(node, "rev-parse", "HEAD")], f"build: pin independent {name} campaign inputs")
             import_checkout(repo, node)
+        for parent in fp4_parents:
+            if not ancestor(repo, parent, sha):
+                raise RuntimeError("FP4 integration ancestry is missing")
+        cache_prepared_ref(repo, ref, sha)
         if publish:
             publish_ref(repo, ref, sha)
         objects[name] = sha
@@ -370,6 +478,9 @@ def prepare(repo, snapshot_path, output, publish=False):
                     "candle_validation_ref": state["candle"]["extended"]["validation_ref"],
                     "features": cfg["features"], "toolchain": cfg["toolchain"], "asd_required": True,
                     "contract_hash": metadata["legacy"]["contract_hash"]}
+        contract["resolution_hash"] = resolution_digest("extended")
+        if state.get("integrations"):
+            contract["integrations"] = state["integrations"]
         existing = state["leases"]["extended"]
         ref, cached = prepared_ref(repo, "extended", contract)
         if cached:
@@ -384,11 +495,19 @@ def prepare(repo, snapshot_path, output, publish=False):
             for sha in objects.values():
                 merge(node, sha, objects["legacy"])
                 commit(node, [git(node, "rev-parse", "HEAD"), sha], f"merge independent component {sha}")
-            pin_candle(node, contract["candle_sha"])
+            pin_candle(node, contract["candle_sha"], cfg.get("candle_version"))
             install_contract(node, contract)
+            from compat_mxfp4 import install
+            from compat_sm61 import install as install_sm61
+            from compat_paged_fp8 import install as install_paged_fp8
+            adapted = install(node)
+            adapted = install_sm61(node) or adapted
+            if install_paged_fp8(node) or adapted:
+                command(["cargo", f'+{cfg["toolchain"]}', "fmt", "--all"], cwd=node)
             resolve_lock(node, cfg["toolchain"])
             candidate = commit(node, [git(node, "rev-parse", "HEAD")], "build: lock Extended standalone composition")
             import_checkout(repo, node)
+        cache_prepared_ref(repo, ref, candidate)
         if publish:
             publish_ref(repo, ref, candidate)
         if ("asd" in cfg["targets"]["extended"]["components"]
@@ -458,6 +577,12 @@ def promote(repo, plan_path, proofs, run_id):
         if any(not SHA256.fullmatch(gpu.get("asd_profiles", {}).get(n, ""))
                for n in ("current.json", "current.asd")):
             raise RuntimeError("Extended ASD profile SHA256 evidence missing")
+    if plan.get("integrations", {}).get("fp4"):
+        if any(gpu.get("fp4_test_counts", {}).get(n["component"], 0) < 1 for n in plan["matrix"]):
+            raise RuntimeError("final-campaign physical FP4 proof is missing")
+    if plan["config"].get("fp8_kv_qualification"):
+        from fp8_kv import verify_campaign
+        verify_campaign(plan, Path(proofs) / "gpu", gpu, run_id)
     # LFM3 arrived on master with text, VL and GGUF paths. Exercising
     # only a synthetic convolution is not a substitute for model parity.
     lfm3 = plan["config"].get("lfm3_qualification", {})

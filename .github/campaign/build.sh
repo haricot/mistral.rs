@@ -26,8 +26,10 @@ kernel_key="$(git ls-tree -r HEAD -- mistralrs-core/build.rs mistralrs-core/src/
 export MISTRALRS_CUDA_BUILD_ROOT="$CAMPAIGN_CACHE/cuda/$kernel_key"
 features="$(python3 -c 'import json,sys;print(",".join(json.load(open(sys.argv[1]))["config"]["features"]))' "$plan")"
 export MISTRALRS_LFM3_REQUIRED="$(python3 -c 'import json,sys;print(str(json.load(open(sys.argv[1]))["config"].get("lfm3_qualification",{}).get("require_cpu_unit_and_gguf",False)).lower())' "$plan")"
+export MISTRALRS_FP4_REQUIRED="$(python3 -c 'import json,sys;print(str(bool(json.load(open(sys.argv[1])).get("integrations",{}).get("fp4"))).lower())' "$plan")"
+export MISTRALRS_FP8_KV_REQUIRED="$(python3 -c 'import json,sys;print(str(json.load(open(sys.argv[1]))["config"].get("fp8_kv_qualification",False)).lower())' "$plan")"
 test_args=(--lib --bin mistralrs)
-for name in campaign_backends legacy_sm61_runtime asd_sm61_smoke extended_sm61_runtime lfm25_dspark_sm61_runtime; do
+for name in campaign_backends campaign_paged_fp8 legacy_sm61_runtime asd_sm61_smoke extended_sm61_runtime lfm25_dspark_sm61_runtime; do
   if [[ -f "mistralrs-core/tests/$name.rs" ]]; then test_args+=(--test "$name"); fi
 done
 date -u +%FT%TZ > "$report/start.txt"

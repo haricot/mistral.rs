@@ -4,7 +4,7 @@ test-threads = 2
 
 [profile.cpu]
 default-filter = '''
-  test(campaign_cpu_backend) | test(campaign_force_cpu) | test(campaign_cpu_flag) | test(args::tests::)
+  test(campaign_cpu_backend) | test(campaign_cpu_nvfp4) | test(campaign_cpu_mxfp4) | test(campaign_cpu_fp8_kv) | test(campaign_force_cpu) | test(campaign_cpu_flag) | test(args::tests::) | test(skills::tests::)
   | ((test(speculative::) | test(models::lfm2::) | test(models::lfm3::)
        | test(gguf::lfm3_vl_) | test(vision_models::lfm3_vl::)
        | test(lfm3_conv::tests::cpu_prefill_decode_and_cached_chunks_match_reference)
@@ -12,7 +12,7 @@ default-filter = '''
        | test(engine::memory::tests::) | test(bolt) | test(gemma4)
        | test(pipeline::chat_template::tests) | test(flashinfer_speculative_rows_keep_gather_block_tables)
        | test(uqff::tests::) | test(gguf::tests::) | test(test_fp8_vector_quant_cpu)
-       | test(test_fp8_vector_dequant))
+       | test(test_fp8_vector_dequant) | (test(fp8::quantize::tests::) & !test(cublaslt) & !test(metal)) | test(nvfp4::tests::))
      & !test(cuda) & !test(graph_release_waits_for_detached_output_copies)
      & !test(recurrent_checkpoint_device_gate_rejects_mixed_placement))
 '''

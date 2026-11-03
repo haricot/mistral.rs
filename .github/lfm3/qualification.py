@@ -25,6 +25,8 @@ RUNTIMES = ("legacy", "extended")
 READY_TIMEOUT = 900
 REQUEST_TIMEOUT = 600
 IMAGE_EDGE = 64
+KV_BENCH_REPEATS = 3
+KV_BENCH_WARMUP = 1
 HEX256 = re.compile(r"[0-9a-f]{64}\Z")
 MODEL_ERRORS = (RuntimeError, ValueError, KeyError, IndexError, TypeError, OSError, subprocess.CalledProcessError)
 MEASUREMENT_SOURCE_SHA = "b804e46bb4322f1c3b64887c50feda83f0947ade"
@@ -365,13 +367,19 @@ def http(port, endpoint, payload=None):
         return json.load(response)
 
 
-def infer(binary, mode, device, paths, policy, log):
+def infer(binary, mode, device, paths, policy, log, *, paged_cache_type=None):
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
     args = [str(binary), "serve", "-m", str(paths[mode]), "--dtype", policy["dtype"],
-            "--host", "127.0.0.1", "--port", str(port), "--no-ui", "--paged-attn", "off",
+            "--host", "127.0.0.1", "--port", str(port), "--no-ui", "--paged-attn", "off" if paged_cache_type is None else "on",
             "--max-model-len", str(policy["max_model_len"])]
+    if paged_cache_type is not None:
+        if mode != "text" or device != "cuda" or paged_cache_type not in ("auto", "f8e4m3"):
+            raise ValueError("paged KV measurements require the Text CUDA runtime")
+        args += ["--pa-cache-type", paged_cache_type, "--kv-cache", "2048tokens",
+                 "--max-seqs", "1", "--max-num-batched-tokens", "128",
+                 "--max-prefill-chunk-tokens", "128", "--prefix-cache-n", "0"]
     if mode == "vl":
         args += ["--tokenizer", str(paths["vl"] / "tokenizer.json"), "--max-edge", "128", "--max-num-images", "1"]
     elif mode == "text":
@@ -412,9 +420,25 @@ def infer(binary, mode, device, paths, policy, log):
             payload = {"model": model, "messages": [{"role": "user", "content": content}], "temperature": 0,
                        "max_tokens": policy["max_tokens"], "logprobs": True, "top_logprobs": policy["top_logprobs"],
                        "enable_thinking": False, "stream": False, "seed": 44}
-            response = http(port, "/v1/chat/completions", payload)
-            return {"device": device, "request": payload, "response": response,
-                    "fixture_sha256": hashlib.sha256(image_data()).hexdigest() if mode == "vl" else None}
+            measurements = []
+            repeats = KV_BENCH_WARMUP + KV_BENCH_REPEATS if paged_cache_type is not None else 1
+            for index in range(repeats):
+                start = time.monotonic()
+                response = http(port, "/v1/chat/completions", payload)
+                elapsed = time.monotonic() - start
+                if paged_cache_type is not None:
+                    usage = response.get("usage", {})
+                    if usage.get("prompt_tokens", 0) < 1 or usage.get("completion_tokens", 0) < 1:
+                        raise RuntimeError("paged KV benchmark did not execute prefill and decode")
+                    if index >= KV_BENCH_WARMUP:
+                        measurements.append({"wall_seconds": elapsed, "response": response})
+            result = {"device": device, "request": payload, "response": response,
+                      "fixture_sha256": hashlib.sha256(image_data()).hexdigest() if mode == "vl" else None}
+            if paged_cache_type is not None:
+                result["paged_kv"] = {"cache_type": paged_cache_type, "warmup": KV_BENCH_WARMUP,
+                                      "samples": measurements, "command": args,
+                                      "timing_scope": "HTTP prefill and decode; excludes model loading; prefix cache disabled"}
+            return result
         finally:
             process.terminate()
             try:

@@ -82,6 +82,54 @@ class GitCampaignTests(unittest.TestCase):
         with patch.object(c, "command", side_effect=self.fake_cargo):
             return c.prepare(self.repo, self.state_path, self.root / output, publish=True)
 
+    def fp4_sources(self):
+        c.git(self.repo, "switch", "-c", "generic-fp4", self.state["leases"]["legacy"])
+        self.write("src/fp4.rs", "generic packed FP4\n")
+        shared = self.commit("generic FP4")
+        c.git(self.repo, "switch", "-c", "full-fp4", shared)
+        self.write("src/dflash-fp4.rs", "packed DFlash\n")
+        full = self.commit("DFlash FP4")
+        c.git(self.repo, "switch", "master")
+        c.git(self.repo, "push", "origin", "generic-fp4", "full-fp4")
+        self.state["leases"].update({"generic-fp4": shared, "full-fp4": full})
+        self.config["fp4_integration"] = {"extended_component": "b"}
+        self.state["integrations"] = {"fp4": {"standalone": full, "legacy_dispatch": shared,
+            "shared_dispatch_blob": "f" * 40, "physical_qualification": "final-campaign-only"}}
+        c.write_json(self.state_path, self.state)
+        return shared, full
+
+    def test_fp4_shared_dispatch_reaches_both_targets_without_independent_gpu_job(self):
+        shared, full = self.fp4_sources()
+        result = self.prepare()
+        for name, sha in result["components"].items():
+            self.assertTrue(c.ancestor(self.repo, shared, sha))
+            self.assertEqual(c.ancestor(self.repo, full, sha), name in ("b", "extended"))
+        self.assertEqual([n["component"] for n in result["matrix"]], ["legacy", "a", "b", "extended"])
+        for branch, sha in self.state["leases"].items():
+            self.assertEqual(c.remote_head(self.repo, "origin", branch), sha)
+
+    def test_dflash_only_fp4_change_reuses_generic_components(self):
+        self.fp4_sources()
+        first = self.prepare()
+        c.git(self.repo, "switch", "full-fp4")
+        self.write("src/dflash-fp4.rs", "new packed DFlash\n")
+        full = self.commit("new DFlash FP4")
+        c.git(self.repo, "push", "origin", "full-fp4")
+        self.state["leases"]["full-fp4"] = full
+        self.state["integrations"]["fp4"]["standalone"] = full
+        c.write_json(self.state_path, self.state)
+        second = self.prepare("second")
+        for name in ("legacy", "a"):
+            self.assertEqual(first["components"][name], second["components"][name])
+        self.assertNotEqual(first["components"]["b"], second["components"]["b"])
+
+    def test_fp4_promotion_requires_final_campaign_execution(self):
+        self.fp4_sources()
+        result = self.prepare()
+        proofs = self.proofs(result)
+        with self.assertRaisesRegex(RuntimeError, "physical FP4 proof"):
+            c.promote(self.repo, self.root / "first/plan.json", proofs, "123")
+
     def test_standalones_receive_master_and_declared_prerequisite_without_peer(self):
         result = self.prepare()
         a = result["components"]["a"]

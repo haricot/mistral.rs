@@ -1,2 +1,4 @@
-CUDA environment reuse and archived SM61 qualification: extended
-Replace preparation 40969865016 containing the same invalidly rejected archived Candle Legacy proof.
+master-fp8-kv-sm61-standard-backend-extended-20261102
+master=095991a7d680a6994e6f1554156ebef5d09db049
+fp4=2b36d29b2784bcd34c22cfde61088678a3dab3b8
+qualification-only; complete preparation; select standard FP8 KV backend before production cache allocation; retain FP16 FlashInfer; physical hybrid GQA layout and real Text FP16/FP8 benchmarks

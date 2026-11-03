@@ -85,6 +85,12 @@ def transplant(base, feature, upstream, path):
         if tag == "equal":
             continue
         removed, added = base[i1:i2], feature[j1:j2]
+        if (path == "mistralrs-cli/src/args/mod.rs"
+                and removed == ["    /// MTP assistant model id or path.\n"]
+                and added == ["    /// MTP, DFlash, or DSpark assistant model id or path.\n"]
+                and upstream.count("    /// Separate MTP draft model, as a Hugging Face ID or local path.\n") == 2):
+            audit.append((i1+1, "upstream-comment-retained"))
+            continue
         if tag == "delete" or len(removed) > 3:
             raise RuntimeError(f"DSpark functional repair: destructive delta {path}@{i1+1}")
         # Do not deduplicate by searching the *whole file*: MTP config
@@ -130,3 +136,63 @@ def resolve_known_conflicts(repo, conflicts, profile):
         destination.write_text(merged)
         command(repo, "add", path)
         print(f"LFMDSPARK_LFM3_RECONCILED={path} edits={len(audit)} decisions={audit}", flush=True)
+
+
+def migrate_bolt_apis(repo):
+    repo = Path(repo)
+    gguf = repo / "mistralrs-core/src/pipeline/gguf.rs"
+    registry = repo / "mistralrs-core/src/gguf/arch_registry.rs"
+    if not gguf.exists():
+        return
+    text = gguf.read_text()
+    start = '        if architecture.eq_ignore_ascii_case("gemma4") {\n'
+    if start in text:
+        end = '        let metadata_keys = archive\n'
+        if text.count(start) != 1 or end not in text:
+            raise RuntimeError("unrecognized Gemma4 text GGUF route")
+        a = text.index(start); b = text.index(end, a)
+        if "SynthesizedMultimodalSource" not in text[a:b]:
+            raise RuntimeError("unrecognized Gemma4 synthesis API")
+        gguf.write_text(text[:a] + text[b:])
+        text = registry.read_text()
+        old = 'GgufArchSpec::new(&["gemma4"])\n        .text(GgufTextRoute::ProjectorRequired)'
+        if text.count(old) != 1:
+            raise RuntimeError("unrecognized Gemma4 architecture registry")
+        text = text.replace(old, old.replace('ProjectorRequired', 'Synthesized(synthesize_gemma4_text)'), 1)
+        text += '''
+fn synthesize_gemma4_text(inputs: &GgufSynthesisInputs<'_>) -> Result<SynthesizedGguf> {
+    let archive = inputs.archive;
+    let names = archive.tensors().keys().cloned().collect::<Vec<_>>();
+    let config = super::gemma4_config::prepare_gemma4_text_config(
+        inputs.external_config, archive.metadata(), &names,
+    )?;
+    Ok(SynthesizedGguf {
+        config,
+        bindings: build_gemma4_bindings(archive)?,
+        loader_type: MultimodalLoaderType::Gemma4,
+        processor_config: None,
+        preprocessor_config: None,
+        rope_pairing: RopePairing::HalfSplit,
+    })
+}
+
+#[cfg(test)]
+mod campaign_gemma4_text_route_tests {
+    use super::*;
+    #[test]
+    fn gemma4_keeps_text_synthesis_and_multimodal_resolution() {
+        assert!(matches!(arch_spec("gemma4").text, GgufTextRoute::Synthesized(_)));
+        assert!(matches!(arch_spec("GEMMA4").multimodal, GgufMultimodalRoute::Resolve(_)));
+        assert!(matches!(arch_spec("qwen3vl").text, GgufTextRoute::ProjectorRequired));
+    }
+}
+'''
+        registry.write_text(text)
+    path = repo / "mistralrs-core/src/models/lfm2/speculative.rs"
+    if path.exists():
+        text = path.read_text()
+        old = '.embedding_forward(&ids, self.dtype)?'
+        if old in text:
+            if text.count(old) != 1:
+                raise RuntimeError("unrecognized DSpark embedding API")
+            path.write_text(text.replace(old, '.embedding_forward(&ids, self.dtype.into())?', 1))

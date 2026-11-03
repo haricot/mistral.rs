@@ -41,6 +41,8 @@ def build(directory):
     proof["cpu_test_count"] = test_count(directory / "cpu-junit.xml", "campaign_cpu_backend")
     test_count(directory / "cpu-junit.xml", "campaign_force_cpu_selects_cpu")
     test_count(directory / "cpu-junit.xml", "campaign_cpu_flag_is_available")
+    if os.environ.get("MISTRALRS_FP8_KV_REQUIRED") == "true":
+        test_count(directory / "cpu-junit.xml", "campaign_cpu_fp8_kv_capability_matrix")
     if os.environ.get("MISTRALRS_LFM3_REQUIRED") == "true":
         for required in (
             "models::lfm3::tests::",
@@ -49,6 +51,9 @@ def build(directory):
         ):
             test_count(directory / "cpu-junit.xml", required)
         proof["lfm3_cpu_qualified"] = True
+    if os.environ.get("MISTRALRS_FP4_REQUIRED") == "true":
+        proof["fp4_cpu_test_count"] = test_count(directory / "cpu-junit.xml", "campaign_cpu_nvfp4_w4a16", matching_only=True)
+        test_count(directory / "cpu-junit.xml", "campaign_cpu_mxfp4_embedding")
     proof["status"] = "BUILD_AND_CPU_PASSED"
     proof["features"] = ["cuda-legacy-bf16", "cuda-legacy-fp8", "cuda-legacy-fp4"]
     proof["profile"] = "campaign"
@@ -91,7 +96,7 @@ def main():
     elif args.mode == "gpu-count":
         print(test_count(args.path, "campaign_cuda_backend"))
     elif args.mode == "gpu-required":
-        if args.component not in ("asd_sm61_smoke", "cuda_prefill_decode_and_cached_chunks_match_reference"):
+        if args.component not in ("asd_sm61_smoke", "cuda_prefill_decode_and_cached_chunks_match_reference", "campaign_cuda_nvfp4_sm61_w4a16", "campaign_cuda_fp8_kv_sm61_correctness_and_performance", "campaign_cuda_fp8_kv_sm61_production_cache_layout"):
             raise RuntimeError("unsupported required GPU test")
         print(test_count(args.path, args.component, matching_only=True))
     else:
