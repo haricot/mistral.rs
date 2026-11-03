@@ -1,0 +1,45 @@
+name: Migrate qualified Mistral branch to legacy
+on:
+  push:
+    branches: [mirror_orch, ci/rename-legacy-branch, ci/rename-legacy-release]
+    paths: [.github/campaign/legacy-branch-migration.once]
+permissions:
+  contents: read
+concurrency:
+  group: mistral-legacy-branch-migration
+  cancel-in-progress: false
+  queue: max
+jobs:
+  contracts:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          toolchain: '1.99.0'
+      - run: python3 -B -m unittest discover -v -s .github/campaign/tests
+      - run: python3 -B -m unittest discover -v -s .github/standalone-sync -p 'test_*.py'
+      - run: python3 -B -m unittest discover -v -s .github/scripts/tests -p test_rename_legacy_branch.py
+      - run: bash -n .github/scripts/legacy-cuda-rebase.sh
+  rename:
+    if: github.repository == 'haricot/mistral.rs' && github.actor == 'haricot' && github.ref == 'refs/heads/mirror_orch'
+    needs: contracts
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Rename exactly the qualified commit without rebuilding
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/rename-legacy-branch.py "$RUNNER_TEMP/legacy-rename.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: legacy-branch-rename-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/legacy-rename.json
+          retention-days: 90

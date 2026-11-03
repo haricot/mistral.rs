@@ -14,7 +14,7 @@
   ],
   "components": {
     "legacy": {
-      "branch": "allow_old_card",
+      "branch": "legacy",
       "requires": [],
       "candle_branch": "cuda_legacy"
     },
@@ -42,7 +42,7 @@
   },
   "targets": {
     "legacy": {
-      "branch": "allow_old_card",
+      "branch": "legacy",
       "components": [
         "legacy"
       ],
