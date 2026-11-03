@@ -1,1 +1,1 @@
-rename allow_old_card to legacy at e4f7349cf973b5603ccbfe344e90c4d019a62754
+rename allow_old_card to legacy at e4f7349cf973b5603ccbfe344e90c4d019a62754; contracts include rustfmt
