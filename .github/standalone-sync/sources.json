@@ -3,7 +3,7 @@
   "master_branch": "master",
   "orchestrator_branch": "mirror_orch",
   "tracked_standalones": [
-    "allow_old_card",
+    "legacy",
     "asd_runner_standalone",
     "lfm25_dspark_standalone",
     "nemotron_bolt_dflash_standalone",

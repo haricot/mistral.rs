@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # Rebase the exact PR head onto the official upstream master, then stage only
-# a reproducible Candle cuda_legacy candidate. Never mutate allow_old_card.
+# a reproducible Candle cuda_legacy candidate. Never mutate legacy.
 set -euo pipefail
 report="$RUNNER_TEMP/legacy-rebase"
 mkdir -p "$report"
 git config user.name 'github-actions[bot]'
 git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
 git remote add upstream https://github.com/EricLBuehler/mistral.rs.git
-git fetch --no-tags origin +refs/heads/allow_old_card:refs/remotes/origin/allow_old_card
+git fetch --no-tags origin +refs/heads/legacy:refs/remotes/origin/legacy
 git fetch --no-tags upstream +refs/heads/master:refs/remotes/upstream/master
-old="$(git rev-parse refs/remotes/origin/allow_old_card)"
+old="$(git rev-parse refs/remotes/origin/legacy)"
 master="$(git rev-parse refs/remotes/upstream/master)"
 candle="$(git ls-remote https://github.com/haricot/candle.git refs/heads/cuda_legacy | cut -f1)"
 for sha in "$old" "$master" "$candle"; do
@@ -24,7 +24,7 @@ test -z "$EXPECTED_PR" || test "$EXPECTED_PR" = "$old"
 test -z "$EXPECTED_UPSTREAM" || test "$EXPECTED_UPSTREAM" = "$master"
 test -z "$EXPECTED_CANDLE" || test "$EXPECTED_CANDLE" = "$candle"
 test "$(git ls-remote upstream refs/heads/master | cut -f1)" = "$master"
-test "$(git ls-remote origin refs/heads/allow_old_card | cut -f1)" = "$old"
+test "$(git ls-remote origin refs/heads/legacy | cut -f1)" = "$old"
 git clone --quiet --no-tags --branch cuda_legacy --single-branch \
   https://github.com/haricot/candle.git "$RUNNER_TEMP/candle-cuda-legacy"
 test "$(git -C "$RUNNER_TEMP/candle-cuda-legacy" rev-parse HEAD)" = "$candle"
@@ -67,7 +67,7 @@ if git merge-base --is-ancestor "$master" "$old" &&
   bundle_sha="$(sha256sum "$report/candidate.bundle" | cut -d' ' -f1)"
   candidate="$(git rev-parse HEAD)"
   ref="artifact://mistral-legacy-prep-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/candidate.bundle"
-  test "$(git ls-remote origin refs/heads/allow_old_card | cut -f1)" = "$old"
+  test "$(git ls-remote origin refs/heads/legacy | cut -f1)" = "$old"
   test "$(git ls-remote upstream refs/heads/master | cut -f1)" = "$master"
   jq --arg candidate "$candidate" --arg lock "$lock" --arg ref "$ref" \
      --arg bundle "$bundle_sha" \
@@ -429,7 +429,7 @@ git bundle create "$report/candidate.bundle" HEAD "^$master"
 git bundle verify "$report/candidate.bundle"
 bundle_sha="$(sha256sum "$report/candidate.bundle" | cut -d' ' -f1)"
 ref="artifact://mistral-legacy-prep-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/candidate.bundle"
-test "$(git ls-remote origin refs/heads/allow_old_card | cut -f1)" = "$old"
+test "$(git ls-remote origin refs/heads/legacy | cut -f1)" = "$old"
 test "$(git ls-remote upstream refs/heads/master | cut -f1)" = "$master"
 jq --arg candidate "$candidate" --arg lock "$lock" --arg ref "$ref" \
    --arg bundle "$bundle_sha" \
