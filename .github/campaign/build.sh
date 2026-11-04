@@ -10,7 +10,7 @@ candidate="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["can
 git switch --detach --force "$candidate"
 git config --global --add safe.directory "$PWD"
 cp Cargo.lock "$report/Cargo.lock"
-source "$script_dir/compiler-env.sh"
+source "$script_dir/compiler-env.sh" --plan "$plan"
 printf '%s\n' "$RUSTFLAGS" > "$report/rustflags.txt"
 rustc -vV > "$report/rustc-version.txt"
 export CUDA_COMPUTE_CAP=61 ALLOW_LEGACY=bf16,fp8

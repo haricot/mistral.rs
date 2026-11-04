@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 
 import release_r1 as release
+from cpu_target import check_host
 
 ROOT = Path(__file__).resolve().parent
 CUDA_ERROR_STUB_LIBRARY = 34
@@ -64,6 +65,7 @@ def loader_smoke(image, directory, output):
 
 
 def build(plan, directory, output):
+    check_host(json.loads(Path(plan).read_text())["config"])
     manifest = release.inspect(plan, directory)
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)

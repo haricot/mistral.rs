@@ -54,7 +54,7 @@ jobs:
           CARGO_INCREMENTAL: '0'
           CARGO_PROFILE_DEV_DEBUG: '0'
         run: |
-          source .github/campaign/compiler-env.sh
+          source .github/campaign/compiler-env.sh --plan "$RUNNER_TEMP/prepared/plan.json"
           git fetch "$RUNNER_TEMP/prepared/candidate.bundle" 'refs/heads/integration/campaign/*:refs/remotes/delivery-check/*'
           candidate="$(jq -r '.candidate' "$RUNNER_TEMP/prepared/plan.json")"
           git switch --detach --force "$candidate"

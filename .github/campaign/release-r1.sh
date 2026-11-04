@@ -9,7 +9,7 @@ git config --global --add safe.directory "$source_dir"
 candidate="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["candidate"])' "$plan")"
 git -C "$source_dir" switch --detach --force "$candidate"
 test "$(git -C "$source_dir" rev-parse HEAD)" = "$candidate"
-source "$(dirname "$0")/compiler-env.sh"
+source "$(dirname "$0")/compiler-env.sh" --plan "$plan"
 export CUDA_COMPUTE_CAP=61 ALLOW_LEGACY=bf16,fp8
 export CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2
 export CARGO_TARGET_DIR="$CAMPAIGN_CACHE/target"

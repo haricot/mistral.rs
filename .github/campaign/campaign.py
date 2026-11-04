@@ -10,6 +10,8 @@ import sys
 import tomllib
 from pathlib import Path
 
+from cpu_target import profile, rustflags
+
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 CANDLE_CRATES = ("candle-core", "candle-nn", "candle-flash-attn-v3", "candle-metal-kernels")
@@ -61,6 +63,7 @@ def recipe():
 
 def snapshot(repo, target, image, output):
     config = json.loads((ROOT / "config.json").read_text())
+    profile(config)
     if not re.fullmatch(r"[^\s]+@sha256:[0-9a-f]{64}", image):
         raise RuntimeError("the CUDA compiler image must have an immutable SHA-256 identity")
     selected = config["targets"][target]
@@ -532,6 +535,8 @@ def prepare(repo, snapshot_path, output, publish=False):
                        "candle": contract["candle_sha"], "candle_branch": contract["candle_branch"],
                        "builder_image": state["image"],
                        "lock": git(repo, "show", f"{sha}:Cargo.lock")})
+        if "cpu_profile" in cfg:
+            matrix[-1]["cpu_profile"] = profile(cfg)
     for item in matrix:
         item["lock"] = hashlib.sha256((item["lock"] + "\n").encode()).hexdigest()
     value = {**state, "candidate": candidate, "components": objects, "matrix": matrix}
@@ -549,6 +554,9 @@ def verify_artifact(directory, expected):
     for key in ("candidate", "build_key", "component", "lock"):
         if proof.get(key) != expected[key]:
             raise RuntimeError(f"artifact {key} mismatch")
+    if "cpu_profile" in expected and (proof.get("cpu_profile") != profile(expected)
+                                      or proof.get("rustflags") != rustflags(expected)):
+        raise RuntimeError("artifact CPU profile or compiler flags mismatch")
     for name, expected_hash in proof["files"].items():
         if Path(name).name != name or file_hash(directory / name) != expected_hash:
             raise RuntimeError(f"artifact digest mismatch: {name}")

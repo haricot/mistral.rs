@@ -5,6 +5,7 @@ plan="$1"
 builds="$2"
 report="$3"
 mkdir -p "$report"
+python3 "$script_dir/cpu_target.py" --plan "$plan" --check-host
 python3 - "$plan" <<'PY'
 import hashlib,json,sys
 from pathlib import Path

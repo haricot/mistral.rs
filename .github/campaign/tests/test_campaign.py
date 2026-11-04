@@ -329,6 +329,17 @@ class ProofTests(unittest.TestCase):
     def test_accepts_exact_build(self):
         self.assertEqual(c.verify_artifact(self.root, self.expected)["cpu_test_count"], 3)
 
+    def test_avx2_archive_cannot_be_replaced_with_portable_or_native_proof(self):
+        expected = {**self.expected, "cpu_profile": "avx2"}
+        proof = {**self.proof, "cpu_profile": "avx2", "rustflags": "-C target-cpu=x86-64-v3"}
+        c.write_json(self.root / "build.json", proof)
+        self.assertEqual(p.verify_build(self.root, expected)["cpu_profile"], "avx2")
+        for key, value in (("cpu_profile", "portable"), ("rustflags", p.PORTABLE_RUSTFLAGS),
+                           ("rustflags", "-C target-cpu=native")):
+            c.write_json(self.root / "build.json", {**proof, key: value})
+            with self.subTest(key=key, value=value), self.assertRaisesRegex(RuntimeError, "mismatch"):
+                p.verify_build(self.root, expected)
+
     def test_gpu_archive_accepts_portable_compiler_flags(self):
         c.write_json(self.root / "build.json", {**self.proof, "rustflags": p.PORTABLE_RUSTFLAGS})
         self.assertEqual(p.verify_build(self.root, self.expected)["rustflags"], p.PORTABLE_RUSTFLAGS)

@@ -1,4 +1,5 @@
 import os
+import json
 import shutil
 import signal
 import subprocess
@@ -36,15 +37,19 @@ class CompilerEnvTests(unittest.TestCase):
             '[build]\nrustflags = ["-C", "target-cpu=native"]\n')
         (self.root / "src/main.rs").write_text(PROBE)
 
-    def compile(self, portable):
-        target = self.root / ("portable" if portable else "avx512")
+    def compile(self, portable, profile=None):
+        target = self.root / (profile or ("portable" if portable else "avx512"))
         env = {**os.environ, "CARGO_TARGET_DIR": str(target),
                "RUSTFLAGS": "-C target-cpu=native",
                "CARGO_ENCODED_RUSTFLAGS": "-C\x1ftarget-cpu=x86-64-v4"}
         env.pop("RUSTC_WRAPPER", None)
         script = 'source "$1"; cargo build --offline -vv' if portable else 'cargo build --offline -vv'
+        if profile:
+            plan = self.root / "plan.json"
+            plan.write_text(json.dumps({"config": {"cpu_profile": profile}}))
+            script = 'source "$1" --plan "$2"; cargo check --offline; cargo build --offline -vv'
         result = subprocess.run(["bash", "-euo", "pipefail", "-c", script,
-                                 "compiler-env-test", ROOT / "compiler-env.sh"],
+                                 "compiler-env-test", ROOT / "compiler-env.sh", self.root / "plan.json"],
                                 cwd=self.root, env=env, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         return target / "debug/portable-probe", result.stderr
@@ -54,6 +59,13 @@ class CompilerEnvTests(unittest.TestCase):
         result = subprocess.run([binary, "-3"], text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "avx=false avx2=false avx512f=false")
+
+    def test_avx2_cargo_check_and_binary_override_native_and_encoded_flags(self):
+        binary, log = self.compile(portable=True, profile="avx2")
+        result = subprocess.run([binary, "-3"], text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "avx=true avx2=true avx512f=false")
+        self.assertIn("target-cpu=x86-64-v3", log)
 
     @unittest.skipUnless(QEMU, "QEMU is required for the CPU instruction regression")
     def test_portable_archive_code_runs_on_cpus_without_avx512(self):

@@ -43,12 +43,20 @@ limited to reduce test compilation time; CUDA kernels retain their build-script
 `-O3` options. These archives are not release performance binaries. Release model
 benchmarks require the release profile and separate measurements.
 
-`compiler-env.sh` fixes Rust's CPU target to baseline `x86-64`, overriding the
-repository's `target-cpu=native` and inherited encoded flags. A hosted machine's
-AVX-512 instructions must not become unconditional instructions on the Pascal
-runner's CPU. Build proofs include the effective flags and compiler version.
-Changing these flags invalidates executable reuse; source candidates and CUDA
-kernel cache inputs remain independent of the host CPU instruction set.
+`config.json` selects the explicit CPU profile: `avx2` means
+`-C target-cpu=x86-64-v3`; `portable` means `-C target-cpu=x86-64`.
+`compiler-env.sh` overrides the repository's `target-cpu=native` and inherited
+encoded flags for both campaign archives and the one final release build.
+The current profile matches the qualified Candle AVX2 campaign and does not
+enable AVX-512. Hosts are checked before compiling or executing AVX2 binaries.
+Build proofs and the release/image manifests bind the selected profile and flags.
+Changing this profile invalidates executable reuse while keeping the immutable
+CUDA SDK and source-keyed CUDA kernel caches reusable.
+
+The release model policy keeps real Text/VL/GGUF CPU/CUDA runs and their hashed
+references mandatory. With `vl_gguf_numeric_informational` enabled, the original
+VL/GGUF numeric verdicts remain in the report without blocking release acceptance;
+Text numeric acceptance, execution errors, and evidence integrity still block it.
 
 `build.sh` runs Cargo check, builds the nextest archive, and runs the CPU test
 selection from the CUDA-enabled executables. The mandatory CPU backend test

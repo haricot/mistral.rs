@@ -45,6 +45,18 @@ class ReleaseR1Tests(unittest.TestCase):
         self.assertEqual(r.inspect(self.plan_file, self.root), details)
         self.assertIn("code-execution", details["features"])
 
+    def test_cpu_target_is_bound_to_release_and_image_identity(self):
+        self.plan["config"]["cpu_profile"] = "avx2"
+        self.plan_file.write_text(json.dumps(self.plan))
+        image = self.image_fixture()
+        record = r.image_record(self.plan_file, self.root, image, archive=True)
+        self.assertEqual(record["release"]["rustflags"], "-C target-cpu=x86-64-v3")
+        self.assertEqual(record["release"]["cpu_profile"], "avx2")
+        self.plan["config"]["cpu_profile"] = "portable"
+        self.plan_file.write_text(json.dumps(self.plan))
+        with self.assertRaisesRegex(ValueError, "rustflags"):
+            r.inspect(self.plan_file, self.root)
+
     def test_refuses_wrong_candidate(self):
         self.record()
         self.plan["candidate"] = "e" * 40
@@ -209,6 +221,42 @@ class ReleaseR1Tests(unittest.TestCase):
         self.assertTrue(result["full_models_executed"])
         self.assertEqual(result["status"], "COLLECTED")
         with self.assertRaises(ValueError): r.verify_gpu(self.plan_file, self.root, proofs, image)
+
+    def test_explicit_vl_gguf_policy_accepts_complete_measurements_without_rewriting_verdicts(self):
+        self.plan["config"]["lfm3_qualification"] = {"vl_gguf_numeric_informational": True}
+        self.plan_file.write_text(json.dumps(self.plan))
+        result, image, proofs = self.collect_fixture(paged=True)
+        accepted = r.verify_gpu(self.plan_file, self.root, proofs, image)
+        self.assertEqual(accepted["status"], "COLLECTED")
+        self.assertEqual(accepted["models"]["vl"]["status"], "FAIL")
+        self.assertEqual(accepted["models"]["text"]["status"], "PASS")
+        self.assertEqual(result["release"]["informational_numeric_models"], ["gguf", "vl"])
+
+    def test_vl_gguf_policy_still_rejects_text_drift_and_tampered_references(self):
+        self.plan["config"]["lfm3_qualification"] = {"vl_gguf_numeric_informational": True}
+        self.plan_file.write_text(json.dumps(self.plan))
+        _, image, proofs = self.collect_fixture()
+        q = r.model_module()
+        path = proofs / "release-r1/text-cuda.json"
+        raw = q.read(path)
+        raw["response"]["choices"][0]["logprobs"]["content"][0]["logprob"] -= 0.5
+        q.write(path, raw)
+        with self.assertRaisesRegex(ValueError, "SHA256"):
+            r.verify_gpu(self.plan_file, self.root, proofs, image)
+        report_path = proofs / "release-r1/report.json"
+        report = q.read(report_path)
+        report["files"][path.name] = r.hash_file(path)
+        q.write(report_path, report)
+        with self.assertRaisesRegex(RuntimeError, "numeric parity"):
+            r.verify_gpu(self.plan_file, self.root, proofs, image)
+
+    def test_vl_gguf_policy_does_not_accept_incomplete_execution(self):
+        self.plan["config"]["lfm3_qualification"] = {"vl_gguf_numeric_informational": True}
+        self.plan_file.write_text(json.dumps(self.plan))
+        result, image, proofs = self.collect_fixture(execution_error=True)
+        self.assertFalse(result["full_models_executed"])
+        with self.assertRaises(ValueError):
+            r.verify_gpu(self.plan_file, self.root, proofs, image)
 
     def test_release_paged_benchmark_keeps_actual_token_counts_without_relaxing_model_verdicts(self):
         result, image, proofs = self.collect_fixture(paged=True)

@@ -7,8 +7,9 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from campaign import ROOT, file_hash, verify_artifact, write_json
+from cpu_target import PROFILES, rustflags
 
-PORTABLE_RUSTFLAGS = "-C target-cpu=x86-64"
+PORTABLE_RUSTFLAGS = PROFILES["portable"]
 
 
 def node(plan, component):
@@ -58,8 +59,8 @@ def build(directory):
     proof["features"] = ["cuda-legacy-bf16", "cuda-legacy-fp8", "cuda-legacy-fp4"]
     proof["profile"] = "campaign"
     proof["rustflags"] = (directory / "rustflags.txt").read_text().strip()
-    if proof["rustflags"] != PORTABLE_RUSTFLAGS:
-        raise RuntimeError("non-portable Rust compiler flags")
+    if proof["rustflags"] != rustflags(proof):
+        raise RuntimeError("non-portable or mismatched Rust compiler flags")
     proof["gpu_executed"] = False
     proof["files"] = {n: file_hash(directory / n) for n in [
         "tests.tar.zst", "cargo-nextest", "cpu-junit.xml", "Cargo.lock", "rustflags.txt", "rustc-version.txt"]}
@@ -70,8 +71,8 @@ def build(directory):
 
 def verify_build(directory, expected):
     proof = verify_artifact(directory, expected)
-    if proof.get("rustflags") != PORTABLE_RUSTFLAGS:
-        raise RuntimeError("non-portable Rust compiler flags")
+    if proof.get("rustflags") != rustflags(expected):
+        raise RuntimeError("non-portable or mismatched Rust compiler flags")
     return proof
 
 

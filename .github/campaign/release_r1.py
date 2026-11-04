@@ -11,8 +11,10 @@ import subprocess
 import statistics
 from pathlib import Path
 
+from cpu_target import PROFILES, check_host, profile, rustflags
+
 SCHEMA = "haricot-extended-release-r1"
-PORTABLE_RUSTFLAGS = "-C target-cpu=x86-64"
+PORTABLE_RUSTFLAGS = PROFILES["portable"]
 SHA = re.compile(r"^[0-9a-f]{40}$")
 DIGEST = re.compile(r"^[0-9a-f]{64}$")
 ROOT = Path(__file__).resolve().parent
@@ -27,6 +29,10 @@ def hash_file(path):
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def informational_models(plan):
+    return {"vl", "gguf"} if plan["config"].get("lfm3_qualification", {}).get("vl_gguf_numeric_informational") is True else set()
 
 
 def expected(plan):
@@ -46,7 +52,9 @@ def expected(plan):
         "target": "sm_61",
         "toolchain": plan["config"]["toolchain"],
         "profile": "release",
-        "rustflags": PORTABLE_RUSTFLAGS,
+        "rustflags": rustflags(plan["config"]),
+        **({"cpu_profile": profile(plan["config"])} if "cpu_profile" in plan["config"] else {}),
+        **({"informational_numeric_models": sorted(informational_models(plan))} if informational_models(plan) else {}),
         "features": sorted(set(plan["config"]["features"] + ["code-execution"])),
         "lock_sha256": matrix[0]["lock"],
     }
@@ -107,6 +115,7 @@ def image_record(plan_file, directory, image_directory, archive=False):
 
 
 def collect_gpu(plan_file, directory, proofs, image_directory):
+    check_host(json.loads(Path(plan_file).read_text())["config"])
     manifest = inspect(plan_file, directory)
     image_record(plan_file, directory, image_directory)
     proofs = Path(proofs)
@@ -187,7 +196,10 @@ def collect_gpu(plan_file, directory, proofs, image_directory):
     summary = "\nRelease binary SHA256: " + manifest["binary_sha256"] + "\n\n"
     summary += "| Release model | Numeric verdict | Max logprob error |\n| --- | --- | --- |\n"
     summary += "".join(f"| {mode} | {case['status']} | {case.get('max_logprob_error', 'unavailable')} |\n" for mode, case in report["models"].items())
-    summary += "\nCollection is not numeric acceptance. Publication requires every release-model comparison to pass.\n"
+    if informational_models(json.loads(Path(plan_file).read_text())):
+        summary += "\nText numeric acceptance remains required; VL/GGUF numeric verdicts are informational. All six executions and raw references remain mandatory.\n"
+    else:
+        summary += "\nCollection is not numeric acceptance. Publication requires every release-model comparison to pass.\n"
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as stream: stream.write(summary)
     print(summary)
@@ -221,6 +233,8 @@ def paged_summary(observation, cache, q):
 
 
 def verify_gpu(plan_file, directory, proofs, image_directory):
+    plan = json.loads(Path(plan_file).read_text())
+    informational = informational_models(plan)
     manifest = inspect(plan_file, directory)
     image_record(plan_file, directory, image_directory)
     proofs = Path(proofs)
@@ -230,7 +244,7 @@ def verify_gpu(plan_file, directory, proofs, image_directory):
     q = model_module()
     policy = q.read(q.ROOT / "models.json")
     if (policy["image"] != manifest["image"] or report.get("schema") != GPU_SCHEMA or report.get("release") != manifest
-            or report.get("status") != "PASS" or report.get("full_models_executed") is not True
+            or report.get("status") not in ({"PASS", "COLLECTED"} if informational else {"PASS"}) or report.get("full_models_executed") is not True
             or report.get("run_id") != kernel.get("run_id") or kernel.get("candidate") != manifest["candidate"]
             or kernel.get("status") != "GPU_PASSED" or kernel.get("asd_required") is not True
             or kernel.get("gpu_executed") is not True or kernel.get("target") != "sm_61"
@@ -264,7 +278,8 @@ def verify_gpu(plan_file, directory, proofs, image_directory):
             raise ValueError("paged KV speed ratio differs from raw measurements")
     for mode in q.MODES:
         case = report["models"][mode]
-        numeric = q.compare(q.read(destination / f"{mode}-cpu.json"), q.read(destination / f"{mode}-cuda.json"), policy)
+        compare = q.measure if mode in informational else q.compare
+        numeric = compare(q.read(destination / f"{mode}-cpu.json"), q.read(destination / f"{mode}-cuda.json"), policy)
         if case.get("errors") or case.get("weights") != policy["models"][mode] or any(case.get(k) != v for k, v in numeric.items()):
             raise ValueError("release numeric evidence does not match the raw references")
     return report
