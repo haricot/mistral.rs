@@ -1,4 +1,6 @@
-master-fp8-kv-sm61-standard-backend-extended-20261102
+extended-avx2-qualified-candle-20261104
 master=095991a7d680a6994e6f1554156ebef5d09db049
-fp4=2b36d29b2784bcd34c22cfde61088678a3dab3b8
-qualification-only; complete preparation; select standard FP8 KV backend before production cache allocation; retain FP16 FlashInfer; physical hybrid GQA layout and real Text FP16/FP8 benchmarks
+candle_extended=3cbf25687e6966b251e0e2af8404a1406899e77b
+cpu_profile=avx2
+rustflags=-C target-cpu=x86-64-v3
+qualification-only; complete preparation; FP4 and software FP8 KV production coverage; one final Extended release binary and matching OCI payload; real Text/VL/GGUF executions with informational VL/GGUF numeric verdicts
