@@ -1,7 +1,7 @@
 name: Mistral campaign contracts
 on:
   push:
-    branches: [ci/standalone-campaign-archive]
+    branches: [ci/standalone-campaign-archive, ci/extended-release-r1-single-build]
   pull_request:
     branches: [mirror_orch]
     paths: [.github/campaign/**, .github/workflows/mistral-campaign-check.yml, .github/workflows/mistral-extended-sm61.yml, .github/workflows/mistral-cuda-legacy-sm61.yml]
@@ -33,12 +33,12 @@ jobs:
           python3 .github/campaign/campaign.py snapshot --repo "$PWD" --target extended --image preparation-only@sha256:0000000000000000000000000000000000000000000000000000000000000000 --output "$RUNNER_TEMP/snapshot.json"
           python3 .github/campaign/campaign.py prepare --repo "$PWD" --snapshot "$RUNNER_TEMP/snapshot.json" --output "$RUNNER_TEMP/prepared"
       - name: Identify the exact delivery candidate for CPU type checking
-        if: github.event_name == 'pull_request' && github.head_ref == 'ci/extended-release-r1-single-build'
+        if: github.head_ref == 'ci/extended-release-r1-single-build' || github.ref == 'refs/heads/ci/extended-release-r1-single-build'
         id: delivery
         run: |
           echo "candidate=$(jq -r '.candidate' "$RUNNER_TEMP/prepared/plan.json")" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
-        if: github.event_name == 'pull_request' && github.head_ref == 'ci/extended-release-r1-single-build'
+        if: github.head_ref == 'ci/extended-release-r1-single-build' || github.ref == 'refs/heads/ci/extended-release-r1-single-build'
         with:
           path: |
             ~/.cargo/registry
@@ -47,7 +47,7 @@ jobs:
           key: release-r1-cpu-rust199-${{ steps.delivery.outputs.candidate }}-${{ hashFiles('.github/campaign/compiler-env.sh') }}
           restore-keys: release-r1-cpu-rust199-
       - name: Check the composed delivery CLI and code-execution feature on CPU
-        if: github.event_name == 'pull_request' && github.head_ref == 'ci/extended-release-r1-single-build'
+        if: github.head_ref == 'ci/extended-release-r1-single-build' || github.ref == 'refs/heads/ci/extended-release-r1-single-build'
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/delivery-check-target
           CARGO_BUILD_JOBS: '2'
