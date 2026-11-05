@@ -1,0 +1,30 @@
+name: CPU-MoE S0 standalone
+
+on:
+  push:
+    branches:
+      - cpu-moe-standalone
+    paths:
+      - .github/workflows/cpu-moe-s0.yml
+      - integration/cpu-moe/**
+      - mistralrs-core/src/moe/experts/**
+      - mistralrs-quant/src/routed_moe/**
+  workflow_dispatch:
+
+jobs:
+  cpu-baseline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Compile CPU
+        run: cargo check -p mistralrs-core -p mistralrs-quant --no-default-features
+      - name: CPU offload contract
+        run: cargo test -p mistralrs-core --no-default-features cpu_moe_baseline
+      - name: GGUF Q4K route parity
+        run: cargo test -p mistralrs-quant --no-default-features cpu_q4k_routing_matches_unfused_baseline

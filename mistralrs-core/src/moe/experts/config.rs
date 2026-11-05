@@ -123,6 +123,7 @@ pub fn prelog_moe_backend(
     quantization_config: &Option<QuantizedConfig>,
     act: Activation,
 ) -> Result<()> {
+    let device = super::cpu_moe_baseline::CpuMoeBaseline::current().expert_device(&device);
     MoEExpertsBackend::resolve(&BackendChoice::new(
         device,
         dtype,

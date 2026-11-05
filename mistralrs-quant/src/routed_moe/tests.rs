@@ -89,6 +89,59 @@ fn cpu_mxfp8_and_mixed_projections_use_canonical_routes() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn cpu_q4k_routing_matches_unfused_baseline() -> Result<()> {
+    use crate::GgufMatMul;
+    use candle_core::quantized::{GgmlDType, QTensor};
+
+    const DIM: usize = 256;
+    const NUM_EXPERTS: usize = 3;
+    let device = &Device::Cpu;
+    let projection = |phase: usize| -> Result<Arc<dyn QuantMethod>> {
+        let values = (0..NUM_EXPERTS * DIM * DIM)
+            .map(|i| ((i + phase) % 101) as f32 / 133.0 - 0.38)
+            .collect::<Vec<_>>();
+        let weights = Tensor::from_vec(values, (NUM_EXPERTS, DIM, DIM), device)?;
+        let weights = QTensor::quantize(&weights, GgmlDType::Q4K)?;
+        Ok(Arc::new(GgufMatMul::new(QuantMethodConfig::Gguf {
+            q_weight: Arc::new(weights),
+            b: None,
+        })?))
+    };
+
+    let gate = projection(1)?;
+    let up = projection(17)?;
+    let down = projection(29)?;
+    let experts = RoutedExperts {
+        gate: &*gate,
+        up: &*up,
+        down: &*down,
+        num_experts: NUM_EXPERTS,
+    };
+    let values = (0..2 * DIM)
+        .map(|i| ((i % 61) as f32 - 30.0) / 97.0)
+        .collect::<Vec<_>>();
+    let xs = Tensor::from_vec(values, (2, DIM), device)?;
+    let indices = Tensor::new(&[[0u32, 2], [1, 0]], device)?;
+    let routing = Tensor::new(&[[0.7f32, 0.3], [0.4, 0.6]], device)?;
+    let input = RoutedInput {
+        xs: &xs,
+        indices: &indices,
+        routing: &routing,
+        output_dtype: DType::F32,
+        lora: None,
+    };
+    let activation = RoutedActivation {
+        fused: Some(GluActivationType::Silu),
+        fallback: &candle_nn::Activation::Silu,
+    };
+    let actual = experts.forward(input, activation)?;
+    let reference = experts.gather(input, activation)?;
+    let max_error = (actual - reference)?.abs()?.max_all()?.to_scalar::<f32>()?;
+    assert!(max_error <= 1e-4, "Q4K CPU routed baseline differs by {max_error}");
+    Ok(())
+}
+
 #[cfg(feature = "cuda")]
 #[test]
 fn cuda_gguf_biases_are_preserved_in_decode_and_prefill() -> Result<()> {

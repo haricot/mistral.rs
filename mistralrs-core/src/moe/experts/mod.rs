@@ -10,6 +10,7 @@ pub(crate) use mistralrs_quant::routed_moe::GROUPED_PREFILL_MIN_TOKENS;
 mod checkpoint;
 pub(crate) use checkpoint::{expert_stack_available, rebuild_expert_projection};
 mod config;
+mod cpu_moe_baseline;
 mod forward;
 #[cfg(test)]
 mod isq_tests;
@@ -22,6 +23,7 @@ use mistralrs_quant::{
 use std::sync::Arc;
 
 use crate::layers::Activation;
+use cpu_moe_baseline::CpuMoeBaseline;
 
 pub use config::{prelog_moe_backend, ExpertProj, ExpertProjNames, MoEExpertsConfig};
 
@@ -106,7 +108,11 @@ impl MoEExperts {
         quantization_config: &Option<QuantizedConfig>,
         act: Activation,
     ) -> Result<Self> {
-        let experts_vb = vb.pp("experts").set_device(layer_device.clone());
+        let policy = *CpuMoeBaseline::current();
+        policy.validate(comm.world_size())?;
+        let experts_vb = vb
+            .pp("experts")
+            .set_device(policy.expert_device(&layer_device));
         if let Some(fast) = FastExpertsWeights::from_weight_source(cfg, &experts_vb, comm)? {
             let lora_site = Self::register_lora_site(cfg, &experts_vb, comm, fast.sharded)?;
             return Ok(Self::from_backend(
@@ -136,7 +142,7 @@ impl MoEExperts {
         }
         check_isq_gather_support()?;
         let choice = BackendChoice::new(
-            layer_device,
+            experts_vb.device().clone(),
             experts_vb.dtype(),
             loading_isq,
             quantization_config,
@@ -167,7 +173,7 @@ impl MoEExperts {
                 if experts_are_prequantized(quantization_config, &experts_vb) {
                     MoEExpertsBackendImpl::Fast(FastExpertsWeights::load_prequantized(
                         cfg,
-                        vb,
+                        vb.set_device(policy.expert_device(&layer_device)),
                         quantization_config,
                     )?)
                 } else {
@@ -198,6 +204,10 @@ impl MoEExperts {
         quantization_config: &Option<QuantizedConfig>,
         act: Activation,
     ) -> Result<Self> {
+        let policy = *CpuMoeBaseline::current();
+        policy.validate(comm.world_size())?;
+        let expert_device = policy.expert_device(experts_vb.device());
+        let experts_vb = experts_vb.set_device(expert_device);
         if let Some(fast) = FastExpertsWeights::from_weight_source(cfg, &experts_vb, comm)? {
             let lora_site = Self::register_lora_site(cfg, &experts_vb, comm, fast.sharded)?;
             return Ok(Self::from_backend(
@@ -330,19 +340,24 @@ impl MoEExperts {
     /// # Returns
     /// Output tensor of shape [batch, seq_len, hidden_dim]
     pub fn forward(&self, xs: &Tensor, topk_weights: Tensor, topk_ids: &Tensor) -> Result<Tensor> {
-        let (batch_size, seq_len, hidden_dim) = xs.dims3()?;
-        let shape = MoEForwardShape::new(batch_size, seq_len, hidden_dim);
-        let xs_flat = xs.reshape(shape.flat())?;
+        let policy = *CpuMoeBaseline::current();
         let lora = self
             .lora_site
             .as_ref()
             .map(LoraExpertExecution::current)
             .transpose()?
             .flatten();
+        if policy.enabled() && lora.is_some() {
+            candle_core::bail!("CPU MoE baseline does not support active expert LoRA");
+        }
+        let (xs_exec, weights_exec, ids_exec) = policy.prepare(xs, topk_weights, topk_ids)?;
+        let (batch_size, seq_len, hidden_dim) = xs_exec.dims3()?;
+        let shape = MoEForwardShape::new(batch_size, seq_len, hidden_dim);
+        let xs_flat = xs_exec.reshape(shape.flat())?;
         let forward = MoEForward {
             xs_flat: &xs_flat,
-            topk_weights: &topk_weights,
-            topk_ids,
+            topk_weights: &weights_exec,
+            topk_ids: &ids_exec,
             original_dtype: xs.dtype(),
             shape,
             lora,
@@ -363,7 +378,7 @@ impl MoEExperts {
             ys = self.all_reduce.sum_all_reduce(&ys)?;
         }
 
-        ys.reshape(forward.shape.output())
+        policy.finish(ys.reshape(forward.shape.output())?, xs.device())
     }
 
     fn forward_config(&self) -> MoEForwardConfig {
