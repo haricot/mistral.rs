@@ -145,6 +145,42 @@ fn cpu_q4k_routing_matches_unfused_baseline() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn cpu_q4k_expert_slice_preserves_packed_projection() -> Result<()> {
+    use crate::GgufMatMul;
+    use candle_core::quantized::{GgmlDType, QTensor};
+
+    const HIDDEN: usize = 256;
+    const EXPERT_COUNT: usize = 3;
+    let device = &Device::Cpu;
+    let values = (0..EXPERT_COUNT * HIDDEN * HIDDEN)
+        .map(|value| (value % 113) as f32 / 81.0 - 0.7)
+        .collect::<Vec<_>>();
+    let stack = Tensor::from_vec(values, (EXPERT_COUNT, HIDDEN, HIDDEN), device)?;
+    let layer = GgufMatMul::new(QuantMethodConfig::Gguf {
+        q_weight: Arc::new(QTensor::quantize(&stack, GgmlDType::Q4K)?),
+        b: None,
+    })?;
+    let input = Tensor::from_vec(
+        (0..HIDDEN).map(|n| n as f32 / 127.0 - 1.0).collect(),
+        (1, HIDDEN),
+        device,
+    )?;
+    for id in 0..EXPERT_COUNT {
+        let sliced = layer
+            .expert_on_device(id, device)?
+            .expect("GGUF Q4K stack supports per-expert extraction");
+        let expected = layer
+            .gather_forward(&input.unsqueeze(1)?, &Tensor::new(&[[id as u32]], device)?)?
+            .squeeze(1)?;
+        let actual = sliced.forward(&input)?;
+        let error = (actual - expected)?.abs()?.max_all()?.to_scalar::<f32>()?;
+        assert!(error < 1e-4, "expert {id} packed Q4K deviation: {error}");
+    }
+    assert!(layer.expert_on_device(EXPERT_COUNT, device).is_err());
+    Ok(())
+}
+
 #[cfg(feature = "cuda")]
 #[test]
 fn cuda_gguf_biases_are_preserved_in_decode_and_prefill() -> Result<()> {

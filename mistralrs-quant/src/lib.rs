@@ -2091,6 +2091,16 @@ pub trait QuantMethod: Send + Sync + Debug + QuantizedSerde {
         None
     }
 
+    /// Materialize one expert without changing the original stacked projection.
+    /// Formats without a lossless per-expert representation return `None`.
+    fn expert_on_device(
+        &self,
+        _expert_id: usize,
+        _device: &Device,
+    ) -> Result<Option<Arc<dyn QuantMethod>>> {
+        Ok(None)
+    }
+
     /// If this is an AFQ layer, return its (w_q, scales, biases, bits, group_size).
     fn afq_inner(&self) -> Option<crate::afq::AfqInner> {
         None
@@ -2331,6 +2341,17 @@ macro_rules! forward_quant_hooks {
     (@weights $acc:path) => {
         fn get_qtensor(&self) -> Option<std::sync::Arc<candle_core::quantized::QTensor>> {
             $acc(self)?.get_qtensor()
+        }
+
+        fn expert_on_device(
+            &self,
+            expert_id: usize,
+            device: &candle_core::Device,
+        ) -> candle_core::Result<Option<std::sync::Arc<dyn $crate::QuantMethod>>> {
+            match $acc(self) {
+                Some(inner) => inner.expert_on_device(expert_id, device),
+                None => Ok(None),
+            }
         }
 
         fn afq_inner(&self) -> Option<$crate::AfqInner> {

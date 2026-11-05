@@ -11,6 +11,7 @@ mod checkpoint;
 pub(crate) use checkpoint::{expert_stack_available, rebuild_expert_projection};
 mod config;
 mod cpu_moe_baseline;
+mod cpu_moe_resident;
 mod forward;
 #[cfg(test)]
 mod isq_tests;
@@ -24,6 +25,7 @@ use std::sync::Arc;
 
 use crate::layers::Activation;
 use cpu_moe_baseline::CpuMoeBaseline;
+use cpu_moe_resident::CpuMoeResident;
 
 pub use config::{prelog_moe_backend, ExpertProj, ExpertProjNames, MoEExpertsConfig};
 
@@ -43,6 +45,7 @@ use forward::{MoEForward, MoEForwardConfig, MoEForwardShape};
 /// MoE experts layer without the gate; the caller computes routing weights + topk indices.
 pub struct MoEExperts {
     backend: MoEExpertsBackendImpl,
+    resident: Option<CpuMoeResident>,
     lora_site: Option<Arc<LoraExpertSiteHandle>>,
     act: Activation,
     #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
@@ -115,13 +118,14 @@ impl MoEExperts {
             .set_device(policy.expert_device(&layer_device));
         if let Some(fast) = FastExpertsWeights::from_weight_source(cfg, &experts_vb, comm)? {
             let lora_site = Self::register_lora_site(cfg, &experts_vb, comm, fast.sharded)?;
-            return Ok(Self::from_backend(
+            return Self::from_backend(
                 MoEExpertsBackendImpl::Fast(fast),
                 lora_site,
                 cfg,
                 comm,
                 act,
-            ));
+                &layer_device,
+            );
         }
         #[cfg(feature = "cutile")]
         if let Some(fp8) = CutileFp8ExpertsWeights::try_from_checkpoint(
@@ -132,13 +136,14 @@ impl MoEExperts {
             act,
         )? {
             let lora_site = Self::register_lora_site(cfg, &experts_vb, comm, false)?;
-            return Ok(Self::from_backend(
+            return Self::from_backend(
                 MoEExpertsBackendImpl::CutileFp8(fp8),
                 lora_site,
                 cfg,
                 comm,
                 act,
-            ));
+                &layer_device,
+            );
         }
         check_isq_gather_support()?;
         let choice = BackendChoice::new(
@@ -191,7 +196,7 @@ impl MoEExperts {
         };
         let lora_site = Self::register_lora_site(cfg, &experts_vb, comm, lora_sharded)?;
 
-        Ok(Self::from_backend(backend_impl, lora_site, cfg, comm, act))
+        Self::from_backend(backend_impl, lora_site, cfg, comm, act, &layer_device)
     }
 
     /// Create MoEExperts from a VB already at the experts level (gemma4's flat `moe.*`, no
@@ -206,17 +211,19 @@ impl MoEExperts {
     ) -> Result<Self> {
         let policy = *CpuMoeBaseline::current();
         policy.validate(comm.world_size())?;
+        let layer_device = experts_vb.device().clone();
         let expert_device = policy.expert_device(experts_vb.device());
         let experts_vb = experts_vb.set_device(expert_device);
         if let Some(fast) = FastExpertsWeights::from_weight_source(cfg, &experts_vb, comm)? {
             let lora_site = Self::register_lora_site(cfg, &experts_vb, comm, fast.sharded)?;
-            return Ok(Self::from_backend(
+            return Self::from_backend(
                 MoEExpertsBackendImpl::Fast(fast),
                 lora_site,
                 cfg,
                 comm,
                 act,
-            ));
+                &layer_device,
+            );
         }
         check_isq_gather_support()?;
         let choice = BackendChoice::new(
@@ -266,7 +273,7 @@ impl MoEExperts {
         };
         let lora_site = Self::register_lora_site(cfg, &experts_vb, comm, lora_sharded)?;
 
-        Ok(Self::from_backend(backend_impl, lora_site, cfg, comm, act))
+        Self::from_backend(backend_impl, lora_site, cfg, comm, act, &layer_device)
     }
 
     fn from_backend(
@@ -275,16 +282,32 @@ impl MoEExperts {
         cfg: &MoEExpertsConfig,
         comm: &Arc<mistralrs_quant::Comm>,
         act: Activation,
-    ) -> Self {
-        Self {
+        original_device: &Device,
+    ) -> Result<Self> {
+        let slots = CpuMoeResident::configured_slots()?;
+        if slots != 0 && !CpuMoeBaseline::current().enabled() {
+            candle_core::bail!("CPU-MoE resident slots require MISTRALRS_CPU_MOE_BASELINE=1");
+        }
+        let resident = match &backend {
+            MoEExpertsBackendImpl::Fast(fast) if slots > 0 => {
+                CpuMoeResident::try_new(fast, MoEForwardConfig {
+                    num_experts: cfg.num_experts,
+                    num_experts_per_tok: cfg.num_experts_per_tok,
+                    act,
+                }, original_device, slots)?
+            }
+            _ => None,
+        };
+        Ok(Self {
             backend,
+            resident,
             lora_site,
             act,
             num_experts: cfg.num_experts,
             num_experts_per_tok: cfg.num_experts_per_tok,
             all_reduce: SumAllReduce::new(comm),
             world_size: comm.world_size(),
-        }
+        })
     }
 
     fn register_lora_site(
@@ -349,6 +372,22 @@ impl MoEExperts {
             .flatten();
         if policy.enabled() && lora.is_some() {
             candle_core::bail!("CPU MoE baseline does not support active expert LoRA");
+        }
+        if let Some(resident) = &self.resident {
+            let (batch, seq_len, hidden) = xs.dims3()?;
+            if seq_len == 1 && xs.device().is_cuda() {
+                let shape = MoEForwardShape::new(batch, seq_len, hidden);
+                let xs_flat = xs.reshape(shape.flat())?;
+                let forward = MoEForward {
+                    xs_flat: &xs_flat,
+                    topk_weights: &topk_weights,
+                    topk_ids,
+                    original_dtype: xs.dtype(),
+                    shape,
+                    lora: None,
+                };
+                return resident.forward(&forward)?.reshape(shape.output());
+            }
         }
         let (xs_exec, weights_exec, ids_exec) = policy.prepare(xs, topk_weights, topk_ids)?;
         let (batch_size, seq_len, hidden_dim) = xs_exec.dims3()?;

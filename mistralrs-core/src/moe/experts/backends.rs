@@ -48,6 +48,7 @@ pub(super) struct CutlassExpertsWeights {
 pub(super) const CUTLASS_MOE_MIN_TOKENS: usize = 64;
 
 /// Gather-based experts (Metal / CPU / ISQ / pre-quantized).
+#[derive(Clone)]
 pub(super) struct FastExpertsWeights {
     pub(super) fused_gate_proj: Arc<dyn QuantMethod>,
     pub(super) fused_up_proj: Arc<dyn QuantMethod>,

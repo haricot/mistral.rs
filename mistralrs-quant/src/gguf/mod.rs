@@ -597,6 +597,55 @@ impl QuantMethod for GgufMatMul {
         }
     }
 
+    fn expert_on_device(
+        &self,
+        expert_id: usize,
+        device: &Device,
+    ) -> Result<Option<Arc<dyn QuantMethod>>> {
+        let QMatMul::QTensor(weight) = &self.w else {
+            return Ok(None);
+        };
+        let [experts, out_dim, in_dim] = weight.shape().dims() else {
+            return Ok(None);
+        };
+        if expert_id >= *experts {
+            candle_core::bail!("GGUF expert index {expert_id} is outside {experts} experts");
+        }
+        let dtype = weight.dtype();
+        let bytes_per_expert = out_dim
+            .checked_mul(*in_dim)
+            .and_then(|count| count.checked_div(dtype.block_size()))
+            .and_then(|blocks| blocks.checked_mul(dtype.type_size()))
+            .ok_or_else(|| candle_core::Error::msg("GGUF expert byte size overflow"))?;
+        let begin = expert_id
+            .checked_mul(bytes_per_expert)
+            .ok_or_else(|| candle_core::Error::msg("GGUF expert byte offset overflow"))?;
+        let end = begin
+            .checked_add(bytes_per_expert)
+            .ok_or_else(|| candle_core::Error::msg("GGUF expert byte end overflow"))?;
+        let bytes = weight.data()?;
+        let slab = bytes
+            .get(begin..end)
+            .ok_or_else(|| candle_core::Error::msg("GGUF expert slab is truncated"))?
+            .to_vec();
+        let bias = self
+            .b
+            .as_ref()
+            .map(|b| {
+                let selected = if b.rank() == 2 { b.get(expert_id)? } else { b.clone() };
+                selected.to_device(device)
+            })
+            .transpose()?;
+        let projection = GgufMatMul::from_raw_uqff(
+            ggml_dtype_to_uqff_code(dtype),
+            slab,
+            vec![*out_dim, *in_dim],
+            bias,
+            device,
+        )?;
+        Ok(Some(Arc::new(projection)))
+    }
+
     fn group_member(
         &self,
         xs: &Tensor,

@@ -1,0 +1,46 @@
+name: CPU-MoE combined qualification
+
+on:
+  push:
+    branches:
+      - cpu-moe-standalone
+    paths:
+      - .github/workflows/cpu-moe-qualification.yml
+      - integration/cpu-moe/**
+      - mistralrs-core/src/moe/experts/**
+      - mistralrs-quant/src/gguf/**
+      - mistralrs-quant/src/lib.rs
+      - mistralrs-quant/src/routed_moe/**
+  workflow_dispatch:
+
+jobs:
+  combined-cpu-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Phase 0 - normalize Rust formatting
+        run: |
+          cargo fmt --all
+          git diff --check
+          git diff --binary > cpu-moe-rustfmt.patch
+          cargo fmt --all -- --check
+      - name: Preserve formatting delta for source promotion
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpu-moe-rustfmt
+          path: cpu-moe-rustfmt.patch
+      - name: Phase 0b - CPU compile
+        run: |
+          cargo check -p mistralrs-core -p mistralrs-quant --no-default-features
+      - name: Phase 1 - exact synchronous functional baseline
+        run: |
+          cargo test -p mistralrs-core --no-default-features cpu_moe_baseline
+          cargo test -p mistralrs-quant --no-default-features cpu_q4k_routing_matches_unfused_baseline
+      - name: Phase 2 - persistent cache lifecycle and asynchronous worker
+        run: cargo test -p mistralrs-core --no-default-features cpu_moe_resident
+      - name: Phase 3 - packed Q4K expert extraction parity
+        run: cargo test -p mistralrs-quant --no-default-features cpu_q4k_expert_slice_preserves_packed_projection

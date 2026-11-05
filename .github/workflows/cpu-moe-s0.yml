@@ -1,14 +1,6 @@
 name: CPU-MoE S0 standalone
 
 on:
-  push:
-    branches:
-      - cpu-moe-standalone
-    paths:
-      - .github/workflows/cpu-moe-s0.yml
-      - integration/cpu-moe/**
-      - mistralrs-core/src/moe/experts/**
-      - mistralrs-quant/src/routed_moe/**
   workflow_dispatch:
 
 jobs:
