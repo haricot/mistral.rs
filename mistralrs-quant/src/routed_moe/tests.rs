@@ -138,7 +138,10 @@ fn cpu_q4k_routing_matches_unfused_baseline() -> Result<()> {
     let actual = experts.forward(input, activation)?;
     let reference = experts.gather(input, activation)?;
     let max_error = (actual - reference)?.abs()?.max_all()?.to_scalar::<f32>()?;
-    assert!(max_error <= 1e-4, "Q4K CPU routed baseline differs by {max_error}");
+    assert!(
+        max_error <= 1e-4,
+        "Q4K CPU routed baseline differs by {max_error}"
+    );
     Ok(())
 }
 
