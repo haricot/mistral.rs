@@ -1,6 +1,7 @@
-extended-avx2-qualified-candle-20261104
+extended-avx2-qualified-candle-20261105
 master=095991a7d680a6994e6f1554156ebef5d09db049
-candle_extended=3cbf25687e6966b251e0e2af8404a1406899e77b
+candle_extended=651a5456405b9fb53bf2cf3074ff869564893f72
+candle_validation_run=41903640725
 cpu_profile=avx2
 rustflags=-C target-cpu=x86-64-v3
 qualification-only; complete preparation; FP4 and software FP8 KV production coverage; one final Extended release binary and matching OCI payload; real Text/VL/GGUF executions with informational VL/GGUF numeric verdicts
