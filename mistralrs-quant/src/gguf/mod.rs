@@ -632,7 +632,11 @@ impl QuantMethod for GgufMatMul {
             .b
             .as_ref()
             .map(|b| {
-                let selected = if b.rank() == 2 { b.get(expert_id)? } else { b.clone() };
+                let selected = if b.rank() == 2 {
+                    b.get(expert_id)?
+                } else {
+                    b.clone()
+                };
                 selected.to_device(device)
             })
             .transpose()?;

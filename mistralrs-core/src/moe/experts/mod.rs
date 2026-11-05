@@ -289,13 +289,16 @@ impl MoEExperts {
             candle_core::bail!("CPU-MoE resident slots require MISTRALRS_CPU_MOE_BASELINE=1");
         }
         let resident = match &backend {
-            MoEExpertsBackendImpl::Fast(fast) if slots > 0 => {
-                CpuMoeResident::try_new(fast, MoEForwardConfig {
+            MoEExpertsBackendImpl::Fast(fast) if slots > 0 => CpuMoeResident::try_new(
+                fast,
+                MoEForwardConfig {
                     num_experts: cfg.num_experts,
                     num_experts_per_tok: cfg.num_experts_per_tok,
                     act,
-                }, original_device, slots)?
-            }
+                },
+                original_device,
+                slots,
+            )?,
             _ => None,
         };
         Ok(Self {

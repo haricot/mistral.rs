@@ -8,9 +8,15 @@ use std::{
 };
 
 use candle_core::{quantized::GgmlDType, DType, Device, Module, Result, Tensor};
-use mistralrs_quant::{QuantMethod, routed_moe::{RoutedActivation, RoutedExperts, RoutedInput}};
+use mistralrs_quant::{
+    routed_moe::{RoutedActivation, RoutedExperts, RoutedInput},
+    QuantMethod,
+};
 
-use super::{backends::FastExpertsWeights, forward::{MoEForward, MoEForwardConfig}};
+use super::{
+    backends::FastExpertsWeights,
+    forward::{MoEForward, MoEForwardConfig},
+};
 
 const SLOTS_FLAG: &str = "MISTRALRS_CPU_MOE_RESIDENT_SLOTS";
 
@@ -151,15 +157,19 @@ impl CpuMoeResident {
         if capacity == 0 || !device.is_cuda() {
             return Ok(None);
         }
-        let all_gguf = [&weights.fused_gate_proj, &weights.fused_up_proj, &weights.fused_down_proj]
-            .into_iter()
-            .all(|projection| {
-                projection.get_qtensor().is_some_and(|q| {
-                    matches!(q.shape().dims(), [experts, _, _] if *experts == config.num_experts)
-                        && q.dtype() == GgmlDType::Q4K
-                        && q.device().is_cpu()
-                })
-            });
+        let all_gguf = [
+            &weights.fused_gate_proj,
+            &weights.fused_up_proj,
+            &weights.fused_down_proj,
+        ]
+        .into_iter()
+        .all(|projection| {
+            projection.get_qtensor().is_some_and(|q| {
+                matches!(q.shape().dims(), [experts, _, _] if *experts == config.num_experts)
+                    && q.dtype() == GgmlDType::Q4K
+                    && q.device().is_cpu()
+            })
+        });
         if !all_gguf {
             tracing::warn!("CPU-MoE resident cache currently requires CPU-packed GGUF Q4K stacks; retaining S0");
             return Ok(None);
@@ -186,9 +196,11 @@ impl CpuMoeResident {
                     drop(state);
                     let stage = || -> Result<Arc<ResidentExpert>> {
                         let load = |layer: &Arc<dyn QuantMethod>| -> Result<Arc<dyn QuantMethod>> {
-                            layer.expert_on_device(id as usize, &stage_device)?.ok_or_else(|| {
-                                candle_core::Error::msg("GGUF expert extraction unavailable")
-                            })
+                            layer
+                                .expert_on_device(id as usize, &stage_device)?
+                                .ok_or_else(|| {
+                                    candle_core::Error::msg("GGUF expert extraction unavailable")
+                                })
                         };
                         Ok(Arc::new(ResidentExpert {
                             gate: load(&stage_weights.fused_gate_proj)?,
@@ -232,7 +244,10 @@ impl CpuMoeResident {
     }
 
     fn request_prefetch(&self, id: u32) -> Result<()> {
-        let mut state = self.cache.lock().map_err(|_| candle_core::Error::msg("CPU-MoE cache lock poisoned"))?;
+        let mut state = self
+            .cache
+            .lock()
+            .map_err(|_| candle_core::Error::msg("CPU-MoE cache lock poisoned"))?;
         if state.entries.contains_key(&id) || !state.pending.insert(id) {
             return Ok(());
         }
@@ -250,15 +265,29 @@ impl CpuMoeResident {
 
     pub(super) fn forward(&self, forward: &MoEForward) -> Result<Tensor> {
         let (tokens, hidden) = forward.xs_flat.dims2()?;
-        let indices = forward.topk_ids.to_device(&Device::Cpu)?.to_dtype(DType::U32)?.to_vec2::<u32>()?;
-        let weights = forward.topk_weights.to_device(&Device::Cpu)?.to_dtype(DType::F32)?.to_vec2::<f32>()?;
-        let gpu_execution = self.execution.read().map_err(|_| candle_core::Error::msg("CPU-MoE execution lock poisoned"))?;
+        let indices = forward
+            .topk_ids
+            .to_device(&Device::Cpu)?
+            .to_dtype(DType::U32)?
+            .to_vec2::<u32>()?;
+        let weights = forward
+            .topk_weights
+            .to_device(&Device::Cpu)?
+            .to_dtype(DType::F32)?
+            .to_vec2::<f32>()?;
+        let gpu_execution = self
+            .execution
+            .read()
+            .map_err(|_| candle_core::Error::msg("CPU-MoE execution lock poisoned"))?;
 
         let mut hot: BTreeMap<u32, HotGroup> = BTreeMap::new();
         let mut cold = Vec::<(u32, u32, f32)>::new();
         let mut missed = HashMap::<u32, f32>::new();
         {
-            let mut state = self.cache.lock().map_err(|_| candle_core::Error::msg("CPU-MoE cache lock poisoned"))?;
+            let mut state = self
+                .cache
+                .lock()
+                .map_err(|_| candle_core::Error::msg("CPU-MoE cache lock poisoned"))?;
             for token in 0..tokens {
                 for (&id, &weight) in indices[token].iter().zip(weights[token].iter()) {
                     if id as usize >= self.num_experts {
@@ -274,7 +303,10 @@ impl CpuMoeResident {
                     } else {
                         state.stats.misses += 1;
                         cold.push((token as u32, id, weight));
-                        missed.entry(id).and_modify(|best| *best = (*best).max(weight)).or_insert(weight);
+                        missed
+                            .entry(id)
+                            .and_modify(|best| *best = (*best).max(weight))
+                            .or_insert(weight);
                     }
                 }
             }
@@ -286,17 +318,29 @@ impl CpuMoeResident {
             let token_ids = cold.iter().map(|(token, _, _)| *token).collect::<Vec<_>>();
             let token_tensor = Tensor::from_vec(token_ids, cold.len(), &Device::Cpu)?;
             let selected = cpu_xs.index_select(&token_tensor, 0)?;
-            let cpu_ids = Tensor::from_vec(cold.iter().map(|(_, id, _)| *id).collect::<Vec<_>>(), (cold.len(), 1), &Device::Cpu)?;
-            let cpu_weights = Tensor::from_vec(cold.iter().map(|(_, _, weight)| *weight).collect::<Vec<_>>(), (cold.len(), 1), &Device::Cpu)?
-                .to_dtype(forward.topk_weights.dtype())?;
+            let cpu_ids = Tensor::from_vec(
+                cold.iter().map(|(_, id, _)| *id).collect::<Vec<_>>(),
+                (cold.len(), 1),
+                &Device::Cpu,
+            )?;
+            let cpu_weights = Tensor::from_vec(
+                cold.iter()
+                    .map(|(_, _, weight)| *weight)
+                    .collect::<Vec<_>>(),
+                (cold.len(), 1),
+                &Device::Cpu,
+            )?
+            .to_dtype(forward.topk_weights.dtype())?;
             let (sender, receiver) = mpsc::channel();
-            self.cpu_jobs.send(CpuJob {
-                xs: selected,
-                indices: cpu_ids,
-                routing: cpu_weights,
-                output_dtype: DType::F32,
-                reply: sender,
-            }).map_err(candle_core::Error::wrap)?;
+            self.cpu_jobs
+                .send(CpuJob {
+                    xs: selected,
+                    indices: cpu_ids,
+                    routing: cpu_weights,
+                    output_dtype: DType::F32,
+                    reply: sender,
+                })
+                .map_err(candle_core::Error::wrap)?;
             cpu_reply = Some(receiver);
         }
         let mut candidates = missed.into_iter().collect::<Vec<_>>();
@@ -308,7 +352,8 @@ impl CpuMoeResident {
         let mut output = Tensor::zeros((tokens, hidden), DType::F32, &self.device)?;
         for group in hot.values() {
             let expert = group.expert.as_ref().expect("hot group has expert weights");
-            let token_ids = Tensor::from_vec(group.tokens.clone(), group.tokens.len(), &self.device)?;
+            let token_ids =
+                Tensor::from_vec(group.tokens.clone(), group.tokens.len(), &self.device)?;
             let xs = forward.xs_flat.index_select(&token_ids, 0)?;
             let gate = expert.gate.forward(&xs)?;
             let up = expert.up.forward(&xs)?;
@@ -318,7 +363,9 @@ impl CpuMoeResident {
                 (&up * gate.apply(&self.act)?)?
             };
             let ys = expert.down.forward(&activated)?.to_dtype(DType::F32)?;
-            let route_weights = Tensor::from_vec(group.weights.clone(), group.weights.len(), &self.device)?.unsqueeze(1)?;
+            let route_weights =
+                Tensor::from_vec(group.weights.clone(), group.weights.len(), &self.device)?
+                    .unsqueeze(1)?;
             let weighted = ys.broadcast_mul(&route_weights)?;
             output = output.index_add(&token_ids, &weighted, 0)?;
         }
@@ -327,7 +374,11 @@ impl CpuMoeResident {
 
         if let Some(receiver) = cpu_reply {
             let cpu_result = receiver.recv().map_err(candle_core::Error::wrap)??;
-            let token_ids = Tensor::from_vec(cold.iter().map(|(token, _, _)| *token).collect::<Vec<_>>(), cold.len(), &self.device)?;
+            let token_ids = Tensor::from_vec(
+                cold.iter().map(|(token, _, _)| *token).collect::<Vec<_>>(),
+                cold.len(),
+                &self.device,
+            )?;
             let ys = cpu_result.to_device(&self.device)?.to_dtype(DType::F32)?;
             output = output.index_add(&token_ids, &ys, 0)?;
         }
@@ -374,9 +425,12 @@ mod tests {
     fn async_cpu_worker_preserves_individual_routed_contributions() -> Result<()> {
         let device = &Device::Cpu;
         let linear = |value: f32| -> Result<Arc<dyn QuantMethod>> {
-            Ok(Arc::new(UnquantLinear::new(QuantMethodConfig::Unquantized(
-                Linear::new(Tensor::full(value, (2, 8, 8), device)?, None),
-            ))?))
+            Ok(Arc::new(UnquantLinear::new(
+                QuantMethodConfig::Unquantized(Linear::new(
+                    Tensor::full(value, (2, 8, 8), device)?,
+                    None,
+                )),
+            )?))
         };
         let weights = FastExpertsWeights {
             fused_gate_proj: linear(0.25)?,
@@ -394,29 +448,35 @@ mod tests {
         let ids = Tensor::new(&[[0u32], [1u32]], device)?;
         let routing = Tensor::new(&[[0.75f32], [0.25f32]], device)?;
         let (reply, result) = mpsc::channel();
-        sender.send(CpuJob {
-            xs: xs.clone(),
-            indices: ids.clone(),
-            routing: routing.clone(),
-            output_dtype: DType::F32,
-            reply,
-        }).map_err(candle_core::Error::wrap)?;
+        sender
+            .send(CpuJob {
+                xs: xs.clone(),
+                indices: ids.clone(),
+                routing: routing.clone(),
+                output_dtype: DType::F32,
+                reply,
+            })
+            .map_err(candle_core::Error::wrap)?;
         let actual = result.recv().map_err(candle_core::Error::wrap)??;
         let reference = RoutedExperts {
             gate: weights.fused_gate_proj.as_ref(),
             up: weights.fused_up_proj.as_ref(),
             down: weights.fused_down_proj.as_ref(),
             num_experts: 2,
-        }.gather(RoutedInput {
-            xs: &xs,
-            indices: &ids,
-            routing: &routing,
-            output_dtype: DType::F32,
-            lora: None,
-        }, RoutedActivation {
-            fused: crate::ops::glu_activation_type(config.act),
-            fallback: &config.act,
-        })?;
+        }
+        .gather(
+            RoutedInput {
+                xs: &xs,
+                indices: &ids,
+                routing: &routing,
+                output_dtype: DType::F32,
+                lora: None,
+            },
+            RoutedActivation {
+                fused: crate::ops::glu_activation_type(config.act),
+                fallback: &config.act,
+            },
+        )?;
         assert_eq!(actual.to_vec2::<f32>()?, reference.to_vec2::<f32>()?);
         Ok(())
     }
@@ -477,30 +537,50 @@ mod tests {
             up: weights.fused_up_proj.as_ref(),
             down: weights.fused_down_proj.as_ref(),
             num_experts: 2,
-        }.forward(RoutedInput {
-            xs: &xs_cpu,
-            indices: &ids_cpu,
-            routing: &routing_cpu,
-            output_dtype: DType::F32,
-            lora: None,
-        }, RoutedActivation {
-            fused: crate::ops::glu_activation_type(config.act),
-            fallback: &config.act,
-        })?;
+        }
+        .forward(
+            RoutedInput {
+                xs: &xs_cpu,
+                indices: &ids_cpu,
+                routing: &routing_cpu,
+                output_dtype: DType::F32,
+                lora: None,
+            },
+            RoutedActivation {
+                fused: crate::ops::glu_activation_type(config.act),
+                fallback: &config.act,
+            },
+        )?;
 
         resident.forward(&forward)?;
         for _ in 0..200 {
-            if resident.cache.lock().map_err(|_| candle_core::Error::msg("cache poisoned"))?
-                .stats.promotions > 0 {
+            if resident
+                .cache
+                .lock()
+                .map_err(|_| candle_core::Error::msg("cache poisoned"))?
+                .stats
+                .promotions
+                > 0
+            {
                 break;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
         let actual = resident.forward(&forward)?.to_device(&cpu)?;
         let max_error = (actual - expected)?.abs()?.max_all()?.to_scalar::<f32>()?;
-        assert!(max_error < 0.05, "hybrid Q4K numerical deviation: {max_error}");
-        let stats = resident.cache.lock().map_err(|_| candle_core::Error::msg("cache poisoned"))?.stats;
-        assert!(stats.promotions > 0 && stats.hits > 0 && stats.misses > 0, "{stats:?}");
+        assert!(
+            max_error < 0.05,
+            "hybrid Q4K numerical deviation: {max_error}"
+        );
+        let stats = resident
+            .cache
+            .lock()
+            .map_err(|_| candle_core::Error::msg("cache poisoned"))?
+            .stats;
+        assert!(
+            stats.promotions > 0 && stats.hits > 0 && stats.misses > 0,
+            "{stats:?}"
+        );
         Ok(())
     }
 }
