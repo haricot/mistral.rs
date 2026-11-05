@@ -176,7 +176,10 @@ fn cpu_q4k_expert_slice_preserves_packed_projection() -> Result<()> {
             .abs()?
             .max_all()?
             .to_scalar::<f32>()?;
-        assert!(weight_error <= 1e-6, "expert {id} Q4K weight deviation: {weight_error}");
+        assert!(
+            weight_error <= 1e-6,
+            "expert {id} Q4K weight deviation: {weight_error}"
+        );
         let expected = layer
             .gather_forward(&input.unsqueeze(1)?, &Tensor::new(&[[id as u32]], device)?)?
             .squeeze(1)?;
