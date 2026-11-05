@@ -643,7 +643,7 @@ impl QuantMethod for GgufMatMul {
         let projection = GgufMatMul::from_raw_uqff(
             ggml_dtype_to_uqff_code(dtype),
             slab,
-            vec![*out_dim, *in_dim],
+            vec![1, *out_dim, *in_dim],
             bias,
             device,
         )?;

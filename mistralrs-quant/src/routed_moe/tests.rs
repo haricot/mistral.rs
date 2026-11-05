@@ -170,10 +170,19 @@ fn cpu_q4k_expert_slice_preserves_packed_projection() -> Result<()> {
         let sliced = layer
             .expert_on_device(id, device)?
             .expect("GGUF Q4K stack supports per-expert extraction");
+        let reference_weight = layer.get_qtensor().unwrap().dequantize(device)?.get(id)?;
+        let sliced_weight = sliced.get_qtensor().unwrap().dequantize(device)?.get(0)?;
+        let weight_error = (reference_weight - sliced_weight)?
+            .abs()?
+            .max_all()?
+            .to_scalar::<f32>()?;
+        assert!(weight_error <= 1e-6, "expert {id} Q4K weight deviation: {weight_error}");
         let expected = layer
             .gather_forward(&input.unsqueeze(1)?, &Tensor::new(&[[id as u32]], device)?)?
             .squeeze(1)?;
-        let actual = sliced.forward(&input)?;
+        let actual = sliced
+            .gather_forward(&input.unsqueeze(1)?, &Tensor::new(&[[0u32]], device)?)?
+            .squeeze(1)?;
         let error = (actual - expected)?.abs()?.max_all()?.to_scalar::<f32>()?;
         assert!(error < 1e-4, "expert {id} packed Q4K deviation: {error}");
     }

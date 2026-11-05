@@ -5,9 +5,10 @@ use std::{
         mpsc::{self, SyncSender},
         Arc, Mutex, RwLock,
     },
+    time::Duration,
 };
 
-use candle_core::{quantized::GgmlDType, DType, Device, Module, Result, Tensor};
+use candle_core::{quantized::GgmlDType, DType, Device, Result, Tensor};
 use mistralrs_quant::{
     routed_moe::{RoutedActivation, RoutedExperts, RoutedInput},
     QuantMethod,
@@ -19,6 +20,7 @@ use super::{
 };
 
 const SLOTS_FLAG: &str = "MISTRALRS_CPU_MOE_RESIDENT_SLOTS";
+const CPU_WORKER_WAIT: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 struct ResidentExpert {
@@ -355,14 +357,25 @@ impl CpuMoeResident {
             let token_ids =
                 Tensor::from_vec(group.tokens.clone(), group.tokens.len(), &self.device)?;
             let xs = forward.xs_flat.index_select(&token_ids, 0)?;
-            let gate = expert.gate.forward(&xs)?;
-            let up = expert.up.forward(&xs)?;
+            let local_ids = Tensor::zeros((group.tokens.len(), 1), DType::U32, &self.device)?;
+            let gate = expert
+                .gate
+                .gather_forward(&xs.unsqueeze(1)?, &local_ids)?
+                .squeeze(1)?;
+            let up = expert
+                .up
+                .gather_forward(&xs.unsqueeze(1)?, &local_ids)?
+                .squeeze(1)?;
             let activated = if let Some(fused) = crate::ops::glu_activation_type(self.act) {
                 mistralrs_quant::fused_glu(&gate, &up, fused)?
             } else {
                 (&up * gate.apply(&self.act)?)?
             };
-            let ys = expert.down.forward(&activated)?.to_dtype(DType::F32)?;
+            let ys = expert
+                .down
+                .gather_forward(&activated.unsqueeze(1)?, &local_ids)?
+                .squeeze(1)?
+                .to_dtype(DType::F32)?;
             let route_weights =
                 Tensor::from_vec(group.weights.clone(), group.weights.len(), &self.device)?
                     .unsqueeze(1)?;
@@ -373,7 +386,9 @@ impl CpuMoeResident {
         drop(gpu_execution);
 
         if let Some(receiver) = cpu_reply {
-            let cpu_result = receiver.recv().map_err(candle_core::Error::wrap)??;
+            let cpu_result = receiver
+                .recv_timeout(CPU_WORKER_WAIT)
+                .map_err(candle_core::Error::wrap)??;
             let token_ids = Tensor::from_vec(
                 cold.iter().map(|(token, _, _)| *token).collect::<Vec<_>>(),
                 cold.len(),
@@ -457,7 +472,9 @@ mod tests {
                 reply,
             })
             .map_err(candle_core::Error::wrap)?;
-        let actual = result.recv().map_err(candle_core::Error::wrap)??;
+        let actual = result
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(candle_core::Error::wrap)??;
         let reference = RoutedExperts {
             gate: weights.fused_gate_proj.as_ref(),
             up: weights.fused_up_proj.as_ref(),

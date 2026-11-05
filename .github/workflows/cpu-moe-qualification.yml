@@ -16,12 +16,15 @@ on:
 jobs:
   combined-cpu-gate:
     runs-on: ubuntu-latest
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: Phase 0 - normalize Rust formatting
         run: |
           cargo fmt --all
