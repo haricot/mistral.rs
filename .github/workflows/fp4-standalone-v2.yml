@@ -1,0 +1,39 @@
+name: FP4 standalone v2 CPU baseline
+on:
+  push:
+    branches: [fp4_mistralrs_standalone_v2]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: fp4-standalone-v2-cpu
+  cancel-in-progress: false
+  queue: max
+jobs:
+  cpu:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    env:
+      RUSTFLAGS: '-C target-cpu=x86-64'
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify the master baseline and isolated source scope
+        run: |
+          git merge-base --is-ancestor 095991a7d680a6994e6f1554156ebef5d09db049 HEAD
+          test -z "$(git diff --name-only 095991a7d680a6994e6f1554156ebef5d09db049 HEAD -- . ':!.github/workflows/fp4-standalone-v2.yml' ':!fp4-standalone-v2/README.md')"
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          toolchain: '1.99.0'
+      - name: Check the independent FP4 crate
+        run: cargo check --locked -p mistralrs-quant --no-default-features
+      - name: Execute the existing NVFP4 unit and checkpoint contracts on CPU
+        run: |
+          cargo test --locked -p mistralrs-quant --no-default-features --lib nvfp4::tests
+          cargo test --locked -p mistralrs-quant --no-default-features --test nvfp4_checkpoint_tests
