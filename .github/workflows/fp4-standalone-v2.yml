@@ -37,6 +37,7 @@ jobs:
       - name: Compile the current CLI with the exact locked backend
         run: cargo check --locked -p mistralrs-cli --no-default-features --features code-execution
       - name: Run NVFP4 unit and Pascal adapter contracts on CPU
-        run: cargo test --locked -p mistralrs-quant --no-default-features --lib nvfp4::
+        run: |
+          cargo test --locked -p mistralrs-quant --no-default-features --lib nvfp4::
       - name: Run NVFP4 checkpoint and MXFP4 embedding fixtures on CPU
         run: cargo test --locked -p mistralrs-quant --no-default-features --test nvfp4_checkpoint_tests --test fp4_standalone_cpu
