@@ -1,0 +1,48 @@
+---
+title: mistral.rs
+description: Install mistral.rs, run a model, or build local inference into your app.
+template: splash
+hero:
+  title: Fast, flexible LLM inference.
+  actions:
+    - text: Get started
+      link: /quickstart/
+    - text: View on GitHub
+      link: https://github.com/EricLBuehler/mistral.rs
+      variant: secondary
+---
+
+import { CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+<CardGrid>
+  <LinkCard
+    title="Run any model"
+    href="/guides/models/choose-a-model/"
+    description="Text, vision, speech, image generation, and embeddings."
+  />
+  <LinkCard
+    title="Serve an API"
+    href="/guides/serve/openai-compatible-apis/"
+    description="OpenAI- and Anthropic-compatible endpoints for your apps."
+  />
+  <LinkCard
+    title="Build agents"
+    href="/guides/agents/"
+    description="Web search, Python, and shell, built in."
+  />
+  <LinkCard
+    title="Tune performance"
+    href="/guides/perf/throughput-tuning/"
+    description="Quantize, size the cache, and speed up generation."
+  />
+  <LinkCard
+    title="Use Python"
+    href="/guides/python/getting-started/"
+    description="Run models in-process from Python."
+  />
+  <LinkCard
+    title="Use Rust"
+    href="/guides/rust/getting-started/"
+    description="Embed inference in a Rust application."
+  />
+</CardGrid>

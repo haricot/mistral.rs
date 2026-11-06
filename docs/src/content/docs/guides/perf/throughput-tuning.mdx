@@ -1,0 +1,150 @@
+---
+title: Throughput tuning
+description: Concurrency, scheduling, and prefix caching settings for server workloads.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+The defaults suit a general chat server: up to 32 requests run at once, and new prompts are read in 512-token chunks so they don't stall requests that are already streaming. Change the settings on this page when you need more total throughput, faster first tokens, or smoother streaming.
+
+Every request has two phases. Prefill reads the whole prompt, and decode generates the output one token at a time. Time to first token (TTFT) is mostly prefill. Inter-token latency (ITL), the gap between streamed tokens, is decode. Most settings here trade one against the other.
+
+Change one setting at a time and watch TTFT and ITL in the [server metrics](/guides/deploy/observability/) while you send traffic. `mistralrs bench -m <model>` measures one request at a time, so it won't show the effect of concurrency settings.
+
+## Concurrency
+
+`--max-seqs` sets how many requests run at the same time. Requests over the limit wait in a queue until a running one finishes.
+
+- Raise it (64, 128) to serve more users at once and get more total tokens per second. Each stream gets somewhat slower, and the shared KV cache is split more ways.
+- Lower it (4, 8, 16) to give each request faster tokens and more cache room, at the cost of queueing under load.
+
+The default is 32 for `mistralrs serve`, Python, and Rust, and 1 for `mistralrs run`.
+
+<Tabs>
+<TabItem label="CLI">
+
+```bash
+mistralrs serve -m Qwen/Qwen3-4B --max-seqs 64
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+from mistralrs import Runner, Which
+
+runner = Runner(which=Which.Plain(model_id="Qwen/Qwen3-4B"), max_seqs=64)
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let model = mistralrs::ModelBuilder::new("Qwen/Qwen3-4B")
+    .with_max_num_seqs(64)
+    .build()
+    .await?;
+```
+
+</TabItem>
+</Tabs>
+
+If the `mistralrs_paged_preemptions_total` metric keeps climbing, the cache is too small for that many requests. Lower `--max-seqs` or give the cache more memory; see [memory budget](/guides/perf/paged-attention/#memory-budget).
+
+Without paged attention (on CPU, or with `--paged-attn off`), mistral.rs only batches requests whose sequences are the same length, so raising `--max-seqs` helps much less.
+
+## Prefill and decode scheduling
+
+When new prompts arrive while other requests are streaming, mistral.rs splits each step between reading the new prompts and generating tokens for the running requests. Three settings control the split. They apply when paged attention is on, which is the default on CUDA and Metal. Set them on the CLI or under `[runtime]` in a [TOML config](/reference/cli-toml-config/); Python and Rust use the defaults.
+
+| Setting | Default | Raise it | Lower it |
+|---|---:|---|---|
+| `--max-num-batched-tokens` | 4096 | Long prompts and bursts of new requests are read in fewer steps. More working memory is set aside, so the KV cache gets less. | Less working memory, more for the KV cache. Long prompts take more steps to read. |
+| `--max-prefill-chunk-tokens` | 512 | New prompts get through prefill faster (better TTFT), but running streams pause longer while each chunk is read (worse ITL). | Running streams stay smoother; long new prompts take longer to start. |
+| `--max-decode-steps-before-prefill` | 8 | Running streams are interrupted less often (better ITL), but a waiting prompt can be held back for more steps (worse TTFT). | New requests start sooner under steady traffic; running streams pause more often. |
+
+For example:
+
+```bash
+# Interactive chat: keep streams smooth
+mistralrs serve -m Qwen/Qwen3-4B \
+  --max-prefill-chunk-tokens 256 --max-decode-steps-before-prefill 16
+
+# Batch jobs with long prompts: favor total throughput
+mistralrs serve -m Qwen/Qwen3-4B \
+  --max-seqs 128 --max-num-batched-tokens 8192 --max-prefill-chunk-tokens 2048
+```
+
+mistral.rs sizes its working memory from `--max-seqs` and `--max-num-batched-tokens` before it sizes the KV cache, so raising either one leaves less room for the cache.
+
+## Prefix caching
+
+Many requests start with the same text: a shared system prompt, or the earlier turns of a chat. Prefix caching keeps the work done for that text and reuses it, so later requests skip most of their prefill. It's on by default, and you'll see it as a lower TTFT on the second and later requests that share a prefix.
+
+`--prefix-cache-n` sets how many prefixes are kept:
+
+| Value | What happens |
+|---|---|
+| Not set (default) | Up to 16 prefixes are kept. For hybrid models that mix attention with recurrent layers (such as Qwen3.5 or Granite 4.0), mistral.rs may keep fewer so they fit in memory. |
+| `0` | Prefix caching is off. |
+| A number, like `4` or `64` | Up to that many are kept, and mistral.rs won't lower it. |
+
+The count matters in two cases: without paged attention, where it's the number of finished requests whose cache is kept, and for hybrid models, where it's the number of saved recurrent states. In those cases, raise it when many conversations are active at once so each one still finds its earlier turns cached. With paged attention on a standard transformer model, the count doesn't limit anything: any prefix whose blocks are still in the KV cache is reused, and old ones are dropped when the cache needs room. There, only `0` changes behavior.
+
+<Tabs>
+<TabItem label="CLI">
+
+```bash
+mistralrs serve -m Qwen/Qwen3-4B --prefix-cache-n 64
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+runner = Runner(which=Which.Plain(model_id="Qwen/Qwen3-4B"), prefix_cache_n=64)
+```
+
+Pass `prefix_cache_n=0` to turn it off.
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+use mistralrs::PrefixCacheCapacity;
+
+let model = mistralrs::ModelBuilder::new("Qwen/Qwen3-4B")
+    .with_prefix_cache_n(PrefixCacheCapacity::Fixed(64))
+    .build()
+    .await?;
+```
+
+Use `PrefixCacheCapacity::DISABLED` to turn it off.
+
+</TabItem>
+</Tabs>
+
+`--no-kv-cache` turns off prefix caching along with the KV cache itself.
+
+On Metal, Qwen3.5 hybrid models don't yet reuse the cache for repeated identical prompts, so those requests don't get faster and the prefix-cache hit count stays at zero.
+
+## CPU threads and affinity
+
+On CPU, mistral.rs picks the number of worker threads for you. On Apple Silicon, and on Linux machines whose kernel reports a mix of fast and slow cores, it uses one thread per fast core. Otherwise it uses one thread per physical core.
+
+To change that, set one of these environment variables:
+
+| Variable | Effect |
+|---|---|
+| `CANDLE_NUM_THREADS=10` or `RAYON_NUM_THREADS=10` | Use 10 worker threads. |
+| `CANDLE_CPU_MASK=15-19` | Linux only. Pin the workers to CPUs 15 to 19. It takes cpulist syntax, such as `5-9,15-19`. If you don't also set a thread count, you get one thread per listed CPU. |
+| `CANDLE_CPU_AFFINITY=1` | Linux only. Pin the workers to the fast cores automatically. |
+
+```bash
+CANDLE_NUM_THREADS=10 mistralrs bench --cpu -m meta-llama/Llama-3.2-3B-Instruct
+CANDLE_CPU_MASK=5-9,15-19 mistralrs serve --cpu -m meta-llama/Llama-3.2-3B-Instruct
+```
+
+Pinning is off by default because it speeds up some CPU and model pairs and slows down others. Compare tokens per second from `mistralrs bench --cpu` with and without it. All CPU variables are in the [environment variables reference](/reference/environment-variables/#cpu-runtime).
+
+Quantization is the other big throughput lever, traded against quality; see [quantize a model](/guides/quantization/quantize-a-model/).

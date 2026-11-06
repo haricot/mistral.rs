@@ -1,0 +1,77 @@
+---
+title: Cargo features
+description: Feature flags for the mistralrs workspace crates.
+---
+
+mistral.rs uses Cargo features to gate platform-specific and optional functionality.
+
+## Accelerator features
+
+| Feature | Crates | Purpose |
+|---|---|---|
+| `cuda` | `mistralrs-cli`, `mistralrs`, `mistralrs-core`, `mistralrs-server-core` | NVIDIA CUDA acceleration, including [paged attention](/guides/perf/paged-attention/). |
+| `cudnn` | as above | cuDNN-accelerated kernels. |
+| `flash-attn` | as above | Flash attention v2 (Ampere+, requires `cuda`). |
+| `flash-attn-v3` | `mistralrs-cli`, `mistralrs-core`, `mistralrs-server-core` | Flash attention v3 (Hopper, requires `cuda`). Not exposed by the top-level `mistralrs` crate. |
+| `cutile` | `mistralrs-cli`, `mistralrs`, `mistralrs-core`, `mistralrs-pyo3` | cuTile kernels for quantized linear layers, MoE, and routed LoRA. Enables `cuda`. See the [requirements](#cutile-requirements) below. |
+| `metal` | as above | Apple Silicon GPU support via Metal. |
+| `accelerate` | as above | Apple Accelerate framework for CPU math. |
+| `mkl` | as above | Intel MKL for CPU math. |
+| `nccl` | `mistralrs-cli`, `mistralrs`, `mistralrs-core`, `mistralrs-server-core` | NCCL single-machine CUDA multi-GPU support. Requires the NCCL runtime library at build and runtime. |
+
+Typical combinations:
+
+- NVIDIA Hopper: `cuda flash-attn flash-attn-v3 cudnn` (add `cutile` with CUDA >= 13.3)
+- NVIDIA Ampere or Ada: `cuda flash-attn cudnn` (add `cutile` with CUDA >= 13.2)
+- NVIDIA Blackwell with CUDA >= 13.2 and a compatible `tileiras`: `cuda flash-attn cudnn cutile`
+- NVIDIA older: `cuda cudnn`
+- Apple Silicon: `metal`
+- Intel CPU with MKL: `mkl`
+
+For Linux CUDA multi-GPU, add `nccl` when NCCL is installed. The Linux installer and CUDA wheel builder add it automatically when they detect `libnccl`.
+
+### cuTile requirements
+
+- Ampere, Ada, or Blackwell: CUDA 13.2 or newer.
+- Hopper: CUDA 13.3 or newer.
+- A compatible `tileiras` install. See [cuTile setup](/developer/moe-backends/).
+- [NVFP4](/reference/quantization-types/#nvfp4) on cuTile needs Blackwell and CUDA 13.3 or newer.
+
+## Functional features
+
+| Feature | Crates | Purpose |
+|---|---|---|
+| `code-execution` | `mistralrs-cli`, `mistralrs`, `mistralrs-core`, `mistralrs-server-core` | Python code execution tool. In `mistralrs-cli` defaults. |
+| `ring` | as above | Multi-machine ring distributed inference. |
+| `swagger-ui` | `mistralrs-server-core` | Mounts Swagger UI on the HTTP server. On by default in `mistralrs-server-core`. |
+
+## Enabling features
+
+From `cargo install`:
+
+```bash
+cargo install mistralrs-cli --features "cuda nccl flash-attn cudnn"
+```
+
+From a source checkout:
+
+```bash
+cargo install --path mistralrs-cli --features "cuda nccl flash-attn cudnn"
+```
+
+In a consumer crate depending on `mistralrs`:
+
+```toml
+[dependencies]
+mistralrs = { version = "0.9.5", features = ["cuda", "nccl", "flash-attn", "cudnn"] }
+```
+
+## Default features
+
+`mistralrs-cli`'s default feature is `code-execution`. `mistralrs-server-core`'s default feature is `swagger-ui`. To exclude defaults, use `--no-default-features`.
+
+No crate enables an accelerator feature by default. Opt in to the accelerator matching your hardware.
+
+## Feature verification
+
+`mistralrs doctor` prints a `Build features:` line with the accelerator features compiled in, from `cuda`, `metal`, `cudnn`, `flash-attn`, `flash-attn-v3`, `cutile`, `accelerate`, and `mkl`.

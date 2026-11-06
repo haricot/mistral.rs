@@ -1,0 +1,227 @@
+---
+title: Skills
+description: Upload and reference Skills from OpenAI-compatible Responses, Anthropic-compatible Messages, or local SDK mounts.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+A Skill is a folder that teaches the model one task, such as building a report or following your team's release checklist. It holds a `SKILL.md` file with step-by-step instructions, plus any scripts, templates, or reference files those steps use. When a request references a Skill, mistral.rs copies the folder into the session's working directory and tells the model to read `SKILL.md` first. The model then follows the instructions with the [shell tool](/guides/agents/enable-shell/), running the bundled scripts by path.
+
+mistral.rs supports Skills through the same APIs as OpenAI and Anthropic. You upload a Skill to `/v1/skills` once, then reference it from a Responses or Messages request. For how to write a good Skill, see OpenAI's [Tools and Skills guide](https://developers.openai.com/api/docs/guides/tools-skills), Anthropic's [Agent Skills overview](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview), and Anthropic's [Skills API guide](https://platform.claude.com/docs/en/build-with-claude/skills-guide).
+
+Skills need the shell tool. Start the server with `--agent` to also give the model web search and Python, which many Skills use, or with `--enable-shell` for shell alone:
+
+```bash
+mistralrs serve --agent -m <model>
+```
+
+Shell settings, sandboxing, and approvals apply to Skills too; see [shell execution](/guides/agents/enable-shell/) and [permissions and approvals](/guides/agents/permissions-and-approvals/). To give a Skill your own files to work on, attach them as [input files](/guides/agents/file-inputs/).
+
+## Packaging a Skill
+
+A Skill upload is either one zip archive or the files of one top-level folder sent as multipart fields. Either way, the folder must contain a `SKILL.md` that starts with YAML frontmatter:
+
+```markdown
+---
+name: quarterly-report
+description: Build the quarterly sales report as HTML from a CSV export.
+---
+
+1. Run `python scripts/build_report.py <csv> --output report.html`.
+2. ...
+```
+
+`name` and `description` are required. The model sees both in every request that references the Skill, so write the description to say when the Skill applies. An upload can be up to 50 MiB.
+
+## What's supported
+
+| You can | How |
+|---|---|
+| Upload a Skill or a new version | `POST /v1/skills`, `POST /v1/skills/{skill_id}/versions` |
+| List Skills and versions | `GET /v1/skills`, `GET /v1/skills/{skill_id}/versions` |
+| Use it from Responses | A `skill_reference` in a `shell` tool's `container_auto` environment |
+| Use it from Anthropic Messages | A `container.skills` entry with `type: "custom"` |
+| Pick a version | `"version": "latest"`, a version number, or leave `version` out for the latest |
+| See what ran | Responses `shell_call` and `shell_call_output` output items |
+| Bound the run and collect outputs | The mistral.rs fields `max_tool_rounds` and `files` |
+| Use a local folder without uploading | `ShellSkillMount` in the Python SDK, `with_shell_skill` in the Rust SDK |
+
+Not supported:
+
+- Anthropic's prebuilt Skills such as `pptx`, `xlsx`, `docx`, and `pdf`. Upload your own Skill instead.
+- Zipped Skills sent inline in the request. Upload them to `/v1/skills` first.
+- Local folder paths or container references in server requests. On the server, only uploaded Skills can be referenced.
+- Installing Skills from a registry such as `agentskills.io`, or scanning a `.agents/skills` folder.
+
+## Examples
+
+The OpenAI example uploads with the OpenAI package's generic `client.post(...)` helper, which works whether or not your package version has a typed `skills` resource. The Python and Rust SDK examples mount a local folder in-process instead of uploading.
+
+<Tabs>
+<TabItem label="OpenAI server">
+
+```python
+from pathlib import Path
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:1234/v1", api_key="not-used")
+
+
+def upload_skill(zip_path: Path) -> dict:
+    with zip_path.open("rb") as handle:
+        return client.post(
+            "/skills",
+            cast_to=dict,
+            files={"file": (zip_path.name, handle, "application/zip")},
+        )
+
+
+skill = upload_skill(Path("my-skill.zip"))
+
+response = client.responses.create(
+    model="default",
+    input="Use the uploaded skill. Read its instructions, then complete the task.",
+    tools=[
+        {
+            "type": "shell",
+            "environment": {
+                "type": "container_auto",
+                "skills": [
+                    {
+                        "type": "skill_reference",
+                        "skill_id": skill["id"],
+                        "version": "latest",
+                    }
+                ],
+            },
+        }
+    ],
+    tool_choice="required",
+    extra_body={
+        "max_tool_rounds": 6,
+        "files": [{"name": "report.html", "format": "html"}],
+    },
+)
+
+print(response.output_text)
+```
+
+[Full server example](/examples/server/skills/)
+
+To upload a new version of an existing Skill, post another zip to `/skills/{skill_id}/versions` the same way.
+
+</TabItem>
+<TabItem label="Anthropic server">
+
+```python
+import json
+import urllib.request
+
+base_url = "http://localhost:1234"
+skill_id = "skill_..."
+
+payload = {
+    "model": "default",
+    "max_tokens": 1024,
+    "agent_permission": "auto",
+    "max_tool_rounds": 6,
+    "container": {
+        "skills": [{"type": "custom", "skill_id": skill_id, "version": "latest"}],
+    },
+    "tools": [{"type": "code_execution_20250825", "name": "code_execution"}],
+    "messages": [
+        {"role": "user", "content": "Use the uploaded skill to complete the task."}
+    ],
+}
+
+request = urllib.request.Request(
+    f"{base_url}/v1/messages",
+    data=json.dumps(payload).encode("utf-8"),
+    headers={
+        "content-type": "application/json",
+        "x-api-key": "not-used",
+        "anthropic-version": "2023-06-01",
+        "anthropic-beta": "code-execution-2025-08-25,skills-2025-10-02",
+    },
+    method="POST",
+)
+with urllib.request.urlopen(request) as response:
+    print(json.loads(response.read().decode("utf-8")))
+```
+
+[Full server example](/examples/server/anthropic-skills/)
+
+To list uploaded Skills as Anthropic-shaped objects, call `GET /v1/skills?source=custom` with the headers `anthropic-version: 2023-06-01` and `anthropic-beta: skills-2025-10-02`.
+
+</TabItem>
+<TabItem label="Python SDK">
+
+```python
+from mistralrs import ChatCompletionRequest, Runner, ShellConfig, ShellSkillMount, Which
+
+runner = Runner(
+    which=Which.Plain(model_id="Qwen/Qwen3-4B"),
+    shell_config=ShellConfig(),
+)
+
+resp = runner.send_chat_completion_request(
+    ChatCompletionRequest(
+        model="default",
+        messages=[{"role": "user", "content": "Use my-skill to complete the task."}],
+        shell_skills=[
+            ShellSkillMount(
+                name="my-skill",
+                description="Local task-specific skill.",
+                source_path="skills/my-skill",
+            )
+        ],
+        max_tool_rounds=6,
+    )
+)
+print(resp.choices[0].message.content)
+```
+
+[Full example](/examples/python/shell-skills/)
+
+</TabItem>
+<TabItem label="Rust SDK">
+
+```rust
+use mistralrs::{ModelBuilder, RequestBuilder, ShellConfig, TextMessageRole, TextMessages};
+
+let model = ModelBuilder::new("Qwen/Qwen3-4B")
+    .with_shell_execution(ShellConfig::default())
+    .build()
+    .await?;
+
+let messages = TextMessages::new()
+    .add_message(TextMessageRole::User, "Use my-skill to complete the task.");
+let req = RequestBuilder::from(messages)
+    .with_shell_skill(
+        "my-skill",
+        "Local task-specific skill.",
+        "skills/my-skill",
+    )
+    .with_max_tool_rounds(6);
+
+let resp = model.send_chat_request(req).await?;
+println!("{}", resp.choices[0].message.content.as_ref().unwrap());
+```
+
+[Full example](/examples/rust/advanced/shell-skills/)
+
+</TabItem>
+</Tabs>
+
+## Storage and lifecycle
+
+Uploaded Skills are stored under `--skills-dir`, which defaults to `mistralrs-skills` in the system temp directory. Each upload gets a `skill_...` ID and a version number. The server loads everything in that directory at startup, so uploads survive a restart. The OS can clear its temp directory, so point `--skills-dir` at a permanent location to keep Skills long-term.
+
+Each request copies only the Skills it references into its session's working directory, under `skills/<name>/`. The working directory itself follows the shell settings: a new temp directory per session, or a subdirectory of `--shell-workdir`. Session state, tool records, and generated files follow the same lifecycle described in [persist sessions](/guides/agents/persist-sessions/).
+
+## See also
+
+- [OpenAI compatibility](/reference/openai-compatibility/): exact supported fields and known gaps.
+- [Shell execution](/guides/agents/enable-shell/): executor configuration and sandboxing.
+- [Build an agent](/guides/agents/build-an-agent/): combine search, code execution, shell, files, Skills, and sessions.
+- Examples: [server upload](/examples/server/skills/), [Python local mount](/examples/python/shell-skills/), [Rust local mount](/examples/rust/advanced/shell-skills/).

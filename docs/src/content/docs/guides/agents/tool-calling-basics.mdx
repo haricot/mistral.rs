@@ -1,0 +1,262 @@
+---
+title: Tool calling
+description: OpenAI tool calls, strict schemas, and the mistral.rs server-side tool loop.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+Tool calling lets the model ask your code to do something, such as look up the weather or query a database, and then use the result in its answer. You describe each tool with a name and a JSON Schema for its arguments. The model decides when to call one, and mistral.rs returns the call as structured JSON. You need a model and chat template that support tool calls.
+
+## Who runs the tool
+
+You pick one of two ways to run tools:
+
+- **Your app runs it.** This is the standard OpenAI flow. The response contains `tool_calls`, your app runs each one, sends the result back as a `tool` message, and asks the model again. Use it when the tool lives in your app.
+- **mistral.rs runs it.** mistral.rs runs the tool, feeds the result back to the model, and repeats until the model answers, all inside one request. This repeat is the tool loop, and each tool call in it is one round. The tool can be a built-in one (web search, Python, shell, [Skills](/guides/agents/skills/)), a tool from an [MCP (Model Context Protocol) server](/guides/agents/connect-mcp-server/), a callback you register in the Python or Rust SDK, or your own HTTP endpoint. See [agentic runtime](/guides/agents/agentic-runtime/) for what the response contains.
+
+## Client-side: defining tools
+
+<Tabs>
+<TabItem label="HTTP">
+
+Send tool definitions with the chat request:
+
+```json
+{
+  "model": "default",
+  "messages": [{"role": "user", "content": "What's the weather in Tokyo?"}],
+  "tools": [{
+    "type": "function",
+    "function": {
+      "name": "get_weather",
+      "description": "Get the current weather for a city.",
+      "strict": true,
+      "parameters": {
+        "type": "object",
+        "properties": {"city": {"type": "string"}},
+        "required": ["city"],
+        "additionalProperties": false
+      }
+    }
+  }]
+}
+```
+
+When the model calls the tool, the reply has `finish_reason: "tool_calls"` and a `tool_calls` array:
+
+```json
+{"role": "assistant", "tool_calls": [{"id": "call_abc123", "type": "function", "function": {"name": "get_weather", "arguments": "{\"city\": \"Tokyo\"}"}}]}
+```
+
+Run the function, then send the conversation back with the assistant message and a `tool` message whose `tool_call_id` matches, along with the same `tools`:
+
+```json
+{
+  "messages": [
+    {"role": "user", "content": "What's the weather in Tokyo?"},
+    {"role": "assistant", "tool_calls": [...]},
+    {"role": "tool", "tool_call_id": "call_abc123", "content": "{\"temperature\": 18}"}
+  ],
+  "tools": [...]
+}
+```
+
+[Full example](/examples/server/tool-calling/)
+
+</TabItem>
+<TabItem label="Python">
+
+Pass OpenAI-compatible tool schemas as JSON strings on `ChatCompletionRequest.tool_schemas`:
+
+```python
+import json
+from mistralrs import ChatCompletionRequest, Runner, ToolChoice, Which
+
+tool_schema = json.dumps({
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "description": "Get the current weather for a city.",
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"],
+        },
+    },
+})
+
+runner = Runner(which=Which.Plain(model_id="Qwen/Qwen3-4B"), in_situ_quant="4")
+response = runner.send_chat_completion_request(
+    ChatCompletionRequest(
+        model="default",
+        messages=[{"role": "user", "content": "What's the weather in Tokyo?"}],
+        tool_schemas=[tool_schema],
+        tool_choice=ToolChoice.Auto,
+    )
+)
+print(response.choices[0].message.tool_calls)
+```
+
+Run the tool yourself and send the result back as a `tool` message. To have mistral.rs run it instead, register a matching entry in `Runner(tool_callbacks=...)`.
+
+[Full example](/examples/python/tool-call/)
+
+</TabItem>
+<TabItem label="Rust">
+
+Set up a `Tool` with a `Function` definition and inspect `tool_calls` on the response:
+
+```rust
+use std::collections::HashMap;
+
+use anyhow::Result;
+use mistralrs::{
+    Function, IsqBits, ModelBuilder, RequestBuilder, TextMessageRole, Tool, ToolChoice, ToolType,
+};
+use serde_json::{json, Value};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let model = ModelBuilder::new("Qwen/Qwen3-4B")
+        .with_auto_isq(IsqBits::Four)
+        .build()
+        .await?;
+
+    let parameters: HashMap<String, Value> = serde_json::from_value(json!({
+        "type": "object",
+        "properties": {"city": {"type": "string"}},
+        "required": ["city"],
+        "additionalProperties": false
+    }))?;
+
+    let tools = vec![Tool {
+        tp: ToolType::Function,
+        function: Function {
+            name: "get_weather".to_string(),
+            description: Some("Get the current weather in a city.".to_string()),
+            parameters: Some(parameters),
+            strict: Some(true),
+        },
+    }];
+
+    let request = RequestBuilder::new()
+        .add_message(TextMessageRole::User, "What's the weather in Tokyo?")
+        .set_tools(tools)
+        .set_tool_choice(ToolChoice::Auto);
+
+    let response = model.send_chat_request(request).await?;
+    println!("{:?}", response.choices[0].message.tool_calls);
+    Ok(())
+}
+```
+
+To have mistral.rs run the tool instead, register the callback and its `Tool` definition together with `with_tool_callback_and_tool` on the model builder.
+
+[Full example](/examples/rust/advanced/tools/)
+
+</TabItem>
+</Tabs>
+
+## Forcing or suppressing tool use
+
+`tool_choice` controls whether the model calls a tool:
+
+| `tool_choice` | What the model does |
+|---|---|
+| `"auto"` (default) | Decides for itself whether to call a tool. |
+| `"none"` | Never calls a tool. |
+| `"required"` | Must call at least one tool. Rejected if the request has no tools. |
+| `{"type": "function", "function": {"name": "get_weather"}}` | Must call that tool. In the Responses API, use `{"type": "function", "name": "get_weather"}`. |
+| `{"type": "allowed_tools", "mode": "auto" or "required", "tools": [...]}` | Can only use the listed function tools. With `"required"`, must call one of them. |
+
+With `"required"` or a named tool, the model may still write some text or reasoning first, but the reply always ends with a valid call to the tool.
+
+Built-in tools such as web search, `code_interpreter`, and `shell` are turned on by listing them in `tools`. You can't name one in `tool_choice` or `allowed_tools`; the request is rejected. Use `"required"` if you need the model to call one.
+
+### Restrict the model to some tools
+
+`allowed_tools` narrows which functions the model may call without removing the other definitions from `tools`. That way you can keep one full tool list and allow different subsets per request:
+
+```json
+{
+  "type": "allowed_tools",
+  "mode": "required",
+  "tools": [{"type": "function", "name": "get_weather"}]
+}
+```
+
+Pass this object as `tool_choice` over HTTP. In Rust, use `ToolChoice::AllowedTools`. Complete examples: [HTTP](/examples/server/allowed-tools/), [JavaScript](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/allowed_tools.mjs), and [Rust](/examples/rust/advanced/allowed-tools/).
+
+## Strict tool calling
+
+With `function.strict: true`, mistral.rs forces the generated arguments to match the tool's `parameters` schema as it generates them, so you always get valid JSON with the right fields. Without it, arguments are only parsed after generation and can come back malformed or with extra fields. The tighter the schema, the more it constrains: use `required`, `enum`, nested object and array schemas, and `additionalProperties: false`.
+
+Strict mode only shapes the arguments of a call. It doesn't make the model call a tool (use `tool_choice`), and it doesn't shape the final answer (use `response_format`). A strict tool with no `parameters` accepts any JSON object.
+
+Built-in tools are already strict: web search, Python code execution, the file tools, and any MCP tool whose server provides an input schema.
+
+## Server-side: enabling built-in tools
+
+Start the server with the built-in tools you want:
+
+```bash
+# Web search and Python
+mistralrs serve --enable-search --enable-code-execution -m <model>
+
+# Search, Python, and shell together
+mistralrs serve --agent -m <model>
+```
+
+Each tool has its own page: [web search](/guides/agents/web-search/), [code execution](/guides/agents/enable-code-execution/), and [shell](/guides/agents/enable-shell/). [Build an agent](/guides/agents/build-an-agent/) puts them together.
+
+For your own tools, the simplest option is to run them as an MCP server and connect mistral.rs to it; see [connect to an MCP server](/guides/agents/connect-mcp-server/). In the SDKs you can also register a function directly: Python uses `Runner(tool_callbacks=...)` ([full example](/examples/python/custom-tool-call/)) and Rust uses `with_tool_callback(...)` or `with_tool_callback_and_tool(...)` ([full example](/examples/rust/advanced/tool-callback/)).
+
+## Configuring the tool loop
+
+### Maximum tool rounds
+
+`max_tool_rounds` caps how many tool calls mistral.rs runs in one request. Without a cap, it stops after 256. Once the cap is reached, mistral.rs stops running tools; if the model then asks for another one, you get that reply instead of a final answer. Pick a cap that fits the task: a few rounds for a single lookup, more for a multi-step task.
+
+Set a server-wide default, and override it on any request:
+
+| Where | Setting |
+|---|---|
+| CLI (server default) | `--max-tool-rounds 10` |
+| HTTP request | `"max_tool_rounds": 10` |
+| Python request | `ChatCompletionRequest(..., max_tool_rounds=10)` |
+| Rust request | `RequestBuilder::new().with_max_tool_rounds(10)` |
+
+Setting `max_tool_rounds` on a request also turns the tool loop on for it. MCP tools count toward the same cap.
+
+### Dispatch URL
+
+`--tool-dispatch-url` sends tool calls to your own HTTP endpoint. Any call that no built-in tool, MCP server, or callback handles is POSTed there, and the reply goes back to the model:
+
+```bash
+mistralrs serve --tool-dispatch-url http://localhost:7070/tools -m <model>
+```
+
+The request body:
+
+```json
+{"name": "search", "arguments": {"query": "mistralrs"}}
+```
+
+Reply with the tool result as a plain string, or as `{"content": "..."}`. If the call fails, the model gets an error result instead. The URL is set when the server starts; a request can't set or change it. [Full example](/examples/server/tool-dispatch/)
+
+### Per-request versus server-level
+
+| Set on the server at startup | Set on each request |
+|---|---|
+| Which built-in tools exist: `--enable-search`, `--enable-code-execution`, `--enable-shell`, `--agent` | Which tools the model sees: `tools`, `web_search_options`, `enable_shell` |
+| MCP servers: `--mcp-config` | How the model uses them: `tool_choice` |
+| Dispatch endpoint: `--tool-dispatch-url` | Round cap: `max_tool_rounds`, overriding `--max-tool-rounds` |
+| Tool settings: `--code-exec-*`, `--shell-*`, `--search-embedding-model` | Which session to continue: `session_id` |
+| Default permission: `--agent-permission` | A stricter permission: `agent_permission`. A request can tighten the server setting but not loosen it. |
+
+All flags are in the [serve reference](/reference/cli/serve/). Permissions are covered in [permissions and approvals](/guides/agents/permissions-and-approvals/).
+
+## Response extensions
+
+When mistral.rs runs tools, the response adds an `agentic_tool_calls` array with one entry per round. When streaming, `agentic_tool_call_progress` events arrive before and after each tool runs. [Agentic runtime](/guides/agents/agentic-runtime/#stream-a-run-over-http) shows how to use them, and the [HTTP API reference](/reference/http-api/) has the full format.

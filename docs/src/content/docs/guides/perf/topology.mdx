@@ -1,0 +1,95 @@
+---
+title: Configure model topology
+description: Choose the device and quantization format for each layer with a YAML file.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+A topology file sets, layer by layer, which device a model's weights load on and which quantization format they use. Use one to keep sensitive layers at higher precision, to split a model across devices by hand, or to move some layers to the CPU.
+
+Without a topology, mistral.rs spreads layers across your GPUs automatically and `--isq` applies one format to the whole model. That's the right setup for most people.
+
+## Write a topology file
+
+Each key selects some layers, and its value sets `device`, `isq`, or both. This file splits a 40-layer model across two GPUs and the CPU:
+
+```yaml
+0-16:
+  device: cuda[0]
+  isq: q4k
+16-32:
+  device: cuda[1]
+  isq: q4k
+32-40:
+  device: cpu
+  isq: q8_0
+```
+
+A range includes its start and excludes its end, so `0-16` means layers 0 through 15. A bare number like `12:` selects one layer. The numbers are decoder layer indexes, the `N` in weight names like `model.layers.N.self_attn.q_proj`.
+
+| Key | Values |
+|---|---|
+| `device` | `cpu`, `cuda[N]`, or `metal[N]`, where `N` is the device index starting at 0 |
+| `isq` | A format name that `--isq` accepts, such as `q4k`, `q8_0`, `afq4`, or `fp8`. Use names, not bit widths: a bare `4` here always means `q4k`, even on Metal. |
+
+What happens to everything the file doesn't set:
+
+- **Device:** a topology replaces automatic placement. Layers without a `device` load on the main device, normally the first GPU. If the model needs more than one GPU, give every layer a device.
+- **Format:** layers without an `isq` use the `--isq` format if you passed one. Otherwise they stay unquantized.
+
+Putting any numbered layer on the CPU turns off [paged attention](/guides/perf/paged-attention/) for that model.
+
+## Target specific weights
+
+Wrap a key in slashes to make it a regular expression. It matches full weight names, so you can target individual weights instead of whole layers. Regexes are also the only way to reach weights outside the numbered layers, such as the embeddings, the LM head, and norms:
+
+```yaml
+/model\.layers\.\d+\.self_attn\..*/:
+  isq: q8_0
+/lm_head\..*/:
+  device: cpu
+```
+
+A regex with only `device` moves the matching weights even when it sets no `isq`. When entries overlap, a regex beats a range, and among regexes the last one in the file wins.
+
+## Load a topology file
+
+<Tabs>
+<TabItem label="CLI">
+
+```bash
+mistralrs serve -m <model> --isq q4k --topology topology.yaml
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+from mistralrs import Runner, Which
+
+runner = Runner(
+    which=Which.Plain(model_id="<model>", topology="topology.yaml"),
+    in_situ_quant="q4k",
+)
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let model = mistralrs::ModelBuilder::new("<model>")
+    .with_isq(mistralrs::IsqType::Q4K)
+    .with_topology_from_path("topology.yaml")?
+    .build()
+    .await?;
+```
+
+</TabItem>
+</Tabs>
+
+## Topology and UQFF
+
+- **Making a UQFF:** pass `--topology` to `mistralrs quantize`. The `isq` pins are kept in every variant it writes, and `--isq` sets the format for the rest. See [make your own UQFF](/guides/quantization/uqff/#make-your-own-uqff).
+- **Loading a UQFF:** the formats are fixed in the file, so `isq` entries are ignored and only `device` applies. This includes UQFFs that `--quant` loads for you.
+
+For choosing formats in the first place, see [quantize a model](/guides/quantization/quantize-a-model/).

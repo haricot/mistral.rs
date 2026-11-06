@@ -1,0 +1,156 @@
+---
+title: Enable code execution
+description: Let the model run Python, keep state across calls, and return the files it writes.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+Code execution gives the model a Python interpreter. The model writes code, mistral.rs runs it, and the model reads the output before it answers. Use it for math, data analysis, charts, and file conversion.
+
+Start the server with `--enable-code-execution`, or with `--agent` to also turn on web search and shell:
+
+```bash
+mistralrs serve --enable-code-execution -m <model>
+```
+
+Starting the server this way makes the tool available, but each request decides whether to use it. Add the OpenAI-style `code_interpreter` tool to a request to let the model run code; requests without it stay plain chat. The web UI adds the tool when its Code Execution toggle is on.
+
+```json
+{
+  "model": "default",
+  "messages": [
+    {"role": "user", "content": "Use Python to calculate and plot the first 20 primes."}
+  ],
+  "tools": [{"type": "code_interpreter", "container": {"type": "auto"}}],
+  "max_tool_rounds": 4
+}
+```
+
+Always use `"container": {"type": "auto"}`. A request with a container ID, `file_ids`, or `memory_limit` is rejected. To give Python your own files, attach them as [input files](/guides/agents/file-inputs/) and they'll appear in its working directory.
+
+In the Python and Rust SDKs, enable code execution when you build the model and again on each request, as the [examples below](#declaring-output-files) show.
+
+## Configuration
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--code-exec-python <path>` | `python3` (`python` on Windows) | The interpreter to run. Point it at a virtualenv's Python so the model can import your packages. |
+| `--code-exec-timeout <secs>` | 60 | How long one call may run before it's interrupted. |
+| `--code-exec-workdir <path>` | a new temp directory per session | Where Python runs and where output files are collected. See [working directory](#working-directory). |
+| `--agent-permission <mode>` | `auto` | `auto` runs code right away, `ask` waits for your app or user to approve, `deny` refuses. See [permissions and approvals](/guides/agents/permissions-and-approvals/). |
+| `--sandbox <mode>` | `auto` | `auto` sandboxes Python on Linux and macOS, `on` also fails at startup if part of the sandbox is unavailable, `off` gives Python full access to the host. See [isolation](#isolation). |
+
+The sandbox caps CPU time at 600 seconds per session by default. If you set a longer `--code-exec-timeout`, the cap is raised to match.
+
+## Declaring output files
+
+Python returns every file it creates or changes in its working directory, so a chart saved as `plot.png` comes back without extra setup. Hidden files and dependency or cache folders (`node_modules`, `__pycache__`, `venv`, and similar) are skipped.
+
+To make sure you get a particular file, list it in the request's `files`. The model is told to produce it, and if it doesn't, you get an error entry for that name instead of nothing.
+
+<Tabs>
+<TabItem label="HTTP">
+
+```json
+{
+  "model": "default",
+  "messages": [
+    {"role": "user", "content": "Plot a sine wave and save as plot.png."}
+  ],
+  "tools": [{"type": "code_interpreter", "container": {"type": "auto"}}],
+  "files": [{"name": "plot.png"}]
+}
+```
+
+The response gets a top-level `files` array. Each entry has an ID, name, MIME type, size, and, for files up to 8 MiB, the contents inline.
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+from mistralrs import ChatCompletionRequest, CodeExecutionConfig, RequestedFile, Runner, Which
+
+runner = Runner(which=Which.Plain(model_id="Qwen/Qwen3-4B"), code_execution_config=CodeExecutionConfig())
+resp = runner.send_chat_completion_request(
+    ChatCompletionRequest(
+        model="Qwen/Qwen3-4B",
+        messages=[{"role": "user", "content": "Plot sin(x) as plot.png."}],
+        enable_code_execution=True,
+        files=[RequestedFile("plot.png", "png")],
+    )
+)
+for f in resp.files or []:
+    f.save(f.name)
+```
+
+[Full example](/examples/python/code-execution/)
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+// Code execution must be enabled on the model builder; the per-request flag alone is a no-op.
+let model = ModelBuilder::new("Qwen/Qwen3-4B")
+    .with_code_execution(CodeExecutionConfig::default())
+    .build()
+    .await?;
+
+let req = mistralrs::RequestBuilder::from(messages)
+    .with_code_execution()
+    .require_file("plot.png");
+
+let resp = model.send_chat_request(req).await?;
+for f in resp.files.as_deref().unwrap_or_default() {
+    f.save(&f.name)?;
+}
+```
+
+[Full example](/examples/rust/advanced/code-execution-files/)
+
+</TabItem>
+</Tabs>
+
+For downloading large files and where files appear in each API, see [files](/guides/agents/agentic-runtime/#files).
+
+## What the model sees
+
+After each call, the model gets back:
+
+- Everything the code printed to stdout and stderr.
+- The exception, if one was raised.
+- The value of the last expression, as in a notebook cell.
+- Plots. Matplotlib figures from `plt.show()`, `savefig()`, or an animation are captured as images, so a vision model can look at the chart it made.
+- The output files and how long the call took.
+
+Code can't prompt for input: `input()` and reads from stdin raise an error. When a call runs past the timeout, mistral.rs interrupts it as Ctrl-C would and waits 3 seconds. If Python recovers, the session keeps its state; if not, the interpreter is killed and the next call starts a fresh one. On Windows the interpreter is killed right away.
+
+Your app sees the same results in [tool progress events](/guides/agents/agentic-runtime/#stream-a-run-over-http).
+
+## Sessions and state
+
+Requests that share a `session_id` share one Python process, so variables, imports, and open files carry over from call to call. A new session gets a fresh interpreter. The model can also reset the interpreter itself with a built-in reset tool.
+
+An interpreter that's been idle for an hour is shut down. The next call in that session starts a fresh one, without the old variables. [Exported sessions](/guides/agents/persist-sessions/) keep the conversation and tool history but not the interpreter.
+
+## Working directory
+
+Without `--code-exec-workdir`, each session gets its own new temp directory named `mistralrs-code-<random>`. mistral.rs deletes it when the session has been idle for an hour, or when your app drops the session. If the server is killed, for example with Ctrl+C, directories of live sessions are left behind.
+
+With `--code-exec-workdir /path` (or `.` for the current directory), every session runs in that same directory. Files persist across sessions, and each session can see and overwrite what earlier ones wrote.
+
+The working directory doesn't turn the sandbox on or off. When the sandbox is on, it's the one place Python can write.
+
+## Isolation
+
+**The CLI sandboxes Python by default; the SDKs don't.** On Linux and macOS, `--sandbox auto` restricts what Python can read and write, and on Linux it also caps memory, CPU time, and process count. In the Python and Rust SDKs, `CodeExecutionConfig` runs Python with no sandbox unless you attach a `SandboxPolicy`. Profiles, network modes, and limits are in the [sandbox reference](/reference/sandbox/).
+
+To run code somewhere other than the mistral.rs host, leave code execution off, define your own tool, and send its calls to a service you control with [`--tool-dispatch-url`](/guides/agents/tool-calling-basics/#dispatch-url).
+
+## See also
+
+- [Permissions and approvals](/guides/agents/permissions-and-approvals/): gate execution behind app or user approval.
+- [Shell execution](/guides/agents/enable-shell/): run command-line tools.
+- [OpenAI-compatible Skills](/guides/agents/skills/): upload and reference Skills from Responses requests.
+- [Agentic runtime for apps](/guides/agents/agentic-runtime/): streaming events, files, and media.
+- [Persist sessions](/guides/agents/persist-sessions/).
+- Examples: [Python](/examples/python/code-execution/), [Rust](/examples/rust/advanced/code-execution/), [approval flow](/examples/python/code-execution-approval/).

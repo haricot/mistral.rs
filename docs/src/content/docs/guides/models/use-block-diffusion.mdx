@@ -1,0 +1,36 @@
+---
+title: Block-diffusion models
+description: Run DiffusionGemma and understand its sampling and streaming limits.
+---
+
+DiffusionGemma (`google/diffusiongemma-26B-A4B-it`) is a 26B mixture-of-experts model that accepts text and images. Instead of writing one token at a time, it drafts a whole block of tokens, refines the block over several passes, then commits it and starts the next. Each pass fills in many tokens at once, so it decodes faster than a comparable model that writes token by token. You use it through the normal chat API, but sampling, streaming, and structured output work differently.
+
+## Quick start
+
+```bash
+mistralrs run -m google/diffusiongemma-26B-A4B-it
+```
+
+Or serve it:
+
+```bash
+mistralrs serve -m google/diffusiongemma-26B-A4B-it
+curl http://localhost:1234/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "default",
+    "messages": [{"role":"user","content":"Why is the sky blue?"}],
+    "max_tokens": 1024
+  }'
+```
+
+mistral.rs detects the model automatically; no extra flags are needed. In Python and Rust, load it as a multimodal model and send ordinary chat requests. Examples: [Python with images](/examples/python/diffusion-gemma/) and [Rust streaming](/examples/rust/models/diffusion-gemma/).
+
+## What behaves differently
+
+- **Streaming arrives a block at a time.** A block is the checkpoint's `canvas_length`, 256 tokens for DiffusionGemma. Nothing arrives while a block is being refined, then the whole block arrives at once, so expect bursts instead of a steady stream.
+- **Sampling settings come from the checkpoint.** Its `generation_config.json` sets the temperature schedule and the thresholds for accepting tokens and stopping. `temperature`, `top_p`, and repetition penalties in your request are ignored. `max_tokens` still caps the output length.
+- **Structured output isn't enforced.** Tool calls in the model's own format are parsed, even when a call spans two blocks. But mistral.rs can't force the output to follow a grammar while a block is being refined, so `tool_choice: "required"`, forcing a named tool, and JSON schemas don't constrain what comes out. Validate the output in your own code.
+- **Thinking is on by default.** The model's reasoning comes back in the reasoning field, separate from the answer.
+- **Concurrent requests batch by context length.** Requests whose contexts are the same length are refined together in one batch, sharing the cost of each pass. Requests with different lengths run as separate batches.
+- **Speed stats count differently.** Prompt tokens per second covers only reading the prompt. Decode tokens per second is committed tokens divided by the time spent refining, so it's comparable to an ordinary model's decode speed.

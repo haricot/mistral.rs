@@ -1,0 +1,47 @@
+---
+title: Quickstart
+description: Install mistral.rs and start your first chat.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+Run a model on your computer and chat with it in your browser.
+
+## Install
+
+<Tabs>
+<TabItem label="macOS / Linux">
+
+```bash
+curl -fsSL https://mistralrs.dev/install.sh | sh
+```
+
+</TabItem>
+<TabItem label="Windows (PowerShell)">
+
+```powershell
+irm https://mistralrs.dev/install.ps1 | iex
+```
+
+</TabItem>
+</Tabs>
+
+Follow the installer, then open a new terminal.
+
+## Chat in your browser
+
+Start a model:
+
+```bash
+mistralrs serve -m Qwen/Qwen3-4B --quant 4
+```
+
+When the server is ready, open [http://localhost:1234/ui](http://localhost:1234/ui) and send a message.
+
+Keep the terminal open while you chat. Press Ctrl+C when you're done.
+
+## Next steps
+
+- [Choose another model](/guides/models/choose-a-model/)
+- [Use the API](/guides/serve/openai-compatible-apis/)
+- [Get help](/reference/troubleshooting/)

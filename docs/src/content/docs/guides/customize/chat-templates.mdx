@@ -1,0 +1,98 @@
+---
+title: Chat templates
+description: Select or override the template used to format chat messages.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+A chat template formats messages into the string the model receives. An incorrect template can
+degrade output or expose special tokens. mistral.rs normally resolves the template from the model
+files; when it cannot, provide a template file explicitly:
+
+```bash
+mistralrs run -m <model> --chat-template my-template.jinja
+```
+
+## How the template is resolved
+
+Templates are selected in this order:
+
+1. `--jinja-explicit`.
+2. A multimodal `processor_config.json` template.
+3. `--chat-template`.
+4. The model repository's `chat_template.jinja`, then `tokenizer_config.json`, then `chat_template.json`.
+5. Embedded GGUF metadata.
+
+Without a template, only raw completion prompts are accepted. If special tokens leak, system messages are ignored, or multi-turn quality deteriorates, check that the template matches the checkpoint.
+
+## Overriding the template
+
+Both override settings take a file path. A `.jinja` file is the raw template; special tokens (`bos_token`, `eos_token`, `unk_token`) are read from a `tokenizer_config.json` next to the template file, falling back to the model's `tokenizer.json`. A `.json` file carries the template in a `chat_template` field and may set the special tokens itself:
+
+```json
+{
+    "chat_template": "{% for message in messages %}...{% endfor %}",
+    "bos_token": "<s>",
+    "eos_token": "</s>"
+}
+```
+
+<Tabs>
+<TabItem label="CLI">
+
+```bash
+mistralrs run -m <model> --chat-template my-template.jinja
+```
+
+`--jinja-explicit <file.jinja>` overrides `--chat-template` when both are set and only accepts `.jinja` files. Both flags work on `run` and `serve`.
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+runner = Runner(
+    which=Which.Plain(model_id="<model>"),
+    chat_template="my-template.jinja",   # or a .json file
+    # jinja_explicit="my-template.jinja",
+)
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+let model = ModelBuilder::new("<model>")
+    .with_chat_template("my-template.jinja")
+    // .with_jinja_explicit("my-template.jinja".to_string())
+    .build()
+    .await?;
+```
+
+</TabItem>
+</Tabs>
+
+## Bundled templates
+
+The source repository's [`chat_templates/`](https://github.com/EricLBuehler/mistral.rs/tree/master/chat_templates) directory contains ready-made templates: `.json` templates for common formats (`chatml`, `llama2`, `llama3`, `mistral`, `phi3`, `vicuna`, ...) and `.jinja` tool-calling templates (Mistral Nemo/Small, Hermes 2 Pro/3, DeepSeek, SmolLM3, Gemma 3n). They are plain files, not built into the binary; download or clone them and pass a path:
+
+```bash
+mistralrs run -m <model> --chat-template chat_templates/llama3.json
+```
+
+## Writing a template from scratch
+
+Use the checkpoint's template as a starting point; role markers and multimodal placeholders must match the model. Templates use Hugging Face Jinja conventions, with Python-style string methods supported.
+
+Variables available at render time:
+
+- `messages`: the chat message list.
+- `add_generation_prompt`: true when building a prompt for generation.
+- `bos_token`, `eos_token`, `unk_token`: model special tokens.
+- `date_string`: the current UTC date as a preformatted string (`DD, Month, YYYY`, e.g. `13, June, 2026`).
+- `enable_thinking`: resolved thinking toggle; defaults to true when the request specifies neither control.
+- `reasoning_effort`, `reasoning_strength`: the same explicit `off`, `low`, `medium`, `high`, or `xhigh` value. Both are undefined when effort is omitted.
+- `tools` and `builtin_tools`: present only when the request carries tool schemas.
+
+The functions `raise_exception(msg)` and `strftime_now(fmt)` and the `tojson` filter are available, matching Hugging Face's template environment. For model-specific tokens and role markers, the model's Hugging Face page is authoritative.
+
+Multimodal models need templates that handle non-text content parts, usually via placeholder tokens like `<|image|>` or `<|audio|>`; most multimodal repos ship theirs in `processor_config.json` or `chat_template.json`, which mistral.rs picks up automatically.

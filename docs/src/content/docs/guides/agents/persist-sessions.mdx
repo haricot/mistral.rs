@@ -1,0 +1,127 @@
+---
+title: Sessions
+description: Keep agent state across requests, and export, import, or delete it.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+When mistral.rs runs tools for a request, it saves a session: the tool calls and their results, images the tools produced, and the live Python interpreter with its variables. None of it is in the messages your app sends back on the next turn, which carry only the user and assistant text. The session keeps it on the server, so the next request can pick up where the last one stopped.
+
+Sessions apply to requests that run the [tool loop](/guides/agents/agentic-runtime/#when-mistralrs-runs-tools-for-you), for example ones that turn on a built-in tool or set `max_tool_rounds`. A plain chat request ignores `session_id`.
+
+Pass a `session_id` to name the session. The response returns it in a top-level `session_id` field:
+
+```bash
+curl http://localhost:1234/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "default",
+    "messages": [{"role": "user", "content": "Use Python to compute 2 to the 10th."}],
+    "tools": [{"type": "code_interpreter", "container": {"type": "auto"}}],
+    "session_id": "user-42-chat-abc"
+  }'
+```
+
+## What to send on the next turn
+
+Keep sending the whole conversation, as you would with any OpenAI-compatible API: every earlier user and assistant message, then the new one. mistral.rs puts the hidden tool calls and results back in where they happened, so the model sees the complete history.
+
+If you send only the newest message, the model won't see the earlier turns. The Python interpreter and the files in the session's working directory are still there.
+
+If you change an earlier message, the session keeps the tool history up to that point and continues from your edited version.
+
+## How a request finds its session
+
+| Request | What happens |
+|---|---|
+| `session_id` of an existing session | Continues that session. |
+| `session_id` the server hasn't seen | Starts a new session with that ID. |
+| No `session_id`, at least two messages | Continues a session whose saved conversation starts with the same messages, if there is one. Otherwise starts a new session with a generated ID. |
+| No `session_id`, one message | Starts a new session with a generated ID. |
+
+Matching without an ID lets standard OpenAI clients, which resend the conversation but don't know about `session_id`, keep their tool history. The catch: two clients that open with identical messages can land in the same session. Give each conversation its own `session_id` whenever that matters.
+
+## Export, import, delete
+
+<Tabs>
+<TabItem label="HTTP">
+
+```bash
+# Export (404 if the session does not exist)
+curl http://localhost:1234/v1/sessions/user-42-chat-abc
+
+# Import or replace: body is a SerializedSession from a previous GET
+curl -X PUT http://localhost:1234/v1/sessions/user-42-chat-abc \
+  -H "Content-Type: application/json" \
+  -d @saved-session.json
+
+# Delete (idempotent: 200 whether or not the session existed)
+curl -X DELETE http://localhost:1234/v1/sessions/user-42-chat-abc
+```
+
+`PUT` replaces any existing session with the same ID and returns 400 for an invalid payload.
+
+</TabItem>
+<TabItem label="Python">
+
+`Runner` has the same operations as the HTTP endpoints. Each takes an optional `model_id` keyword when you serve several models:
+
+```python
+from mistralrs import ChatCompletionRequest, CodeExecutionConfig, Runner, Which
+
+runner = Runner(
+    which=Which.Plain(model_id="Qwen/Qwen3-4B"),
+    code_execution_config=CodeExecutionConfig(),
+)
+
+ids = runner.list_session_ids()
+
+exported = runner.export_session("user-42-chat-abc")  # JSON string or None
+if exported is not None:
+    runner.import_session("user-42-chat-new-id", exported)
+
+runner.delete_session("user-42-chat-abc")
+```
+
+To continue a session in-process, set `session_id` on the request and send the conversation so far:
+
+```python
+response = runner.send_chat_completion_request(
+    ChatCompletionRequest(
+        model="default",
+        messages=[
+            {"role": "user", "content": "Use Python to compute 2 to the 10th."},
+            {"role": "assistant", "content": "2 to the 10th is 1024."},
+            {"role": "user", "content": "Now divide that by 3."},
+        ],
+        enable_code_execution=True,
+        session_id="user-42-chat-abc",
+    )
+)
+```
+
+The Python stream iterator doesn't include live tool progress. Use the HTTP server if your app needs it; see [streaming a run](/guides/agents/agentic-runtime/#stream-a-run-over-http).
+
+</TabItem>
+<TabItem label="Rust">
+
+[`Model`](https://docs.rs/mistralrs/latest/mistralrs/struct.Model.html) has `export_session`, `import_session`, `delete_session`, and `list_session_ids`, plus `fork_session(model_id, src_session_id, dest_session_id, num_turns)`, which copies the first `num_turns` complete turns of a session to a new ID so you can branch a conversation. All five take a leading `model_id: Option<&str>` for multi-model setups. Set the request's session with `RequestBuilder::with_session_id`:
+
+```rust
+let request = RequestBuilder::from(messages).with_session_id("user-42-chat-abc");
+```
+
+</TabItem>
+</Tabs>
+
+## Lifetime
+
+Sessions live in server memory:
+
+- A session expires after 30 minutes without a request.
+- The server keeps at most 128 sessions. A new one evicts the least recently used.
+- A restart loses every session. To keep one, export it before shutdown and import it afterward.
+
+## Code execution subprocess
+
+The Python interpreter isn't part of an exported session. After you import a session, on the same server or another one, the conversation and tool history carry over, but the next code call starts a fresh interpreter without the old variables and imports.
