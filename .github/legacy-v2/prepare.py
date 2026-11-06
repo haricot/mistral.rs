@@ -204,7 +204,7 @@ def publish(repo, folder, reports):
         raise RuntimeError('run/attempt/workflow provenance mismatch')
     validate_attestations(plan, reports)
     verify_sources(repo, plan['identity']['sources'])
-    args = ['push', '--atomic']
+    args = ['push', '--atomic', 'origin']
     for branch, node in plan['nodes'].items():
         previous = plan['leases'][branch]
         current = head(repo, branch)
@@ -225,7 +225,7 @@ def publish(repo, folder, reports):
         if existing not in (None, node['sha']):
             raise RuntimeError('immutable candidate ref collision')
         args.append(node['sha'] + ':' + ref)
-    if len(args) > 2:
+    if len(args) > 3:
         git(repo, *args)
     write(folder / 'published.json', {'run_id': plan['run_id'], 'input_key': plan['input_key'],
                                      'branches': {name: node['sha'] for name, node in plan['nodes'].items()},

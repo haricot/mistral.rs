@@ -75,6 +75,50 @@ class PreparationContracts(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, 'mismatched CPU'):
                     p.validate_attestations(plan, reports)
 
+    def test_real_atomic_publication_to_bare_remote(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            remote, repo, output, reports = [root / name for name in ('remote.git', 'repo', 'output', 'reports')]
+            p.run(['git', 'init', '--bare', remote])
+            p.run(['git', 'init', repo])
+            p.git(repo, 'remote', 'add', 'origin', str(remote))
+            (repo / 'Cargo.lock').write_text('test lock\n')
+            p.git(repo, 'add', 'Cargo.lock')
+            env = {**os.environ, **p.IDENTITY}
+            import subprocess
+            subprocess.run(['git', '-C', str(repo), 'commit', '-m', 'fixture'], env=env, check=True, capture_output=True)
+            candidate = p.git(repo, 'rev-parse', 'HEAD').decode().strip()
+            tree = p.git(repo, 'rev-parse', 'HEAD^{tree}').decode().strip()
+            output.mkdir()
+            identity = {'sources': {}, 'format_sources': True}
+            nodes = {}
+            for name in p.OUTPUTS:
+                ref = 'refs/heads/integration/legacy-v2/test/' + name.replace('/', '-')
+                p.git(repo, 'update-ref', ref, candidate)
+                nodes[name] = {'sha': candidate, 'tree': tree, 'immutable_ref': ref,
+                               'cargo_lock_sha256': p.hash_bytes((repo / 'Cargo.lock').read_bytes())}
+            bundle = output / 'candidates.bundle'
+            p.git(repo, 'bundle', 'create', str(bundle), *(node['immutable_ref'] for node in nodes.values()))
+            plan = {'identity': identity, 'input_key': p.key(identity), 'nodes': nodes,
+                    'leases': {name: None for name in p.OUTPUTS},
+                    'bundle_sha256': p.hash_bytes(bundle.read_bytes()),
+                    'run_id': '123', 'run_attempt': '1', 'workflow_sha': candidate}
+            p.write(output / 'plan.json', plan)
+            for name, node in nodes.items():
+                p.write(reports / (name.replace('/', '-') + '.json'),
+                        {'target': name, 'candidate': candidate, 'tree': tree, 'input_key': plan['input_key'],
+                         'cargo_lock_sha256': node['cargo_lock_sha256'], 'run_id': '123', 'run_attempt': '1',
+                         'workflow_sha': candidate, 'command': p.CPU_COMMAND, 'status': 'PASS'})
+            with patch.object(p, 'verify_sources'), patch.dict(os.environ, {'GITHUB_RUN_ID': '123',
+                    'GITHUB_RUN_ATTEMPT': '1', 'GITHUB_SHA': candidate}):
+                p.publish(repo, output, reports)
+            refs = p.git(repo, 'ls-remote', '--heads', 'origin').decode().splitlines()
+            self.assertEqual(len(refs), 6)
+            for name in p.OUTPUTS:
+                self.assertEqual(p.head(repo, name), candidate)
+            self.assertIsNone(p.head(repo, 'legacy'))
+            self.assertIsNone(p.head(repo, 'extended'))
+
     def test_rejects_bundle_tampering_before_git_import(self):
         with tempfile.TemporaryDirectory() as d:
             folder = Path(d)
