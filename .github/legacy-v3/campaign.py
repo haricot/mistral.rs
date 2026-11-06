@@ -184,6 +184,27 @@ def verify_files(directory, proof):
             raise ValueError("artifact payload mismatch: " + name)
 
 
+def cpu_proof(plan, directory):
+    directory = Path(directory)
+    value = {"schema": 1, "status": "CPU_BASELINE_PASSED", "identity": plan["identity"], "key": plan["key"],
+             "origin": origin(), "cuda_enabled": False, "command": "cargo check --locked -p mistralrs-cli --no-default-features --features code-execution",
+             "files": {name: sha(directory / name) for name in ("Cargo.lock", "check.log")}}
+    if value["files"]["Cargo.lock"] != plan["identity"]["lock"]:
+        raise ValueError("CPU baseline lock mismatch")
+    write(directory / "cpu.json", value)
+
+
+def verify_cpu(plan, directory):
+    proof = read(Path(directory) / "cpu.json")
+    if (proof.get("status") != "CPU_BASELINE_PASSED" or proof.get("key") != plan["key"]
+            or proof.get("identity") != plan["identity"] or proof.get("cuda_enabled") is not False
+            or set(proof["files"]) != {"Cargo.lock", "check.log"}
+            or proof["files"]["Cargo.lock"] != plan["identity"]["lock"]):
+        raise ValueError("CPU-only baseline proof mismatch")
+    verify_files(directory, proof)
+    return proof
+
+
 def build_proof(plan, directory):
     directory = Path(directory)
     report = {"schema": 1, "status": "BUILD_AND_CPU_PASSED", "key": plan["key"],
@@ -306,8 +327,9 @@ def restore(plan, directory, kind, artifact_id=0, build=None):
         with tempfile.TemporaryDirectory() as temporary:
             try:
                 downloaded = download(entry["id"], temporary)
-                proof = verify_build(plan, temporary) if kind == "build" else verify_gpu(plan, temporary, build)
-                verify_producer(proof, "Hosted Legacy V3 CUDA and CPU" if kind == "build" else "Legacy V3 SM61", downloaded)
+                proof = verify_cpu(plan, temporary) if kind == "cpu" else (verify_build(plan, temporary) if kind == "build" else verify_gpu(plan, temporary, build))
+                role = {"cpu": "Legacy V3 CPU baseline", "build": "Hosted Legacy V3 CUDA and CPU", "evidence": "Legacy V3 SM61"}[kind]
+                verify_producer(proof, role, downloaded)
             except (ValueError, KeyError, OSError, zipfile.BadZipFile) as error:
                 if artifact_id:
                     raise
@@ -322,7 +344,8 @@ def restore(plan, directory, kind, artifact_id=0, build=None):
     return 0
 
 
-def promote(repo, plan, builds, evidence, output):
+def promote(repo, plan, builds, evidence, output, cpu_baseline):
+    cpu = verify_cpu(plan, cpu_baseline)
     build = verify_build(plan, builds)
     gpu = verify_gpu(plan, evidence, build)
     before = command("git", "ls-remote", "--heads", "origin", "refs/heads/legacy_v3", cwd=repo)
@@ -336,7 +359,7 @@ def promote(repo, plan, builds, evidence, output):
     git(repo, "push", "--atomic", "--force-with-lease=refs/heads/legacy_v3:" + (before or ""), "origin", *refs)
     receipt = {"schema": 1, "status": "PILOT_QUALIFIED", "target": "legacy_v3", "before": before,
                "after": plan["candidate"], "key": plan["key"], "origin": origin(),
-               "build_origin": build["origin"], "gpu_origin": gpu["origin"], "binary_sha256": build["files"]["mistralrs"],
+               "cpu_origin": cpu["origin"], "build_origin": build["origin"], "gpu_origin": gpu["origin"], "binary_sha256": build["files"]["mistralrs"],
                "numeric_status": {mode: value["status"] for mode, value in gpu["models"].items()},
                "definitive_workflow_validated": False}
     write(output, receipt)
@@ -345,7 +368,7 @@ def promote(repo, plan, builds, evidence, output):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=["prepare", "verify-plan", "build-proof", "restore-build", "restore-evidence", "verify-build", "promote", "config"])
+    parser.add_argument("mode", choices=["prepare", "verify-plan", "cpu-proof", "restore-cpu", "build-proof", "restore-build", "restore-evidence", "verify-build", "promote", "config"])
     parser.add_argument("--directory", type=Path, required=True)
     parser.add_argument("--repo", type=Path, default=Path.cwd())
     parser.add_argument("--output", type=Path)
@@ -355,6 +378,7 @@ def main():
     parser.add_argument("--artifact-id", type=int, default=0)
     parser.add_argument("--builds", type=Path)
     parser.add_argument("--evidence", type=Path)
+    parser.add_argument("--cpu-baseline", type=Path)
     parser.add_argument("--profile", choices=["cpu", "gpu"])
     args = parser.parse_args()
     if args.mode == "prepare":
@@ -368,6 +392,10 @@ def main():
         args.output.write_text(text.replace(f'junit.path = "{args.profile}-junit.xml"', "junit.path = " + json.dumps(str((args.output.parent / (args.profile + "-junit.xml")).resolve()))))
     elif args.mode == "build-proof":
         build_proof(plan, args.output)
+    elif args.mode == "cpu-proof":
+        cpu_proof(plan, args.output)
+    elif args.mode == "restore-cpu":
+        restore(plan, args.output, "cpu", args.artifact_id)
     elif args.mode == "verify-build":
         verify_build(plan, args.builds)
     elif args.mode == "restore-build":
@@ -375,7 +403,7 @@ def main():
     elif args.mode == "restore-evidence":
         restore(plan, args.output, "evidence", args.artifact_id, verify_build(plan, args.builds))
     else:
-        promote(args.repo.resolve(), plan, args.builds, args.evidence, args.output)
+        promote(args.repo.resolve(), plan, args.builds, args.evidence, args.output, args.cpu_baseline)
 
 
 if __name__ == "__main__":

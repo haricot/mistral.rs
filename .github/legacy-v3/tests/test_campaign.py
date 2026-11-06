@@ -62,6 +62,29 @@ class PilotContracts(unittest.TestCase):
         self.assertFalse(proof["gpu_executed"])
         self.assertEqual(c.verify_build(self.plan, self.root), proof)
 
+    def test_cpu_only_proof_remains_separate_from_cuda_enabled_cpu_tests(self):
+        (self.root / "Cargo.lock").write_text("locked")
+        (self.root / "check.log").write_text("cargo check completed")
+        self.plan["identity"]["lock"] = c.sha(self.root / "Cargo.lock")
+        self.plan["key"] = c.digest(self.plan["identity"])
+        c.cpu_proof(self.plan, self.root)
+        self.assertFalse(c.verify_cpu(self.plan, self.root)["cuda_enabled"])
+        proof = c.read(self.root / "cpu.json")
+        proof["cuda_enabled"] = True
+        c.write(self.root / "cpu.json", proof)
+        with self.assertRaises(ValueError):
+            c.verify_cpu(self.plan, self.root)
+
+    def test_cpu_only_reuse_rejects_modified_logs(self):
+        (self.root / "Cargo.lock").write_text("locked")
+        (self.root / "check.log").write_text("original")
+        self.plan["identity"]["lock"] = c.sha(self.root / "Cargo.lock")
+        self.plan["key"] = c.digest(self.plan["identity"])
+        c.cpu_proof(self.plan, self.root)
+        (self.root / "check.log").write_text("changed")
+        with self.assertRaises(ValueError):
+            c.verify_cpu(self.plan, self.root)
+
     def test_modified_binary_and_wrong_input_proof_are_rejected(self):
         self.build()
         (self.root / "mistralrs").write_text("changed")

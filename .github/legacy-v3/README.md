@@ -14,7 +14,8 @@ Stages:
 
 1. Check protocol contracts and independently resolve the existing compiler SDK.
 2. Verify original source CPU qualifications, lock inputs and compose the candidate.
-3. Run cargo check on the exact CPU-only CLI configuration.
+3. Verify an original matching CPU-only baseline, or run cargo check on that exact
+   configuration and retain its separate proof.
 4. Resolve a matching original build, or compile one release CLI and a nextest
    archive with the same features/profile. Execute CPU contracts with CUDA linked
    through the hosted link stub; this is not a physical CUDA test.
