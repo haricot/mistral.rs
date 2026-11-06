@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "base_master_sha": "095991a7d680a6994e6f1554156ebef5d09db049",
+  "source_legacy_sha": "e4f7349cf973b5603ccbfe344e90c4d019a62754",
+  "candle_sha": "9cba2e898af3d25a89257f1f2ec5acece0404dcb",
+  "sources": [
+    {
+      "component": "bf16",
+      "branch": "bf16_mistralrs_standalone_v2",
+      "sha": "781367bbc1bc6df1d03f96175849a897bb21ac6f",
+      "manifest": "standalone-bf16-v2/sources.json"
+    },
+    {
+      "component": "fp8",
+      "branch": "fp8_mistralrs_standalone_v2",
+      "sha": "bf6bee075f02980b117a8737e6fc977cad182899",
+      "manifest": "standalone-fp8-v2/sources.json"
+    },
+    {
+      "component": "fp4",
+      "branch": "fp4_mistralrs_standalone_v2",
+      "sha": "06604b622f6b43f7b54d193e756e326c32678c6b",
+      "manifest": "fp4-standalone-v2/sources.json"
+    }
+  ],
+  "qualification": {
+    "cuda_compiled": false,
+    "gpu_validated": false,
+    "models_executed": false
+  },
+  "environment_contract": "Enable Cargo features cuda-legacy or individual cuda-legacy-* features. ALLOW_LEGACY alone does not activate Mistral format adapters."
+}
