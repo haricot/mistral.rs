@@ -3,7 +3,9 @@
 Base: master@095991a7d680a6994e6f1554156ebef5d09db049.
 
 The current NVFP4 implementation is retained, with an opt-in Pascal E7 adapter.
-No Mistral Legacy branch is a prerequisite or ancestor. Candle is pinned to
+No Mistral Legacy branch is a prerequisite or ancestor.
+The FP4 opt-in also enables Candle software BF16 conversion primitives for
+BF16 outputs; it does not import the Mistral BF16 standalone algorithms. Candle is pinned to
 9cba2e898af3d25a89257f1f2ec5acece0404dcb, shared with BF16/FP8 v2.
 
 Enable `cuda-legacy-fp4` in the CLI, API, core or Python crate. SM61 uses E7 for

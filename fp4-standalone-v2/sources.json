@@ -10,7 +10,8 @@
     "repository": "haricot/candle",
     "revision": "9cba2e898af3d25a89257f1f2ec5acece0404dcb",
     "features": [
-      "cuda-legacy-fp4"
+      "cuda-legacy-fp4",
+      "cuda-legacy-bf16"
     ]
   },
   "requires_mistral_branches": [],
@@ -65,7 +66,7 @@
     "mistralrs-paged-attn/src/cuda/flashinfer/math.cuh": "495ca88dde0b6ca5b7a35de1670934ea11ce60e8fca82669f1b19911a09767d1",
     "mistralrs-paged-attn/src/cuda/flashinfer/utils.cuh": "c95917b27195e7c7171b8cbbf1c726a389a33e2d287edb4fb8cdab44ab705321",
     "mistralrs-pyo3/Cargo.toml": "50603ae195b120811d02a1940efd9e071fe9a140a0ec083617b0e07a33a09770",
-    "mistralrs-quant/Cargo.toml": "3137423d9e0c06c719f4651f8ae9a164b80da1887359c38a71af7297b2fcaeba",
+    "mistralrs-quant/Cargo.toml": "0e3a37ecd0cb2701c9697fc9361adccfc2bbc9e6e67ae5ada2848d3b372e9caf",
     "mistralrs-quant/kernels/embedding/gather_rows.cu": "ff8f07228b088ea71a7e5386ca6702e100c01fce05ec096647faec783bc89171",
     "mistralrs-quant/src/embedding/mod.rs": "397b2d8f8cece633e52b3cb90c182f182d1bea5499904787ae1c038ef4d61b59",
     "mistralrs-quant/src/gguf/archive.rs": "387b2fe4493beabe6733647c0684eadfe892608ee225aa65adbfde82561a01ea",
