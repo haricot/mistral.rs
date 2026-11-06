@@ -1,0 +1,39 @@
+name: Remove the abandoned Legacy v2 integration
+on:
+  push:
+    branches: [ci/reset-legacy-v3]
+    paths: [.github/workflows/reset-legacy-v3.yml]
+permissions:
+  contents: write
+jobs:
+  remove:
+    if: github.repository == 'haricot/mistral.rs' && github.actor == 'haricot'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+      - name: Archive exact old tips and remove the abandoned branches atomically
+        shell: python
+        run: |
+          import json, subprocess
+          refs = json.loads("[{\"name\":\"ci/legacy-v2-preparation\",\"sha\":\"b938e15be1fe0fd1fae447e4aee323923424ce99\"},{\"name\":\"contrib/lfm25_dspark\",\"sha\":\"b89b7fcf669d8b9097a57f9791653991408f080b\"},{\"name\":\"contrib/nemotron_bolt_dflash\",\"sha\":\"c53aa5ff5ec46a305b4aaf80e03469b32dd1b5de\"},{\"name\":\"integration/legacy-v2/dda875af7eb334c14d15de7d22a05d8a1ddf7fbf1975fe2e6ba34a13c4bdc82c/contrib-lfm25_dspark\",\"sha\":\"b89b7fcf669d8b9097a57f9791653991408f080b\"},{\"name\":\"integration/legacy-v2/dda875af7eb334c14d15de7d22a05d8a1ddf7fbf1975fe2e6ba34a13c4bdc82c/contrib-nemotron_bolt_dflash\",\"sha\":\"c53aa5ff5ec46a305b4aaf80e03469b32dd1b5de\"},{\"name\":\"integration/legacy-v2/dda875af7eb334c14d15de7d22a05d8a1ddf7fbf1975fe2e6ba34a13c4bdc82c/legacy_v2\",\"sha\":\"eddf08bbd2fdbf9a9b583ace7baf812c0e79bdf1\"},{\"name\":\"legacy_v2\",\"sha\":\"eddf08bbd2fdbf9a9b583ace7baf812c0e79bdf1\"}]")
+          def run(*args):
+              return subprocess.check_output(args, text=True).strip()
+          refspecs=[]
+          for item in refs:
+              branch, expected = item['name'], item['sha']
+              actual=run('git','ls-remote','--heads','origin','refs/heads/'+branch)
+              if not actual or actual.split()[0] != expected:
+                  raise SystemExit('Branch changed; cleanup aborted: '+branch)
+              refspecs.append('refs/heads/'+branch+':refs/remotes/discarded/'+branch)
+          subprocess.run(['git','fetch','origin',*refspecs],check=True)
+          args=['git','push','--atomic','origin']
+          for item in refs:
+              branch, expected = item['name'], item['sha']
+              args += ['--force-with-lease=refs/heads/'+branch+':'+expected,
+                       expected+':refs/tags/archive/discarded-legacy-v2/20261106/'+branch,
+                       ':refs/heads/'+branch]
+          subprocess.run(args,check=True)
+          print('DISCARDED_LEGACY_V2_REMOVED=PASS')
