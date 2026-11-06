@@ -46,6 +46,7 @@ safetensors.workspace = true
 tempfile.workspace = true
 
 [features]
+cuda-legacy-fp4 = ["cuda", "mistralrs-core/cuda-legacy-fp4"]
 default = []
 cuda = ["candle-core/cuda", "mistralrs-core/cuda"]
 cutile = ["cuda", "mistralrs-core/cutile"]

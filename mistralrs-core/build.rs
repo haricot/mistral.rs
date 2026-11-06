@@ -86,6 +86,7 @@ fn main() {
     }
 
     println!("cargo::rustc-check-cfg=cfg(has_flashinfer_gdn_sm90_kernel)");
+    println!("cargo::rustc-check-cfg=cfg(has_moe_wmma)");
     println!("cargo::rustc-check-cfg=cfg(has_gdn_fp8_producer)");
 
     #[cfg(feature = "cudnn")]
@@ -131,6 +132,12 @@ fn main() {
             .arg(&header_hash_arg);
 
         let compute_cap = builder.get_compute_cap().unwrap_or(80);
+
+        if compute_cap >= 70 {
+            println!("cargo:rustc-cfg=has_moe_wmma");
+        } else {
+            builder = builder.exclude(&["moe_gemm_wmma.cu", "moe_gemm.cu"]);
+        }
 
         // Check if CUDA_COMPUTE_CAP < 80 and disable bf16 kernels if so.
         // bf16 WMMA operations and certain bf16 intrinsics are only available on sm_80+.

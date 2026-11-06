@@ -2,16 +2,27 @@
 
 Base: master@095991a7d680a6994e6f1554156ebef5d09db049.
 
-This branch starts from the current upstream-compatible NVFP4/MXFP4 implementation,
-not the old FP4 branch, which also incorporated Bolt/DFlash and legacy changes.
-No application source, dependency or feature is changed in this baseline.
+The current NVFP4 implementation is retained, with an opt-in Pascal E7 adapter.
+No Mistral Legacy branch is a prerequisite or ancestor. Candle is pinned to
+9cba2e898af3d25a89257f1f2ec5acece0404dcb, shared with BF16/FP8 v2.
 
-The CPU workflow checks the quantization crate and executes its existing NVFP4
-unit and checkpoint tests. It does not fetch model fixtures or use a GPU.
-A passing CPU workflow is not a physical CUDA or full-model qualification.
+Enable `cuda-legacy-fp4` in the CLI, API, core or Python crate. SM61 uses E7 for
+dense rank-2 W4A16 only. Quantized activations and stacked NVFP4 experts fail
+explicitly. Other GPUs retain their existing routing. Raw E4M3 scale bytes are
+preserved; per-row global multipliers precede bias addition. E7 arithmetic uses
+F16 activations, including explicit conversion for BF16 output: the full BF16
+activation range is not preserved. At most 65535 flattened input rows are
+accepted per E7 call. Offset/strided inputs receive an owned contiguous copy.
 
-The subsequent legacy_v3 composition has four independent inputs: the updated
-BF16, FP8 and FP4 standalone branches and the existing legacy branch. Legacy is
-not a prerequisite or ancestor added to these standalone branches.
-The old Pascal-specific FP4 adapter must be reconciled in that composition;
-this baseline alone does not claim NVFP4 execution on SM61.
+Compatibility changes cover Candle GGUF/MXFP4 types, CPU/CUDA/Metal embeddings,
+UQFF mappings and minimal SM61 MoE/FlashInfer compilation support. BF16 and FP8
+algorithms, ASD, DSpark and Bolt/DFlash are not imported.
+
+CPU validation covers the CLI, NVFP4 unit/checkpoint contracts and synthetic
+NVFP4/MXFP4 loading/embedding fixtures. One external-checkpoint test is ignored
+without its fixtures. CUDA compilation, GPU execution, models and performance
+remain unqualified. Feature-gated hardware tests are included for the later
+integrated campaign, including offset input views.
+
+The future assembly combines the three v2 standalones and residual support.
+Old Legacy supplies selected changes, not a wholesale merge input.

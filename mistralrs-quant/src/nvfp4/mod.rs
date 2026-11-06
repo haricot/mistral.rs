@@ -13,6 +13,8 @@ mod csf;
 #[cfg(all(feature = "cuda", feature = "cutile"))]
 mod decode;
 pub mod embedding;
+#[cfg(any(test, all(feature = "cuda", feature = "cuda-legacy-fp4")))]
+mod pascal;
 #[cfg(feature = "cuda")]
 pub(crate) mod portable;
 #[cfg(all(feature = "cuda", feature = "cutile"))]
@@ -80,15 +82,25 @@ pub struct Nvfp4LayerParts {
     pub dtype: DType,
 }
 
-#[derive(Debug)]
 pub struct Nvfp4Layer {
     parts: Nvfp4LayerParts,
     input_global_scale: Option<f32>,
     // Value equality is safe only for private calibration allocations.
     input_scale_immutable: bool,
     portable: bool,
+    #[cfg(all(feature = "cuda", feature = "cuda-legacy-fp4"))]
+    legacy: Option<candle_core::quantized::nvfp4_arch_e7::Nvfp4E7Linear>,
     #[cfg(all(feature = "cuda", feature = "cutile", has_nvfp4_cutlass_kernels))]
     native: Option<cutlass::State>,
+}
+
+impl std::fmt::Debug for Nvfp4Layer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Nvfp4Layer")
+            .field("weight_shape", &self.parts.weight.dims())
+            .field("output_dtype", &self.parts.dtype)
+            .finish_non_exhaustive()
+    }
 }
 
 #[cfg(all(feature = "cuda", feature = "cutile"))]
@@ -215,9 +227,23 @@ impl Nvfp4Layer {
         if parts.weight.device().is_cuda() && parts.dtype == DType::F32 {
             candle_core::bail!("NVFP4 CUDA inference requires BF16 or F16 output dtype");
         }
+        #[cfg(all(feature = "cuda", feature = "cuda-legacy-fp4"))]
+        let legacy_selected = match parts.weight.device() {
+            Device::Cuda(device) => {
+                let cc = device
+                    .cuda_stream()
+                    .context()
+                    .compute_capability()
+                    .map_err(candle_core::Error::msg)?;
+                cc == (6, 1)
+            }
+            _ => false,
+        };
+        #[cfg(all(feature = "cuda", not(feature = "cuda-legacy-fp4")))]
+        let legacy_selected = false;
         #[cfg(feature = "cuda")]
         let portable = match parts.weight.device() {
-            Device::Cuda(device) => use_portable_kernels(device)?,
+            Device::Cuda(device) if !legacy_selected => use_portable_kernels(device)?,
             _ => false,
         };
         #[cfg(not(feature = "cuda"))]
@@ -309,21 +335,29 @@ impl Nvfp4Layer {
             None
         };
         #[cfg(all(feature = "cuda", feature = "cutile", has_nvfp4_cutlass_kernels))]
-        let native = if portable {
+        let native = if portable || legacy_selected {
             None
         } else {
             cutlass::State::new(&parts)?
+        };
+        #[cfg(all(feature = "cuda", feature = "cuda-legacy-fp4"))]
+        let legacy = if legacy_selected {
+            Some(pascal::build(&parts)?)
+        } else {
+            None
         };
         let layer = Self {
             parts,
             input_global_scale,
             input_scale_immutable,
             portable,
+            #[cfg(all(feature = "cuda", feature = "cuda-legacy-fp4"))]
+            legacy,
             #[cfg(all(feature = "cuda", feature = "cutile", has_nvfp4_cutlass_kernels))]
             native,
         };
         #[cfg(all(feature = "cuda", feature = "cutile"))]
-        if layer.parts.weight.device().is_cuda() && !layer.portable {
+        if layer.parts.weight.device().is_cuda() && !layer.portable && !legacy_selected {
             crate::cutile::register_nvfp4_shape(layer.gemm_args(), layer.parts.dtype)?;
         }
         Ok(layer)
@@ -945,6 +979,23 @@ impl QuantMethod for Nvfp4Layer {
             let mut shape = x.dims().to_vec();
             *shape.last_mut().unwrap() = self.parts.weight.dim(0)?;
             return Tensor::zeros(shape, x.dtype(), x.device());
+        }
+        #[cfg(all(feature = "cuda", feature = "cuda-legacy-fp4"))]
+        if let Some(legacy) = &self.legacy {
+            let k = x.dim(D::Minus1)?;
+            let rows = x.elem_count() / k;
+            // E7 rejects offset views and backing allocations larger than the input.
+            let input = x
+                .contiguous()?
+                .reshape((rows, k))?
+                .to_dtype(DType::F16)?
+                .contiguous()?
+                .copy()?;
+            let output = legacy.forward(
+                &input,
+                candle_core::quantized::nvfp4_arch_e7::E7Mode::W4A16Reference,
+            )?;
+            return pascal::finish(output, &self.parts, x.dims(), x.dtype());
         }
         #[cfg(feature = "cuda")]
         if x.device().is_cuda() {

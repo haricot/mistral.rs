@@ -92,7 +92,7 @@ pub fn moe_gemm(
 
         let output = unsafe { dev.alloc::<T>(size_m * size_n) }?;
 
-        let stream = dev.cuda_stream().cu_stream() as i64;
+        let stream = input.stream().cu_stream() as i64;
         use core::ffi::c_void;
 
         // Threshold for using GEMV kernel (optimized for small batch sizes)
@@ -108,6 +108,36 @@ pub fn moe_gemm(
         // - Prefill (larger batches): use WMMA-based kernel for tensor core acceleration
         // - Decode with small M (<=8): use GEMV kernel optimized for warp reductions
         // - Decode with larger M: use standard moe_gemm kernel
+        // Pascal lacks WMMA for prefill and large decode batches.
+        #[cfg(not(has_moe_wmma))]
+        if is_prefill || size_m_i32 > GEMV_THRESHOLD {
+            return launch_pascal_simt_moe::<T>(
+                dev,
+                input.slice(input_offset..).device_ptr(input.stream()).0 as *const c_void,
+                weights
+                    .slice(weights_offset..)
+                    .device_ptr(weights.stream())
+                    .0 as *const c_void,
+                sorted_token_ids
+                    .slice(sti_offset..)
+                    .device_ptr(sorted_token_ids.stream())
+                    .0 as *const i32,
+                experts_ids
+                    .slice(ei_offset..)
+                    .device_ptr(experts_ids.stream())
+                    .0 as *const i32,
+                topk_weights_ptr,
+                num_experts_i32,
+                topk_i32,
+                size_m_i32,
+                size_n_i32,
+                size_k_i32,
+                data_type,
+                stream,
+            );
+        }
+
+        #[cfg(has_moe_wmma)]
         let moe_func = if is_prefill {
             crate::cuda::ffi::moe_gemm_wmma
         } else if size_m_i32 <= GEMV_THRESHOLD {
@@ -115,6 +145,8 @@ pub fn moe_gemm(
         } else {
             crate::cuda::ffi::moe_gemm
         };
+        #[cfg(not(has_moe_wmma))]
+        let moe_func = crate::cuda::ffi::moe_gemv;
 
         unsafe {
             moe_func(
@@ -186,4 +218,51 @@ pub fn moe_gemm(
     _: bool,
 ) -> Result<Tensor> {
     candle_core::bail!("moe_gemm is not implemented on this platform!")
+}
+
+#[cfg(feature = "cuda")]
+fn launch_pascal_simt_moe<
+    T: candle_core::cuda_backend::CudaDType + candle_core::cuda_backend::cudarc::driver::DeviceRepr,
+>(
+    dev: &candle_core::cuda_backend::CudaDevice,
+    input: *const core::ffi::c_void,
+    weights: *const core::ffi::c_void,
+    sorted_token_ids: *const i32,
+    expert_ids: *const i32,
+    topk_weights: *const f32,
+    num_experts: i32,
+    topk: i32,
+    size_m: i32,
+    size_n: i32,
+    size_k: i32,
+    dtype: i32,
+    stream: i64,
+) -> Result<Tensor> {
+    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+
+    let expert_offsets = unsafe { dev.alloc::<i32>((num_experts + 1) as usize) }?;
+    let output = unsafe { dev.alloc::<T>((size_m * size_n) as usize) }?;
+    unsafe {
+        crate::cuda::ffi::moe_gemm_hfma2(
+            input,
+            weights,
+            sorted_token_ids,
+            expert_ids,
+            topk_weights,
+            output.device_ptr(output.stream()).0 as *mut core::ffi::c_void,
+            expert_offsets.device_ptr(expert_offsets.stream()).0 as *mut i32,
+            num_experts,
+            topk,
+            size_m,
+            size_n,
+            size_k,
+            dtype,
+            stream,
+        );
+    }
+    let output = candle_core::CudaStorage::wrap_cuda_slice(output, dev.clone());
+    Ok(Tensor::from((
+        candle_core::Storage::Cuda(output),
+        (size_m as usize, size_n as usize),
+    )))
 }
