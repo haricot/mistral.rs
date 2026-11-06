@@ -57,6 +57,7 @@ crossterm = "0.29"
 fuzzy-matcher = "0.3"
 
 [features]
+cuda-legacy-bf16 = ["cuda", "mistralrs-core/cuda-legacy-bf16", "mistralrs-server-core/cuda-legacy-bf16"]
 default = ["code-execution"]
 cuda = ["mistralrs-core/cuda", "mistralrs-server-core/cuda"]
 cutile = ["cuda", "mistralrs-core/cutile"]

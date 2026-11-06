@@ -110,6 +110,7 @@ fn cutile_supported_for_build_cuda(major: usize, minor: usize, compute_cap: usiz
 
 fn main() -> Result<(), String> {
     // Declare expected cfg values for check-cfg lint
+    println!("cargo::rustc-check-cfg=cfg(allow_legacy_bf16)");
     println!("cargo::rustc-check-cfg=cfg(has_marlin_kernels)");
     println!("cargo::rustc-check-cfg=cfg(has_blockwise_fp8_kernels)");
     println!("cargo::rustc-check-cfg=cfg(has_cutlass_fp8_sm90_kernels)");
@@ -154,6 +155,10 @@ fn main() -> Result<(), String> {
             .arg(&header_hash_arg);
 
         let compute_cap = builder.get_compute_cap().unwrap_or(80);
+        if cfg!(feature = "cuda-legacy-bf16") && compute_cap == 61 {
+            builder = builder.arg("-DALLOW_LEGACY_BF16");
+            println!("cargo:rustc-cfg=allow_legacy_bf16");
+        }
         // ======== Handle optional kernel compilation via rustc-cfg flags
         let cc_over_80 = compute_cap >= 80;
         let target = std::env::var("TARGET").unwrap();
@@ -212,6 +217,7 @@ fn main() -> Result<(), String> {
                 "*_wmma.cu",
                 "moe_data.cu",
                 "grouped_mm_*.cu",
+                "grouped_fp8.cu",
             ]
         };
         if cc_over_80 && !cutlass_moe {

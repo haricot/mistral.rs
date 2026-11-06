@@ -158,6 +158,9 @@ fn main() -> Result<()> {
         .arg(&header_hash_arg);
 
     let compute_cap = builder.get_compute_cap().unwrap_or(80);
+    if cfg!(feature = "cuda-legacy-bf16") && compute_cap == 61 {
+        builder = builder.arg("-DALLOW_LEGACY_BF16");
+    }
     // Enable FP8 if compute capability >= 8.0 (Ampere and newer)
     let using_fp8 = if compute_cap >= 80 {
         builder = builder.arg("-DENABLE_FP8");
