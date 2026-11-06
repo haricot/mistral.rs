@@ -1,0 +1,130 @@
+name: Mistral Legacy v2 source preparation
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ci/legacy-v2-preparation]
+    paths:
+      - '.github/legacy-v2/**'
+      - '.github/workflows/mistral-legacy-v2-prepare.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mistral-legacy-v2-preparation
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  compose:
+    name: Compose pinned BF16 FP8 FP4 and independent contributions
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - run: python3 -B -m unittest discover -v -s .github/legacy-v2 -p 'test_*.py'
+      - run: rustup toolchain install 1.99.0 --profile minimal --component rustfmt
+      - name: Generate immutable source candidates and bundle
+        run: python3 .github/legacy-v2/prepare.py compose --repo "$PWD" --output "$RUNNER_TEMP/legacy-v2"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: legacy-v2-preparation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/legacy-v2/plan.json
+            ${{ runner.temp }}/legacy-v2/candidates.bundle
+          if-no-files-found: error
+          retention-days: 30
+
+  cpu:
+    name: Locked CPU CLI check (${{ matrix.target }})
+    needs: compose
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [legacy_v2, contrib/lfm25_dspark, contrib/nemotron_bolt_dflash]
+    env:
+      RUSTFLAGS: '-C target-cpu=x86-64'
+      CARGO_TARGET_DIR: ${{ github.workspace }}/../legacy-v2-target
+      CARGO_INCREMENTAL: '0'
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - run: rustup toolchain install 1.99.0 --profile minimal --component rustfmt
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with:
+          name: legacy-v2-preparation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/legacy-v2
+      - name: Verify bundle and select the exact candidate
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          cp -a .github/legacy-v2 "$RUNNER_TEMP/legacy-v2-tools"
+          python3 "$RUNNER_TEMP/legacy-v2-tools/prepare.py" checkout --repo "$PWD" --output "$RUNNER_TEMP/legacy-v2" --target "$TARGET"
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ env.CARGO_TARGET_DIR }}
+          key: legacy-v2-cpu-${{ runner.os }}-rust1.99-portable-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+      - name: Check the real CLI and CPU dependency graph without GPU or models
+        run: cargo +1.99.0 check --locked -p mistralrs-cli --no-default-features --features code-execution
+      - name: Bind successful CPU evidence to this candidate and attempt
+        env:
+          TARGET: ${{ matrix.target }}
+        run: python3 "$RUNNER_TEMP/legacy-v2-tools/prepare.py" attest --repo "$PWD" --output "$RUNNER_TEMP/legacy-v2" --target "$TARGET" --reports "$RUNNER_TEMP/cpu-reports"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: legacy-v2-cpu-${{ strategy.job-index }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cpu-reports/*.json
+          if-no-files-found: error
+          retention-days: 30
+
+  publish_sources:
+    name: Atomically update only legacy_v2 and contrib source branches
+    needs: [compose, cpu]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with:
+          name: legacy-v2-preparation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/legacy-v2
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with:
+          pattern: legacy-v2-cpu-*-${{ github.run_id }}-${{ github.run_attempt }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/cpu-reports
+      - name: Verify all evidence and source leases before one atomic push
+        run: python3 .github/legacy-v2/prepare.py publish --repo "$PWD" --output "$RUNNER_TEMP/legacy-v2" --reports "$RUNNER_TEMP/cpu-reports"
+      - name: Record preparation scope
+        run: |
+          python3 - "$RUNNER_TEMP/legacy-v2/published.json" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json,sys
+          report=json.load(open(sys.argv[1]))
+          print('CPU source preparation complete. Existing Legacy, Extended and standalone outputs are unchanged.\n')
+          for name,sha in report['branches'].items():
+              print(f'- `{name}`: `{sha}`')
+          print('\nCUDA compilation, physical SM61 and full model evidence have not been supplied by this CPU-only workflow.')
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: legacy-v2-source-publication-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/legacy-v2/published.json
+          if-no-files-found: error
+          retention-days: 30

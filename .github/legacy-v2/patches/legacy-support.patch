@@ -1,0 +1,3106 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 0955b5e7da71b013485e71a44df643e7a274eaf4..c78baef90372311de5acd0e0b6fe17d6c3cb7732 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -141,7 +141,7 @@ version = "1.1.5"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
+ dependencies = [
+- "windows-sys 0.61.2",
++ "windows-sys 0.60.2",
+ ]
+ 
+ [[package]]
+@@ -152,7 +152,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
+ dependencies = [
+  "anstyle",
+  "once_cell_polyfill",
+- "windows-sys 0.61.2",
++ "windows-sys 0.60.2",
+ ]
+ 
+ [[package]]
+@@ -691,9 +691,8 @@ checksum = "ade8366b8bd5ba243f0a58f036cc0ca8a2f069cff1a2351ef1cac6b083e16fc0"
+ 
+ [[package]]
+ name = "candle-core"
+-version = "0.11.1"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "d11c8be87cfbaef9ebb62fb3f850d1fc8e00cc1d11d393fdbe55a4d5c2cdb325"
++version = "0.11.0"
++source = "git+https://github.com/haricot/candle.git?rev=bfce966ad4d61a48801eb6af4db8b8eabebc01a8#bfce966ad4d61a48801eb6af4db8b8eabebc01a8"
+ dependencies = [
+  "accelerate-src",
+  "byteorder",
+@@ -720,14 +719,13 @@ dependencies = [
+  "tokenizers 0.23.2",
+  "yoke",
+  "zerocopy",
+- "zip",
++ "zip 9.0.3",
+ ]
+ 
+ [[package]]
+ name = "candle-flash-attn-v3"
+-version = "0.11.1"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "71644f2fd1a039568e4eeaa99251b2a19df476cfaaa1311074c4d1a8b1fd23af"
++version = "0.11.0"
++source = "git+https://github.com/haricot/candle.git?rev=bfce966ad4d61a48801eb6af4db8b8eabebc01a8#bfce966ad4d61a48801eb6af4db8b8eabebc01a8"
+ dependencies = [
+  "anyhow",
+  "candle-core",
+@@ -739,18 +737,16 @@ dependencies = [
+ 
+ [[package]]
+ name = "candle-kernels"
+-version = "0.11.1"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "8dc057aec95c3b1a0e595227cd039c1436da596f79ccc9e025ba17d070315851"
++version = "0.11.0"
++source = "git+https://github.com/haricot/candle.git?rev=bfce966ad4d61a48801eb6af4db8b8eabebc01a8#bfce966ad4d61a48801eb6af4db8b8eabebc01a8"
+ dependencies = [
+  "cudaforge",
+ ]
+ 
+ [[package]]
+ name = "candle-metal-kernels"
+-version = "0.11.1"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "6e9fdf9f3fb13fb677fec22802f85515e4bdf9a2b8fa153efb5454eced755932"
++version = "0.11.0"
++source = "git+https://github.com/haricot/candle.git?rev=bfce966ad4d61a48801eb6af4db8b8eabebc01a8#bfce966ad4d61a48801eb6af4db8b8eabebc01a8"
+ dependencies = [
+  "block2",
+  "half",
+@@ -764,9 +760,8 @@ dependencies = [
+ 
+ [[package]]
+ name = "candle-nn"
+-version = "0.11.1"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "437fabe77547c2447c7bdf3cc946e19db29a2832440176b419f77c80b0a9a05e"
++version = "0.11.0"
++source = "git+https://github.com/haricot/candle.git?rev=bfce966ad4d61a48801eb6af4db8b8eabebc01a8#bfce966ad4d61a48801eb6af4db8b8eabebc01a8"
+ dependencies = [
+  "accelerate-src",
+  "candle-core",
+@@ -976,7 +971,7 @@ version = "3.1.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
+ dependencies = [
+- "windows-sys 0.61.2",
++ "windows-sys 0.59.0",
+ ]
+ 
+ [[package]]
+@@ -1847,7 +1842,7 @@ dependencies = [
+  "libc",
+  "option-ext",
+  "redox_users 0.5.2",
+- "windows-sys 0.61.2",
++ "windows-sys 0.59.0",
+ ]
+ 
+ [[package]]
+@@ -2047,7 +2042,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
+ dependencies = [
+  "libc",
+- "windows-sys 0.61.2",
++ "windows-sys 0.59.0",
+ ]
+ 
+ [[package]]
+@@ -2528,8 +2523,8 @@ dependencies = [
+  "libc",
+  "log",
+  "rustversion",
+- "windows-link 0.2.1",
+- "windows-result 0.4.1",
++ "windows-link 0.1.3",
++ "windows-result 0.3.4",
+ ]
+ 
+ [[package]]
+@@ -3004,7 +2999,7 @@ dependencies = [
+  "js-sys",
+  "log",
+  "wasm-bindgen",
+- "windows-core 0.62.2",
++ "windows-core 0.61.2",
+ ]
+ 
+ [[package]]
+@@ -4308,7 +4303,7 @@ dependencies = [
+  "utoipa",
+  "utoipa-swagger-ui",
+  "uuid 1.19.0",
+- "zip",
++ "zip 9.1.3",
+ ]
+ 
+ [[package]]
+@@ -4489,7 +4484,7 @@ version = "0.50.3"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
+ dependencies = [
+- "windows-sys 0.61.2",
++ "windows-sys 0.59.0",
+ ]
+ 
+ [[package]]
+@@ -5950,7 +5945,7 @@ dependencies = [
+  "errno",
+  "libc",
+  "linux-raw-sys 0.11.0",
+- "windows-sys 0.61.2",
++ "windows-sys 0.59.0",
+ ]
+ 
+ [[package]]
+@@ -6009,7 +6004,7 @@ dependencies = [
+  "security-framework",
+  "security-framework-sys",
+  "webpki-root-certs",
+- "windows-sys 0.61.2",
++ "windows-sys 0.59.0",
+ ]
+ 
+ [[package]]
+@@ -6590,7 +6585,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
+ dependencies = [
+  "libc",
+- "windows-sys 0.61.2",
++ "windows-sys 0.60.2",
+ ]
+ 
+ [[package]]
+@@ -6644,7 +6639,7 @@ dependencies = [
+  "cfg-if",
+  "libc",
+  "psm",
+- "windows-sys 0.61.2",
++ "windows-sys 0.60.2",
+ ]
+ 
+ [[package]]
+@@ -7047,7 +7042,7 @@ dependencies = [
+  "getrandom 0.4.3",
+  "once_cell",
+  "rustix 1.1.3",
+- "windows-sys 0.61.2",
++ "windows-sys 0.59.0",
+ ]
+ 
+ [[package]]
+@@ -7078,7 +7073,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
+ dependencies = [
+  "rustix 1.1.3",
+- "windows-sys 0.61.2",
++ "windows-sys 0.59.0",
+ ]
+ 
+ [[package]]
+@@ -7695,6 +7690,12 @@ version = "2.1.5"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "86a801b3cea342a06d468c8710662aa29e5e05e4f5c0d62f00bbb7f2ad7941c2"
+ 
++[[package]]
++name = "typed-path"
++version = "0.12.4"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "54ec2755506471f54baf5e4bb5499d8e510cc1caf271270e778a736bd2d7336c"
++
+ [[package]]
+ name = "typed-path"
+ version = "0.13.0"
+@@ -7869,7 +7870,7 @@ dependencies = [
+  "url",
+  "utoipa",
+  "utoipa-swagger-ui-vendored",
+- "zip",
++ "zip 9.0.3",
+ ]
+ 
+ [[package]]
+@@ -8222,7 +8223,7 @@ version = "0.1.11"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
+ dependencies = [
+- "windows-sys 0.61.2",
++ "windows-sys 0.59.0",
+ ]
+ 
+ [[package]]
+@@ -9031,9 +9032,23 @@ dependencies = [
+ 
+ [[package]]
+ name = "zip"
+-version = "9.2.1"
++version = "9.0.3"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "848dad21639597378c3be94c59fd4de683f0f6d8a5387575896e1245737d4f37"
++checksum = "c2d98561b612a84ae525331a7a094429ef8a5772514ed507ff6db5f54badc971"
++dependencies = [
++ "crc32fast",
++ "flate2",
++ "indexmap 2.13.0",
++ "memchr",
++ "nix 0.31.3",
++ "typed-path 0.12.4",
++ "zopfli",
++]
++
++[[package]]
++name = "zip"
++version = "9.1.3"
++source = "git+https://github.com/zip-rs/zip2.git?rev=af2ed2a3e12af1fdd733b1886b3e9067bf510be5#af2ed2a3e12af1fdd733b1886b3e9067bf510be5"
+ dependencies = [
+  "crc32fast",
+  "flate2",
+@@ -9041,7 +9056,7 @@ dependencies = [
+  "indexmap 2.13.0",
+  "memchr",
+  "nix 0.31.3",
+- "typed-path",
++ "typed-path 0.13.0",
+  "windows-sys 0.61.2",
+  "zopfli",
+ ]
+diff --git a/Cargo.toml b/Cargo.toml
+index 2963d228fa18e51980d57494bcc1c107c6e7573e..20c08d41a90f822d511d8cc8b75c5dca12f80b08 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -48,10 +48,10 @@ license = "MIT"
+ rust-version = "1.95"
+ 
+ [workspace.dependencies]
+-candle-core = { version = "0.11.1" }
+-candle-nn = { version = "0.11.1" }
+-candle-flash-attn-v3 = { version = "0.11.1" }
+-candle-metal-kernels = { version = "0.11.1" }
++candle-core = { version = "0.11.0", git = "https://github.com/haricot/candle.git", rev = "bfce966ad4d61a48801eb6af4db8b8eabebc01a8" }
++candle-nn = { version = "0.11.0", git = "https://github.com/haricot/candle.git", rev = "bfce966ad4d61a48801eb6af4db8b8eabebc01a8" }
++candle-flash-attn-v3 = { version = "0.11.0", git = "https://github.com/haricot/candle.git", rev = "bfce966ad4d61a48801eb6af4db8b8eabebc01a8" }
++candle-metal-kernels = { version = "0.11.0", git = "https://github.com/haricot/candle.git", rev = "bfce966ad4d61a48801eb6af4db8b8eabebc01a8" }
+ # candle-core = { path = "../candle/candle-core", version = "0.11.0" }
+ # candle-nn = { path = "../candle/candle-nn", version = "0.11.0" }
+ # candle-flash-attn-v3 = { path = "../candle/candle-flash-attn-v3", version = "0.11.0" }
+@@ -167,7 +167,7 @@ interprocess = "2.2.3"
+ urlencoding = "2.1.3"
+ scraper = "0.25.0"
+ html2text = "0.16.6"
+-zip = { version = "9.1.3", default-features = false, features = ["deflate"] }
++zip = { version = "9.1.3", default-features = false, features = ["deflate"], git = "https://github.com/zip-rs/zip2.git", rev = "af2ed2a3e12af1fdd733b1886b3e9067bf510be5" }
+ ordered-float = "5.1.0"
+ hashbrown = "0.16.1"
+ parking_lot = "0.12.5"
+@@ -235,3 +235,13 @@ debug = true
+ [profile.dev]
+ debug = true
+ opt-level = 3
++
++[profile.campaign]
++inherits = "dev"
++opt-level = 1
++debug = 0
++incremental = false
++codegen-units = 8
++
++[profile.campaign.package.mistralrs-core]
++opt-level = 0
+diff --git a/mistralrs-cli/Cargo.toml b/mistralrs-cli/Cargo.toml
+index a50470a3a97cea16fea35c4d0ef978b033d26302..7521997caecbdbfce17f8f205d12dba15573ea33 100644
+--- a/mistralrs-cli/Cargo.toml
++++ b/mistralrs-cli/Cargo.toml
+@@ -57,6 +57,9 @@ crossterm = "0.29"
+ fuzzy-matcher = "0.3"
+ 
+ [features]
++cuda-legacy-bf16 = ["cuda", "mistralrs-core/cuda-legacy-bf16", "mistralrs-server-core/cuda-legacy-bf16"]
++cuda-legacy-fp8 = ["cuda", "mistralrs-core/cuda-legacy-fp8", "mistralrs-server-core/cuda-legacy-fp8"]
++cuda-legacy-fp4 = ["cuda", "mistralrs-core/cuda-legacy-fp4", "mistralrs-server-core/cuda-legacy-fp4"]
+ default = ["code-execution"]
+ cuda = ["mistralrs-core/cuda", "mistralrs-server-core/cuda"]
+ cutile = ["cuda", "mistralrs-core/cutile"]
+diff --git a/mistralrs-cli/src/args/mod.rs b/mistralrs-cli/src/args/mod.rs
+index 9af201e2f5436f43144da272c952c54149b99a00..fb635a160a24a03844d01f9ecbad83af09080d7f 100644
+--- a/mistralrs-cli/src/args/mod.rs
++++ b/mistralrs-cli/src/args/mod.rs
+@@ -1737,3 +1737,16 @@ mod tests {
+         );
+     }
+ }
++
++#[cfg(test)]
++mod campaign_cpu_flag_tests {
++    use clap::Parser;
++
++    #[test]
++    fn campaign_cpu_flag_is_available() {
++        assert!(
++            super::Cli::try_parse_from(["mistralrs", "run", "-m", "local-fixture", "--cpu",])
++                .is_ok()
++        );
++    }
++}
+diff --git a/mistralrs-core/Cargo.toml b/mistralrs-core/Cargo.toml
+index 76408de89cc89b2122dafa565588973a6d31cbe4..ca283a3c130f38f741348c1507092ab118d08248 100644
+--- a/mistralrs-core/Cargo.toml
++++ b/mistralrs-core/Cargo.toml
+@@ -122,6 +122,9 @@ dispatch2 = { workspace = true, optional = true }
+ mistralrs-metal-compile = { workspace = true, optional = true, features = ["metal"] }
+ 
+ [features]
++cuda-legacy-bf16 = ["cuda", "candle-core/cuda-legacy-bf16", "mistralrs-quant/cuda-legacy-bf16", "mistralrs-paged-attn/cuda-legacy-bf16"]
++cuda-legacy-fp8 = ["cuda", "candle-core/cuda-legacy-fp8", "mistralrs-quant/cuda-legacy-fp8", "mistralrs-paged-attn/cuda-legacy-fp8"]
++cuda-legacy-fp4 = ["cuda", "candle-core/cuda-legacy-fp4", "mistralrs-quant/cuda-legacy-fp4", "mistralrs-paged-attn/cuda-legacy-fp4"]
+ pyo3_macros = ["pyo3", "mistralrs-mcp/pyo3_macros"]
+ cuda = [
+     "candle-core/cuda",
+diff --git a/mistralrs-core/build.rs b/mistralrs-core/build.rs
+index b41e3ba891c1740ea8f49ac1f3870b98686fc5f1..bebe57792203a47e5c688d4cab0d62ee67dcb85f 100644
+--- a/mistralrs-core/build.rs
++++ b/mistralrs-core/build.rs
+@@ -86,6 +86,7 @@ fn main() {
+     }
+ 
+     println!("cargo::rustc-check-cfg=cfg(has_flashinfer_gdn_sm90_kernel)");
++    println!("cargo::rustc-check-cfg=cfg(has_moe_wmma)");
+     println!("cargo::rustc-check-cfg=cfg(has_gdn_fp8_producer)");
+ 
+     #[cfg(feature = "cudnn")]
+@@ -99,6 +100,7 @@ fn main() {
+             println!("cargo:rustc-cfg=has_gdn_fp8_producer");
+         }
+         println!("cargo:rerun-if-changed=build.rs");
++        println!("cargo:rerun-if-env-changed=ALLOW_LEGACY");
+         println!("cargo:rerun-if-changed=src/cuda");
+         println!("cargo:rerun-if-env-changed=CUDA_NVCC_FLAGS");
+         println!("cargo:rerun-if-env-changed=NVCC");
+@@ -132,11 +134,31 @@ fn main() {
+ 
+         let compute_cap = builder.get_compute_cap().unwrap_or(80);
+ 
++        if compute_cap >= 70 {
++            println!("cargo:rustc-cfg=has_moe_wmma");
++        } else {
++            // Generic BF16 GEMM uses unsupported native BF16 half2 on Pascal.
++            // Pascal goes through moe_gemm_hfma2.cu instead. The GEMV kernel
++            // remains available for small decode batches.
++            builder = builder.exclude(&["moe_gemm_wmma.cu", "moe_gemm.cu"]);
++        }
++
++        let allow_legacy = std::env::var("ALLOW_LEGACY").unwrap_or_default();
++        let allow_legacy_bf16 = cfg!(feature = "cuda-legacy-bf16")
++            || allow_legacy == "all"
++            || allow_legacy
++                .split(',')
++                .map(str::trim)
++                .any(|value| value == "bf16");
++
+         // Check if CUDA_COMPUTE_CAP < 80 and disable bf16 kernels if so.
+         // bf16 WMMA operations and certain bf16 intrinsics are only available on sm_80+.
+-        if compute_cap < 80 {
++        if compute_cap < 80 && !allow_legacy_bf16 {
+             builder = builder.arg("-DNO_BF16_KERNEL");
+         }
++        if allow_legacy_bf16 {
++            builder = builder.arg("-DALLOW_LEGACY_BF16");
++        }
+ 
+         // https://github.com/EricLBuehler/mistral.rs/issues/286
+         if let Some(cuda_nvcc_flags_env) = CUDA_NVCC_FLAGS {
+diff --git a/mistralrs-core/src/cuda/ffi.rs b/mistralrs-core/src/cuda/ffi.rs
+index 2c3eb384b17847ad1fdc58a3aa6628546b12faa6..9ce284800e490ed2fd40c220d50385bfbd8a766b 100644
+--- a/mistralrs-core/src/cuda/ffi.rs
++++ b/mistralrs-core/src/cuda/ffi.rs
+@@ -570,6 +570,25 @@ extern "C" {
+         stream: i64,
+     );
+ 
++    // Pascal grouped SIMT fallback; the implementation is in moe_gemm_hfma2.cu.
++    #[link_name = "mistralrs_moe_gemm_hfma2"]
++    pub fn moe_gemm_hfma2(
++        input: *const c_void,
++        weights: *const c_void,
++        sorted_token_ids: *const i32,
++        expert_ids: *const i32,
++        topk_weights: *const f32,
++        output: *mut c_void,
++        expert_offsets: *mut i32,
++        num_experts: i32,
++        topk: i32,
++        size_m: i32,
++        size_n: i32,
++        size_k: i32,
++        dtype: i32,
++        stream: i64,
++    );
++
+     // MoE GEMV for decode phase (optimized for small batch sizes M <= 8)
+     pub fn moe_gemv(
+         input: *const c_void,   // input [size_m or size_m / topk, size_k]
+diff --git a/mistralrs-core/src/cuda/moe.rs b/mistralrs-core/src/cuda/moe.rs
+index ac79426ff39fe94d062a78fb1d3d92ec4b644778..754c553aa931275b95f58ede15732f93f834853f 100644
+--- a/mistralrs-core/src/cuda/moe.rs
++++ b/mistralrs-core/src/cuda/moe.rs
+@@ -92,7 +92,7 @@ pub fn moe_gemm(
+ 
+         let output = unsafe { dev.alloc::<T>(size_m * size_n) }?;
+ 
+-        let stream = dev.cuda_stream().cu_stream() as i64;
++        let stream = input.stream().cu_stream() as i64;
+         use core::ffi::c_void;
+ 
+         // Threshold for using GEMV kernel (optimized for small batch sizes)
+@@ -108,6 +108,37 @@ pub fn moe_gemm(
+         // - Prefill (larger batches): use WMMA-based kernel for tensor core acceleration
+         // - Decode with small M (<=8): use GEMV kernel optimized for warp reductions
+         // - Decode with larger M: use standard moe_gemm kernel
++        // Pascal lacks WMMA. Both prefill and large decode require the SIMT
++        // fallback, including BF16 multiplication in float accumulators.
++        #[cfg(not(has_moe_wmma))]
++        if is_prefill || size_m_i32 > GEMV_THRESHOLD {
++            return launch_pascal_simt_moe::<T>(
++                dev,
++                input.slice(input_offset..).device_ptr(input.stream()).0 as *const c_void,
++                weights
++                    .slice(weights_offset..)
++                    .device_ptr(weights.stream())
++                    .0 as *const c_void,
++                sorted_token_ids
++                    .slice(sti_offset..)
++                    .device_ptr(sorted_token_ids.stream())
++                    .0 as *const i32,
++                experts_ids
++                    .slice(ei_offset..)
++                    .device_ptr(experts_ids.stream())
++                    .0 as *const i32,
++                topk_weights_ptr,
++                num_experts_i32,
++                topk_i32,
++                size_m_i32,
++                size_n_i32,
++                size_k_i32,
++                data_type,
++                stream,
++            );
++        }
++
++        #[cfg(has_moe_wmma)]
+         let moe_func = if is_prefill {
+             crate::cuda::ffi::moe_gemm_wmma
+         } else if size_m_i32 <= GEMV_THRESHOLD {
+@@ -115,6 +146,8 @@ pub fn moe_gemm(
+         } else {
+             crate::cuda::ffi::moe_gemm
+         };
++        #[cfg(not(has_moe_wmma))]
++        let moe_func = crate::cuda::ffi::moe_gemv;
+ 
+         unsafe {
+             moe_func(
+@@ -187,3 +220,78 @@ pub fn moe_gemm(
+ ) -> Result<Tensor> {
+     candle_core::bail!("moe_gemm is not implemented on this platform!")
+ }
++
++#[cfg(feature = "cuda")]
++fn launch_pascal_simt_moe<
++    T: candle_core::cuda_backend::CudaDType + candle_core::cuda_backend::cudarc::driver::DeviceRepr,
++>(
++    dev: &candle_core::cuda_backend::CudaDevice,
++    input: *const core::ffi::c_void,
++    weights: *const core::ffi::c_void,
++    sorted_token_ids: *const i32,
++    expert_ids: *const i32,
++    topk_weights: *const f32,
++    num_experts: i32,
++    topk: i32,
++    size_m: i32,
++    size_n: i32,
++    size_k: i32,
++    dtype: i32,
++    stream: i64,
++) -> Result<Tensor> {
++    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
++
++    let expert_offsets = unsafe { dev.alloc::<i32>((num_experts + 1) as usize) }?;
++    let output = unsafe { dev.alloc::<T>((size_m * size_n) as usize) }?;
++    unsafe {
++        crate::cuda::ffi::moe_gemm_hfma2(
++            input,
++            weights,
++            sorted_token_ids,
++            expert_ids,
++            topk_weights,
++            output.device_ptr(output.stream()).0 as *mut core::ffi::c_void,
++            expert_offsets.device_ptr(expert_offsets.stream()).0 as *mut i32,
++            num_experts,
++            topk,
++            size_m,
++            size_n,
++            size_k,
++            dtype,
++            stream,
++        );
++    }
++    let output = candle_core::CudaStorage::wrap_cuda_slice(output, dev.clone());
++    Ok(Tensor::from((
++        candle_core::Storage::Cuda(output),
++        (size_m as usize, size_n as usize),
++    )))
++}
++
++#[cfg(all(test, feature = "cuda"))]
++mod pascal_moe_tests {
++    use super::*;
++    use candle_core::{DType, Device};
++
++    #[test]
++    fn legacy_sm61_moe_f16_bf16_prefill() -> Result<()> {
++        let device = Device::new_cuda(0)?;
++        for dtype in [DType::F16, DType::BF16] {
++            let input = Tensor::ones((1, 16), dtype, &device)?;
++            let weights = Tensor::ones((1, 4, 16), dtype, &device)?;
++            let sorted = Tensor::new(&[0u32], &device)?;
++            let experts = Tensor::new(&[0u32], &device)?;
++            let output = moe_gemm(&input, &weights, &None, &sorted, &experts, 1, true)?;
++            device.synchronize()?;
++            let output = output
++                .to_dtype(DType::F32)?
++                .to_device(&Device::Cpu)?
++                .to_vec2::<f32>()?;
++            assert_eq!(output.len(), 1);
++            for val in &output[0] {
++                assert!((*val - 16.0).abs() < 0.5, "{dtype:?}: {val}");
++            }
++        }
++        Ok(())
++    }
++}
+diff --git a/mistralrs-core/src/cuda/moe_gemm_hfma2.cu b/mistralrs-core/src/cuda/moe_gemm_hfma2.cu
+new file mode 100644
+index 0000000000000000000000000000000000000000..4185ee1b061b680ef1f35a0b7546b466aa9cabd9
+--- /dev/null
++++ b/mistralrs-core/src/cuda/moe_gemm_hfma2.cu
+@@ -0,0 +1,240 @@
++/**
++ * @brief CUDA kernel for Mixture-of-Experts (MoE) GEMM using half2/bf162
++ * vectorized arithmetic as a fallback for WMMA.
++ *
++ * Adapted from candle-kernels for mistral.rs
++ */
++
++#include "moe_utils.h"
++#include <cstdint>
++#include <cstdio>
++#include <type_traits>
++
++namespace vllm_rs {
++
++#define CEILDIV(x, y) (((x) + (y) - 1) / (y))
++
++constexpr int M_BLK = 32;
++constexpr int N_BLK = 32;
++constexpr int K_BLK = 16;
++constexpr int BLOCK_THREADS = 128;
++constexpr int THREADS_PER_GROUP = 16;
++
++template <typename T2>
++static __device__ __forceinline__ float hfma2_dot2(T2 a, T2 b) {
++#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
++  if constexpr (std::is_same_v<T2, nv_bfloat162>) {
++    nv_bfloat162 res = __hmul2(a, b);
++    return __bfloat162float(res.x) + __bfloat162float(res.y);
++  }
++#endif
++#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 530
++  if constexpr (std::is_same_v<T2, half2>) {
++    half2 res = __hmul2(a, b);
++    return __half2float(res.x) + __half2float(res.y);
++  }
++#endif
++
++  if constexpr (std::is_same_v<T2, nv_bfloat162>) {
++    return __bfloat162float(a.x) * __bfloat162float(b.x) +
++           __bfloat162float(a.y) * __bfloat162float(b.y);
++  } else {
++    return vllm::to_float(a.x) * vllm::to_float(b.x) +
++           vllm::to_float(a.y) * vllm::to_float(b.y);
++  }
++}
++
++template <typename T, typename T2>
++__global__ void moe_gemm_hfma2_kernel(
++    const T *__restrict__ input,                  // [num_tokens, size_k]
++    const T *__restrict__ weights,                // [num_experts, size_n, size_k]
++    const int32_t *__restrict__ sorted_token_ids, // [size_m]
++    const int32_t *__restrict__ expert_offsets,   // [num_experts + 1]
++    const float *__restrict__ topk_weights,       // [size_m]
++    T *__restrict__ output,                       // [size_m, size_n]
++    const int num_experts, const int topk, const int32_t size_m,
++    const int32_t size_n, const int32_t size_k) {
++  const int expert_id = blockIdx.x;
++  const int n_tile_idx = blockIdx.y;
++  if (expert_id >= num_experts)
++    return;
++
++  const int segment_start = expert_offsets[expert_id];
++  const int segment_end = expert_offsets[expert_id + 1];
++  const int num_rows_in_segment = segment_end - segment_start;
++  if (num_rows_in_segment <= 0)
++    return;
++
++  const int n_base = n_tile_idx * N_BLK;
++  if (n_base >= size_n)
++    return;
++
++  const T *expert_w =
++      weights + (size_t)expert_id * (size_t)size_n * (size_t)size_k;
++
++  constexpr int K_PAD = K_BLK + 2;
++  extern __shared__ uint8_t smem_bytes[];
++  T *A_sh = reinterpret_cast<T *>(smem_bytes);
++  T *B_sh = reinterpret_cast<T *>(A_sh + M_BLK * K_PAD);
++
++  const int tid = threadIdx.x;
++
++  for (int m_base = 0; m_base < num_rows_in_segment; m_base += M_BLK) {
++    float acc[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
++
++    for (int k_base = 0; k_base < size_k; k_base += K_BLK) {
++      constexpr int A_ELEMS = M_BLK * K_BLK;
++      for (int i = tid; i < A_ELEMS / 2; i += BLOCK_THREADS) {
++        int idx = i * 2;
++        int m_local = idx / K_BLK;
++        int k_local = idx % K_BLK;
++        int m_seg = m_base + m_local;
++        int k_global = k_base + k_local;
++
++        T *dest = &A_sh[m_local * K_PAD + k_local];
++        T2 val;
++
++        if (m_seg < num_rows_in_segment && (k_global + 1) < size_k) {
++          int token_pair_index = segment_start + m_seg;
++          int token_index = sorted_token_ids[token_pair_index];
++          int input_index = topk_weights ? token_index : (token_index / topk);
++          val = *reinterpret_cast<const T2 *>(
++              &input[(size_t)input_index * size_k + k_global]);
++        } else if (m_seg < num_rows_in_segment && k_global < size_k) {
++          reinterpret_cast<T *>(&val)[0] =
++              input[(size_t)(topk_weights ? sorted_token_ids[segment_start + m_seg]
++                                          : (sorted_token_ids[segment_start + m_seg] / topk)) *
++                        size_k +
++                    k_global];
++          reinterpret_cast<T *>(&val)[1] = T(0.0f);
++        } else {
++          val = T2{T(0.0f), T(0.0f)};
++        }
++        *reinterpret_cast<T2 *>(dest) = val;
++      }
++
++      constexpr int B_ELEMS = N_BLK * K_BLK;
++      for (int i = tid; i < B_ELEMS / 2; i += BLOCK_THREADS) {
++        int idx = i * 2;
++        int n_local = idx / K_BLK;
++        int k_local = idx % K_BLK;
++        int n_global = n_base + n_local;
++        int k_global = k_base + k_local;
++
++        T *dest = &B_sh[n_local * K_PAD + k_local];
++        T2 val;
++
++        if (n_global < size_n && (k_global + 1) < size_k) {
++          val = *reinterpret_cast<const T2 *>(
++              &expert_w[(size_t)n_global * size_k + k_global]);
++        } else if (n_global < size_n && k_global < size_k) {
++          reinterpret_cast<T *>(&val)[0] =
++              expert_w[(size_t)n_global * size_k + k_global];
++          reinterpret_cast<T *>(&val)[1] = T(0.0f);
++        } else {
++          val = T2{T(0.0f), T(0.0f)};
++        }
++        *reinterpret_cast<T2 *>(dest) = val;
++      }
++      __syncthreads();
++
++      const int group_id = tid / THREADS_PER_GROUP;
++      const int lane_id = tid % THREADS_PER_GROUP;
++      const int m_start = group_id * 4;
++      const int n_start = lane_id * 2;
++
++      const T2 *A2_sh = reinterpret_cast<const T2 *>(A_sh);
++      const T2 *B2_sh = reinterpret_cast<const T2 *>(B_sh);
++
++      for (int k2 = 0; k2 < K_BLK / 2; ++k2) {
++        T2 a2[4];
++        for (int r = 0; r < 4; ++r) {
++          a2[r] = A2_sh[(m_start + r) * (K_PAD / 2) + k2];
++        }
++
++        T2 b2[2];
++        for (int c = 0; c < 2; ++c) {
++          b2[c] = B2_sh[(n_start + c) * (K_PAD / 2) + k2];
++        }
++
++        for (int r = 0; r < 4; ++r) {
++          for (int c = 0; c < 2; ++c) {
++            acc[r * 2 + c] += hfma2_dot2(a2[r], b2[c]);
++          }
++        }
++      }
++      __syncthreads();
++    }
++
++    const int group_id = tid / THREADS_PER_GROUP;
++    const int lane_id = tid % THREADS_PER_GROUP;
++    const int m_start = group_id * 4;
++    const int n_start = lane_id * 2;
++
++    for (int r = 0; r < 4; ++r) {
++      int m_seg = m_base + m_start + r;
++      if (m_seg >= num_rows_in_segment)
++        continue;
++
++      int token_pair_index = segment_start + m_seg;
++      int token_index = sorted_token_ids[token_pair_index];
++
++      for (int c = 0; c < 2; ++c) {
++        int n_global = n_base + n_start + c;
++        if (n_global >= size_n)
++          continue;
++
++        float val = acc[r * 2 + c];
++        if (topk_weights) {
++          val *= topk_weights[token_index];
++        }
++        if constexpr (std::is_same_v<T, half>) {
++          // Convert the float value, never the raw 16-bit encoding as an integer.
++          output[(size_t)token_index * size_n + n_global] = __float2half_rn(val);
++        } else {
++          vllm::from_float(output[(size_t)token_index * size_n + n_global], val);
++        }
++      }
++    }
++  }
++}
++
++} // namespace vllm_rs
++
++extern "C" void mistralrs_moe_gemm_hfma2(
++    const void *input, const void *weights, const int32_t *sorted_token_ids,
++    const int32_t *expert_ids, const float *topk_weights, void *output,
++    int32_t *expert_offsets, int num_experts, int topk, int size_m, int size_n,
++    int size_k, int data_type, cudaStream_t stream) {
++  using namespace vllm_rs;
++
++  calculate_expert_offsets(expert_ids, size_m, expert_offsets, num_experts,
++                           stream);
++
++  int grid_n = CEILDIV(size_n, N_BLK);
++  dim3 grid(num_experts, grid_n, 1);
++  dim3 block(BLOCK_THREADS, 1, 1);
++
++  constexpr int K_PAD = K_BLK + 2;
++  size_t smem_bytes =
++      (M_BLK * K_PAD + N_BLK * K_PAD) * 2; // sizeof(half) or sizeof(bfloat16)
++
++  if (data_type == 0) {
++    moe_gemm_hfma2_kernel<half, half2><<<grid, block, smem_bytes, stream>>>(
++        reinterpret_cast<const half *>(input),
++        reinterpret_cast<const half *>(weights), sorted_token_ids,
++        expert_offsets, topk_weights, reinterpret_cast<half *>(output),
++        num_experts, topk, size_m, size_n, size_k);
++  }
++#ifndef NO_BF16_KERNEL
++  else if (data_type == 1) {
++    moe_gemm_hfma2_kernel<nv_bfloat16, nv_bfloat162>
++        <<<grid, block, smem_bytes, stream>>>(
++            reinterpret_cast<const nv_bfloat16 *>(input),
++            reinterpret_cast<const nv_bfloat16 *>(weights), sorted_token_ids,
++            expert_offsets, topk_weights,
++            reinterpret_cast<nv_bfloat16 *>(output), num_experts, topk, size_m,
++            size_n, size_k);
++  }
++#endif
++}
+diff --git a/mistralrs-core/src/cuda/moe_utils.h b/mistralrs-core/src/cuda/moe_utils.h
+index 16d85cd45d87d8a629ff78cc0738df4723e7454e..ad1d9ceedaa742eb7e2c099e89333c20845a0449 100644
+--- a/mistralrs-core/src/cuda/moe_utils.h
++++ b/mistralrs-core/src/cuda/moe_utils.h
+@@ -51,6 +51,10 @@ inline __device__ float to_float(__nv_bfloat16 u) {
+   return __bfloat162float(u);
+ }
+ 
++inline __device__ float to_float(float f) {
++  return f;
++}
++
+ } // namespace vllm
+ 
+ #define ASSERT_THROW(cond, msg)                                                \
+diff --git a/mistralrs-core/src/paged_attention/cache_engine.rs b/mistralrs-core/src/paged_attention/cache_engine.rs
+index 6ea6b65eda83306863d075f342ed77eb84910425..ba1dd716c1b90751069f939a52bad734ed1dad91 100644
+--- a/mistralrs-core/src/paged_attention/cache_engine.rs
++++ b/mistralrs-core/src/paged_attention/cache_engine.rs
+@@ -10,6 +10,10 @@ use super::config::{KvCacheLayout, ModelConfigLike};
+ #[cfg(all(feature = "cuda", target_family = "unix"))]
+ use crate::flashinfer::{register_fa3_prefill_caches, Fa3PrefillWorkspaceRegistration};
+ 
++#[cfg(any(test, all(feature = "cuda", target_family = "unix")))]
++#[path = "fp8_support.rs"]
++mod fp8_support;
++
+ const METAL_PAGED_LAYOUT_ENV: &str = "MISTRALRS_METAL_PAGED_LAYOUT";
+ 
+ fn metal_cache_layout(value: Option<&str>) -> Result<KvCacheLayout> {
+@@ -41,13 +45,36 @@ fn cuda_supports_fp8(device: &Device) -> bool {
+     let Ok(device) = result::device::get(ordinal as i32) else {
+         return false;
+     };
+-    unsafe {
+-        result::device::get_attribute(
+-            device,
+-            sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR,
+-        )
+-        .is_ok_and(|major| major >= 8)
+-    }
++    let (Ok(major), Ok(minor)) = (
++        unsafe {
++            result::device::get_attribute(
++                device,
++                sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR,
++            )
++        },
++        unsafe {
++            result::device::get_attribute(
++                device,
++                sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR,
++            )
++        },
++    ) else {
++        return false;
++    };
++    fp8_support::supports_arch(
++        major,
++        minor,
++        mistralrs_paged_attn::USE_FP8,
++        mistralrs_paged_attn::USE_FP8_LEGACY_SM61,
++    )
++}
++
++#[cfg(all(test, feature = "cuda", target_family = "unix"))]
++#[test]
++fn campaign_cuda_fp8_kv_sm61_device_gate() {
++    let device = Device::new_cuda(0).expect("physical SM61 GPU");
++    assert!(mistralrs_paged_attn::USE_FP8_LEGACY_SM61);
++    assert!(cuda_supports_fp8(&device));
+ }
+ 
+ #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Default)]
+@@ -102,7 +129,7 @@ impl PagedCacheType {
+                 #[cfg(all(feature = "cuda", target_family = "unix"))]
+                 if !cuda_supports_fp8(layer_device) {
+                     return Err(
+-                        "FP8 KV cache requires CUDA compute capability 8.0 or newer and a matching CUDA build"
++                        "FP8 KV cache requires CUDA SM80+ or an explicitly enabled SM61 software FP8 build (cuda-legacy-fp8)"
+                             .to_string(),
+                     );
+                 }
+diff --git a/mistralrs-core/src/paged_attention/config.rs b/mistralrs-core/src/paged_attention/config.rs
+index 056ef6cbda62ae9f9ccfe2e27323f2b73c0c7f8b..673fdec6be0f00efca12b86fd846c656dac2764b 100644
+--- a/mistralrs-core/src/paged_attention/config.rs
++++ b/mistralrs-core/src/paged_attention/config.rs
+@@ -246,11 +246,16 @@ pub(crate) fn with_attention_features(
+ pub(crate) struct AttentionFeaturesConfig<M> {
+     base: M,
+     fallback: Option<PrefixPrefillAttentionFeatures>,
++    force_standard: bool,
+ }
+ 
+ impl<M> AttentionFeaturesConfig<M> {
+     pub(crate) fn new(base: M, fallback: Option<PrefixPrefillAttentionFeatures>) -> Self {
+-        Self { base, fallback }
++        Self {
++            base,
++            fallback,
++            force_standard: false,
++        }
+     }
+ }
+ 
+@@ -303,11 +308,19 @@ where
+     }
+ 
+     fn attention_backend_kind(&self) -> AttentionBackendKind {
+-        self.base.attention_backend_kind()
++        if self.force_standard {
++            AttentionBackendKind::Standard
++        } else {
++            self.base.attention_backend_kind()
++        }
+     }
+ 
+     fn kv_cache_layout(&self) -> KvCacheLayout {
+-        self.base.kv_cache_layout()
++        if self.force_standard {
++            select_kv_cache_layout(self.base.kv_cache_layout(), self)
++        } else {
++            self.base.kv_cache_layout()
++        }
+     }
+ 
+     fn kv_cache_elements_per_token(&self) -> usize {
+@@ -351,11 +364,23 @@ where
+     }
+ 
+     fn attention_backend_kind_for_layer(&self, layer_idx: usize) -> AttentionBackendKind {
+-        self.base.attention_backend_kind_for_layer(layer_idx)
++        if self.force_standard {
++            AttentionBackendKind::Standard
++        } else {
++            self.base.attention_backend_kind_for_layer(layer_idx)
++        }
+     }
+ 
+     fn kv_cache_layout_for_layer(&self, layer_idx: usize) -> KvCacheLayout {
+-        self.base.kv_cache_layout_for_layer(layer_idx)
++        if self.force_standard {
++            select_kv_cache_layout_for_layer(
++                self.base.kv_cache_layout_for_layer(layer_idx),
++                self,
++                layer_idx,
++            )
++        } else {
++            self.base.kv_cache_layout_for_layer(layer_idx)
++        }
+     }
+ 
+     fn prefix_prefill_attention_features(
+@@ -787,3 +812,5 @@ mod tests {
+         assert_eq!(config.kv_cache_layout(), KvCacheLayout::Standard);
+     }
+ }
++
++include!("legacy_fp8_backend.rs");
+diff --git a/mistralrs-core/src/paged_attention/fp8_support.rs b/mistralrs-core/src/paged_attention/fp8_support.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..498e24684a31d84e91944a07eff876db28a3fd46
+--- /dev/null
++++ b/mistralrs-core/src/paged_attention/fp8_support.rs
+@@ -0,0 +1,28 @@
++pub(super) fn supports_arch(major: i32, minor: i32, fp8: bool, legacy_sm61: bool) -> bool {
++    fp8 && (major >= 8 || (legacy_sm61 && (major, minor) == (6, 1)))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::supports_arch;
++
++    #[test]
++    fn campaign_cpu_fp8_kv_capability_matrix() {
++        for (major, minor, native, legacy) in [
++            (6, 0, false, false),
++            (6, 1, false, true),
++            (7, 0, false, false),
++            (7, 5, false, false),
++            (8, 0, true, true),
++            (8, 9, true, true),
++            (9, 0, true, true),
++        ] {
++            assert_eq!(supports_arch(major, minor, true, false), native);
++            assert_eq!(supports_arch(major, minor, true, true), legacy);
++            for opt_in in [false, true] {
++                assert!(!supports_arch(major, minor, false, opt_in));
++            }
++        }
++        assert!(!supports_arch(-1, -1, true, true));
++    }
++}
+diff --git a/mistralrs-core/src/paged_attention/legacy_fp8_backend.rs b/mistralrs-core/src/paged_attention/legacy_fp8_backend.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..e659cb155228972795ece8e072549774df1da6ad
+--- /dev/null
++++ b/mistralrs-core/src/paged_attention/legacy_fp8_backend.rs
+@@ -0,0 +1,260 @@
++pub(crate) fn with_legacy_fp8_backend(
++    base: std::sync::Arc<dyn ModelConfigLike + Send + Sync>,
++    paged_config: Option<&super::PagedAttentionConfig>,
++    device: &candle_core::Device,
++) -> std::sync::Arc<dyn ModelConfigLike + Send + Sync> {
++    #[cfg(all(feature = "cuda", target_family = "unix"))]
++    let legacy_sm61 = mistralrs_paged_attn::USE_FP8_LEGACY_SM61;
++    #[cfg(not(all(feature = "cuda", target_family = "unix")))]
++    let legacy_sm61 = false;
++    let standard = legacy_fp8_requires_standard(
++        legacy_sm61,
++        device.is_cuda(),
++        paged_config.is_some_and(|config| config.cache_type == super::PagedCacheType::F8E4M3),
++    );
++    if standard {
++        tracing::info!("SM61 software FP8 KV uses the standard paged-attention backend");
++        std::sync::Arc::new(AttentionFeaturesConfig {
++            base,
++            fallback: None,
++            force_standard: true,
++        })
++    } else {
++        base
++    }
++}
++
++fn legacy_fp8_requires_standard(legacy_sm61: bool, cuda: bool, fp8_cache: bool) -> bool {
++    legacy_sm61 && cuda && fp8_cache
++}
++
++#[cfg(test)]
++mod campaign_legacy_fp8_backend_tests {
++    use super::*;
++    use std::sync::Arc;
++
++    #[test]
++    fn campaign_cpu_fp8_kv_backend_selection_is_dtype_and_build_specific() {
++        for legacy in [false, true] {
++            for cuda in [false, true] {
++                for fp8 in [false, true] {
++                    assert_eq!(
++                        legacy_fp8_requires_standard(legacy, cuda, fp8),
++                        legacy && cuda && fp8
++                    );
++                }
++            }
++        }
++    }
++
++    struct HndModel;
++
++    impl ModelConfigLike for HndModel {
++        fn max_seq_len(&self) -> usize {
++            2048
++        }
++        fn num_layers(&self) -> usize {
++            3
++        }
++        fn hidden_size(&self) -> usize {
++            2048
++        }
++        fn num_kv_heads(&self) -> usize {
++            4
++        }
++        fn num_attn_heads(&self) -> usize {
++            16
++        }
++        fn k_head_dim(&self) -> usize {
++            128
++        }
++        fn v_head_dim(&self) -> usize {
++            128
++        }
++        fn attention_backend_kind(&self) -> AttentionBackendKind {
++            AttentionBackendKind::FlashInfer
++        }
++        fn attention_backend_kind_for_layer(&self, _: usize) -> AttentionBackendKind {
++            AttentionBackendKind::FlashInfer
++        }
++        fn kv_cache_layout(&self) -> KvCacheLayout {
++            KvCacheLayout::FlashInferHnd
++        }
++        fn kv_cache_layout_for_layer(&self, _: usize) -> KvCacheLayout {
++            KvCacheLayout::FlashInferHnd
++        }
++        fn layer_has_paged_kv_cache(&self, layer: usize) -> bool {
++            layer != 1
++        }
++        fn sliding_window_for_layer(&self, _: usize) -> Option<usize> {
++            Some(128)
++        }
++        fn prefix_prefill_attention_features(
++            &self,
++            layer: usize,
++        ) -> Option<PrefixPrefillAttentionFeatures> {
++            (layer != 1).then_some(PrefixPrefillAttentionFeatures::default())
++        }
++    }
++
++    fn model() -> Arc<dyn ModelConfigLike + Send + Sync> {
++        Arc::new(HndModel)
++    }
++
++    #[test]
++    fn campaign_cpu_fp8_kv_backend_preserves_hybrid_metadata_and_uses_one_layout() {
++        let base = model();
++        assert_eq!(base.kv_cache_layout(), KvCacheLayout::FlashInferHnd);
++        assert_eq!(
++            base.attention_backend_kind(),
++            AttentionBackendKind::FlashInfer
++        );
++        let wrapped = AttentionFeaturesConfig {
++            base: base.clone(),
++            fallback: None,
++            force_standard: true,
++        };
++        assert_eq!(
++            wrapped.attention_backend_kind(),
++            AttentionBackendKind::Standard
++        );
++        assert_eq!(wrapped.kv_cache_layout(), KvCacheLayout::Standard);
++        assert_eq!(wrapped.kv_cache_group_ids(), base.kv_cache_group_ids());
++        assert_eq!(
++            wrapped.total_kv_cache_elements_per_token(),
++            base.total_kv_cache_elements_per_token()
++        );
++        for layer in 0..base.num_layers() {
++            assert_eq!(
++                wrapped.attention_backend_kind_for_layer(layer),
++                AttentionBackendKind::Standard
++            );
++            assert_eq!(
++                wrapped.kv_cache_layout_for_layer(layer),
++                KvCacheLayout::Standard
++            );
++            assert_eq!(
++                wrapped.layer_has_paged_kv_cache(layer),
++                base.layer_has_paged_kv_cache(layer)
++            );
++            assert_eq!(
++                wrapped.prefix_prefill_attention_features(layer),
++                base.prefix_prefill_attention_features(layer)
++            );
++            assert_eq!(
++                wrapped.k_head_dim_for_layer(layer),
++                base.k_head_dim_for_layer(layer)
++            );
++            assert_eq!(
++                wrapped.sliding_window_for_layer(layer),
++                base.sliding_window_for_layer(layer)
++            );
++        }
++        for cache_type in [
++            super::super::PagedCacheType::Auto,
++            super::super::PagedCacheType::F8E4M3,
++        ] {
++            let paged =
++                super::super::PagedAttentionConfig::new(None, crate::MemoryGoal::Auto, cache_type)
++                    .unwrap();
++            assert!(Arc::ptr_eq(
++                &base,
++                &with_legacy_fp8_backend(base.clone(), Some(&paged), &candle_core::Device::Cpu)
++            ));
++        }
++    }
++
++    #[cfg(all(feature = "cuda", target_family = "unix"))]
++    #[test]
++    fn campaign_cuda_fp8_kv_sm61_production_cache_layout() -> candle_core::Result<()> {
++        use crate::paged_attention::{CacheConfig, CacheEngine, PagedCacheType};
++        use candle_core::{DType, Device, Tensor};
++        let device = Device::new_cuda(0)?;
++        assert!(mistralrs_paged_attn::USE_FP8_LEGACY_SM61);
++        let base = model();
++        assert_eq!(
++            base.attention_backend_kind(),
++            AttentionBackendKind::FlashInfer
++        );
++        assert_eq!(base.kv_cache_layout(), KvCacheLayout::FlashInferHnd);
++        let auto = super::super::PagedAttentionConfig::new(
++            None,
++            crate::MemoryGoal::Auto,
++            PagedCacheType::Auto,
++        )
++        .unwrap();
++        let fp8 = super::super::PagedAttentionConfig::new(
++            None,
++            crate::MemoryGoal::Auto,
++            PagedCacheType::F8E4M3,
++        )
++        .unwrap();
++        assert!(Arc::ptr_eq(
++            &base,
++            &with_legacy_fp8_backend(base.clone(), Some(&auto), &device)
++        ));
++        let metadata = with_legacy_fp8_backend(base, Some(&fp8), &device);
++        assert_eq!(
++            metadata.attention_backend_kind(),
++            AttentionBackendKind::Standard
++        );
++        let config = CacheConfig {
++            block_size: 32,
++            num_gpu_blocks: 2,
++            cache_type: PagedCacheType::F8E4M3,
++            kv_cache_group_ids: metadata.kv_cache_group_ids(),
++        };
++        let engine = CacheEngine::new(
++            metadata.as_ref(),
++            &config,
++            DType::F16,
++            &device,
++            vec![None; 3],
++        )?;
++        let caches = engine.get_kv_cache();
++        assert_eq!(caches[0].0.dims(), &[2, 4, 8, 32, 16]);
++        assert_eq!(caches[1].0.dim(0)?, 0);
++        assert_eq!(
++            AttentionBackendKind::from_cache(&caches[0].0, &caches[0].1),
++            AttentionBackendKind::Standard
++        );
++        let key = Tensor::zeros((32, 4, 128), DType::F16, &device)?;
++        let value = Tensor::ones((32, 4, 128), DType::F16, &device)?;
++        let slots = Tensor::from_vec((0i64..32).collect(), 32, &device)?;
++        let scale = Tensor::new(1f32, &device)?;
++        mistralrs_paged_attn::reshape_and_cache(
++            &key,
++            &value,
++            Some(&scale),
++            Some(&scale),
++            &caches[0].0,
++            &caches[0].1,
++            &slots,
++        )?;
++        let query = Tensor::zeros((1, 16, 128), DType::F16, &device)?;
++        let table = Tensor::new(&[[0u32]], &device)?;
++        let lengths = Tensor::new(&[32u32], &device)?;
++        let output = mistralrs_paged_attn::paged_attention(
++            &query,
++            Some(&scale),
++            Some(&scale),
++            &caches[0].0,
++            &caches[0].1,
++            &table,
++            &lengths,
++            None,
++            32,
++            1.0,
++            1.0,
++            None,
++        )?;
++        device.synchronize()?;
++        assert!(output
++            .to_dtype(DType::F32)?
++            .flatten_all()?
++            .to_vec1::<f32>()?
++            .iter()
++            .all(|x| (x - 1.0).abs() < 0.01));
++        Ok(())
++    }
++}
+diff --git a/mistralrs-core/src/paged_attention/mod.rs b/mistralrs-core/src/paged_attention/mod.rs
+index a26ae0e7f7d47c28750ad94f198319f382faedc1..460ac469930c0f79665cb934ad1247f989f3f456 100644
+--- a/mistralrs-core/src/paged_attention/mod.rs
++++ b/mistralrs-core/src/paged_attention/mod.rs
+@@ -35,9 +35,9 @@ pub use cache_allocation::allocate_cache;
+ pub(crate) use cache_engine::configured_metal_cache_layout;
+ pub use cache_engine::{CacheConfig, CacheEngine, PagedCacheType};
+ use candle_core::{DType, Device};
+-pub(crate) use config::with_attention_features;
+ #[cfg(feature = "metal")]
+ pub(crate) use config::AttentionFeaturesConfig;
++pub(crate) use config::{with_attention_features, with_legacy_fp8_backend};
+ pub use config::{
+     HybridPagedKvCacheConfig, KvCacheLayout, KvCacheTopology, ModelConfigLike, ModelConfigMetadata,
+     PrefixPrefillAttentionFeatures,
+diff --git a/mistralrs-core/src/pipeline/multimodal.rs b/mistralrs-core/src/pipeline/multimodal.rs
+index 47a257763190d40edd613d651aa8b18d34010834..9e66d700b90f86f4f2544937cc42bf361e4039a5 100644
+--- a/mistralrs-core/src/pipeline/multimodal.rs
++++ b/mistralrs-core/src/pipeline/multimodal.rs
+@@ -1487,6 +1487,11 @@ impl Loader for MultimodalLoader {
+                 .activation_model_config(&runtime_config)?
+                 .attention_features,
+         );
++        let model_metadata = crate::paged_attention::with_legacy_fp8_backend(
++            model_metadata,
++            paged_attn_config.as_ref(),
++            &device,
++        );
+         // Layers past the mapped stack (e.g. an MTP head) live on the non-mapped device.
+         while layer_devices.len() < model_metadata.num_layers() {
+             layer_devices.push(Some(device.clone()));
+diff --git a/mistralrs-core/src/pipeline/normal.rs b/mistralrs-core/src/pipeline/normal.rs
+index d323e67e5200d50676aad77fed6b0ba45d46372f..5a9c578198b1fda1dc3b9f696beb12c8433d046b 100644
+--- a/mistralrs-core/src/pipeline/normal.rs
++++ b/mistralrs-core/src/pipeline/normal.rs
+@@ -187,6 +187,11 @@ pub(crate) fn build_normal_pipeline(
+ 
+     let model_metadata =
+         crate::paged_attention::with_attention_features(model.model_config(), attention_features);
++    let model_metadata = crate::paged_attention::with_legacy_fp8_backend(
++        model_metadata,
++        paged_attn_config.as_ref(),
++        &device,
++    );
+     #[cfg(feature = "metal")]
+     if !loaded_for_uqff_write {
+         super::metal_warmup::prepare_model(super::metal_warmup::MetalModelWarmup {
+diff --git a/mistralrs-core/tests/campaign_backends.rs b/mistralrs-core/tests/campaign_backends.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..8e341e1fbe83d07cad0b45b118b377347946343c
+--- /dev/null
++++ b/mistralrs-core/tests/campaign_backends.rs
+@@ -0,0 +1,152 @@
++use candle_core::{Device, Result, Tensor};
++
++fn check_backend(device: &Device) -> Result<()> {
++    let input = Tensor::new(&[[1f32, 2.], [3., 4.]], device)?;
++    let result = input.matmul(&input)?;
++    device.synchronize()?;
++    assert_eq!(
++        result.to_device(&Device::Cpu)?.to_vec2::<f32>()?,
++        vec![vec![7., 10.], vec![15., 22.]]
++    );
++    Ok(())
++}
++
++#[test]
++fn campaign_cpu_backend() -> Result<()> {
++    check_backend(&Device::Cpu)
++}
++
++#[cfg(feature = "cuda")]
++#[test]
++fn campaign_cuda_backend() -> Result<()> {
++    check_backend(&Device::new_cuda(0)?)
++}
++
++const NVFP4_K: usize = 32;
++
++fn nvfp4_fixture_parts(
++    device: &Device,
++    dtype: candle_core::DType,
++) -> Result<mistralrs_quant::nvfp4::Nvfp4LayerParts> {
++    use candle_core::DType;
++    use mistralrs_quant::nvfp4::Nvfp4LayerParts;
++    use mistralrs_quant::Nvfp4ActivationMode;
++    Ok(Nvfp4LayerParts {
++        weight: Tensor::from_vec(vec![0x22u8; NVFP4_K], (2, NVFP4_K / 2), device)?,
++        scales: Tensor::ones((2, NVFP4_K / 16), DType::F32, &Device::Cpu)?
++            .to_dtype(DType::F8E4M3)?
++            .to_device(device)?,
++        global_scales: Tensor::new(&[0.5f32, 2.0], device)?,
++        input_scale: None,
++        activation: Nvfp4ActivationMode::None,
++        bias: None,
++        dtype,
++    })
++}
++
++#[test]
++fn campaign_cpu_nvfp4_w4a16() -> Result<()> {
++    use candle_core::quantized::nvfp4_e7c_safetensors::ModelOptNvfp4Shards;
++    use candle_core::DType;
++    use mistralrs_quant::nvfp4::Nvfp4Layer;
++    use mistralrs_quant::QuantMethod;
++    let parts = nvfp4_fixture_parts(&Device::Cpu, DType::F32)?;
++    let path = std::env::temp_dir().join(format!(
++        "haricot-nvfp4-fixture-{}.safetensors",
++        std::process::id()
++    ));
++    candle_core::safetensors::save(
++        &std::collections::HashMap::from([
++            ("fixture.weight", parts.weight.clone()),
++            ("fixture.weight_scale", parts.scales.clone()),
++            ("fixture.weight_scale_2", Tensor::new(1f32, &Device::Cpu)?),
++        ]),
++        &path,
++    )?;
++    let payload = ModelOptNvfp4Shards::single_file(&path).load(2, NVFP4_K, "fixture");
++    std::fs::remove_file(path)?;
++    payload?;
++    let layer = Nvfp4Layer::from_parts(parts)?;
++    let input = Tensor::new(&[[1f32; NVFP4_K], [2f32; NVFP4_K]], &Device::Cpu)?;
++    assert_eq!(
++        layer.forward(&input)?.to_vec2::<f32>()?,
++        vec![vec![16., 64.], vec![32., 128.]]
++    );
++    Ok(())
++}
++
++fn mxfp4_embedding(device: &Device, dtype: candle_core::DType) -> Result<()> {
++    use candle_core::{
++        quantized::{GgmlDType, QTensor},
++        DType,
++    };
++    use mistralrs_quant::EmbeddingTable;
++    let dense = Tensor::from_vec(
++        (0..64)
++            .map(|i| (i as f32 - 31.5) * 0.125)
++            .collect::<Vec<_>>(),
++        (2, 32),
++        &Device::Cpu,
++    )?;
++    let weights = QTensor::quantize(&dense, GgmlDType::Mxfp4)?;
++    let ids = Tensor::new(&[1u32, 0, 1], &Device::Cpu)?;
++    let reference = weights
++        .dequantize(&Device::Cpu)?
++        .index_select(&ids, 0)?
++        .to_dtype(dtype)?
++        .to_dtype(DType::F32)?
++        .to_vec2::<f32>()?;
++    #[cfg(feature = "cuda")]
++    let weights = if device.is_cuda() {
++        use candle_core::quantized::QStorage;
++        QTensor::new(
++            QStorage::from_data(weights.data()?, device, weights.dtype())?,
++            weights.shape().clone(),
++        )?
++    } else {
++        weights
++    };
++    let actual =
++        EmbeddingTable::quantized(&weights)?.gather(&ids.to_device(device)?, dtype.into())?;
++    device.synchronize()?;
++    assert_eq!(
++        actual
++            .to_dtype(DType::F32)?
++            .to_device(&Device::Cpu)?
++            .to_vec2::<f32>()?,
++        reference
++    );
++    Ok(())
++}
++
++#[test]
++fn campaign_cpu_mxfp4_embedding() -> Result<()> {
++    mxfp4_embedding(&Device::Cpu, candle_core::DType::F32)
++}
++
++#[cfg(all(feature = "cuda", feature = "cuda-legacy-fp4"))]
++#[test]
++fn campaign_cuda_nvfp4_sm61_w4a16() -> Result<()> {
++    use candle_core::DType;
++    use mistralrs_quant::nvfp4::Nvfp4Layer;
++    use mistralrs_quant::QuantMethod;
++    let device = Device::new_cuda(0)?;
++    let input = Tensor::new(&[[1f32; NVFP4_K], [2f32; NVFP4_K]], &device)?;
++    for dtype in [DType::F16, DType::BF16] {
++        let layer = Nvfp4Layer::from_parts(nvfp4_fixture_parts(&device, dtype)?)?;
++        let actual = layer.forward(&input.to_dtype(dtype)?)?;
++        device.synchronize()?;
++        assert_eq!(actual.dtype(), dtype);
++        assert_eq!(
++            actual
++                .to_dtype(DType::F32)?
++                .to_device(&Device::Cpu)?
++                .to_vec2::<f32>()?,
++            vec![vec![16., 64.], vec![32., 128.]]
++        );
++    }
++    for dtype in [DType::F32, DType::F16, DType::BF16] {
++        mxfp4_embedding(&device, dtype)?;
++    }
++    Ok(())
++}
+diff --git a/mistralrs-core/tests/campaign_paged_fp8.rs b/mistralrs-core/tests/campaign_paged_fp8.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..990b4394895ece56b8dba908ee2a98b1f07b6a25
+--- /dev/null
++++ b/mistralrs-core/tests/campaign_paged_fp8.rs
+@@ -0,0 +1,301 @@
++#![cfg(all(feature = "cuda", target_family = "unix"))]
++
++use candle_core::{DType, Device, Result, Tensor};
++use mistralrs_paged_attn::{paged_attention, reshape_and_cache};
++use std::time::Instant;
++
++const HEADS: usize = 32;
++const KV_HEADS: usize = 8;
++const HEAD_DIM: usize = 64;
++const BLOCK: usize = 32;
++const VECTOR_BYTES: usize = 16;
++const CONTEXTS: [usize; 3] = [128, 2048, 8192];
++const K_SCALE: f32 = 0.5;
++const V_SCALE: f32 = 2.0;
++const WARMUP: usize = 4;
++const SAMPLES: usize = 9;
++const ITERATIONS: usize = 8;
++const ATTENTION_TOLERANCE: f32 = 0.01;
++
++struct Cache {
++    keys: Tensor,
++    values: Tensor,
++    k_scale: Option<Tensor>,
++    v_scale: Option<Tensor>,
++}
++
++struct Fixture {
++    query: Tensor,
++    keys: Tensor,
++    values: Tensor,
++    slots: Tensor,
++    tables: Tensor,
++    lengths: Tensor,
++    context: usize,
++}
++
++impl Cache {
++    fn new(dtype: DType, context: usize, device: &Device) -> Result<Self> {
++        let blocks = context.div_ceil(BLOCK);
++        let x = VECTOR_BYTES / dtype.size_in_bytes();
++        let fp8 = dtype == DType::F8E4M3;
++        Ok(Self {
++            keys: Tensor::zeros((blocks, KV_HEADS, HEAD_DIM / x, BLOCK, x), dtype, device)?,
++            values: Tensor::zeros((blocks, KV_HEADS, HEAD_DIM, BLOCK), dtype, device)?,
++            k_scale: fp8.then(|| Tensor::new(K_SCALE, device)).transpose()?,
++            v_scale: fp8.then(|| Tensor::new(V_SCALE, device)).transpose()?,
++        })
++    }
++
++    fn write(&self, fixture: &Fixture) -> Result<()> {
++        reshape_and_cache(
++            &fixture.keys,
++            &fixture.values,
++            self.k_scale.as_ref(),
++            self.v_scale.as_ref(),
++            &self.keys,
++            &self.values,
++            &fixture.slots,
++        )
++    }
++
++    fn decode(&self, fixture: &Fixture) -> Result<Tensor> {
++        paged_attention(
++            &fixture.query,
++            self.k_scale.as_ref(),
++            self.v_scale.as_ref(),
++            &self.keys,
++            &self.values,
++            &fixture.tables,
++            &fixture.lengths,
++            None,
++            fixture.context,
++            1.0 / (HEAD_DIM as f32).sqrt(),
++            1.0,
++            None,
++        )
++    }
++
++    fn bytes(&self) -> usize {
++        (self.keys.elem_count() + self.values.elem_count()) * self.keys.dtype().size_in_bytes()
++    }
++}
++
++fn key(index: usize) -> f32 {
++    ((index * 17 % 31) as f32 - 15.0) / 32.0
++}
++
++fn value(index: usize) -> f32 {
++    ((index * 7 % 17) as f32 - 8.0) / 8.0
++}
++
++fn query(index: usize) -> f32 {
++    ((index * 3 % 9) as f32 - 4.0) / 8.0
++}
++
++fn reference(context: usize) -> Vec<f32> {
++    let mut output = Vec::new();
++    for head in 0..HEADS {
++        let kv_head = head / (HEADS / KV_HEADS);
++        let scores = (0..context)
++            .map(|token| {
++                let dot = (0..HEAD_DIM)
++                    .map(|dim| {
++                        f64::from(query(head * HEAD_DIM + dim))
++                            * f64::from(key((token * KV_HEADS + kv_head) * HEAD_DIM + dim))
++                    })
++                    .sum::<f64>();
++                dot / (HEAD_DIM as f64).sqrt()
++            })
++            .collect::<Vec<_>>();
++        let maximum = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
++        let weights = scores
++            .iter()
++            .map(|score| (score - maximum).exp())
++            .collect::<Vec<_>>();
++        let total = weights.iter().sum::<f64>();
++        for dim in 0..HEAD_DIM {
++            output.push(
++                (weights
++                    .iter()
++                    .enumerate()
++                    .map(|(token, weight)| {
++                        weight * f64::from(value((token * KV_HEADS + kv_head) * HEAD_DIM + dim))
++                    })
++                    .sum::<f64>()
++                    / total) as f32,
++            );
++        }
++    }
++    output
++}
++
++fn max_error(actual: &Tensor, expected: &[f32]) -> Result<f32> {
++    let actual = actual
++        .to_dtype(DType::F32)?
++        .flatten_all()?
++        .to_vec1::<f32>()?;
++    assert_eq!(actual.len(), expected.len());
++    assert!(actual.iter().all(|x| x.is_finite()));
++    Ok(actual
++        .iter()
++        .zip(expected)
++        .map(|(a, b)| (a - b).abs())
++        .fold(0.0, f32::max))
++}
++
++fn elapsed_us(device: &Device, mut run: impl FnMut() -> Result<()>) -> Result<f64> {
++    device.synchronize()?;
++    let start = Instant::now();
++    for _ in 0..ITERATIONS {
++        run()?;
++    }
++    device.synchronize()?;
++    Ok(start.elapsed().as_secs_f64() * 1e6 / ITERATIONS as f64)
++}
++
++fn median(samples: &[f64]) -> f64 {
++    let mut sorted = samples.to_vec();
++    sorted.sort_by(f64::total_cmp);
++    sorted[sorted.len() / 2]
++}
++
++#[test]
++fn campaign_cuda_fp8_kv_sm61_correctness_and_performance() -> Result<()> {
++    assert!(mistralrs_paged_attn::USE_FP8);
++    assert!(mistralrs_paged_attn::USE_FP8_LEGACY_SM61);
++    let device = Device::new_cuda(0)?;
++    let mut cases = Vec::new();
++    for context in CONTEXTS {
++        let blocks = context.div_ceil(BLOCK);
++        let elements = context * KV_HEADS * HEAD_DIM;
++        let fixture = Fixture {
++            query: Tensor::from_vec(
++                (0..HEADS * HEAD_DIM).map(query).collect(),
++                (1, HEADS, HEAD_DIM),
++                &device,
++            )?
++            .to_dtype(DType::F16)?,
++            keys: Tensor::from_vec(
++                (0..elements).map(key).collect(),
++                (context, KV_HEADS, HEAD_DIM),
++                &device,
++            )?
++            .to_dtype(DType::F16)?,
++            values: Tensor::from_vec(
++                (0..elements).map(value).collect(),
++                (context, KV_HEADS, HEAD_DIM),
++                &device,
++            )?
++            .to_dtype(DType::F16)?,
++            slots: Tensor::from_vec(
++                (0..context)
++                    .map(|token| ((blocks - 1 - token / BLOCK) * BLOCK + token % BLOCK) as i64)
++                    .collect(),
++                context,
++                &device,
++            )?,
++            tables: Tensor::from_vec((0..blocks as u32).rev().collect(), (1, blocks), &device)?,
++            lengths: Tensor::new(&[context as u32], &device)?,
++            context,
++        };
++        let caches = [
++            Cache::new(DType::F16, context, &device)?,
++            Cache::new(DType::F8E4M3, context, &device)?,
++        ];
++        for cache in &caches {
++            cache.write(&fixture)?;
++        }
++        let fp8_keys = caches[1]
++            .keys
++            .to_device(&Device::Cpu)?
++            .to_dtype(DType::F32)?
++            .flatten_all()?
++            .to_vec1::<f32>()?;
++        let fp8_values = caches[1]
++            .values
++            .to_device(&Device::Cpu)?
++            .to_dtype(DType::F32)?
++            .flatten_all()?
++            .to_vec1::<f32>()?;
++        let x = VECTOR_BYTES;
++        for token in 0..context {
++            let block = blocks - 1 - token / BLOCK;
++            for head in 0..KV_HEADS {
++                for dim in 0..HEAD_DIM {
++                    let logical = (token * KV_HEADS + head) * HEAD_DIM + dim;
++                    let k = ((((block * KV_HEADS + head) * (HEAD_DIM / x) + dim / x) * BLOCK
++                        + token % BLOCK)
++                        * x)
++                        + dim % x;
++                    let v = ((block * KV_HEADS + head) * HEAD_DIM + dim) * BLOCK + token % BLOCK;
++                    assert_eq!(fp8_keys[k] * K_SCALE, key(logical));
++                    assert_eq!(fp8_values[v] * V_SCALE, value(logical));
++                }
++            }
++        }
++        let expected = reference(context);
++        let fp16 = caches[0].decode(&fixture)?;
++        let fp8 = caches[1].decode(&fixture)?;
++        let fp16_error = max_error(&fp16, &expected)?;
++        let fp8_error = max_error(&fp8, &expected)?;
++        let fp16_values = fp16.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
++        let pair_error = max_error(&fp8, &fp16_values)?;
++        assert!(
++            fp16_error < ATTENTION_TOLERANCE,
++            "FP16 reference error {fp16_error}"
++        );
++        assert!(
++            fp8_error < ATTENTION_TOLERANCE,
++            "FP8 reference error {fp8_error}"
++        );
++        assert!(
++            pair_error < ATTENTION_TOLERANCE,
++            "FP8/FP16 error {pair_error}"
++        );
++        assert_eq!(caches[0].bytes(), 2 * caches[1].bytes());
++        for _ in 0..WARMUP {
++            for cache in &caches {
++                cache.write(&fixture)?;
++                cache.decode(&fixture)?;
++            }
++        }
++        let mut write = [Vec::new(), Vec::new()];
++        let mut decode = [Vec::new(), Vec::new()];
++        for sample in 0..SAMPLES {
++            for offset in 0..2 {
++                let index = (sample + offset) % 2;
++                write[index].push(elapsed_us(&device, || caches[index].write(&fixture))?);
++                decode[index].push(elapsed_us(&device, || {
++                    caches[index].decode(&fixture)?;
++                    Ok(())
++                })?);
++            }
++        }
++        cases.push(serde_json::json!({
++            "context": context, "query_heads": HEADS, "kv_heads": KV_HEADS, "head_dim": HEAD_DIM,
++            "fp16_cache_bytes": caches[0].bytes(), "fp8_cache_bytes": caches[1].bytes(),
++            "fp16_reference_max_abs_error": fp16_error, "fp8_reference_max_abs_error": fp8_error,
++            "fp8_fp16_max_abs_error": pair_error, "exact_scaled_cache_roundtrip": true,
++            "fp16_write_us": write[0], "fp8_write_us": write[1],
++            "fp16_decode_us": decode[0], "fp8_decode_us": decode[1],
++            "fp16_write_median_us": median(&write[0]), "fp8_write_median_us": median(&write[1]),
++            "fp16_decode_median_us": median(&decode[0]), "fp8_decode_median_us": median(&decode[1]),
++            "decode_speed_ratio_fp16_over_fp8": median(&decode[0]) / median(&decode[1]),
++        }));
++    }
++    let report = serde_json::json!({
++        "schema": 1, "scope": "synthetic-paged-kv-cache", "full_model_benchmark": false,
++        "candidate": std::env::var("HARICOT_FP8_KV_CANDIDATE").unwrap(),
++        "component": std::env::var("HARICOT_FP8_KV_COMPONENT").unwrap(),
++        "run_id": std::env::var("GITHUB_RUN_ID").unwrap(),
++        "run_attempt": std::env::var("GITHUB_RUN_ATTEMPT").unwrap(),
++        "method": "synchronized-host-wall-time-including-api-overhead; alternating-order; allocations-outside-timed-write",
++        "warmup": WARMUP, "samples": SAMPLES, "iterations_per_sample": ITERATIONS,
++        "performance_threshold": null, "status": "PASS", "cases": cases,
++    });
++    let path = std::env::var("HARICOT_FP8_KV_REPORT").unwrap();
++    std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap())
++        .map_err(candle_core::Error::msg)?;
++    Ok(())
++}
+diff --git a/mistralrs-core/tests/legacy_sm61_runtime.rs b/mistralrs-core/tests/legacy_sm61_runtime.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..46e6c7ec88b12956b563cab28649017172d14fb5
+--- /dev/null
++++ b/mistralrs-core/tests/legacy_sm61_runtime.rs
+@@ -0,0 +1,26 @@
++#![cfg(feature = "cuda")]
++use candle_core::{DType, Device, Result, Tensor};
++
++#[test]
++fn legacy_sm61_f32_bf16_fp8_roundtrip() -> Result<()> {
++    let device = Device::new_cuda(0)?;
++    let input = Tensor::new(&[1f32, 2., 3., 4.], &device)?;
++    let doubled = (&input + &input)?;
++    assert_eq!(
++        doubled.to_device(&Device::Cpu)?.to_vec1::<f32>()?,
++        vec![2., 4., 6., 8.]
++    );
++    for dtype in [DType::BF16, DType::F8E4M3] {
++        let tensor = input.to_dtype(dtype)?;
++        let restored = tensor.to_dtype(DType::F32)?;
++        device.synchronize()?;
++        let values = restored.to_device(&Device::Cpu)?.to_vec1::<f32>()?;
++        for (value, expected) in values.iter().zip([1., 2., 3., 4.]) {
++            assert!(
++                (value - expected).abs() < 0.1,
++                "{dtype:?}: {value} != {expected}"
++            );
++        }
++    }
++    Ok(())
++}
+diff --git a/mistralrs-paged-attn/Cargo.toml b/mistralrs-paged-attn/Cargo.toml
+index f4198098f136755a26ed133d1529e16128367176..9a1a5daeaa864d682e32e4e375c1d72629648741 100644
+--- a/mistralrs-paged-attn/Cargo.toml
++++ b/mistralrs-paged-attn/Cargo.toml
+@@ -29,6 +29,9 @@ anyhow.workspace = true
+ mistralrs-metal-compile = { workspace = true, optional = true }
+ 
+ [features]
++cuda-legacy-bf16 = ["cuda", "candle-core/cuda-legacy-bf16"]
++cuda-legacy-fp8 = ["cuda", "candle-core/cuda-legacy-fp8"]
++cuda-legacy-fp4 = ["cuda", "candle-core/cuda-legacy-fp4"]
+ cuda = ["dep:cudaforge", "candle-core/cuda"]
+ metal = [
+     "candle-core/metal",
+diff --git a/mistralrs-paged-attn/build.rs b/mistralrs-paged-attn/build.rs
+index 91bbea96865dfd5b9ec05308c55f530192169cab..f1a73712bf88002400005204fe1173da13c06e3b 100644
+--- a/mistralrs-paged-attn/build.rs
++++ b/mistralrs-paged-attn/build.rs
+@@ -96,9 +96,11 @@ fn main() -> Result<()> {
+ 
+     // Declare expected cfg values for check-cfg lint
+     println!("cargo::rustc-check-cfg=cfg(has_fp8)");
++    println!("cargo::rustc-check-cfg=cfg(has_fp8_legacy_sm61)");
+     println!("cargo::rustc-check-cfg=cfg(has_fa3_fp8_paged)");
+ 
+     println!("cargo:rerun-if-changed=build.rs");
++    println!("cargo:rerun-if-env-changed=ALLOW_LEGACY");
+     println!("cargo:rerun-if-env-changed=CUDA_NVCC_FLAGS");
+     println!("cargo:rerun-if-changed=src/cuda/pagedattention.cuh");
+     println!("cargo:rerun-if-changed=src/cuda/copy_blocks_kernel.cu");
+@@ -158,9 +160,17 @@ fn main() -> Result<()> {
+         .arg(&header_hash_arg);
+ 
+     let compute_cap = builder.get_compute_cap().unwrap_or(80);
+-    // Enable FP8 if compute capability >= 8.0 (Ampere and newer)
+-    let using_fp8 = if compute_cap >= 80 {
++    let allow_legacy = std::env::var("ALLOW_LEGACY").unwrap_or_default();
++    let allow_legacy_fp8 = cfg!(feature = "cuda-legacy-fp8")
++        || allow_legacy == "all"
++        || allow_legacy.split(',').map(str::trim).any(|x| x == "fp8");
++
++    // Native FP8 is SM80+. Pascal uses opt-in software conversion.
++    let using_fp8 = if compute_cap >= 80 || allow_legacy_fp8 {
+         builder = builder.arg("-DENABLE_FP8");
++        if allow_legacy_fp8 {
++            builder = builder.arg("-DALLOW_LEGACY_FP8");
++        }
+         true
+     } else {
+         false
+@@ -249,6 +259,10 @@ fn main() -> Result<()> {
+         println!("cargo:rustc-cfg=has_fa3_fp8_paged");
+     }
+ 
++    if using_fp8 && allow_legacy_fp8 && compute_cap == 61 {
++        println!("cargo:rustc-cfg=has_fp8_legacy_sm61");
++    }
++
+     if using_fp8 {
+         println!("cargo:rustc-cfg=has_fp8");
+     }
+@@ -259,6 +273,7 @@ fn main() -> Result<()> {
+ fn main() -> Result<(), String> {
+     // Declare expected cfg values for check-cfg lint
+     println!("cargo::rustc-check-cfg=cfg(has_fp8)");
++    println!("cargo::rustc-check-cfg=cfg(has_fp8_legacy_sm61)");
+     println!("cargo::rustc-check-cfg=cfg(has_fa3_fp8_paged)");
+ 
+     mistralrs_metal_compile::compile_metallibs(&PAGED_ATTENTION_METAL_SOURCE_SET)
+@@ -268,6 +283,7 @@ fn main() -> Result<(), String> {
+ fn main() -> Result<()> {
+     // Declare expected cfg values for check-cfg lint
+     println!("cargo::rustc-check-cfg=cfg(has_fp8)");
++    println!("cargo::rustc-check-cfg=cfg(has_fp8_legacy_sm61)");
+     println!("cargo::rustc-check-cfg=cfg(has_fa3_fp8_paged)");
+     Ok(())
+ }
+diff --git a/mistralrs-paged-attn/src/cuda/attention/dtype_bfloat16.cuh b/mistralrs-paged-attn/src/cuda/attention/dtype_bfloat16.cuh
+index 31e0cee01d2e1ff47b3381590c5cbc2c8446b556..7f6ecba1924d9e9f209e54473f8a0d0035c60bb7 100644
+--- a/mistralrs-paged-attn/src/cuda/attention/dtype_bfloat16.cuh
++++ b/mistralrs-paged-attn/src/cuda/attention/dtype_bfloat16.cuh
+@@ -88,7 +88,10 @@ struct FloatVec<bf16_8_t> {
+ // Utility functions for type conversions.
+ inline __device__ float2 bf1622float2(const __nv_bfloat162 val) {
+ #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+-  assert(false);
++  float2 res;
++  res.x = __bfloat162float(val.x);
++  res.y = __bfloat162float(val.y);
++  return res;
+ #else
+   return __bfloat1622float2(val);
+ #endif
+@@ -96,7 +99,7 @@ inline __device__ float2 bf1622float2(const __nv_bfloat162 val) {
+ 
+ inline __device__ __nv_bfloat162 bf162bf162(const __nv_bfloat16 val) {
+ #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+-  assert(false);
++  return __nv_bfloat162{val, val};
+ #else
+   return __bfloat162bfloat162(val);
+ #endif
+@@ -105,7 +108,7 @@ inline __device__ __nv_bfloat162 bf162bf162(const __nv_bfloat16 val) {
+ // Vector addition.
+ inline __device__ __nv_bfloat16 add(__nv_bfloat16 a, __nv_bfloat16 b) {
+ #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+-  assert(false);
++  return __float2bfloat16(__bfloat162float(a) + __bfloat162float(b));
+ #else
+   #ifndef USE_ROCM
+     return a + b;
+@@ -117,7 +120,8 @@ inline __device__ __nv_bfloat16 add(__nv_bfloat16 a, __nv_bfloat16 b) {
+ 
+ inline __device__ __nv_bfloat162 add(__nv_bfloat162 a, __nv_bfloat162 b) {
+ #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+-  assert(false);
++  return __nv_bfloat162{__float2bfloat16(__bfloat162float(a.x) + __bfloat162float(b.x)),
++                        __float2bfloat16(__bfloat162float(a.y) + __bfloat162float(b.y))};
+ #else
+   return __hadd2(a, b);
+ #endif
+@@ -164,7 +168,7 @@ inline __device__ Float8_ add(bf16_8_t a, Float8_ fb) {
+ template<>
+ inline __device__ __nv_bfloat16 mul(__nv_bfloat16 a, __nv_bfloat16 b) {
+ #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+-  assert(false);
++  return __float2bfloat16(__bfloat162float(a) * __bfloat162float(b));
+ #else
+   return __hmul(a, b);
+ #endif
+@@ -173,7 +177,8 @@ inline __device__ __nv_bfloat16 mul(__nv_bfloat16 a, __nv_bfloat16 b) {
+ template<>
+ inline __device__ __nv_bfloat162 mul(__nv_bfloat162 a, __nv_bfloat162 b) {
+ #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+-  assert(false);
++  return __nv_bfloat162{__float2bfloat16(__bfloat162float(a.x) * __bfloat162float(b.x)),
++                        __float2bfloat16(__bfloat162float(a.y) * __bfloat162float(b.y))};
+ #else
+   return __hmul2(a, b);
+ #endif
+@@ -282,7 +287,9 @@ inline __device__ Float8_ mul(__nv_bfloat16 a, bf16_8_t b) {
+ // Vector fused multiply-add.
+ inline __device__ __nv_bfloat162 fma(__nv_bfloat162 a, __nv_bfloat162 b, __nv_bfloat162 c) {
+ #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+-  assert(false);
++  return __nv_bfloat162{
++      __float2bfloat16(__bfloat162float(a.x) * __bfloat162float(b.x) + __bfloat162float(c.x)),
++      __float2bfloat16(__bfloat162float(a.y) * __bfloat162float(b.y) + __bfloat162float(c.y))};
+ #else
+   return __hfma2(a, b, c);
+ #endif
+@@ -290,7 +297,7 @@ inline __device__ __nv_bfloat162 fma(__nv_bfloat162 a, __nv_bfloat162 b, __nv_bf
+ 
+ inline __device__ __nv_bfloat162 fma(__nv_bfloat16 a, __nv_bfloat162 b, __nv_bfloat162 c) {
+ #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+-  assert(false);
++  return fma(bf162bf162(a), b, c);
+ #else
+   return __hfma2(bf162bf162(a), b, c);
+ #endif
+@@ -407,7 +414,8 @@ inline __device__ void from_float(__nv_bfloat16& dst, float src) {
+ 
+ inline __device__ void from_float(__nv_bfloat162& dst, float2 src) {
+ #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+-  assert(false);
++  dst.x = __float2bfloat16(src.x);
++  dst.y = __float2bfloat16(src.y);
+ #else
+   dst = __float22bfloat162_rn(src);
+ #endif
+@@ -415,7 +423,8 @@ inline __device__ void from_float(__nv_bfloat162& dst, float2 src) {
+ 
+ inline __device__ void from_float(bf16_4_t& dst, Float4_ src) {
+ #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+-  assert(false);
++  from_float(dst.x, src.x);
++  from_float(dst.y, src.y);
+ #else
+   dst.x = __float22bfloat162_rn(src.x);
+   dst.y = __float22bfloat162_rn(src.y);
+@@ -424,7 +433,10 @@ inline __device__ void from_float(bf16_4_t& dst, Float4_ src) {
+ 
+ inline __device__ void from_float(bf16_8_t& dst, Float8_ src) {
+ #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+-  assert(false);
++  from_float(dst.x, src.x);
++  from_float(dst.y, src.y);
++  from_float(dst.z, src.z);
++  from_float(dst.w, src.w);
+ #else
+   dst.x = __float22bfloat162_rn(src.x);
+   dst.y = __float22bfloat162_rn(src.y);
+@@ -441,7 +453,7 @@ inline __device__ float to_float(__nv_bfloat16 u) {
+ // Zero-out a variable.
+ inline __device__ void zero(__nv_bfloat16& dst) {
+ #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+-  assert(false);
++  dst = __float2bfloat16(0.0f);
+ #else
+   // Same as CUDART_ZERO_BF16 introduced in CUDA 12.2.
+   dst = __ushort_as_bfloat16((unsigned short)0x0000U);
+diff --git a/mistralrs-paged-attn/src/cuda/backend/paged_attention.rs b/mistralrs-paged-attn/src/cuda/backend/paged_attention.rs
+index 2f76930f269b99b5e2925c6f637bdc6b11a4d233..7f47a5d633223e8a1905913a2fcd0c1809c39583 100644
+--- a/mistralrs-paged-attn/src/cuda/backend/paged_attention.rs
++++ b/mistralrs-paged-attn/src/cuda/backend/paged_attention.rs
+@@ -216,7 +216,7 @@ impl PagedAttention {
+             std::ptr::null()
+         };
+ 
+-        let (k_scale_ptr, v_scale_ptr) =
++        let (k_scale_ptr, v_scale_ptr) = if cache_dtype == 3 {
+             if let (Some(k_scale), Some(v_scale)) = (&self.k_scale, &self.v_scale) {
+                 if !crate::cuda::USE_FP8 {
+                     candle::bail!("FP8 is not supported on this system.");
+@@ -241,7 +241,10 @@ impl PagedAttention {
+                 (ks as *const f32, vs as *const f32)
+             } else {
+                 (std::ptr::null(), std::ptr::null())
+-            };
++            }
++        } else {
++            (std::ptr::null(), std::ptr::null())
++        };
+ 
+         let sinks_ptr = if let Some(sinks) = self.sinks.as_ref() {
+             let (s, s_l) = sinks.storage_and_layout();
+@@ -644,28 +647,32 @@ fn update_cache<
+     let v = v.slice(v_l.start_offset()..);
+     let s = s.slice(s_l.start_offset()..);
+ 
+-    let (k_scale_ptr, v_scale_ptr) = if let (Some(k_scale), Some(v_scale)) = (k_scale, v_scale) {
+-        if !crate::cuda::USE_FP8 {
+-            candle::bail!("FP8 is not supported on this system.");
+-        }
++    let (k_scale_ptr, v_scale_ptr) = if cache_dtype == 3 {
++        if let (Some(k_scale), Some(v_scale)) = (k_scale, v_scale) {
++            if !crate::cuda::USE_FP8 {
++                candle::bail!("FP8 is not supported on this system.");
++            }
+ 
+-        let (ks, ks_l) = k_scale.storage_and_layout();
+-        let ks = match &*ks {
+-            Storage::Cuda(ks) => ks,
+-            _ => candle::bail!("k_scale must be a cuda tensor"),
+-        };
+-        let ks = ks.as_cuda_slice::<f32>()?;
+-        let (ks, _ks_guard) = slice_ptr(ks, ks_l.start_offset());
++            let (ks, ks_l) = k_scale.storage_and_layout();
++            let ks = match &*ks {
++                Storage::Cuda(ks) => ks,
++                _ => candle::bail!("k_scale must be a cuda tensor"),
++            };
++            let ks = ks.as_cuda_slice::<f32>()?;
++            let (ks, _ks_guard) = slice_ptr(ks, ks_l.start_offset());
+ 
+-        let (vs, vs_l) = v_scale.storage_and_layout();
+-        let vs = match &*vs {
+-            Storage::Cuda(vs) => vs,
+-            _ => candle::bail!("v_scale must be a cuda tensor"),
+-        };
+-        let vs = vs.as_cuda_slice::<f32>()?;
+-        let (vs, _vs_guard) = slice_ptr(vs, vs_l.start_offset());
++            let (vs, vs_l) = v_scale.storage_and_layout();
++            let vs = match &*vs {
++                Storage::Cuda(vs) => vs,
++                _ => candle::bail!("v_scale must be a cuda tensor"),
++            };
++            let vs = vs.as_cuda_slice::<f32>()?;
++            let (vs, _vs_guard) = slice_ptr(vs, vs_l.start_offset());
+ 
+-        (ks as *const f32, vs as *const f32)
++            (ks as *const f32, vs as *const f32)
++        } else {
++            (std::ptr::null(), std::ptr::null())
++        }
+     } else {
+         (std::ptr::null(), std::ptr::null())
+     };
+diff --git a/mistralrs-paged-attn/src/cuda/flashinfer/math.cuh b/mistralrs-paged-attn/src/cuda/flashinfer/math.cuh
+index 27c6351e8ff36cec490fe81ef5463699050c7a0e..72259fdc3b4170fd0d19851beef8e38cbd0edfa7 100644
+--- a/mistralrs-paged-attn/src/cuda/flashinfer/math.cuh
++++ b/mistralrs-paged-attn/src/cuda/flashinfer/math.cuh
+@@ -60,10 +60,16 @@ __forceinline__ __device__ float ptx_log2(float x) {
+  * \param x input
+  */
+ __forceinline__ __device__ half2 ptx_exp2(half2 x) {
++#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ < 750)
++  // Pascal: calculate in f32 and round each lane once to half.
++  return __halves2half2(__float2half_rn(::exp2f(__low2float(x))),
++                        __float2half_rn(::exp2f(__high2float(x))));
++#else
+   uint32_t y_u32;
+   uint32_t x_u32 = half2_as_uint32(x);
+   asm volatile("ex2.approx.f16x2 %0, %1;" : "=r"(y_u32) : "r"(x_u32));
+   return uint32_as_half2(y_u32);
++#endif
+ }
+ 
+ /*!
+@@ -71,9 +77,13 @@ __forceinline__ __device__ half2 ptx_exp2(half2 x) {
+  * \param x input
+  */
+ __forceinline__ __device__ half ptx_exp2(half x) {
++#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ < 750)
++  return __float2half_rn(::exp2f(__half2float(x)));
++#else
+   ushort y_u16;
+   asm volatile("ex2.approx.f16 %0, %1;" : "=h"(y_u16) : "h"(__half_as_ushort(x)));
+   return __ushort_as_half(y_u16);
++#endif
+ }
+ 
+ /*!
+@@ -125,9 +135,14 @@ __forceinline__ __device__ float rsqrt(float x) {
+  * \param x input
+  */
+ __forceinline__ __device__ float tanh(float x) {
++#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ < 750)
++  // libdevice emits Pascal-compatible math, including proper saturation.
++  return ::tanhf(x);
++#else
+   float y;
+   asm volatile("tanh.approx.f32 %0, %1;" : "=f"(y) : "f"(x));
+   return y;
++#endif
+ }
+ 
+ /*!
+@@ -135,10 +150,15 @@ __forceinline__ __device__ float tanh(float x) {
+  * \param x input
+  */
+ __forceinline__ __device__ half2 tanh(half2 x) {
++#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ < 750)
++  return __halves2half2(__float2half_rn(::tanhf(__low2float(x))),
++                        __float2half_rn(::tanhf(__high2float(x))));
++#else
+   uint32_t y_u32;
+   uint32_t x_u32 = half2_as_uint32(x);
+   asm volatile("tanh.approx.f16x2 %0, %1;" : "=r"(y_u32) : "r"(x_u32));
+   return uint32_as_half2(y_u32);
++#endif
+ }
+ 
+ /*!
+@@ -146,9 +166,13 @@ __forceinline__ __device__ half2 tanh(half2 x) {
+  * \param x input
+  */
+ __forceinline__ __device__ half tanh(half x) {
++#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ < 750)
++  return __float2half_rn(::tanhf(__half2float(x)));
++#else
+   ushort y_u16;
+   asm volatile("tanh.approx.f16 %0, %1;" : "=h"(y_u16) : "h"(__half_as_ushort(x)));
+   return __ushort_as_half(y_u16);
++#endif
+ }
+ 
+ }  // namespace math
+diff --git a/mistralrs-paged-attn/src/cuda/flashinfer/utils.cuh b/mistralrs-paged-attn/src/cuda/flashinfer/utils.cuh
+index b93290c6780c5802271b957b76e2f80ca439b10f..deb72bafb6a0fcd45c412c46b96f11bfab7ea1d3 100644
+--- a/mistralrs-paged-attn/src/cuda/flashinfer/utils.cuh
++++ b/mistralrs-paged-attn/src/cuda/flashinfer/utils.cuh
+@@ -29,6 +29,11 @@
+ #include <unordered_set>
+ #include <vector>
+ 
++#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ < 700)
++#undef __grid_constant__
++#define __grid_constant__
++#endif
++
+ #include "exception.h"
+ 
+ #define STR_HELPER(x) #x
+diff --git a/mistralrs-paged-attn/src/cuda/mod.rs b/mistralrs-paged-attn/src/cuda/mod.rs
+index 381b23758dbea2f5c8d7fe1c74724da7e0dff076..c501ac40da3b634d9e106d842d1339ba80f56653 100644
+--- a/mistralrs-paged-attn/src/cuda/mod.rs
++++ b/mistralrs-paged-attn/src/cuda/mod.rs
+@@ -1,4 +1,5 @@
+ pub const USE_FP8: bool = cfg!(has_fp8);
++pub const USE_FP8_LEGACY_SM61: bool = cfg!(has_fp8_legacy_sm61);
+ 
+ mod backend;
+ mod ffi;
+diff --git a/mistralrs-paged-attn/src/cuda/quantization/fp8/nvidia/quant_utils.cuh b/mistralrs-paged-attn/src/cuda/quantization/fp8/nvidia/quant_utils.cuh
+index 7cd1da1e797427c408b4fee2df8ceb7190bfc2ee..5c4c6833a52e02e06ab60c938eda2a3f7d7ce1a2 100644
+--- a/mistralrs-paged-attn/src/cuda/quantization/fp8/nvidia/quant_utils.cuh
++++ b/mistralrs-paged-attn/src/cuda/quantization/fp8/nvidia/quant_utils.cuh
+@@ -197,14 +197,9 @@ template <>
+ __inline__ __device__ uint8_t scaled_vec_conversion<uint8_t, __nv_bfloat16>(
+     const __nv_bfloat16& a, const float scale,
+     const __nv_fp8_interpretation_t fp8_type) {
+-    #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+-  assert(false);
+-    #else
+   __nv_fp8_storage_t res = __nv_cvt_float_to_fp8(__bfloat162float(a) / scale,
+                                                  __NV_SATFINITE, fp8_type);
+   return (uint8_t)res;
+-    #endif
+-  __builtin_unreachable();  // Suppress missing return statement warning
+ }
+ 
+ // float -> fp8
+diff --git a/mistralrs-pyo3/Cargo.toml b/mistralrs-pyo3/Cargo.toml
+index 1c8e42c1ae17d82c9c2305da005fc682c168ecfc..127efb4fe848e977ef1c419878efc182824060bd 100644
+--- a/mistralrs-pyo3/Cargo.toml
++++ b/mistralrs-pyo3/Cargo.toml
+@@ -46,6 +46,9 @@ safetensors.workspace = true
+ tempfile.workspace = true
+ 
+ [features]
++cuda-legacy-fp4 = ["cuda", "mistralrs-core/cuda-legacy-fp4"]
++cuda-legacy-fp8 = ["cuda", "mistralrs-core/cuda-legacy-fp8"]
++cuda-legacy-bf16 = ["cuda", "mistralrs-core/cuda-legacy-bf16"]
+ default = []
+ cuda = ["candle-core/cuda", "mistralrs-core/cuda"]
+ cutile = ["cuda", "mistralrs-core/cutile"]
+diff --git a/mistralrs-quant/Cargo.toml b/mistralrs-quant/Cargo.toml
+index 8162cff7ab92d67d57f7cf9cb3beb59652c01055..831f2ac4334e1277be391c7e8d4231766b39cf21 100644
+--- a/mistralrs-quant/Cargo.toml
++++ b/mistralrs-quant/Cargo.toml
+@@ -45,6 +45,9 @@ cutile = { workspace = true, optional = true, features = ["experimental-tune"] }
+ mistralrs-metal-compile = { workspace = true, optional = true, features = ["metal"] }
+ 
+ [features]
++cuda-legacy-bf16 = ["cuda", "candle-core/cuda-legacy-bf16"]
++cuda-legacy-fp8 = ["cuda", "candle-core/cuda-legacy-fp8"]
++cuda-legacy-fp4 = ["cuda", "candle-core/cuda-legacy-fp4"]
+ cuda = [
+     "candle-core/cuda",
+     "candle-nn/cuda",
+diff --git a/mistralrs-quant/build.rs b/mistralrs-quant/build.rs
+index b98cebf474afee88f8a390122879c9c5ab94f6ff..1183ece0927f69cd9a49657d278185d4e22662a1 100644
+--- a/mistralrs-quant/build.rs
++++ b/mistralrs-quant/build.rs
+@@ -111,6 +111,9 @@ fn cutile_supported_for_build_cuda(major: usize, minor: usize, compute_cap: usiz
+ fn main() -> Result<(), String> {
+     // Declare expected cfg values for check-cfg lint
+     println!("cargo::rustc-check-cfg=cfg(has_marlin_kernels)");
++    println!("cargo::rustc-check-cfg=cfg(has_fp8_mma_kernels)");
++    println!("cargo::rustc-check-cfg=cfg(allow_legacy_bf16)");
++    println!("cargo::rustc-check-cfg=cfg(allow_legacy_fp8)");
+     println!("cargo::rustc-check-cfg=cfg(has_blockwise_fp8_kernels)");
+     println!("cargo::rustc-check-cfg=cfg(has_cutlass_fp8_sm90_kernels)");
+     println!("cargo::rustc-check-cfg=cfg(has_deepgemm_fp8_sm90_provider)");
+@@ -127,6 +130,7 @@ fn main() -> Result<(), String> {
+         const CUDA_NVCC_FLAGS: Option<&'static str> = option_env!("CUDA_NVCC_FLAGS");
+ 
+         println!("cargo:rerun-if-changed=build.rs");
++        println!("cargo:rerun-if-env-changed=ALLOW_LEGACY");
+         println!("cargo:rerun-if-env-changed=CUDA_NVCC_FLAGS");
+         println!("cargo:rerun-if-env-changed={CUTLASS_COMMIT_ENV}");
+         let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+@@ -153,6 +157,19 @@ fn main() -> Result<(), String> {
+             .watch(["kernels"])
+             .arg(&header_hash_arg);
+ 
++        let legacy = std::env::var("ALLOW_LEGACY").unwrap_or_default();
++        let requested =
++            |name| legacy == "all" || legacy.split(',').map(str::trim).any(|part| part == name);
++        let legacy_bf16 = cfg!(feature = "cuda-legacy-bf16") || requested("bf16");
++        let legacy_fp8 = cfg!(feature = "cuda-legacy-fp8") || requested("fp8");
++        if legacy_bf16 {
++            builder = builder.arg("-DALLOW_LEGACY_BF16");
++            println!("cargo:rustc-cfg=allow_legacy_bf16");
++        }
++        if legacy_fp8 {
++            builder = builder.arg("-DALLOW_LEGACY_FP8");
++            println!("cargo:rustc-cfg=allow_legacy_fp8");
++        }
+         let compute_cap = builder.get_compute_cap().unwrap_or(80);
+         // ======== Handle optional kernel compilation via rustc-cfg flags
+         let cc_over_80 = compute_cap >= 80;
+@@ -165,10 +182,13 @@ fn main() -> Result<(), String> {
+ 
+         if cc_over_80 {
+             println!("cargo:rustc-cfg=has_marlin_kernels");
++            println!("cargo:rustc-cfg=has_fp8_mma_kernels");
++            println!("cargo:rustc-cfg=has_mxfp4_wmma_kernels");
++        }
++        if cc_over_80 || legacy_fp8 {
+             println!("cargo:rustc-cfg=has_blockwise_fp8_kernels");
+             println!("cargo:rustc-cfg=has_scalar_fp8_kernels");
+             // WMMA tensor core MXFP4 kernel (FP16/BF16 WMMA requires SM >= 80)
+-            println!("cargo:rustc-cfg=has_mxfp4_wmma_kernels");
+         }
+         let cutlass_fp8_sm90 = compute_cap == 90 && cuda_major >= 12 && !target.contains("msvc");
+         if cutlass_fp8_sm90 {
+@@ -206,14 +226,16 @@ fn main() -> Result<(), String> {
+         } else {
+             vec![
+                 "marlin_*.cu",
+-                "*_fp8.cu",
+-                "*_fp8_gemm.cu",
+                 "*_fp8_mma.cu",
+                 "*_wmma.cu",
+                 "moe_data.cu",
+                 "grouped_mm_*.cu",
++                "grouped_fp8.cu",
+             ]
+         };
++        if !cc_over_80 && !legacy_fp8 {
++            excluded_files.extend(["*_fp8.cu", "*_fp8_gemm.cu"]);
++        }
+         if cc_over_80 && !cutlass_moe {
+             excluded_files.push("moe_data.cu");
+             excluded_files.push("grouped_mm_*.cu");
+diff --git a/mistralrs-quant/kernels/embedding/gather_rows.cu b/mistralrs-quant/kernels/embedding/gather_rows.cu
+index 3d6313f6d367646baf9c87c02be0c37482107c9c..f376dad248c3d89dd356e79ae67e14360ad2bb2f 100644
+--- a/mistralrs-quant/kernels/embedding/gather_rows.cu
++++ b/mistralrs-quant/kernels/embedding/gather_rows.cu
+@@ -37,6 +37,7 @@ enum Codec : int {
+   AFQ = 18,
+   SYM_INT4 = 19,
+   SYM_INT8 = 20,
++  MXFP4 = 21,
+ };
+ 
+ // Scalar encodings mirror `ScaleType` in src/embedding/mod.rs.
+@@ -243,6 +244,16 @@ __device__ __forceinline__ void decode(const GatherArgs &a, const Row &r, uint64
+       const int lo = quarter >= 2 ? (ql[i] >> 4) : (ql[i] & 0xF);
+       v[i] = d * ((lo | (((qh[i] >> (2 * quarter)) & 3) << 4)) - 32);
+     }
++  } else if constexpr (C == MXFP4) {
++    const uint8_t *b = r.data + (col / 32) * 17;
++    const uint32_t e = b[0];
++    const float d = __uint_as_float(e < 2 ? (0x00200000u << e) : ((e - 1) << 23));
++#pragma unroll
++    for (int i = 0; i < kUnit; ++i) {
++      const int c = col % 32 + i;
++      const int code = (b[1 + c % 16] >> (c < 16 ? 0 : 4)) & 15;
++      v[i] = (2.0f * e2m1_to_float(code)) * d;
++    }
+   } else if constexpr (C == FP4) {
+     const uint8_t *q = r.data + col / 2;
+     const float s = load_scalar(r.scales, col / a.group, a.scale_type);
+@@ -437,6 +448,7 @@ template <typename T> void launch(const GatherArgs &a, bool scalar, cudaStream_t
+     GATHER_CASE(Q6K)
+     GATHER_CASE(Q8K)
+     GATHER_CASE(IQ4_NL)
++    GATHER_CASE(MXFP4)
+     GATHER_CASE(FP4)
+     GATHER_CASE(FP8)
+     GATHER_CASE(AFQ)
+diff --git a/mistralrs-quant/src/blockwise_fp8/ffi.rs b/mistralrs-quant/src/blockwise_fp8/ffi.rs
+index 7e9f625c816ae584f0ec9b723a4494c005802218..f5e5613da17abe280453d3c4f46596435c7884c6 100644
+--- a/mistralrs-quant/src/blockwise_fp8/ffi.rs
++++ b/mistralrs-quant/src/blockwise_fp8/ffi.rs
+@@ -32,7 +32,7 @@ extern "C" {
+     ) -> i32;
+ }
+ 
+-#[cfg(has_blockwise_fp8_kernels)]
++#[cfg(has_fp8_mma_kernels)]
+ extern "C" {
+     pub(crate) fn mistralrs_fp8_mma_error_string(status: i32) -> *const core::ffi::c_char;
+     pub(crate) fn mistralrs_fp8_mma_gemv(
+diff --git a/mistralrs-quant/src/blockwise_fp8/mod.rs b/mistralrs-quant/src/blockwise_fp8/mod.rs
+index b182dad66b717613d14f92bc6972abcd1e41e7ce..58fae442f6bd63e3cc4810745ef1ad89c97c9e2a 100644
+--- a/mistralrs-quant/src/blockwise_fp8/mod.rs
++++ b/mistralrs-quant/src/blockwise_fp8/mod.rs
+@@ -5,7 +5,7 @@ use candle_nn::Linear;
+ 
+ #[cfg(all(feature = "cuda", has_deepgemm_fp8_sm90_provider))]
+ mod deepgemm;
+-#[cfg(all(feature = "cuda", has_blockwise_fp8_kernels))]
++#[cfg(all(feature = "cuda", has_fp8_mma_kernels))]
+ pub(crate) mod mma;
+ pub(crate) mod ops;
+ pub use ops::{
+@@ -50,7 +50,7 @@ enum BlockwiseFp8Provider {
+     CutlassSm90,
+     #[cfg(all(feature = "cuda", has_deepgemm_fp8_sm90_provider))]
+     DeepGemmSm90(Arc<deepgemm::Prepared>),
+-    #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels))]
++    #[cfg(all(feature = "cuda", has_fp8_mma_kernels))]
+     TensorCoreGemv,
+ }
+ 
+@@ -65,7 +65,7 @@ const FP8_SM90_PROVIDER_ENV: &str = "MISTRALRS_FP8_SM90_PROVIDER";
+ // The fused GLU quantizer kernel emits one F32 scale per 128 columns.
+ #[cfg(feature = "cuda")]
+ const FUSED_GLU_QUANT_BLOCK_COLUMNS: usize = 128;
+-#[cfg(all(feature = "cuda", has_blockwise_fp8_kernels))]
++#[cfg(all(feature = "cuda", has_fp8_mma_kernels))]
+ static TENSOR_CORE_GEMV_PROVIDER_LOG: std::sync::Once = std::sync::Once::new();
+ 
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+@@ -96,7 +96,7 @@ impl BlockwiseFp8Provider {
+             Self::CutlassSm90 => true,
+             #[cfg(all(feature = "cuda", has_deepgemm_fp8_sm90_provider))]
+             Self::DeepGemmSm90(_) => true,
+-            #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels))]
++            #[cfg(all(feature = "cuda", has_fp8_mma_kernels))]
+             Self::TensorCoreGemv => true,
+         }
+     }
+@@ -179,14 +179,14 @@ impl BlockwiseFP8Linear {
+         );
+         #[cfg(not(all(feature = "cuda", has_cutlass_fp8_sm90_kernels)))]
+         let cutlass_sm90 = false;
+-        #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels))]
++        #[cfg(all(feature = "cuda", has_fp8_mma_kernels))]
+         let tensor_core_gemv = self.dequant_dtype == DType::BF16
+             && mma::weight_supported(
+                 &self.weight,
+                 &self.weight_scale_inv,
+                 &self.weight_block_size,
+             );
+-        #[cfg(not(all(feature = "cuda", has_blockwise_fp8_kernels)))]
++        #[cfg(not(all(feature = "cuda", has_fp8_mma_kernels)))]
+         let tensor_core_gemv = false;
+ 
+         match select_dynamic_provider(cutlass_sm90, tensor_core_gemv) {
+@@ -206,7 +206,7 @@ impl BlockwiseFP8Linear {
+             }
+             #[cfg(not(all(feature = "cuda", has_cutlass_fp8_sm90_kernels)))]
+             DynamicFp8Provider::CutlassSm90 => unreachable!(),
+-            #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels))]
++            #[cfg(all(feature = "cuda", has_fp8_mma_kernels))]
+             DynamicFp8Provider::TensorCoreGemv => {
+                 self.provider = BlockwiseFp8Provider::TensorCoreGemv;
+                 #[cfg(feature = "cutile")]
+@@ -225,13 +225,13 @@ impl BlockwiseFP8Linear {
+                     );
+                 });
+             }
+-            #[cfg(not(all(feature = "cuda", has_blockwise_fp8_kernels)))]
++            #[cfg(not(all(feature = "cuda", has_fp8_mma_kernels)))]
+             DynamicFp8Provider::TensorCoreGemv => unreachable!(),
+         }
+         Ok(())
+     }
+ 
+-    #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels, feature = "cutile"))]
++    #[cfg(all(feature = "cuda", has_fp8_mma_kernels, feature = "cutile"))]
+     fn cutile_scale_layout() -> ActivationScaleLayout {
+         ActivationScaleLayout::GroupMajor {
+             row_alignment: std::num::NonZeroUsize::new(crate::cutile::FP8_GEMM_BLOCK_ROWS)
+@@ -240,7 +240,7 @@ impl BlockwiseFP8Linear {
+     }
+ 
+     /// Rows padded to the GEMM block when `x` takes the cuTile GEMM instead of the tensor-core GEMV.
+-    #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels, feature = "cutile"))]
++    #[cfg(all(feature = "cuda", has_fp8_mma_kernels, feature = "cutile"))]
+     fn cutile_padded_rows(&self, x: &Tensor) -> Option<usize> {
+         if !matches!(self.provider, BlockwiseFp8Provider::TensorCoreGemv)
+             || x.dtype() != DType::BF16
+@@ -260,7 +260,7 @@ impl BlockwiseFP8Linear {
+             .then(|| rows.div_ceil(block_rows) * block_rows)
+     }
+ 
+-    #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels, feature = "cutile"))]
++    #[cfg(all(feature = "cuda", has_fp8_mma_kernels, feature = "cutile"))]
+     fn forward_cutile_quantized(&self, activation: &QuantizedActivation) -> Result<Tensor> {
+         let dev = activation.quantized().device().as_cuda_device()?;
+         let (rows, _) = activation.quantized().dims2()?;
+@@ -291,7 +291,7 @@ impl BlockwiseFP8Linear {
+         split_size: usize,
+         activation: GluActivationType,
+     ) -> Result<Option<Tensor>> {
+-        #[cfg(all(has_blockwise_fp8_kernels, feature = "cutile"))]
++        #[cfg(all(has_fp8_mma_kernels, feature = "cutile"))]
+         if matches!(self.provider, BlockwiseFp8Provider::TensorCoreGemv) {
+             if self.activation_scheme != Some(Fp8ActivationScheme::Dynamic)
+                 || input.dtype() != DType::BF16
+@@ -660,7 +660,7 @@ impl QuantMethod for BlockwiseFP8Linear {
+             return self.forward_quantized(&activation);
+         }
+ 
+-        #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels))]
++        #[cfg(all(feature = "cuda", has_fp8_mma_kernels))]
+         if matches!(self.provider, BlockwiseFp8Provider::TensorCoreGemv) && x.dtype() == DType::BF16
+         {
+             if self.activation_quantization_scheme_for(x).is_some() {
+@@ -756,7 +756,7 @@ impl QuantMethod for BlockwiseFP8Linear {
+                 return Ok(output);
+             }
+         }
+-        #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels))]
++        #[cfg(all(feature = "cuda", has_fp8_mma_kernels))]
+         if let [block_n, block_k] = *self.weight_block_size.as_slice() {
+             let view = crate::moe::grouped_fp8::Fp8WeightView {
+                 weight: &self.weight,
+@@ -800,7 +800,7 @@ impl QuantMethod for BlockwiseFP8Linear {
+         {
+             return None;
+         }
+-        #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels))]
++        #[cfg(all(feature = "cuda", has_fp8_mma_kernels))]
+         if matches!(self.provider, BlockwiseFp8Provider::TensorCoreGemv) {
+             return Some(ActivationQuantizationScheme {
+                 dtype: DType::F8E4M3,
+@@ -826,7 +826,7 @@ impl QuantMethod for BlockwiseFP8Linear {
+         &self,
+         x: &Tensor,
+     ) -> Option<ActivationQuantizationScheme> {
+-        #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels))]
++        #[cfg(all(feature = "cuda", has_fp8_mma_kernels))]
+         if matches!(self.provider, BlockwiseFp8Provider::TensorCoreGemv) {
+             #[cfg(feature = "cutile")]
+             if self.cutile_padded_rows(x).is_some() {
+@@ -844,7 +844,7 @@ impl QuantMethod for BlockwiseFP8Linear {
+ 
+     fn preferred_activation_scale_layout_for(&self, x: &Tensor) -> Option<ActivationScaleLayout> {
+         self.activation_quantization_scheme_for(x)?;
+-        #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels, feature = "cutile"))]
++        #[cfg(all(feature = "cuda", has_fp8_mma_kernels, feature = "cutile"))]
+         if self.cutile_padded_rows(x).is_some() {
+             return Some(Self::cutile_scale_layout());
+         }
+@@ -869,7 +869,7 @@ impl QuantMethod for BlockwiseFP8Linear {
+     }
+ 
+     fn quantize_activation(&self, x: &Tensor) -> Result<QuantizedActivation> {
+-        #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels))]
++        #[cfg(all(feature = "cuda", has_fp8_mma_kernels))]
+         if matches!(self.provider, BlockwiseFp8Provider::TensorCoreGemv) {
+             let scheme = self.activation_quantization_scheme_for(x).ok_or_else(|| {
+                 candle_core::Error::msg("FP8 tensor-core activation quantization is unavailable")
+@@ -932,7 +932,7 @@ impl QuantMethod for BlockwiseFP8Linear {
+     }
+ 
+     fn forward_quantized(&self, activation: &QuantizedActivation) -> Result<Tensor> {
+-        #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels))]
++        #[cfg(all(feature = "cuda", has_fp8_mma_kernels))]
+         if matches!(self.provider, BlockwiseFp8Provider::TensorCoreGemv) {
+             #[cfg(feature = "cutile")]
+             if activation.scale_layout() == Self::cutile_scale_layout() {
+@@ -1730,7 +1730,7 @@ mod tests {
+         Ok(())
+     }
+ 
+-    #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels, feature = "cutile"))]
++    #[cfg(all(feature = "cuda", has_fp8_mma_kernels, feature = "cutile"))]
+     fn cutile_test_layer(
+         dev: &Device,
+         output_features: usize,
+@@ -1767,7 +1767,7 @@ mod tests {
+         Ok(layer)
+     }
+ 
+-    #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels, feature = "cutile"))]
++    #[cfg(all(feature = "cuda", has_fp8_mma_kernels, feature = "cutile"))]
+     #[test]
+     #[ignore = "requires a CUDA device with cuTile support"]
+     fn cutile_w8a16_preserves_empty_leading_dimensions() -> Result<()> {
+@@ -1790,7 +1790,7 @@ mod tests {
+         Ok(())
+     }
+ 
+-    #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels, feature = "cutile"))]
++    #[cfg(all(feature = "cuda", has_fp8_mma_kernels, feature = "cutile"))]
+     fn assert_close(label: &str, reference: &Tensor, output: &Tensor) -> Result<()> {
+         let reference = reference.to_dtype(DType::F32)?.to_device(&Device::Cpu)?;
+         let output = output.to_dtype(DType::F32)?.to_device(&Device::Cpu)?;
+@@ -1807,7 +1807,7 @@ mod tests {
+         Ok(())
+     }
+ 
+-    #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels, feature = "cutile"))]
++    #[cfg(all(feature = "cuda", has_fp8_mma_kernels, feature = "cutile"))]
+     #[test]
+     #[ignore = "requires a CUDA device with cuTile support"]
+     fn cutile_fused_glu_matches_unfused() -> Result<()> {
+@@ -1859,7 +1859,7 @@ mod tests {
+         Ok(())
+     }
+ 
+-    #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels, feature = "cutile"))]
++    #[cfg(all(feature = "cuda", has_fp8_mma_kernels, feature = "cutile"))]
+     #[test]
+     #[ignore = "requires a CUDA device with cuTile support"]
+     fn cutile_consumes_fused_rms_norm_group_major_activation() -> Result<()> {
+diff --git a/mistralrs-quant/src/embedding/mod.rs b/mistralrs-quant/src/embedding/mod.rs
+index 4157df7d8fcd4ef72d2de2b6ac9ce13f05861ba2..4378a65b14b856925537dfa7a0a1589392b51abf 100644
+--- a/mistralrs-quant/src/embedding/mod.rs
++++ b/mistralrs-quant/src/embedding/mod.rs
+@@ -33,6 +33,7 @@ const IQ4_VALUES: [i8; 16] = [
+ const FP4_VALUES: [f32; 8] = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0];
+ const SYM_INT4_OFFSET: i32 = 8;
+ const GGUF_IQ4_NL: u32 = 20;
++const GGUF_MXFP4: u32 = 39;
+ 
+ /// Output of an embedding gather: row dtype plus a multiplier fused into the decode (Gemma `sqrt(hidden)`).
+ #[derive(Clone, Copy, Debug, PartialEq)]
+@@ -76,6 +77,7 @@ pub enum GgufRowType {
+     Q6K,
+     Q8K,
+     Iq4Nl,
++    Mxfp4 = 18,
+ }
+ 
+ impl GgufRowType {
+@@ -93,6 +95,7 @@ impl GgufRowType {
+             Self::Q5K => (256, 176),
+             Self::Q6K => (256, 210),
+             Self::Q8K => (256, 292),
++            Self::Mxfp4 => (32, 17),
+         }
+     }
+ }
+@@ -208,6 +211,7 @@ impl RowCodec {
+             GgmlDType::Q5K => GgufRowType::Q5K,
+             GgmlDType::Q6K => GgufRowType::Q6K,
+             GgmlDType::Q8K => GgufRowType::Q8K,
++            GgmlDType::Mxfp4 => GgufRowType::Mxfp4,
+         };
+         Self::Gguf(ty)
+     }
+@@ -231,6 +235,7 @@ impl RowCodec {
+             14 => Self::Gguf(GgufRowType::Q6K),
+             15 => Self::Gguf(GgufRowType::Q8K),
+             GGUF_IQ4_NL => Self::Gguf(GgufRowType::Iq4Nl),
++            GGUF_MXFP4 => Self::Gguf(GgufRowType::Mxfp4),
+             other => candle_core::bail!("unsupported GGUF embedding type {other}"),
+         })
+     }
+@@ -379,6 +384,7 @@ fn decode_gguf(ty: GgufRowType, src: &[u8], out: &mut [f32]) {
+         GgufRowType::Q5K => dequantize_blocks::<BlockQ5K>(src, out),
+         GgufRowType::Q6K => dequantize_blocks::<BlockQ6K>(src, out),
+         GgufRowType::Q8K => dequantize_blocks::<BlockQ8K>(src, out),
++        GgufRowType::Mxfp4 => dequantize_blocks::<BlockMxfp4>(src, out),
+         GgufRowType::Iq4Nl => {
+             for (block, dst) in src
+                 .as_chunks::<IQ4_BLOCK_BYTES>()
+diff --git a/mistralrs-quant/src/fp8/quantize.rs b/mistralrs-quant/src/fp8/quantize.rs
+index b3cd8546aa0711b99219a69dca7eb6a5770f0839..a90535fb1fb26fa5488b0a400ce199da87f586d6 100644
+--- a/mistralrs-quant/src/fp8/quantize.rs
++++ b/mistralrs-quant/src/fp8/quantize.rs
+@@ -76,8 +76,17 @@ mod tests {
+     #[test]
+     #[cfg(not(feature = "metal"))]
+     fn test_roundtrip_f8e4m3() -> Result<()> {
+-        let dev = Device::cuda_if_available(0)?;
++        roundtrip_f8e4m3_on_device(Device::Cpu)
++    }
+ 
++    #[test]
++    #[cfg(all(feature = "cuda", not(feature = "metal")))]
++    fn cuda_sm61_roundtrip_f8e4m3() -> Result<()> {
++        roundtrip_f8e4m3_on_device(Device::new_cuda(0)?)
++    }
++
++    #[cfg(not(feature = "metal"))]
++    fn roundtrip_f8e4m3_on_device(dev: Device) -> Result<()> {
+         let data = Tensor::rand(0f32, 1f32, (32, 32), &dev)?;
+ 
+         let QuantizationResult {
+diff --git a/mistralrs-quant/src/gguf/archive.rs b/mistralrs-quant/src/gguf/archive.rs
+index 3f273aa37cde79cbad1725f00902229af62412cd..decf9d0089db8ff46da2a05c520911c1fdaa7131 100644
+--- a/mistralrs-quant/src/gguf/archive.rs
++++ b/mistralrs-quant/src/gguf/archive.rs
+@@ -742,6 +742,7 @@ const fn ggml_dtype_alignment(dtype: GgmlDType) -> usize {
+         GgmlDType::Q6K => align_of::<BlockQ6K>(),
+         GgmlDType::Q8K => align_of::<BlockQ8K>(),
+         GgmlDType::BF16 => align_of::<bf16>(),
++        GgmlDType::Mxfp4 => align_of::<candle_core::quantized::k_quants::BlockMxfp4>(),
+     }
+ }
+ 
+diff --git a/mistralrs-quant/src/gguf/mod.rs b/mistralrs-quant/src/gguf/mod.rs
+index d2bf67d7538e590c38b64d6d5e8b480af97987a2..284aba34baa447fc1ac09357709751e6d5e1d941 100644
+--- a/mistralrs-quant/src/gguf/mod.rs
++++ b/mistralrs-quant/src/gguf/mod.rs
+@@ -88,6 +88,7 @@ fn ggml_dtype_to_uqff_code(dtype: GgmlDType) -> u32 {
+         GgmlDType::Q6K => 14,
+         GgmlDType::Q8K => 15,
+         GgmlDType::BF16 => 30,
++        GgmlDType::Mxfp4 => 39,
+     }
+ }
+ 
+@@ -127,6 +128,7 @@ fn ggml_dtype_from_uqff_code(dtype: u32) -> Result<GgmlDType> {
+         14 => Ok(GgmlDType::Q6K),
+         15 => Ok(GgmlDType::Q8K),
+         30 => Ok(GgmlDType::BF16),
++        39 => Ok(GgmlDType::Mxfp4),
+         _ => candle_core::bail!("unknown dtype for quantized weight tensor {dtype}"),
+     }
+ }
+@@ -148,6 +150,7 @@ fn gguf_dtype_label(dtype: u32) -> String {
+         14 => "q6k",
+         15 => "q8k",
+         30 => "bf16",
++        39 => "mxfp4",
+         _ => "unknown",
+     }
+     .to_string()
+diff --git a/mistralrs-quant/src/lib.rs b/mistralrs-quant/src/lib.rs
+index 1bcb274bbd6f81e5daf6fa4bb261b26e6516c400..6a5cde6d2b17be0d9d46df54ecc2f90ba959391d 100644
+--- a/mistralrs-quant/src/lib.rs
++++ b/mistralrs-quant/src/lib.rs
+@@ -1398,7 +1398,7 @@ impl TryFrom<GgmlDType> for IsqType {
+             GgmlDType::Q8_0 => Ok(Self::Q8_0),
+             GgmlDType::Q8_1 => Ok(Self::Q8_1),
+             GgmlDType::Q8K => Ok(Self::Q8K),
+-            GgmlDType::BF16 | GgmlDType::F32 | GgmlDType::F16 => {
++            GgmlDType::BF16 | GgmlDType::F32 | GgmlDType::F16 | GgmlDType::Mxfp4 => {
+                 candle_core::bail!("Expected valid GGML ISQ type.")
+             }
+         }
+diff --git a/mistralrs-quant/src/metal_kernels/embedding.metal b/mistralrs-quant/src/metal_kernels/embedding.metal
+index 0d173877ed7700fb6e5f999320da5befb135ae0b..ef851a0ea3017f0ee1ac223da66377687bfcfb8b 100644
+--- a/mistralrs-quant/src/metal_kernels/embedding.metal
++++ b/mistralrs-quant/src/metal_kernels/embedding.metal
+@@ -13,7 +13,7 @@ enum Codec : int {
+   DENSE_F32 = 0, DENSE_F16 = 1, DENSE_BF16 = 2,
+   Q4_0 = 3, Q4_1 = 4, Q5_0 = 5, Q5_1 = 6, Q8_0 = 7, Q8_1 = 8,
+   Q2K = 9, Q3K = 10, Q4K = 11, Q5K = 12, Q6K = 13, Q8K = 14,
+-  IQ4_NL = 15, FP4 = 16, FP8 = 17, AFQ = 18, SYM_INT4 = 19, SYM_INT8 = 20,
++  IQ4_NL = 15, FP4 = 16, FP8 = 17, AFQ = 18, SYM_INT4 = 19, SYM_INT8 = 20, MXFP4 = 21,
+ };
+ 
+ struct EmbeddingGatherConfig {
+@@ -136,6 +136,14 @@ inline float decode(constant EmbeddingGatherConfig &a, const device uchar *data,
+     const int ql = (b[64 * n + l + 32 * (quarter & 1)] >> (quarter >= 2 ? 4 : 0)) & 15;
+     const int qh = (b[128 + 32 * n + l] >> (2 * quarter)) & 3;
+     return read_half(b + 208) * sc * ((ql | (qh << 4)) - 32);
++  } else if (C == MXFP4) {
++    const device uchar *b = data + (col / 32) * 17;
++    const uint e = b[0];
++    const float d = as_type<float>(e < 2 ? (0x00200000u << e) : ((e - 1) << 23));
++    const uint c = col % 32;
++    const int code = (b[1 + c % 16] >> (c < 16 ? 0 : 4)) & 15;
++    const float q = (code & 8) ? -fp4_values[code & 7] : fp4_values[code & 7];
++    return (2.0f * q) * d;
+   } else if (C == FP4) {
+     const int code = (data[col / 2] >> (4 * (col % 2))) & 15;
+     const float q = (code & 8) ? -fp4_values[code & 7] : fp4_values[code & 7];
+@@ -219,6 +227,7 @@ EMBEDDING_CODEC(17)
+ EMBEDDING_CODEC(18)
+ EMBEDDING_CODEC(19)
+ EMBEDDING_CODEC(20)
++EMBEDDING_CODEC(21)
+ #undef EMBEDDING_CODEC
+ #undef EMBEDDING_INSTANCE
+ 
+diff --git a/mistralrs-quant/src/moe/mod.rs b/mistralrs-quant/src/moe/mod.rs
+index 420a3d3d7b4aa6eac1a1cca6970da2b150f95761..f53ff5c54d1a8c891746b93a36960274abde078c 100644
+--- a/mistralrs-quant/src/moe/mod.rs
++++ b/mistralrs-quant/src/moe/mod.rs
+@@ -1,7 +1,7 @@
+ //! MoE support that is independent of any specific quant scheme.
+ 
+ pub mod cuda;
+-#[cfg(has_blockwise_fp8_kernels)]
++#[cfg(has_fp8_mma_kernels)]
+ pub(crate) mod grouped_fp8;
+ mod weighted_reduce;
+ pub use weighted_reduce::moe_weighted_reduce;
+diff --git a/mistralrs-quant/src/mxfp8/mod.rs b/mistralrs-quant/src/mxfp8/mod.rs
+index fe6fb6147b03efe41eabbd207160653d152693ce..fa9de646017a1dec20fcc6cb4619810e4e13a6bc 100644
+--- a/mistralrs-quant/src/mxfp8/mod.rs
++++ b/mistralrs-quant/src/mxfp8/mod.rs
+@@ -286,7 +286,7 @@ impl QuantMethod for Mxfp8Linear {
+                 return Ok(output);
+             }
+         }
+-        #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels))]
++        #[cfg(all(feature = "cuda", has_fp8_mma_kernels))]
+         {
+             let view = crate::moe::grouped_fp8::Fp8WeightView {
+                 weight: &self.weight,
+diff --git a/mistralrs-quant/src/nvfp4/mod.rs b/mistralrs-quant/src/nvfp4/mod.rs
+index 4ba5b2d2e679103bcd736618ec154c4d8286dea8..d010535db5642ea73a4e669c5de0de6489ea9cfe 100644
+--- a/mistralrs-quant/src/nvfp4/mod.rs
++++ b/mistralrs-quant/src/nvfp4/mod.rs
+@@ -80,17 +80,27 @@ pub struct Nvfp4LayerParts {
+     pub dtype: DType,
+ }
+ 
+-#[derive(Debug)]
+ pub struct Nvfp4Layer {
+     parts: Nvfp4LayerParts,
+     input_global_scale: Option<f32>,
+     // Value equality is safe only for private calibration allocations.
+     input_scale_immutable: bool,
+     portable: bool,
++    #[cfg(all(feature = "cuda", feature = "cuda-legacy-fp4"))]
++    legacy: Option<candle_core::quantized::nvfp4_arch_e7::Nvfp4E7Linear>,
+     #[cfg(all(feature = "cuda", feature = "cutile", has_nvfp4_cutlass_kernels))]
+     native: Option<cutlass::State>,
+ }
+ 
++impl std::fmt::Debug for Nvfp4Layer {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.debug_struct("Nvfp4Layer")
++            .field("weight_shape", &self.parts.weight.dims())
++            .field("output_dtype", &self.parts.dtype)
++            .finish_non_exhaustive()
++    }
++}
++
+ #[cfg(all(feature = "cuda", feature = "cutile"))]
+ const NVFP4_GROUP_FORMAT: &str = "nvfp4";
+ 
+@@ -217,7 +227,13 @@ impl Nvfp4Layer {
+         }
+         #[cfg(feature = "cuda")]
+         let portable = match parts.weight.device() {
+-            Device::Cuda(device) => use_portable_kernels(device)?,
++            Device::Cuda(device) => {
++                if cfg!(feature = "cuda-legacy-fp4") && !portable::supported(device) {
++                    false
++                } else {
++                    use_portable_kernels(device)?
++                }
++            }
+             _ => false,
+         };
+         #[cfg(not(feature = "cuda"))]
+@@ -314,11 +330,50 @@ impl Nvfp4Layer {
+         } else {
+             cutlass::State::new(&parts)?
+         };
++        #[cfg(all(feature = "cuda", feature = "cuda-legacy-fp4"))]
++        let legacy = if let Device::Cuda(device) = parts.weight.device() {
++            if portable::supported(device) {
++                None
++            } else {
++                if parts.weight.rank() != 2 || parts.activation != Nvfp4ActivationMode::None {
++                    candle_core::bail!(
++                        "legacy NVFP4 CUDA supports rank-2 W4A16 only (packed E2M1 weights)"
++                    );
++                }
++                let n = parts.weight.dim(0)?;
++                let k = parts.weight.dim(1)? * VALUES_PER_BYTE;
++                let packed = parts
++                    .weight
++                    .to_device(&Device::Cpu)?
++                    .flatten_all()?
++                    .to_vec1::<u8>()?;
++                // Reuse UQFF's lossless raw-byte conversion: FP8 scale payloads
++                // must not be numerically rounded or converted on Pascal.
++                let scales = crate::utils::data_to_bytes::<F8E4M3>(
++                    parts
++                        .scales
++                        .to_device(&Device::Cpu)?
++                        .flatten_all()?
++                        .to_vec1::<F8E4M3>()?,
++                );
++                // E7 currently accepts one global multiplier; use 1.0 and apply
++                // the checkpoint's per-output-row multipliers after the GEMV.
++                Some(
++                    candle_core::quantized::nvfp4_arch_e7::Nvfp4E7Linear::from_modelopt_bytes(
++                        device, n, k, &packed, &scales, 1.0,
++                    )?,
++                )
++            }
++        } else {
++            None
++        };
+         let layer = Self {
+             parts,
+             input_global_scale,
+             input_scale_immutable,
+             portable,
++            #[cfg(all(feature = "cuda", feature = "cuda-legacy-fp4"))]
++            legacy,
+             #[cfg(all(feature = "cuda", feature = "cutile", has_nvfp4_cutlass_kernels))]
+             native,
+         };
+@@ -946,6 +1001,27 @@ impl QuantMethod for Nvfp4Layer {
+             *shape.last_mut().unwrap() = self.parts.weight.dim(0)?;
+             return Tensor::zeros(shape, x.dtype(), x.device());
+         }
++        #[cfg(all(feature = "cuda", feature = "cuda-legacy-fp4"))]
++        if let Some(legacy) = &self.legacy {
++            let k = x.dim(D::Minus1)?;
++            let rows = x.elem_count() / k;
++            let output = legacy.forward(
++                &x.contiguous()?.reshape((rows, k))?.to_dtype(DType::F16)?,
++                candle_core::quantized::nvfp4_arch_e7::E7Mode::W4A16Reference,
++            )?;
++            let n = self.parts.weight.dim(0)?;
++            let output = output
++                .to_dtype(DType::F32)?
++                .broadcast_mul(&self.parts.global_scales.reshape((1, n))?)?
++                .to_dtype(x.dtype())?;
++            let output = match &self.parts.bias {
++                Some(bias) => output.broadcast_add(bias)?,
++                None => output,
++            };
++            let mut shape = x.dims().to_vec();
++            *shape.last_mut().unwrap() = n;
++            return output.reshape(shape);
++        }
+         #[cfg(feature = "cuda")]
+         if x.device().is_cuda() {
+             let k = x.dim(D::Minus1)?;
+diff --git a/mistralrs-quant/src/pertensor_fp8/mod.rs b/mistralrs-quant/src/pertensor_fp8/mod.rs
+index c5d8ac892816444f983c0ee04333a63264c80a83..f373cd52a2b694ca71fcbc60034f54ffd043a726 100644
+--- a/mistralrs-quant/src/pertensor_fp8/mod.rs
++++ b/mistralrs-quant/src/pertensor_fp8/mod.rs
+@@ -249,7 +249,7 @@ impl PerTensorFP8Linear {
+         false
+     }
+ 
+-    #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels))]
++    #[cfg(all(feature = "cuda", has_fp8_mma_kernels))]
+     fn w8a16_view<'a>(&'a self, weight: &'a Tensor) -> crate::moe::grouped_fp8::Fp8WeightView<'a> {
+         let [n, k] = self.weight_shape;
+         crate::moe::grouped_fp8::Fp8WeightView {
+@@ -266,7 +266,7 @@ impl PerTensorFP8Linear {
+ 
+     // The retained-E4M3 kernel replaces the resident dequantized copy whenever it serves the model dtype.
+     fn w8a16_kernel_supported(&self) -> bool {
+-        #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels))]
++        #[cfg(all(feature = "cuda", has_fp8_mma_kernels))]
+         if let Some(weight) = self.weight.as_ref() {
+             return crate::moe::grouped_fp8::dense_supported(
+                 self.w8a16_view(weight),
+@@ -276,7 +276,7 @@ impl PerTensorFP8Linear {
+         false
+     }
+ 
+-    #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels))]
++    #[cfg(all(feature = "cuda", has_fp8_mma_kernels))]
+     fn try_w8a16_kernel(&self, input: &Tensor) -> Result<Option<Tensor>> {
+         let Some(weight) = self.weight.as_ref() else {
+             return Ok(None);
+@@ -602,7 +602,7 @@ impl QuantMethod for PerTensorFP8Linear {
+         if let Some(result) = self.try_cutile_w8a8(x)? {
+             return Ok(result);
+         }
+-        #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels))]
++        #[cfg(all(feature = "cuda", has_fp8_mma_kernels))]
+         if let Some(result) = self.try_w8a16_kernel(x)? {
+             return Ok(result);
+         }
+diff --git a/mistralrs-quant/src/unquantized/mod.rs b/mistralrs-quant/src/unquantized/mod.rs
+index b6d171280a583d5d59da2d84b7fe629e8b12e932..65765cc349ea95a5e5f8c14597be968c66135265 100644
+--- a/mistralrs-quant/src/unquantized/mod.rs
++++ b/mistralrs-quant/src/unquantized/mod.rs
+@@ -35,6 +35,15 @@ fn supports_cublaslt_batch_matmul(a: &Tensor, w: &Tensor) -> bool {
+     has_cublaslt_batch_layout(a) && has_cublaslt_batch_layout(w)
+ }
+ 
++// Legacy BF16 routes through Candle's supported matmul path on Pascal,
++// avoiding the specialized GEMV/cuBLASLt kernels. Opt-in only.
++fn use_legacy_bf16_fallback(input: &Tensor) -> bool {
++    cfg!(feature = "cuda")
++        && cfg!(allow_legacy_bf16)
++        && input.device().is_cuda()
++        && input.dtype() == DType::BF16
++}
++
+ impl UnquantLinear {
+     fn forward_cuda_gemm(&self, input: &Tensor) -> Result<Tensor> {
+         let input_dim = input.dim(D::Minus1)?;
+@@ -149,12 +158,13 @@ impl QuantMethod for UnquantLinear {
+     fn forward_raw(&self, a: &Tensor) -> Result<Tensor> {
+         // Batch matrix multiplication
+         maybe_init_cublas_lt_wrapper(a.device().clone());
++        let legacy_bf16 = use_legacy_bf16_fallback(a);
+ 
+         self.stats.process(a)?;
+ 
+         // Try custom GEMV for single-token decode (batch_size=1)
+         #[cfg(feature = "cuda")]
+-        if crate::gemv::should_use_gemv(a, &self.w) {
++        if !legacy_bf16 && crate::gemv::should_use_gemv(a, &self.w) {
+             return crate::gemv::gemv(a, &self.w, self.b.as_ref());
+         }
+ 
+@@ -185,7 +195,7 @@ impl QuantMethod for UnquantLinear {
+             match a.device().location() {
+                 DeviceLocation::Cuda { .. } => {
+                     // Try to use cublaslt, otherwise fallback to gemm
+-                    let cublaslt = if supports_cublaslt_batch_matmul(a, &w) {
++                    let cublaslt = if !legacy_bf16 && supports_cublaslt_batch_matmul(a, &w) {
+                         CUBLASLT_CONTROLLER.get_for_device(a.device())
+                     } else {
+                         None
+@@ -233,7 +243,7 @@ impl QuantMethod for UnquantLinear {
+         } else {
+             match a.device().location() {
+                 DeviceLocation::Cuda { .. } => {
+-                    let cublaslt = if supports_cublaslt_batch_matmul(a, &w) {
++                    let cublaslt = if !legacy_bf16 && supports_cublaslt_batch_matmul(a, &w) {
+                         CUBLASLT_CONTROLLER.get_for_device(a.device())
+                     } else {
+                         None
+@@ -955,3 +965,32 @@ mod tests {
+ 
+ #[cfg(all(test, feature = "cuda"))]
+ mod wide_gemv_tests;
++
++#[cfg(all(test, feature = "cuda"))]
++mod legacy_bf16_pascal_proof {
++    use super::*;
++
++    #[test]
++    fn legacy_bf16_unquantized_linear_avoids_unsupported_dispatch() -> Result<()> {
++        if !cfg!(allow_legacy_bf16) {
++            return Ok(());
++        }
++        let device = Device::new_cuda(0)?;
++        let a = Tensor::new(&[[1.0_f32, 2.0]], &device)?.to_dtype(DType::BF16)?;
++        assert!(use_legacy_bf16_fallback(&a));
++        let weight = Tensor::new(&[[1.0_f32, 1.0], [2.0, 0.0]], &device)?.to_dtype(DType::BF16)?;
++        let layer = <UnquantLinear as QuantMethod>::new(QuantMethodConfig::Unquantized(
++            Linear::new(weight, None),
++        ))?;
++        let result = layer
++            .forward_raw(&a)?
++            .to_dtype(DType::F32)?
++            .to_device(&Device::Cpu)?
++            .to_vec2::<f32>()?;
++        assert_eq!(result.len(), 1);
++        assert_eq!(result[0].len(), 2);
++        assert!((result[0][0] - 3.0).abs() < 0.1);
++        assert!((result[0][1] - 2.0).abs() < 0.1);
++        Ok(())
++    }
++}
+diff --git a/mistralrs-server-core/Cargo.toml b/mistralrs-server-core/Cargo.toml
+index 7635a096b851db382655f01a021a82cdc3dedfc4..b0646b9dcf04740a605173388769ab9239399b35 100644
+--- a/mistralrs-server-core/Cargo.toml
++++ b/mistralrs-server-core/Cargo.toml
+@@ -49,6 +49,9 @@ accelerate-src = { workspace = true, optional = true }
+ intel-mkl-src = { workspace = true, optional = true }
+ 
+ [features]
++cuda-legacy-bf16 = ["cuda", "mistralrs-core/cuda-legacy-bf16"]
++cuda-legacy-fp8 = ["cuda", "mistralrs-core/cuda-legacy-fp8"]
++cuda-legacy-fp4 = ["cuda", "mistralrs-core/cuda-legacy-fp4"]
+ default = ["swagger-ui"]
+ swagger-ui = ["dep:utoipa-swagger-ui"]
+ cuda = ["mistralrs-core/cuda"]
+diff --git a/mistralrs-server-core/src/mistralrs_for_server_builder.rs b/mistralrs-server-core/src/mistralrs_for_server_builder.rs
+index 093ef52f137bc5cc5502f21d4d1d6b3231a90788..709188623256bc551be2bd07514e3f4a77470b46 100644
+--- a/mistralrs-server-core/src/mistralrs_for_server_builder.rs
++++ b/mistralrs-server-core/src/mistralrs_for_server_builder.rs
+@@ -1512,3 +1512,12 @@ pub fn get_search_embedding_model(
+         None
+     }
+ }
++
++#[cfg(test)]
++mod campaign_runtime_backend_tests {
++    #[test]
++    fn campaign_force_cpu_selects_cpu() {
++        let device = super::init_device(true, None).unwrap();
++        assert!(device.is_cpu());
++    }
++}
+diff --git a/mistralrs/Cargo.toml b/mistralrs/Cargo.toml
+index 7feeb530acb9f2fdf26ce93695291e42795a2138..79b1b988d4d715fcf634de3aac745cc7276349e3 100644
+--- a/mistralrs/Cargo.toml
++++ b/mistralrs/Cargo.toml
+@@ -286,6 +286,9 @@ path = "examples/cookbook/agent/main.rs"
+ no-default-features = true
+ 
+ [features]
++cuda-legacy-bf16 = ["cuda", "mistralrs-core/cuda-legacy-bf16"]
++cuda-legacy-fp8 = ["cuda", "mistralrs-core/cuda-legacy-fp8"]
++cuda-legacy-fp4 = ["cuda", "mistralrs-core/cuda-legacy-fp4"]
+ # NVIDIA CUDA GPU support
+ cuda = ["mistralrs-core/cuda"]
+ cutile = ["cuda", "mistralrs-core/cutile"]
+diff --git a/rust-toolchain.toml b/rust-toolchain.toml
+new file mode 100644
+index 0000000000000000000000000000000000000000..2b03d5c1b935128c84b541afbc62df45e52ffc2e
+--- /dev/null
++++ b/rust-toolchain.toml
+@@ -0,0 +1,4 @@
++[toolchain]
++channel = "1.99.0"
++profile = "minimal"
++components = ["rustfmt"]

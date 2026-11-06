@@ -1,0 +1,125 @@
+{
+  "schema_version": 1,
+  "master": "095991a7d680a6994e6f1554156ebef5d09db049",
+  "toolchain": "1.99.0",
+  "sdk": "ghcr.io/haricot/mistral-ci-sm61@sha256:1ea7476aee23aed947918bb7159aaf82ae9f4e98caec19db1160768000354eee",
+  "features": [
+    "cuda-legacy-bf16",
+    "cuda-legacy-fp8",
+    "cuda-legacy-fp4"
+  ],
+  "sources": {
+    "master": "095991a7d680a6994e6f1554156ebef5d09db049",
+    "legacy": "e4f7349cf973b5603ccbfe344e90c4d019a62754",
+    "bf16_mistralrs_standalone": "825732afe09100f4fed75ea39192ad5d9438e95c",
+    "fp8_mistralrs_standalone": "ba2b93cb8a7a326bcbc33d4ed1fa192b05c165a0",
+    "fp4_mistralrs_standalone": "2b36d29b2784bcd34c22cfde61088678a3dab3b8",
+    "lfm25_dspark_standalone": "c0e7282e2bfc6e50979811749c8e24d11fcb5a9a",
+    "nemotron_bolt_dflash_standalone": "9ff03fa63e624cf919108480df9b6ff3b1f4f4b2"
+  },
+  "legacy_support": {
+    "base": "095991a7d680a6994e6f1554156ebef5d09db049",
+    "source": "e4f7349cf973b5603ccbfe344e90c4d019a62754",
+    "paths": [
+      "Cargo.lock",
+      "Cargo.toml",
+      "mistralrs-cli/Cargo.toml",
+      "mistralrs-cli/src/args/mod.rs",
+      "mistralrs-core/Cargo.toml",
+      "mistralrs-core/build.rs",
+      "mistralrs-core/src/cuda/ffi.rs",
+      "mistralrs-core/src/cuda/moe.rs",
+      "mistralrs-core/src/cuda/moe_gemm_hfma2.cu",
+      "mistralrs-core/src/cuda/moe_utils.h",
+      "mistralrs-core/src/paged_attention/cache_engine.rs",
+      "mistralrs-core/src/paged_attention/config.rs",
+      "mistralrs-core/src/paged_attention/fp8_support.rs",
+      "mistralrs-core/src/paged_attention/legacy_fp8_backend.rs",
+      "mistralrs-core/src/paged_attention/mod.rs",
+      "mistralrs-core/src/pipeline/multimodal.rs",
+      "mistralrs-core/src/pipeline/normal.rs",
+      "mistralrs-core/tests/campaign_backends.rs",
+      "mistralrs-core/tests/campaign_paged_fp8.rs",
+      "mistralrs-core/tests/legacy_sm61_runtime.rs",
+      "mistralrs-paged-attn/Cargo.toml",
+      "mistralrs-paged-attn/build.rs",
+      "mistralrs-paged-attn/src/cuda/attention/dtype_bfloat16.cuh",
+      "mistralrs-paged-attn/src/cuda/backend/paged_attention.rs",
+      "mistralrs-paged-attn/src/cuda/flashinfer/math.cuh",
+      "mistralrs-paged-attn/src/cuda/flashinfer/utils.cuh",
+      "mistralrs-paged-attn/src/cuda/mod.rs",
+      "mistralrs-paged-attn/src/cuda/quantization/fp8/nvidia/quant_utils.cuh",
+      "mistralrs-pyo3/Cargo.toml",
+      "mistralrs-quant/Cargo.toml",
+      "mistralrs-quant/build.rs",
+      "mistralrs-quant/kernels/embedding/gather_rows.cu",
+      "mistralrs-quant/src/blockwise_fp8/ffi.rs",
+      "mistralrs-quant/src/blockwise_fp8/mod.rs",
+      "mistralrs-quant/src/embedding/mod.rs",
+      "mistralrs-quant/src/fp8/quantize.rs",
+      "mistralrs-quant/src/gguf/archive.rs",
+      "mistralrs-quant/src/gguf/mod.rs",
+      "mistralrs-quant/src/lib.rs",
+      "mistralrs-quant/src/metal_kernels/embedding.metal",
+      "mistralrs-quant/src/moe/mod.rs",
+      "mistralrs-quant/src/mxfp8/mod.rs",
+      "mistralrs-quant/src/nvfp4/mod.rs",
+      "mistralrs-quant/src/pertensor_fp8/mod.rs",
+      "mistralrs-quant/src/unquantized/mod.rs",
+      "mistralrs-server-core/Cargo.toml",
+      "mistralrs-server-core/src/mistralrs_for_server_builder.rs",
+      "mistralrs/Cargo.toml",
+      "rust-toolchain.toml"
+    ],
+    "patch": "patches/legacy-support.patch",
+    "sha256": "c04977d8402d100f6d847552d9f035a3fbe3011f05dc16a3e815859d7458582c"
+  },
+  "fp8_packed": {
+    "base": "e204ab4342f5150a46ff763d954cbaccca8637e1",
+    "source": "ba2b93cb8a7a326bcbc33d4ed1fa192b05c165a0",
+    "upstream_path": "mistralrs-quant/src/blockwise_fp8/mod.rs",
+    "migrated_onto": "e4f7349cf973b5603ccbfe344e90c4d019a62754",
+    "patch": "patches/fp8-packed.patch",
+    "sha256": "b003fd18c730799081de624eca075af081a1358da6b0905c81983e37967773aa",
+    "upstream_delta_sha256": "6e5639ce34aa4f6a556f612d68bc0f4bd7919d77d4a5a238bc425ccbdf23f00f"
+  },
+  "fp4": {
+    "source": "2b36d29b2784bcd34c22cfde61088678a3dab3b8",
+    "generic_source_blob": "629cc55973a299825f8f84e91c980d08dd8958cf",
+    "migrated_legacy_blob": "d010535db5642ea73a4e669c5de0de6489ea9cfe",
+    "path": "mistralrs-quant/src/nvfp4/mod.rs",
+    "exclude_bolt_dflash_from_legacy": true
+  },
+  "test_imports": [
+    {
+      "branch": "bf16_mistralrs_standalone",
+      "path": "mistralrs-core/tests/bf16_sm61_standalone.rs",
+      "sha256": "fafb7aac1029f37cd575664e8460908400095604b47b5cccb26daa90adb35b60"
+    },
+    {
+      "branch": "fp8_mistralrs_standalone",
+      "path": "mistralrs-quant/tests/fp8_sm61_standalone.rs",
+      "sha256": "77efc8949bfc432fa455e0fbe586a0920fbf639e8e2cc612c14384ab622dccca"
+    }
+  ],
+  "outputs": {
+    "legacy_v2": {
+      "kind": "legacy",
+      "requires": []
+    },
+    "contrib/lfm25_dspark": {
+      "kind": "contribution",
+      "source": "lfm25_dspark_standalone",
+      "requires": [
+        "legacy_v2"
+      ]
+    },
+    "contrib/nemotron_bolt_dflash": {
+      "kind": "contribution",
+      "source": "nemotron_bolt_dflash_standalone",
+      "requires": [
+        "legacy_v2"
+      ]
+    }
+  }
+}
