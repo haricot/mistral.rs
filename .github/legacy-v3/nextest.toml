@@ -1,0 +1,31 @@
+[profile.default]
+fail-fast = true
+test-threads = 2
+
+[profile.cpu]
+default-filter = '''
+  test(cpu_backend_remains_available) | test(campaign_force_cpu_selects_cpu)
+  | test(campaign_cpu_flag_is_available) | test(campaign_cpu_fp8_kv)
+  | test(nvfp4::tests::) | test(nvfp4::pascal::tests::) | test(nvfp4::csf::tests::)
+  | test(unquantized::bf16_standalone_routing::)
+  | (test(unquantized::tests::) & !test(cuda))
+  | (test(blockwise_fp8::tests::) & !test(cuda))
+  | test(fp8_standalone_geometry) | test(test_roundtrip_f8e4m3)
+  | binary(bf16_standalone_cpu) | binary(fp8_standalone_cpu)
+  | (binary(fp4_standalone_cpu) & !test(cuda))
+  | (binary(nvfp4_checkpoint_tests) & !test(cuda))
+'''
+junit.path = "cpu-junit.xml"
+
+[profile.gpu]
+test-threads = 1
+default-filter = '''
+  test(legacy_bf16_unquantized_linear_avoids_unsupported_dispatch)
+  | binary(bf16_sm61_standalone) | binary(fp8_sm61_standalone)
+  | test(sm61_single_packed_cuda_resident_copy) | test(sm61_moe_experts_single_resident_weight_each)
+  | test(fp4_cuda_nvfp4_sm61_w4a16)
+  | test(legacy_sm61_moe_f16_bf16_prefill)
+  | test(campaign_cuda_fp8_kv_sm61_correctness_and_performance)
+  | test(legacy_sm61_f32_bf16_fp8_roundtrip)
+'''
+junit.path = "gpu-junit.xml"
