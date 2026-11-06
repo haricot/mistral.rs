@@ -48,8 +48,16 @@ Do not start another campaign merely because an existing GPU job awaits Nicolas.
 
 The current compatibility runner is updated in the existing V6 archive. The
 dedicated legacy-v3.sh check/start commands require an explicit run ID, reuse the
-existing local image and shared GPU lock, and expose only the three pinned model
-repository directories read-only. The assistant never registers or starts it.
+existing local image and shared GPU lock, and expose only the pinned model files
+read-only. The assistant never registers or starts it.
+
+Runner V6.4.7 is required for this pilot: it verifies each pinned model file
+before a read-only file mount, and supplies official GitHub CLI 2.103.3 through
+a checksum-verified read-only tool mount. An offline CLI execution probe runs
+before registration. This preserves the existing image and the source/build
+identity. Campaign 42285229267 failed in artifact restoration because its image
+lacked gh, before physical tests; its successful hosted CPU/build artifacts
+remain eligible for original-producer reuse in a fresh complete campaign.
 
 Artifacts live for 90 days. Missing or expired artifacts cause requalification;
 durable artifact publication and the full Candle/Extended orchestration remain
