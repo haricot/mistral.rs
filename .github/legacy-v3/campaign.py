@@ -244,6 +244,18 @@ def measure_pair(helper, cpu, cuda, policy):
         return {"status": "FAIL", "numeric_error": str(error)}
 
 
+def verify_fp8_kv_report(plan, directory, producer):
+    report = read(Path(directory) / "fp8-kv.json")
+    if (report.get("schema") != 1 or report.get("status") != "PASS"
+            or report.get("scope") != "synthetic-paged-kv-cache" or report.get("full_model_benchmark") is not False
+            or report.get("candidate") != plan["candidate"] or report.get("component") != "legacy_v3"
+            or str(report.get("run_id")) != str(producer["run_id"])
+            or str(report.get("run_attempt")) != str(producer["run_attempt"])
+            or sorted(case.get("context", 0) for case in report.get("cases", [])) != [128, 2048, 8192]):
+        raise ValueError("FP8 KV report is missing exact candidate, producer or benchmark cases")
+    return report
+
+
 def verify_gpu(plan, directory, build):
     proof = read(Path(directory) / "gpu.json")
     if (proof.get("status") != "GPU_AND_MODELS_PASSED" or proof.get("key") != plan["key"]
@@ -252,6 +264,9 @@ def verify_gpu(plan, directory, build):
             or proof.get("compute_capability") != "6.1" or proof.get("full_models_executed") is not True):
         raise ValueError("physical evidence identity mismatch")
     verify_files(directory, proof)
+    if "fp8-kv.json" not in proof["files"]:
+        raise ValueError("FP8 KV raw report missing from physical evidence")
+    verify_fp8_kv_report(plan, directory, proof["origin"])
     if proof["tests"] != junit(Path(directory) / "gpu-junit.xml", GPU_REQUIRED):
         raise ValueError("GPU contract evidence incomplete")
     if set(proof["models"]) != {"text", "vl", "gguf"} or any(not numeric_accepted(mode, result) for mode, result in proof["models"].items()):

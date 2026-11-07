@@ -1,6 +1,7 @@
 import contextlib
 import hashlib
 import io
+import json
 import os
 from pathlib import Path
 import shutil
@@ -9,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+import xml.etree.ElementTree as ET
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import gpu
@@ -24,7 +26,27 @@ class RealArchiveExecution(unittest.TestCase):
         cls.source = cls.root / "source"
         (cls.source / "src").mkdir(parents=True)
         (cls.source / "Cargo.toml").write_text('[package]\nname="archive-regression"\nversion="0.1.0"\nedition="2021"\n[workspace]\n')
-        (cls.source / "src/lib.rs").write_text('#[test]\nfn archive_runs_without_gpu() { assert_eq!(2 + 2, 4); }\n#[test]\nfn archive_failure() { panic!("synthetic archived test failure"); }\n')
+        (cls.source / "src/lib.rs").write_text(r'''
+#[test]
+fn archive_runs_without_gpu() { assert_eq!(2 + 2, 4); }
+#[test]
+fn archive_failure() { panic!("synthetic archived test failure"); }
+#[test]
+fn archive_writes_bound_report() {
+    let candidate = std::env::var("HARICOT_FP8_KV_CANDIDATE").unwrap();
+    let component = std::env::var("HARICOT_FP8_KV_COMPONENT").unwrap();
+    let run_id = std::env::var("GITHUB_RUN_ID").unwrap();
+    let attempt = std::env::var("GITHUB_RUN_ATTEMPT").unwrap();
+    assert_eq!(candidate, "a".repeat(40));
+    assert_eq!(component, "legacy_v3");
+    assert_eq!(run_id, "12345678");
+    assert_eq!(attempt, "2");
+    let report = format!(
+        "{{\"candidate\":\"{candidate}\",\"component\":\"{component}\",\"run_id\":\"{run_id}\",\"run_attempt\":\"{attempt}\"}}"
+    );
+    std::fs::write(std::env::var("HARICOT_FP8_KV_REPORT").unwrap(), report).unwrap();
+}
+''')
         cls.builds = cls.root / "builds"
         cls.builds.mkdir()
         shutil.copy2(os.environ["LEGACY_V3_NEXTEST"], cls.builds / "cargo-nextest")
@@ -36,16 +58,20 @@ class RealArchiveExecution(unittest.TestCase):
         cls.workspace = cls.root / "relocated-source"
         cls.source.rename(cls.workspace)
 
-    def run_archive(self, name):
+    def run_archive(self, name, test_filter=None):
         report = self.root / name / "evidence"
         self.assertFalse(report.exists())
         config_root = self.root / name / "recipe"
         config_root.mkdir(parents=True)
-        (config_root / "nextest.toml").write_text('[profile.gpu]\ndefault-filter = "test(' + name + ')"\njunit.path = "gpu-junit.xml"\n')
+        expression = test_filter or "test(" + name + ")"
+        (config_root / "nextest.toml").write_text('[profile.default]\nfail-fast = true\n[profile.gpu]\ndefault-filter = "' + expression + '"\njunit.path = "gpu-junit.xml"\n')
         output = io.StringIO()
-        with patch.object(gpu.c, "ROOT", config_root), patch.object(gpu.c, "GPU_REQUIRED", [name]), contextlib.redirect_stdout(output):
+        environment = {"GITHUB_RUN_ID": "12345678", "GITHUB_RUN_ATTEMPT": "2",
+                       "HARICOT_FP8_KV_CANDIDATE": "untrusted inherited candidate",
+                       "HARICOT_FP8_KV_COMPONENT": "unrelated", "HARICOT_FP8_KV_REPORT": "/does-not-exist/report"}
+        with patch.object(gpu.c, "ROOT", config_root), patch.object(gpu.c, "GPU_REQUIRED", [name]), patch.dict(os.environ, environment), contextlib.redirect_stdout(output):
             try:
-                return gpu.run_archived_tests(self.builds, report, self.workspace), report, output.getvalue()
+                return gpu.run_archived_tests(self.builds, report, self.workspace, {"candidate": "a" * 40}), report, output.getvalue()
             except subprocess.CalledProcessError as error:
                 return error, report, output.getvalue()
 
@@ -66,3 +92,18 @@ class RealArchiveExecution(unittest.TestCase):
         self.assertNotEqual(error.returncode, 0)
         self.assertIn("synthetic archived test failure", output)
         self.assertEqual((report / "gpu-tests.log").read_text(), output)
+
+    def test_archived_report_receives_the_exact_candidate_and_producer_context(self):
+        result, report, output = self.run_archive("archive_writes_bound_report")
+        self.assertIsInstance(result, dict, output)
+        self.assertEqual(result["passed"], 1)
+        self.assertEqual(json.loads((report / "fp8-kv.json").read_text()),
+                         {"candidate": "a" * 40, "component": "legacy_v3", "run_id": "12345678", "run_attempt": "2"})
+
+    def test_all_archived_tests_finish_even_when_one_fails(self):
+        error, report, output = self.run_archive("complete_failed_suite", "all()")
+        self.assertIsInstance(error, subprocess.CalledProcessError, output)
+        cases = list(ET.parse(report / "gpu-junit.xml").getroot().iter("testcase"))
+        self.assertEqual(len(cases), 3)
+        self.assertEqual(sum(case.find("failure") is not None for case in cases), 1)
+        self.assertTrue((report / "fp8-kv.json").is_file())

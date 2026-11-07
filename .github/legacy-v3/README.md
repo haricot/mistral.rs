@@ -68,6 +68,16 @@ success and an intentional test failure before another physical job is offered.
 The changed qualification recipe requires a fresh complete campaign identity;
 the runner remains V6.4.7 and no application source was changed for this repair.
 
+The first physical execution of that repaired launcher passed the MoE SIMT
+and BF16 GEMM tests. The FP8 KV test reached its final report construction,
+then stopped because the launcher had not supplied HARICOT_FP8_KV_CANDIDATE,
+HARICOT_FP8_KV_COMPONENT and HARICOT_FP8_KV_REPORT. These are now set from the
+verified plan and evidence directory. A real archived regression test checks
+the child environment and report output. FP8 reports must retain the exact
+candidate, original producer run/attempt and all three context measurements.
+The physical suite now completes independent tests after a failure, while
+any failed test still blocks qualification and promotion.
+
 Artifacts live for 90 days. Missing or expired artifacts cause requalification;
 durable artifact publication and the full Candle/Extended orchestration remain
 separate acceptance criteria for the definitive workflow. A green pilot receipt

@@ -10,19 +10,21 @@ import time
 import campaign as c
 
 
-def run_archived_tests(builds, report, workspace):
+def run_archived_tests(builds, report, workspace, plan):
     report.mkdir(parents=True, exist_ok=True)
     target = report / "target"
     target.mkdir(parents=True, exist_ok=True)
     config = report / "nextest.toml"
     text = (c.ROOT / "nextest.toml").read_text().replace('junit.path = "gpu-junit.xml"', "junit.path = " + json.dumps(str((report / "gpu-junit.xml").resolve())))
     config.write_text(text)
+    environment = {**os.environ, "HARICOT_FP8_KV_CANDIDATE": plan["candidate"],
+                   "HARICOT_FP8_KV_COMPONENT": "legacy_v3", "HARICOT_FP8_KV_REPORT": str(report / "fp8-kv.json")}
     log = report / "gpu-tests.log"
     with log.open("w") as stream:
         result = subprocess.run([str(builds / "cargo-nextest"), "nextest", "run", "--archive-file", str(builds / "tests.tar.zst"),
                                  "--workspace-remap", str(workspace), "--extract-to", str(target),
-                                 "--config-file", str(config), "--profile", "gpu", "--no-tests=fail"],
-                                stdout=stream, stderr=subprocess.STDOUT)
+                                 "--config-file", str(config), "--profile", "gpu", "--no-tests=fail", "--no-fail-fast"],
+                                stdout=stream, stderr=subprocess.STDOUT, env=environment)
     print(log.read_text(), end="", flush=True)
     result.check_returncode()
     return c.junit(report / "gpu-junit.xml", c.GPU_REQUIRED)
@@ -49,7 +51,7 @@ def execute(prep, builds, report, workspace):
         raise ValueError("executed source tree mismatch")
     for name in ("cargo-nextest", "mistralrs"):
         (builds / name).chmod(0o755)
-    tests = run_archived_tests(builds, report, workspace)
+    tests = run_archived_tests(builds, report, workspace, plan)
     loader = importlib.util.spec_from_file_location("model_measurements", c.ROOT.parent / "lfm3/qualification.py")
     models = importlib.util.module_from_spec(loader)
     loader.loader.exec_module(models)

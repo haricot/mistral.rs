@@ -142,6 +142,25 @@ class PilotContracts(unittest.TestCase):
         with self.assertRaises(ValueError):
             c.verify_gpu(self.plan, self.root, build)
 
+    def fp8_kv_report(self):
+        return {"schema": 1, "status": "PASS", "scope": "synthetic-paged-kv-cache",
+                "full_model_benchmark": False, "candidate": self.plan["candidate"], "component": "legacy_v3",
+                "run_id": "12345678", "run_attempt": "2", "cases": [{"context": value} for value in (128, 2048, 8192)]}
+
+    def test_fp8_kv_report_preserves_the_original_producer_on_reuse(self):
+        report = self.fp8_kv_report()
+        c.write(self.root / "fp8-kv.json", report)
+        with patch.dict(c.os.environ, {"GITHUB_RUN_ID": "87654321", "GITHUB_RUN_ATTEMPT": "1"}):
+            self.assertEqual(c.verify_fp8_kv_report(self.plan, self.root, {"run_id": "12345678", "run_attempt": 2}), report)
+
+    def test_fp8_kv_report_rejects_wrong_identity_or_incomplete_contexts(self):
+        for altered in ({"candidate": "b" * 40}, {"component": "extended"}, {"run_id": "87654321"},
+                        {"run_attempt": "1"}, {"cases": [{"context": 128}]}, {"status": "FAIL"},
+                        {"scope": "full-model"}, {"full_model_benchmark": True}):
+            with self.subTest(altered=altered), self.assertRaises(ValueError):
+                c.write(self.root / "fp8-kv.json", {**self.fp8_kv_report(), **altered})
+                c.verify_fp8_kv_report(self.plan, self.root, {"run_id": "12345678", "run_attempt": 2})
+
     def test_producer_must_match_workflow_branch_sha_and_successful_job(self):
         proof = {"origin": {"run_id": "12345678", "run_attempt": 1, "control_sha": "a" * 40}}
         entry = {"workflow_run": {"id": 12345678}}
