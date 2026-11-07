@@ -5,7 +5,7 @@ use candle_nn::Linear;
 
 #[cfg(all(feature = "cuda", has_deepgemm_fp8_sm90_provider))]
 mod deepgemm;
-#[cfg(all(feature = "cuda", has_blockwise_fp8_kernels))]
+#[cfg(all(feature = "cuda", has_fp8_mma_kernels))]
 pub(crate) mod mma;
 pub(crate) mod ops;
 pub use ops::{
@@ -44,13 +44,17 @@ pub struct BlockwiseFP8Linear {
 #[derive(Clone, Debug)]
 enum BlockwiseFp8Provider {
     Legacy,
+    #[cfg(all(feature = "cuda", feature = "cuda-legacy-fp8"))]
+    Sm61(Fp8Sm61Resident),
+    #[cfg(all(feature = "cuda", feature = "cuda-legacy-fp8"))]
+    Sm61Experts(Fp8Sm61Experts),
     #[cfg(all(feature = "cuda", feature = "cutile"))]
     CutileW8A16,
     #[cfg(all(feature = "cuda", has_cutlass_fp8_sm90_kernels))]
     CutlassSm90,
     #[cfg(all(feature = "cuda", has_deepgemm_fp8_sm90_provider))]
     DeepGemmSm90(Arc<deepgemm::Prepared>),
-    #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels))]
+    #[cfg(all(feature = "cuda", has_fp8_mma_kernels))]
     TensorCoreGemv,
 }
 
@@ -65,7 +69,7 @@ const FP8_SM90_PROVIDER_ENV: &str = "MISTRALRS_FP8_SM90_PROVIDER";
 // The fused GLU quantizer kernel emits one F32 scale per 128 columns.
 #[cfg(feature = "cuda")]
 const FUSED_GLU_QUANT_BLOCK_COLUMNS: usize = 128;
-#[cfg(all(feature = "cuda", has_blockwise_fp8_kernels))]
+#[cfg(all(feature = "cuda", has_fp8_mma_kernels))]
 static TENSOR_CORE_GEMV_PROVIDER_LOG: std::sync::Once = std::sync::Once::new();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,20 +90,73 @@ fn select_dynamic_provider(cutlass_sm90: bool, tensor_core_gemv: bool) -> Dynami
     }
 }
 
+#[cfg(all(feature = "cuda", feature = "cuda-legacy-fp8"))]
+#[derive(Clone)]
+struct Fp8Sm61Resident {
+    linear: Arc<candle_core::quantized::fp8_linear_sm61::Fp8Sm61Linear>,
+    device: Device,
+}
+
+#[cfg(all(feature = "cuda", feature = "cuda-legacy-fp8"))]
+impl std::fmt::Debug for Fp8Sm61Resident {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fmt.debug_struct("Fp8Sm61Resident")
+            .field("residency", &"single packed E4M3FN CUDA copy")
+            .field("bytes", &self.linear.resident_weight_bytes())
+            .finish()
+    }
+}
+
+#[cfg(all(feature = "cuda", feature = "cuda-legacy-fp8"))]
+#[derive(Clone)]
+struct Fp8Sm61Experts {
+    linear: Vec<Arc<candle_core::quantized::fp8_linear_sm61::Fp8Sm61Linear>>,
+    device: Device,
+    out_features: usize,
+    in_features: usize,
+}
+
+#[cfg(all(feature = "cuda", feature = "cuda-legacy-fp8"))]
+impl std::fmt::Debug for Fp8Sm61Experts {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fmt.debug_struct("Fp8Sm61Experts")
+            .field("experts", &self.linear.len())
+            .field("out_features", &self.out_features)
+            .field("in_features", &self.in_features)
+            .field("residency", &"single packed E4M3FN copy per expert")
+            .finish()
+    }
+}
+
 impl BlockwiseFp8Provider {
     fn supports_shared_activation(&self) -> bool {
         match self {
             Self::Legacy => false,
+            #[cfg(all(feature = "cuda", feature = "cuda-legacy-fp8"))]
+            Self::Sm61(_) | Self::Sm61Experts(_) => false,
             #[cfg(all(feature = "cuda", feature = "cutile"))]
             Self::CutileW8A16 => false,
             #[cfg(all(feature = "cuda", has_cutlass_fp8_sm90_kernels))]
             Self::CutlassSm90 => true,
             #[cfg(all(feature = "cuda", has_deepgemm_fp8_sm90_provider))]
             Self::DeepGemmSm90(_) => true,
-            #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels))]
+            #[cfg(all(feature = "cuda", has_fp8_mma_kernels))]
             Self::TensorCoreGemv => true,
         }
     }
+}
+
+#[cfg(any(test, all(feature = "cuda", feature = "cuda-legacy-fp8")))]
+fn validate_sm61_geometry(shape: &[usize], bn: usize, bk: usize) -> Result<()> {
+    if !matches!(shape.len(), 2 | 3)
+        || shape.contains(&0)
+        || bn == 0
+        || bk == 0
+        || !shape.last().copied().unwrap_or(0).is_multiple_of(128)
+    {
+        candle_core::bail!("SM61 packed FP8 requires rank-2/rank-3 nonempty weights, positive blocks and K divisible by 128");
+    }
+    Ok(())
 }
 
 impl BlockwiseFP8Linear {
@@ -116,6 +173,137 @@ impl BlockwiseFP8Linear {
 
     fn prepare_provider(&mut self) -> Result<()> {
         self.provider = BlockwiseFp8Provider::Legacy;
+        // Fail closed on unsupported architectures and activation schemes. The
+        // SM61 backend keeps a single packed CUDA representation; original
+        // checkpoint tensors are moved to CPU *before* allocating the kernels.
+        #[cfg(all(feature = "cuda", feature = "cuda-legacy-fp8"))]
+        if self.weight.dtype() == DType::F8E4M3
+            && matches!(self.dequant_dtype, DType::F16 | DType::BF16)
+            && (self.activation_scheme.is_none()
+                || self.activation_scheme == Some(Fp8ActivationScheme::Dynamic))
+            && self.weight_block_size.len() == 2
+        {
+            if let Device::Cuda(cuda) = self.weight.device().clone() {
+                let cc = cuda
+                    .cuda_stream()
+                    .context()
+                    .compute_capability()
+                    .map_err(candle_core::Error::msg)?;
+                if cc == (6, 1) {
+                    let device = self.weight.device().clone();
+                    let bn = self.weight_block_size[0];
+                    let bk = self.weight_block_size[1];
+                    let shape = self.weight.dims().to_vec();
+                    validate_sm61_geometry(&shape, bn, bk)?;
+                    // Explicitly release the original GPU tensors *before*
+                    // constructing any new device-side packed representation.
+                    self.weight = self.weight.to_device(&Device::Cpu)?;
+                    self.weight_scale_inv = self.weight_scale_inv.to_device(&Device::Cpu)?;
+                    let scales = self.weight_scale_inv.to_dtype(DType::F32)?;
+                    let mode = candle_core::quantized::fp8_linear_sm61::Fp8Sm61Mode::SimtW8A16;
+                    if shape.len() == 2 {
+                        let (n, k) = self.weight.dims2()?;
+                        let bytes = crate::utils::data_to_bytes::<float8::F8E4M3>(
+                            self.weight.flatten_all()?.to_vec1::<float8::F8E4M3>()?,
+                        );
+                        let scale_values = scales.flatten_all()?.to_vec1::<f32>()?;
+                        let linear =
+                            candle_core::quantized::fp8_linear_sm61::Fp8Sm61Linear::from_bytes(
+                                &cuda,
+                                n,
+                                k,
+                                &bytes,
+                                &scale_values,
+                                bn,
+                                bk,
+                                mode,
+                                128,
+                            )?;
+                        let packed_gpu_bytes = linear.resident_weight_bytes();
+                        self.provider = BlockwiseFp8Provider::Sm61(Fp8Sm61Resident {
+                            linear: Arc::new(linear),
+                            device,
+                        });
+                        tracing::info!(
+                            n,
+                            k,
+                            packed_gpu_bytes,
+                            "SM61 FP8: one packed GPU copy; BF16/F16 activations"
+                        );
+                        return Ok(());
+                    }
+                    if shape.len() == 3 {
+                        let (experts, n, k) = self.weight.dims3()?;
+                        if self.weight_scale_inv.dims() != [experts, n.div_ceil(bn), k.div_ceil(bk)]
+                        {
+                            candle_core::bail!(
+                                "SM61 FP8 MoE scale shape must be [experts,ceil(N/bn),ceil(K/bk)]"
+                            );
+                        }
+                        let mut linears = Vec::with_capacity(experts);
+                        for i in 0..experts {
+                            let w = self.weight.narrow(0, i, 1)?.squeeze(0)?;
+                            let scale = scales.narrow(0, i, 1)?.squeeze(0)?;
+                            let bytes = crate::utils::data_to_bytes::<float8::F8E4M3>(
+                                w.flatten_all()?.to_vec1::<float8::F8E4M3>()?,
+                            );
+                            let scale_values = scale.flatten_all()?.to_vec1::<f32>()?;
+                            linears.push(Arc::new(
+                                candle_core::quantized::fp8_linear_sm61::Fp8Sm61Linear::from_bytes(
+                                    &cuda,
+                                    n,
+                                    k,
+                                    &bytes,
+                                    &scale_values,
+                                    bn,
+                                    bk,
+                                    mode,
+                                    128,
+                                )?,
+                            ));
+                        }
+                        let packed_gpu_bytes: usize = linears
+                            .iter()
+                            .map(|linear| linear.resident_weight_bytes())
+                            .sum();
+                        self.provider = BlockwiseFp8Provider::Sm61Experts(Fp8Sm61Experts {
+                            linear: linears,
+                            device,
+                            out_features: n,
+                            in_features: k,
+                        });
+                        tracing::info!(
+                            experts,
+                            n,
+                            k,
+                            packed_gpu_bytes,
+                            "SM61 MoE: one packed FP8 CUDA copy per expert"
+                        );
+                        return Ok(());
+                    }
+                    candle_core::bail!(
+                        "SM61 FP8 supports only rank-2 projections and rank-3 MoE weights"
+                    );
+                }
+            }
+        }
+        // Feature-enabled Pascal execution must NEVER accidentally enter the
+        // legacy dequantize-and-matmul fallback for a packed FP8 checkpoint.
+        #[cfg(all(feature = "cuda", feature = "cuda-legacy-fp8"))]
+        if self.weight.dtype() == DType::F8E4M3 {
+            if let Device::Cuda(cuda) = self.weight.device() {
+                let cc = cuda
+                    .cuda_stream()
+                    .context()
+                    .compute_capability()
+                    .map_err(candle_core::Error::msg)?;
+                if cc == (6, 1) {
+                    candle_core::bail!(
+                        "SM61 FP8 unsupported packed geometry, dtype or activation scheme; refusing dense weight expansion"
+                    )
+                }
+            }
+        }
         #[cfg(all(feature = "cuda", feature = "cutile"))]
         if self.activation_scheme.is_none()
             && self.weight_block_size == [128, 128]
@@ -179,14 +367,14 @@ impl BlockwiseFP8Linear {
         );
         #[cfg(not(all(feature = "cuda", has_cutlass_fp8_sm90_kernels)))]
         let cutlass_sm90 = false;
-        #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels))]
+        #[cfg(all(feature = "cuda", has_fp8_mma_kernels))]
         let tensor_core_gemv = self.dequant_dtype == DType::BF16
             && mma::weight_supported(
                 &self.weight,
                 &self.weight_scale_inv,
                 &self.weight_block_size,
             );
-        #[cfg(not(all(feature = "cuda", has_blockwise_fp8_kernels)))]
+        #[cfg(not(all(feature = "cuda", has_fp8_mma_kernels)))]
         let tensor_core_gemv = false;
 
         match select_dynamic_provider(cutlass_sm90, tensor_core_gemv) {
@@ -206,7 +394,7 @@ impl BlockwiseFP8Linear {
             }
             #[cfg(not(all(feature = "cuda", has_cutlass_fp8_sm90_kernels)))]
             DynamicFp8Provider::CutlassSm90 => unreachable!(),
-            #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels))]
+            #[cfg(all(feature = "cuda", has_fp8_mma_kernels))]
             DynamicFp8Provider::TensorCoreGemv => {
                 self.provider = BlockwiseFp8Provider::TensorCoreGemv;
                 #[cfg(feature = "cutile")]
@@ -225,13 +413,13 @@ impl BlockwiseFP8Linear {
                     );
                 });
             }
-            #[cfg(not(all(feature = "cuda", has_blockwise_fp8_kernels)))]
+            #[cfg(not(all(feature = "cuda", has_fp8_mma_kernels)))]
             DynamicFp8Provider::TensorCoreGemv => unreachable!(),
         }
         Ok(())
     }
 
-    #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels, feature = "cutile"))]
+    #[cfg(all(feature = "cuda", has_fp8_mma_kernels, feature = "cutile"))]
     fn cutile_scale_layout() -> ActivationScaleLayout {
         ActivationScaleLayout::GroupMajor {
             row_alignment: std::num::NonZeroUsize::new(crate::cutile::FP8_GEMM_BLOCK_ROWS)
@@ -240,7 +428,7 @@ impl BlockwiseFP8Linear {
     }
 
     /// Rows padded to the GEMM block when `x` takes the cuTile GEMM instead of the tensor-core GEMV.
-    #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels, feature = "cutile"))]
+    #[cfg(all(feature = "cuda", has_fp8_mma_kernels, feature = "cutile"))]
     fn cutile_padded_rows(&self, x: &Tensor) -> Option<usize> {
         if !matches!(self.provider, BlockwiseFp8Provider::TensorCoreGemv)
             || x.dtype() != DType::BF16
@@ -260,7 +448,7 @@ impl BlockwiseFP8Linear {
             .then(|| rows.div_ceil(block_rows) * block_rows)
     }
 
-    #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels, feature = "cutile"))]
+    #[cfg(all(feature = "cuda", has_fp8_mma_kernels, feature = "cutile"))]
     fn forward_cutile_quantized(&self, activation: &QuantizedActivation) -> Result<Tensor> {
         let dev = activation.quantized().device().as_cuda_device()?;
         let (rows, _) = activation.quantized().dims2()?;
@@ -291,7 +479,7 @@ impl BlockwiseFP8Linear {
         split_size: usize,
         activation: GluActivationType,
     ) -> Result<Option<Tensor>> {
-        #[cfg(all(has_blockwise_fp8_kernels, feature = "cutile"))]
+        #[cfg(all(has_fp8_mma_kernels, feature = "cutile"))]
         if matches!(self.provider, BlockwiseFp8Provider::TensorCoreGemv) {
             if self.activation_scheme != Some(Fp8ActivationScheme::Dynamic)
                 || input.dtype() != DType::BF16
@@ -530,7 +718,7 @@ impl QuantMethod for BlockwiseFP8Linear {
     }
 
     fn dequantize_w(&self) -> Result<candle_core::Tensor> {
-        if self.weight.rank() == 3 {
+        let dense = if self.weight.rank() == 3 {
             let experts = (0..self.weight.dim(0)?)
                 .map(|expert| {
                     ops::fp8_blockwise_dequantize(
@@ -541,17 +729,59 @@ impl QuantMethod for BlockwiseFP8Linear {
                     )
                 })
                 .collect::<Result<Vec<_>>>()?;
-            return Tensor::stack(&experts, 0);
+            Tensor::stack(&experts, 0)?
+        } else {
+            ops::fp8_blockwise_dequantize(
+                &self.weight,
+                &self.weight_scale_inv,
+                self.weight_block_size.to_vec(),
+                self.dequant_dtype,
+            )?
+        };
+        // Explicit materialization (e.g. ISQ) may allocate dense weight.
+        // The normal SM61 inference path never calls dequantize_w().
+        #[cfg(all(feature = "cuda", feature = "cuda-legacy-fp8"))]
+        match &self.provider {
+            BlockwiseFp8Provider::Sm61(p) => return dense.to_device(&p.device),
+            BlockwiseFp8Provider::Sm61Experts(p) => return dense.to_device(&p.device),
+            _ => {}
         }
-        ops::fp8_blockwise_dequantize(
-            &self.weight,
-            &self.weight_scale_inv,
-            self.weight_block_size.to_vec(),
-            self.dequant_dtype,
-        )
+        Ok(dense)
     }
 
     fn forward_raw(&self, x: &Tensor) -> Result<Tensor> {
+        #[cfg(all(feature = "cuda", feature = "cuda-legacy-fp8"))]
+        if let BlockwiseFp8Provider::Sm61(kernel) = &self.provider {
+            if !matches!(x.dtype(), DType::F16 | DType::BF16) {
+                candle_core::bail!("SM61 FP8 provider requires F16 or BF16 activations");
+            }
+            if !x.device().same_device(&kernel.device) {
+                candle_core::bail!("SM61 FP8 weight/input device mismatch");
+            }
+            let source = x.dims();
+            let k = *source
+                .last()
+                .ok_or_else(|| candle_core::Error::msg("SM61 FP8 input must not be scalar"))?;
+            if k == 0 {
+                candle_core::bail!("SM61 FP8 input dimension must be nonzero");
+            }
+            let rows = x.elem_count() / k;
+            let flat = x.contiguous()?.reshape((rows, k))?;
+            let output = kernel.linear.forward(&flat)?.to_dtype(x.dtype())?;
+            let mut shape = source.to_vec();
+            *shape.last_mut().unwrap() = output.dim(1)?;
+            let output = output.reshape(shape)?;
+            return match &self.bias {
+                Some(bias) => output.broadcast_add(bias),
+                None => Ok(output),
+            };
+        }
+        #[cfg(all(feature = "cuda", feature = "cuda-legacy-fp8"))]
+        if matches!(self.provider, BlockwiseFp8Provider::Sm61Experts(_)) {
+            candle_core::bail!(
+                "SM61 packed FP8 MoE requires gather_forward_raw with routing indices"
+            );
+        }
         #[cfg(feature = "metal")]
         if let [block_n, block_k] = self.weight_block_size.as_slice() {
             if let Some(result) = crate::metal_fp8::linear(
@@ -660,7 +890,7 @@ impl QuantMethod for BlockwiseFP8Linear {
             return self.forward_quantized(&activation);
         }
 
-        #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels))]
+        #[cfg(all(feature = "cuda", has_fp8_mma_kernels))]
         if matches!(self.provider, BlockwiseFp8Provider::TensorCoreGemv) && x.dtype() == DType::BF16
         {
             if self.activation_quantization_scheme_for(x).is_some() {
@@ -751,12 +981,86 @@ impl QuantMethod for BlockwiseFP8Linear {
     }
 
     fn gather_forward_raw(&self, x: &Tensor, indices: &Tensor) -> Result<Tensor> {
+        #[cfg(all(feature = "cuda", feature = "cuda-legacy-fp8"))]
+        if let BlockwiseFp8Provider::Sm61Experts(experts) = &self.provider {
+            if !matches!(x.dtype(), DType::F16 | DType::BF16)
+                || !x.device().same_device(&experts.device)
+                || !indices.device().same_device(&experts.device)
+            {
+                candle_core::bail!(
+                    "SM61 FP8 MoE requires same-device F16/BF16 activations and indices"
+                );
+            }
+            let (tokens, topk) = indices.dims2()?;
+            if tokens == 0 || topk == 0 || experts.linear.is_empty() {
+                candle_core::bail!("SM61 FP8 MoE requires nonempty tokens, topk and experts");
+            }
+            let ids = indices
+                .to_device(&Device::Cpu)?
+                .to_dtype(DType::U32)?
+                .to_vec2::<u32>()?;
+            let (input, per_slot) = match x.dims() {
+                [t, k] if *t == tokens && *k == experts.in_features => (x.clone(), false),
+                [t, 1, k] if *t == tokens && *k == experts.in_features => (x.squeeze(1)?, false),
+                [t, r, k] if *t == tokens && *r == topk && *k == experts.in_features => {
+                    (x.reshape((tokens * topk, *k))?, true)
+                }
+                _ => candle_core::bail!(
+                    "SM61 FP8 MoE expects [tokens,K], [tokens,1,K] or [tokens,topk,K]"
+                ),
+            };
+            // Group by expert: one packed GEMM call per active expert rather
+            // than one call per token/slot. Never materialize dense weights.
+            let mut routes = vec![Vec::<(usize, u32)>::new(); experts.linear.len()];
+            for (token, row) in ids.iter().enumerate() {
+                for (slot, &expert) in row.iter().enumerate() {
+                    let expert = expert as usize;
+                    if expert >= routes.len() {
+                        candle_core::bail!("SM61 FP8 MoE expert index out of range");
+                    }
+                    let position = token * topk + slot;
+                    let input_index = if per_slot { position } else { token };
+                    routes[expert].push((position, input_index as u32));
+                }
+            }
+            let mut outputs: Vec<Option<Tensor>> = vec![None; tokens * topk];
+            for (expert_id, selected) in routes.iter().enumerate() {
+                if selected.is_empty() {
+                    continue;
+                }
+                let gather = Tensor::from_vec(
+                    selected.iter().map(|(_, row)| *row).collect::<Vec<_>>(),
+                    selected.len(),
+                    x.device(),
+                )?;
+                let batch = input.index_select(&gather, 0)?.contiguous()?;
+                let out = experts.linear[expert_id]
+                    .forward(&batch)?
+                    .to_dtype(x.dtype())?;
+                for (local, (position, _)) in selected.iter().enumerate() {
+                    outputs[*position] = Some(out.narrow(0, local, 1)?);
+                }
+            }
+            let ordered = outputs
+                .into_iter()
+                .map(|out| {
+                    out.ok_or_else(|| {
+                        candle_core::Error::msg("SM61 FP8 MoE routing produced an unfilled output")
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let out = Tensor::cat(&ordered, 0)?.reshape((tokens, topk, experts.out_features))?;
+            return match &self.bias {
+                Some(bias) => out.broadcast_add(bias),
+                None => Ok(out),
+            };
+        }
         if let Some(routed) = self.routed_weights() {
             if let Some(output) = crate::try_routed_gather(x, indices, &routed)? {
                 return Ok(output);
             }
         }
-        #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels))]
+        #[cfg(all(feature = "cuda", has_fp8_mma_kernels))]
         if let [block_n, block_k] = *self.weight_block_size.as_slice() {
             let view = crate::moe::grouped_fp8::Fp8WeightView {
                 weight: &self.weight,
@@ -800,7 +1104,7 @@ impl QuantMethod for BlockwiseFP8Linear {
         {
             return None;
         }
-        #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels))]
+        #[cfg(all(feature = "cuda", has_fp8_mma_kernels))]
         if matches!(self.provider, BlockwiseFp8Provider::TensorCoreGemv) {
             return Some(ActivationQuantizationScheme {
                 dtype: DType::F8E4M3,
@@ -826,7 +1130,7 @@ impl QuantMethod for BlockwiseFP8Linear {
         &self,
         x: &Tensor,
     ) -> Option<ActivationQuantizationScheme> {
-        #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels))]
+        #[cfg(all(feature = "cuda", has_fp8_mma_kernels))]
         if matches!(self.provider, BlockwiseFp8Provider::TensorCoreGemv) {
             #[cfg(feature = "cutile")]
             if self.cutile_padded_rows(x).is_some() {
@@ -844,7 +1148,7 @@ impl QuantMethod for BlockwiseFP8Linear {
 
     fn preferred_activation_scale_layout_for(&self, x: &Tensor) -> Option<ActivationScaleLayout> {
         self.activation_quantization_scheme_for(x)?;
-        #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels, feature = "cutile"))]
+        #[cfg(all(feature = "cuda", has_fp8_mma_kernels, feature = "cutile"))]
         if self.cutile_padded_rows(x).is_some() {
             return Some(Self::cutile_scale_layout());
         }
@@ -869,7 +1173,7 @@ impl QuantMethod for BlockwiseFP8Linear {
     }
 
     fn quantize_activation(&self, x: &Tensor) -> Result<QuantizedActivation> {
-        #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels))]
+        #[cfg(all(feature = "cuda", has_fp8_mma_kernels))]
         if matches!(self.provider, BlockwiseFp8Provider::TensorCoreGemv) {
             let scheme = self.activation_quantization_scheme_for(x).ok_or_else(|| {
                 candle_core::Error::msg("FP8 tensor-core activation quantization is unavailable")
@@ -932,7 +1236,7 @@ impl QuantMethod for BlockwiseFP8Linear {
     }
 
     fn forward_quantized(&self, activation: &QuantizedActivation) -> Result<Tensor> {
-        #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels))]
+        #[cfg(all(feature = "cuda", has_fp8_mma_kernels))]
         if matches!(self.provider, BlockwiseFp8Provider::TensorCoreGemv) {
             #[cfg(feature = "cutile")]
             if activation.scale_layout() == Self::cutile_scale_layout() {
@@ -1054,6 +1358,12 @@ impl QuantMethod for BlockwiseFP8Linear {
     }
 
     fn dtype_and_device(&self) -> (DType, candle_core::Device) {
+        #[cfg(all(feature = "cuda", feature = "cuda-legacy-fp8"))]
+        match &self.provider {
+            BlockwiseFp8Provider::Sm61(p) => return (DType::F8E4M3, p.device.clone()),
+            BlockwiseFp8Provider::Sm61Experts(p) => return (DType::F8E4M3, p.device.clone()),
+            _ => {}
+        }
         (DType::F8E4M3, self.weight.device().clone())
     }
 
@@ -1064,7 +1374,7 @@ impl QuantMethod for BlockwiseFP8Linear {
     fn plan_isq(&self, request: &crate::IsqRequest) -> Result<crate::IsqPlanParams> {
         Ok(crate::plan_weight_isq(
             self.dequant_dtype,
-            self.weight.device().clone(),
+            self.dtype_and_device().1,
             self.weight.dims().to_vec(),
             request,
             true,
@@ -1730,7 +2040,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels, feature = "cutile"))]
+    #[cfg(all(feature = "cuda", has_fp8_mma_kernels, feature = "cutile"))]
     fn cutile_test_layer(
         dev: &Device,
         output_features: usize,
@@ -1767,7 +2077,7 @@ mod tests {
         Ok(layer)
     }
 
-    #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels, feature = "cutile"))]
+    #[cfg(all(feature = "cuda", has_fp8_mma_kernels, feature = "cutile"))]
     #[test]
     #[ignore = "requires a CUDA device with cuTile support"]
     fn cutile_w8a16_preserves_empty_leading_dimensions() -> Result<()> {
@@ -1790,7 +2100,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels, feature = "cutile"))]
+    #[cfg(all(feature = "cuda", has_fp8_mma_kernels, feature = "cutile"))]
     fn assert_close(label: &str, reference: &Tensor, output: &Tensor) -> Result<()> {
         let reference = reference.to_dtype(DType::F32)?.to_device(&Device::Cpu)?;
         let output = output.to_dtype(DType::F32)?.to_device(&Device::Cpu)?;
@@ -1807,7 +2117,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels, feature = "cutile"))]
+    #[cfg(all(feature = "cuda", has_fp8_mma_kernels, feature = "cutile"))]
     #[test]
     #[ignore = "requires a CUDA device with cuTile support"]
     fn cutile_fused_glu_matches_unfused() -> Result<()> {
@@ -1859,7 +2169,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels, feature = "cutile"))]
+    #[cfg(all(feature = "cuda", has_fp8_mma_kernels, feature = "cutile"))]
     #[test]
     #[ignore = "requires a CUDA device with cuTile support"]
     fn cutile_consumes_fused_rms_norm_group_major_activation() -> Result<()> {
@@ -2473,5 +2783,87 @@ mod tests {
         .unwrap_err();
         assert!(err.to_string().contains("missing FP8 weight scale"));
         Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "cuda", feature = "cuda-legacy-fp8"))]
+mod sm61_packed_residency_tests {
+    use super::*;
+
+    #[test]
+    fn sm61_single_packed_cuda_resident_copy() -> Result<()> {
+        let gpu = Device::new_cuda(0)?;
+        let weight = Tensor::ones((128, 128), DType::F32, &gpu)?.to_dtype(DType::F8E4M3)?;
+        let scale = Tensor::ones((1, 1), DType::F32, &gpu)?;
+        let layer = BlockwiseFP8Linear::new(QuantMethodConfig::BlockwiseFP8 {
+            weight,
+            weight_scale_inv: scale,
+            bias: None,
+            dequant_dtype: DType::BF16,
+            weight_block_size: vec![128, 128],
+            activation_scheme: Some(Fp8ActivationScheme::Dynamic),
+        })?;
+        // Neither original tensor owns CUDA storage anymore.
+        assert!(matches!(layer.weight.device(), Device::Cpu));
+        assert!(matches!(layer.weight_scale_inv.device(), Device::Cpu));
+        let BlockwiseFp8Provider::Sm61(kernel) = &layer.provider else {
+            panic!("expected packed SM61 kernel")
+        };
+        // 128x128 FP8 weights + one F32 scale, never an F16 expansion.
+        assert_eq!(kernel.linear.resident_weight_bytes(), 128 * 128 + 4);
+        assert!(matches!(kernel.device, Device::Cuda(_)));
+        Ok(())
+    }
+
+    #[test]
+    fn sm61_moe_experts_single_resident_weight_each() -> Result<()> {
+        let gpu = Device::new_cuda(0)?;
+        let weight = Tensor::ones((2, 128, 128), DType::F32, &gpu)?.to_dtype(DType::F8E4M3)?;
+        let scale = Tensor::ones((2, 1, 1), DType::F32, &gpu)?;
+        let layer = BlockwiseFP8Linear::new(QuantMethodConfig::BlockwiseFP8 {
+            weight,
+            weight_scale_inv: scale,
+            bias: None,
+            dequant_dtype: DType::F16,
+            weight_block_size: vec![128, 128],
+            activation_scheme: None,
+        })?;
+        assert!(matches!(layer.weight.device(), Device::Cpu));
+        assert!(matches!(layer.weight_scale_inv.device(), Device::Cpu));
+        let BlockwiseFp8Provider::Sm61Experts(experts) = &layer.provider else {
+            panic!("expected packed SM61 experts")
+        };
+        assert_eq!(experts.linear.len(), 2);
+        for linear in &experts.linear {
+            assert_eq!(linear.resident_weight_bytes(), 128 * 128 + 4);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod fp8_standalone_geometry {
+    use super::*;
+
+    #[test]
+    fn packed_geometry_accepts_dense_and_expert_shapes() -> Result<()> {
+        validate_sm61_geometry(&[64, 128], 32, 128)?;
+        validate_sm61_geometry(&[3, 64, 256], 32, 128)
+    }
+
+    #[test]
+    fn packed_geometry_rejects_shapes_before_checkpoint_storage_moves() {
+        for shape in [
+            &[][..],
+            &[128],
+            &[2, 2, 2, 128],
+            &[0, 128],
+            &[2, 0, 128],
+            &[64, 127],
+        ] {
+            assert!(validate_sm61_geometry(shape, 128, 128).is_err());
+        }
+        assert!(validate_sm61_geometry(&[64, 128], 0, 128).is_err());
+        assert!(validate_sm61_geometry(&[64, 128], 128, 0).is_err());
     }
 }
