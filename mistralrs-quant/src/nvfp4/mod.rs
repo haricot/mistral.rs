@@ -984,13 +984,7 @@ impl QuantMethod for Nvfp4Layer {
         if let Some(legacy) = &self.legacy {
             let k = x.dim(D::Minus1)?;
             let rows = x.elem_count() / k;
-            // E7 rejects offset views and backing allocations larger than the input.
-            let input = x
-                .contiguous()?
-                .reshape((rows, k))?
-                .to_dtype(DType::F16)?
-                .contiguous()?
-                .copy()?;
+            let input = pascal::prepare_input(x, rows, k)?;
             let output = legacy.forward(
                 &input,
                 candle_core::quantized::nvfp4_arch_e7::E7Mode::W4A16Reference,

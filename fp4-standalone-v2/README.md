@@ -14,7 +14,9 @@ explicitly. Other GPUs retain their existing routing. Raw E4M3 scale bytes are
 preserved; per-row global multipliers precede bias addition. E7 arithmetic uses
 F16 activations, including explicit conversion for BF16 output: the full BF16
 activation range is not preserved. At most 65535 flattened input rows are
-accepted per E7 call. Offset/strided inputs receive an owned contiguous copy.
+accepted per E7 call. All E7 inputs receive compact, zero-offset storage with exactly rows * k F16
+values. Candle contiguous() and copy() alone can preserve view offsets or excess
+backing storage. CPU and GPU contracts cover offset, prefix and strided views.
 
 Compatibility changes cover Candle GGUF/MXFP4 types, CPU/CUDA/Metal embeddings,
 UQFF mappings and minimal SM61 MoE/FlashInfer compilation support. BF16 and FP8

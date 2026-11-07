@@ -43,6 +43,14 @@ pub(super) fn build(
     )
 }
 
+pub(super) fn prepare_input(input: &Tensor, rows: usize, k: usize) -> Result<Tensor> {
+    // contiguous() and copy() preserve contiguous views' offsets; E7 also requires exact storage length.
+    input
+        .to_dtype(DType::F16)?
+        .force_contiguous()?
+        .reshape((rows, k))
+}
+
 pub(super) fn finish(
     output: Tensor,
     parts: &Nvfp4LayerParts,
@@ -104,6 +112,50 @@ mod tests {
             &Device::Cpu,
         )?;
         assert_eq!(scale_bytes(&tensor)?, bytes);
+        Ok(())
+    }
+
+    #[test]
+    fn e7_input_compacts_views_and_preserves_logical_values() -> Result<()> {
+        for dtype in [DType::F16, DType::BF16] {
+            let base = Tensor::arange(0f32, 24f32, &Device::Cpu)?
+                .reshape((3, 2, 4))?
+                .to_dtype(dtype)?;
+            let offset = base.narrow(0, 1, 1)?;
+            assert!(offset.is_contiguous());
+            assert_ne!(offset.layout().start_offset(), 0);
+            let prefix = base.narrow(0, 0, 1)?;
+            assert!(prefix.is_contiguous());
+            assert_eq!(prefix.layout().start_offset(), 0);
+            let strided = base.transpose(0, 1)?;
+            assert!(!strided.is_contiguous());
+            for input in [&base, &offset, &prefix, &strided] {
+                let rows = input.elem_count() / 4;
+                let expected = input
+                    .to_dtype(DType::F32)?
+                    .flatten_all()?
+                    .to_vec1::<f32>()?;
+                let actual = prepare_input(input, rows, 4)?;
+                assert_eq!(actual.dtype(), DType::F16);
+                assert_eq!(actual.dims(), [rows, 4]);
+                let (storage, layout) = actual.storage_and_layout();
+                assert!(layout.is_contiguous());
+                assert_eq!(layout.start_offset(), 0);
+                match &*storage {
+                    candle_core::Storage::Cpu(storage) => {
+                        assert_eq!(storage.as_slice::<half::f16>()?.len(), rows * 4);
+                    }
+                    _ => unreachable!(),
+                }
+                assert_eq!(
+                    actual
+                        .to_dtype(DType::F32)?
+                        .flatten_all()?
+                        .to_vec1::<f32>()?,
+                    expected
+                );
+            }
+        }
         Ok(())
     }
 

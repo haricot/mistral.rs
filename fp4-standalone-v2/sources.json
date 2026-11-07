@@ -73,9 +73,9 @@
     "mistralrs-quant/src/gguf/mod.rs": "f998bdf3811818caacf3651d2bdfc7c3966bbb1e1134ce7667a8f4fd9d413e18",
     "mistralrs-quant/src/lib.rs": "431354fec40c37de35035b16a6fade6b397b7180b6602f4767ec68160b192f3e",
     "mistralrs-quant/src/metal_kernels/embedding.metal": "1a066bf01af689b88d393239b6290f32d36fa12d93cdc43fd6d1ea6d26540c68",
-    "mistralrs-quant/src/nvfp4/mod.rs": "0d4aa8489fc5d7588c7e52b52bcd193c9df194869f9fcd24109a71c5b40a9a53",
-    "mistralrs-quant/src/nvfp4/pascal.rs": "dbc2376150846e2bafb709d2ab0acd33aba26dacf02df6b635e14e0eee7ade0b",
-    "mistralrs-quant/tests/fp4_standalone_cpu.rs": "6d945580165c3acdb28b3f560e511157334a3bbc060d01581a26f94877c23e53",
+    "mistralrs-quant/src/nvfp4/mod.rs": "484e2d98863ab5334ee7cbd21981feec342f78126b8245f958068cfae539db9a",
+    "mistralrs-quant/src/nvfp4/pascal.rs": "8bb9806dd0b7987722663f31db5aced789b1d90124a5054957656cb3aded7e03",
+    "mistralrs-quant/tests/fp4_standalone_cpu.rs": "30ea970ec25545d78ca3bd18c77cf3dc85d7930cacb6819b54d832be4d8b291f",
     "mistralrs-server-core/Cargo.toml": "53862f0d98b74b75a47a48327d2426f77bf56c7a1a78166cb13ef6cc256856c3",
     "mistralrs/Cargo.toml": "1875b40f82b8815b884d9ae79c5560f3532b2b99f62edc1574913948945472f0",
     "rust-toolchain.toml": "da74f15d4ea22066934e0bfe22c80c56f370325f9cbec579de66f080046cca1c"

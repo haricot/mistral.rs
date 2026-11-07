@@ -121,8 +121,29 @@ fn fp4_cuda_nvfp4_sm61_w4a16() -> Result<()> {
     let input = Tensor::new(&[[1f32; NVFP4_K], [2f32; NVFP4_K]], &device)?;
     for dtype in [DType::F16, DType::BF16] {
         let layer = Nvfp4Layer::from_parts(nvfp4_fixture_parts(&device, dtype)?)?;
-        let offset = Tensor::ones((3, 2, NVFP4_K), dtype, &device)?.narrow(0, 1, 1)?;
-        assert_eq!(layer.forward(&offset)?.dims(), [1, 2, 2]);
+        let batches = Tensor::stack(&[&input, &input, &input], 0)?.to_dtype(dtype)?;
+        for view in [batches.narrow(0, 1, 1)?, batches.narrow(0, 0, 1)?] {
+            let actual = layer.forward(&view)?;
+            assert_eq!(actual.dtype(), dtype);
+            assert_eq!(actual.dims(), [1, 2, 2]);
+            assert_eq!(
+                actual
+                    .to_dtype(DType::F32)?
+                    .to_device(&Device::Cpu)?
+                    .to_vec3::<f32>()?,
+                vec![vec![vec![16., 64.], vec![32., 128.]]]
+            );
+        }
+        let strided = input.to_dtype(dtype)?.t()?.contiguous()?.t()?;
+        assert!(!strided.is_contiguous());
+        let actual = layer.forward(&strided)?;
+        assert_eq!(
+            actual
+                .to_dtype(DType::F32)?
+                .to_device(&Device::Cpu)?
+                .to_vec2::<f32>()?,
+            vec![vec![16., 64.], vec![32., 128.]]
+        );
         let actual = layer.forward(&input.to_dtype(dtype)?)?;
         device.synchronize()?;
         assert_eq!(actual.dtype(), dtype);
