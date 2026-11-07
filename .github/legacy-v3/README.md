@@ -59,6 +59,15 @@ identity. Campaign 42285229267 failed in artifact restoration because its image
 lacked gh, before physical tests; its successful hosted CPU/build artifacts
 remain eligible for original-producer reuse in a fresh complete campaign.
 
+Campaign 42301201626 restored that original build successfully, then Nextest
+stopped before executing tests because its extraction destination did not
+exist. The GPU launcher now creates this directory and prints the preserved
+Nextest log before propagating its exit code. The hosted contracts exercise
+the exact launcher with a real relocated Rust test archive, covering both
+success and an intentional test failure before another physical job is offered.
+The changed qualification recipe requires a fresh complete campaign identity;
+the runner remains V6.4.7 and no application source was changed for this repair.
+
 Artifacts live for 90 days. Missing or expired artifacts cause requalification;
 durable artifact publication and the full Candle/Extended orchestration remain
 separate acceptance criteria for the definitive workflow. A green pilot receipt
