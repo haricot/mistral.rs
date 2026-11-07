@@ -35,6 +35,24 @@ fn supports_cublaslt_batch_matmul(a: &Tensor, w: &Tensor) -> bool {
     has_cublaslt_batch_layout(a) && has_cublaslt_batch_layout(w)
 }
 
+#[cfg(any(test, all(feature = "cuda", feature = "cuda-legacy-bf16")))]
+fn legacy_bf16_arch(dtype: DType, cc: (i32, i32)) -> bool {
+    dtype == DType::BF16 && cc == (6, 1)
+}
+
+fn use_legacy_bf16_fallback(input: &Tensor) -> bool {
+    #[cfg(all(feature = "cuda", feature = "cuda-legacy-bf16"))]
+    if let Device::Cuda(device) = input.device() {
+        return device
+            .cuda_stream()
+            .context()
+            .compute_capability()
+            .is_ok_and(|cc| legacy_bf16_arch(input.dtype(), cc));
+    }
+    let _ = input;
+    false
+}
+
 impl UnquantLinear {
     fn forward_cuda_gemm(&self, input: &Tensor) -> Result<Tensor> {
         let input_dim = input.dim(D::Minus1)?;
@@ -149,12 +167,13 @@ impl QuantMethod for UnquantLinear {
     fn forward_raw(&self, a: &Tensor) -> Result<Tensor> {
         // Batch matrix multiplication
         maybe_init_cublas_lt_wrapper(a.device().clone());
+        let legacy_bf16 = use_legacy_bf16_fallback(a);
 
         self.stats.process(a)?;
 
         // Try custom GEMV for single-token decode (batch_size=1)
         #[cfg(feature = "cuda")]
-        if crate::gemv::should_use_gemv(a, &self.w) {
+        if !legacy_bf16 && crate::gemv::should_use_gemv(a, &self.w) {
             return crate::gemv::gemv(a, &self.w, self.b.as_ref());
         }
 
@@ -185,7 +204,7 @@ impl QuantMethod for UnquantLinear {
             match a.device().location() {
                 DeviceLocation::Cuda { .. } => {
                     // Try to use cublaslt, otherwise fallback to gemm
-                    let cublaslt = if supports_cublaslt_batch_matmul(a, &w) {
+                    let cublaslt = if !legacy_bf16 && supports_cublaslt_batch_matmul(a, &w) {
                         CUBLASLT_CONTROLLER.get_for_device(a.device())
                     } else {
                         None
@@ -233,7 +252,7 @@ impl QuantMethod for UnquantLinear {
         } else {
             match a.device().location() {
                 DeviceLocation::Cuda { .. } => {
-                    let cublaslt = if supports_cublaslt_batch_matmul(a, &w) {
+                    let cublaslt = if !legacy_bf16 && supports_cublaslt_batch_matmul(a, &w) {
                         CUBLASLT_CONTROLLER.get_for_device(a.device())
                     } else {
                         None
@@ -955,3 +974,52 @@ mod tests {
 
 #[cfg(all(test, feature = "cuda"))]
 mod wide_gemv_tests;
+
+#[cfg(all(test, feature = "cuda", feature = "cuda-legacy-bf16"))]
+mod legacy_bf16_pascal_proof {
+    use super::*;
+
+    #[test]
+    fn legacy_bf16_unquantized_linear_avoids_unsupported_dispatch() -> Result<()> {
+        let device = Device::new_cuda(0)?;
+        let a = Tensor::new(&[[1.0_f32, 2.0]], &device)?.to_dtype(DType::BF16)?;
+        assert!(use_legacy_bf16_fallback(&a));
+        let weight = Tensor::new(&[[1.0_f32, 1.0], [2.0, 0.0]], &device)?.to_dtype(DType::BF16)?;
+        let layer = <UnquantLinear as QuantMethod>::new(QuantMethodConfig::Unquantized(
+            Linear::new(weight, None),
+        ))?;
+        let result = layer
+            .forward_raw(&a)?
+            .to_dtype(DType::F32)?
+            .to_device(&Device::Cpu)?
+            .to_vec2::<f32>()?;
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].len(), 2);
+        assert!((result[0][0] - 3.0).abs() < 0.1);
+        assert!((result[0][1] - 2.0).abs() < 0.1);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod bf16_standalone_routing {
+    use super::*;
+
+    #[test]
+    fn bf16_software_dispatch_is_specific_to_pascal_and_dtype() {
+        assert!(legacy_bf16_arch(DType::BF16, (6, 1)));
+        for cc in [(6, 0), (7, 0), (8, 0), (9, 0)] {
+            assert!(!legacy_bf16_arch(DType::BF16, cc));
+        }
+        for dtype in [DType::F16, DType::F32, DType::F8E4M3] {
+            assert!(!legacy_bf16_arch(dtype, (6, 1)));
+        }
+    }
+
+    #[test]
+    fn cpu_bf16_does_not_enter_the_cuda_fallback() -> Result<()> {
+        let input = Tensor::ones((2, 2), DType::BF16, &Device::Cpu)?;
+        assert!(!use_legacy_bf16_fallback(&input));
+        Ok(())
+    }
+}
