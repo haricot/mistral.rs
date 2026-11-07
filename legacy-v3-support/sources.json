@@ -19,7 +19,7 @@
     {
       "component": "fp4",
       "branch": "fp4_mistralrs_standalone_v2",
-      "sha": "06604b622f6b43f7b54d193e756e326c32678c6b",
+      "sha": "f0cb78fb5e196645f15cec13ae83d7a60b485c00",
       "manifest": "fp4-standalone-v2/sources.json"
     }
   ],
