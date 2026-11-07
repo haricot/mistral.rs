@@ -1,0 +1,205 @@
+{
+  "legacy_sha": "e4f7349cf973b5603ccbfe344e90c4d019a62754",
+  "files": [
+    {
+      "path": "Cargo.lock",
+      "destination": "shared pinned dependencies/toolchain"
+    },
+    {
+      "path": "Cargo.toml",
+      "destination": "integration: explicit feature union and architecture guards; env-only activation retired"
+    },
+    {
+      "path": "mistral-integration/sources.json",
+      "destination": "excluded: obsolete integration identity"
+    },
+    {
+      "path": "mistralrs-cli/Cargo.toml",
+      "destination": "integration: explicit feature union and architecture guards; env-only activation retired"
+    },
+    {
+      "path": "mistralrs-cli/src/args/mod.rs",
+      "destination": "support: cross-format/backend test contracts only"
+    },
+    {
+      "path": "mistralrs-core/Cargo.toml",
+      "destination": "integration: explicit feature union and architecture guards; env-only activation retired"
+    },
+    {
+      "path": "mistralrs-core/build.rs",
+      "destination": "integration: explicit feature union and architecture guards; env-only activation retired"
+    },
+    {
+      "path": "mistralrs-core/src/cuda/ffi.rs",
+      "destination": "shared compatibility retained by the v2 source union"
+    },
+    {
+      "path": "mistralrs-core/src/cuda/moe.rs",
+      "destination": "shared SIMT retained; integration combines feature-gated tests"
+    },
+    {
+      "path": "mistralrs-core/src/cuda/moe_gemm_hfma2.cu",
+      "destination": "shared compatibility retained by the v2 source union"
+    },
+    {
+      "path": "mistralrs-core/src/cuda/moe_utils.h",
+      "destination": "shared compatibility retained by the v2 source union"
+    },
+    {
+      "path": "mistralrs-core/src/paged_attention/cache_engine.rs",
+      "destination": "FP8 v2: compact weights and actual KV routing"
+    },
+    {
+      "path": "mistralrs-core/src/paged_attention/config.rs",
+      "destination": "FP8 v2: compact weights and actual KV routing"
+    },
+    {
+      "path": "mistralrs-core/src/paged_attention/fp8_support.rs",
+      "destination": "FP8 v2: compact weights and actual KV routing"
+    },
+    {
+      "path": "mistralrs-core/src/paged_attention/legacy_fp8_backend.rs",
+      "destination": "FP8 v2: compact weights and actual KV routing"
+    },
+    {
+      "path": "mistralrs-core/src/paged_attention/mod.rs",
+      "destination": "FP8 v2: compact weights and actual KV routing"
+    },
+    {
+      "path": "mistralrs-core/src/pipeline/multimodal.rs",
+      "destination": "FP8 v2: compact weights and actual KV routing"
+    },
+    {
+      "path": "mistralrs-core/src/pipeline/normal.rs",
+      "destination": "FP8 v2: compact weights and actual KV routing"
+    },
+    {
+      "path": "mistralrs-core/tests/campaign_backends.rs",
+      "destination": "FP4 v2 fixtures; generic backend assertion retained in support"
+    },
+    {
+      "path": "mistralrs-core/tests/campaign_paged_fp8.rs",
+      "destination": "FP8 v2: compact weights and actual KV routing"
+    },
+    {
+      "path": "mistralrs-core/tests/legacy_sm61_runtime.rs",
+      "destination": "support: cross-format/backend test contracts only"
+    },
+    {
+      "path": "mistralrs-paged-attn/Cargo.toml",
+      "destination": "integration: explicit feature union and architecture guards; env-only activation retired"
+    },
+    {
+      "path": "mistralrs-paged-attn/build.rs",
+      "destination": "integration: explicit feature union and architecture guards; env-only activation retired"
+    },
+    {
+      "path": "mistralrs-paged-attn/src/cuda/attention/dtype_bfloat16.cuh",
+      "destination": "BF16 v2: software BF16 and range-preserving fixes"
+    },
+    {
+      "path": "mistralrs-paged-attn/src/cuda/backend/paged_attention.rs",
+      "destination": "shared compatibility retained by the v2 source union"
+    },
+    {
+      "path": "mistralrs-paged-attn/src/cuda/flashinfer/math.cuh",
+      "destination": "shared compatibility retained by the v2 source union"
+    },
+    {
+      "path": "mistralrs-paged-attn/src/cuda/flashinfer/utils.cuh",
+      "destination": "shared compatibility retained by the v2 source union"
+    },
+    {
+      "path": "mistralrs-paged-attn/src/cuda/mod.rs",
+      "destination": "shared compatibility retained by the v2 source union"
+    },
+    {
+      "path": "mistralrs-paged-attn/src/cuda/quantization/fp8/nvidia/quant_utils.cuh",
+      "destination": "FP8 v2: compact weights and actual KV routing"
+    },
+    {
+      "path": "mistralrs-pyo3/Cargo.toml",
+      "destination": "integration: explicit feature union and architecture guards; env-only activation retired"
+    },
+    {
+      "path": "mistralrs-quant/Cargo.toml",
+      "destination": "integration: explicit feature union and architecture guards; env-only activation retired"
+    },
+    {
+      "path": "mistralrs-quant/build.rs",
+      "destination": "integration: explicit feature union and architecture guards; env-only activation retired"
+    },
+    {
+      "path": "mistralrs-quant/kernels/embedding/gather_rows.cu",
+      "destination": "shared compatibility retained by the v2 source union"
+    },
+    {
+      "path": "mistralrs-quant/src/blockwise_fp8/ffi.rs",
+      "destination": "FP8 v2: compact weights and actual KV routing"
+    },
+    {
+      "path": "mistralrs-quant/src/blockwise_fp8/mod.rs",
+      "destination": "FP8 v2: compact weights and actual KV routing"
+    },
+    {
+      "path": "mistralrs-quant/src/embedding/mod.rs",
+      "destination": "shared compatibility retained by the v2 source union"
+    },
+    {
+      "path": "mistralrs-quant/src/fp8/quantize.rs",
+      "destination": "FP8 v2: compact weights and actual KV routing"
+    },
+    {
+      "path": "mistralrs-quant/src/gguf/archive.rs",
+      "destination": "shared compatibility retained by the v2 source union"
+    },
+    {
+      "path": "mistralrs-quant/src/gguf/mod.rs",
+      "destination": "shared compatibility retained by the v2 source union"
+    },
+    {
+      "path": "mistralrs-quant/src/lib.rs",
+      "destination": "shared compatibility retained by the v2 source union"
+    },
+    {
+      "path": "mistralrs-quant/src/metal_kernels/embedding.metal",
+      "destination": "shared compatibility retained by the v2 source union"
+    },
+    {
+      "path": "mistralrs-quant/src/moe/mod.rs",
+      "destination": "shared compatibility retained by the v2 source union"
+    },
+    {
+      "path": "mistralrs-quant/src/mxfp8/mod.rs",
+      "destination": "FP8 v2: compact weights and actual KV routing"
+    },
+    {
+      "path": "mistralrs-quant/src/nvfp4/mod.rs",
+      "destination": "FP4 v2: Pascal E7 adapted to current API"
+    },
+    {
+      "path": "mistralrs-quant/src/pertensor_fp8/mod.rs",
+      "destination": "FP8 v2: compact weights and actual KV routing"
+    },
+    {
+      "path": "mistralrs-quant/src/unquantized/mod.rs",
+      "destination": "BF16 v2: software BF16 and range-preserving fixes"
+    },
+    {
+      "path": "mistralrs-server-core/Cargo.toml",
+      "destination": "integration: explicit feature union and architecture guards; env-only activation retired"
+    },
+    {
+      "path": "mistralrs-server-core/src/mistralrs_for_server_builder.rs",
+      "destination": "support: cross-format/backend test contracts only"
+    },
+    {
+      "path": "mistralrs/Cargo.toml",
+      "destination": "integration: explicit feature union and architecture guards; env-only activation retired"
+    },
+    {
+      "path": "rust-toolchain.toml",
+      "destination": "shared pinned dependencies/toolchain"
+    }
+  ]
+}

@@ -267,7 +267,15 @@ fn launch_pascal_simt_moe<
     )))
 }
 
-#[cfg(all(test, feature = "cuda", any(feature = "cuda-legacy-bf16", feature = "cuda-legacy-fp8", feature = "cuda-legacy-fp4")))]
+#[cfg(all(
+    test,
+    feature = "cuda",
+    any(
+        feature = "cuda-legacy-bf16",
+        feature = "cuda-legacy-fp8",
+        feature = "cuda-legacy-fp4"
+    )
+))]
 mod pascal_moe_tests {
     use super::*;
     use candle_core::{DType, Device};
@@ -284,7 +292,10 @@ mod pascal_moe_tests {
                 .map_err(candle_core::Error::msg)?,
             (6, 1)
         );
-        for dtype in [DType::F16].into_iter().chain(cfg!(feature = "cuda-legacy-bf16").then_some(DType::BF16)) {
+        for dtype in [DType::F16]
+            .into_iter()
+            .chain(cfg!(feature = "cuda-legacy-bf16").then_some(DType::BF16))
+        {
             let input = Tensor::ones((1, 16), dtype, &device)?;
             let weights = Tensor::ones((1, 4, 16), dtype, &device)?;
             let sorted = Tensor::new(&[0u32], &device)?;
