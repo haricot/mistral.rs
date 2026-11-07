@@ -21,7 +21,8 @@ SHA = re.compile(r"[0-9a-f]{40}\Z")
 SDK = re.compile(r"ghcr.io/[a-z0-9/._-]+@sha256:[0-9a-f]{64}\Z")
 CPU_REQUIRED = ["cpu_backend_remains_available", "campaign_force_cpu_selects_cpu",
                 "campaign_cpu_flag_is_available", "campaign_cpu_fp8_kv",
-                "row_multipliers_precede_bias_and_restore_batch_shape", "fp4_cpu_mxfp4_embedding"]
+                "row_multipliers_precede_bias_and_restore_batch_shape", "fp4_cpu_mxfp4_embedding",
+                "e7_input_compacts_views_and_preserves_logical_values"]
 GPU_REQUIRED = ["legacy_bf16_unquantized_linear_avoids_unsupported_dispatch",
                 "sm61_bf16_gemm_preserves_values_outside_f16_range",
                 "sm61_fp8_blockwise_packed_f16_w8a16", "sm61_fp8_blockwise_packed_bf16_preserves_range",

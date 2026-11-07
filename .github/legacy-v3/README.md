@@ -78,6 +78,17 @@ candidate, original producer run/attempt and all three context measurements.
 The physical suite now completes independent tests after a failure, while
 any failed test still blocks qualification and promotion.
 
+Campaign 42370436352 executed all 12 physical tests: 11 passed, while NVFP4
+rejected a contiguous activation view with a nonzero storage offset. The FP4
+standalone now uses Candle force_contiguous() to copy logical F16 values into
+exact, zero-offset storage; contiguous() and copy() can retain view metadata.
+The source CPU contract checks dense, offset, prefix and strided inputs in F16
+and BF16, including exact backing length and values. The physical FP4 test
+checks those layouts numerically. This CPU regression is mandatory in hosted
+evidence. The changed standalone and support pins require a fresh candidate,
+CPU baseline and CUDA build before physical requalification. Runner V6.4.7
+remains current.
+
 Artifacts live for 90 days. Missing or expired artifacts cause requalification;
 durable artifact publication and the full Candle/Extended orchestration remain
 separate acceptance criteria for the definitive workflow. A green pilot receipt
