@@ -29,7 +29,8 @@ class RealArchiveExecution(unittest.TestCase):
         cls.builds.mkdir()
         shutil.copy2(os.environ["LEGACY_V3_NEXTEST"], cls.builds / "cargo-nextest")
         result = subprocess.run([str(cls.builds / "cargo-nextest"), "nextest", "archive", "--manifest-path", str(cls.source / "Cargo.toml"),
-                                 "--archive-file", str(cls.builds / "tests.tar.zst")], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                                 "--archive-file", str(cls.builds / "tests.tar.zst")], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                env={**os.environ, "RUSTFLAGS": "-C target-cpu=x86-64"})
         if result.returncode:
             raise RuntimeError(result.stdout)
         cls.workspace = cls.root / "relocated-source"
@@ -54,7 +55,8 @@ class RealArchiveExecution(unittest.TestCase):
         result, report, output = self.run_archive("archive_runs_without_gpu")
         self.assertIsInstance(result, dict, output)
         self.assertEqual(result["passed"], 1)
-        self.assertIn("1 passed", output)
+        self.assertIn("archive_runs_without_gpu", output)
+        self.assertEqual((report / "gpu-tests.log").read_text(), output)
         self.assertTrue((report / "target").is_dir())
         self.assertEqual(hashlib.sha256(archive.read_bytes()).hexdigest(), before)
 
