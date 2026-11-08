@@ -14,6 +14,7 @@ homepage.workspace = true
 
 [dependencies]
 candle-core.workspace = true
+mistralrs-kernel-runtime.workspace = true
 candle-nn.workspace = true
 half.workspace = true
 serde.workspace = true
@@ -52,6 +53,7 @@ cuda-legacy = ["cuda-legacy-bf16", "cuda-legacy-fp8", "cuda-legacy-fp4"]
 cuda = [
     "candle-core/cuda",
     "candle-nn/cuda",
+    "mistralrs-kernel-runtime/cuda",
     "dep:cudaforge"
 ]
 cutile = [

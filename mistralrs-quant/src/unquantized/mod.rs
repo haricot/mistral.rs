@@ -19,6 +19,8 @@ pub struct UnquantLinear {
     w: Tensor,
     b: Option<Tensor>,
     stats: ImatrixLayerStats,
+    #[cfg(feature = "cuda")]
+    external_f32: Option<mistralrs_kernel_runtime::session::LayerPlan>,
 }
 
 fn has_cublaslt_batch_layout(x: &Tensor) -> bool {
@@ -54,6 +56,25 @@ fn use_legacy_bf16_fallback(input: &Tensor) -> bool {
 }
 
 impl UnquantLinear {
+    fn from_parts(w: Tensor, b: Option<Tensor>, stats: ImatrixLayerStats) -> Result<Self> {
+        #[cfg(feature = "cuda")]
+        let external_f32 = mistralrs_kernel_runtime::session::LayerPlan::for_weight(&w)
+            .map_err(|e| candle_core::Error::Msg(format!("{e:#}")))?;
+        #[cfg(feature = "cuda")]
+        let w = if external_f32.is_some() {
+            w.force_contiguous()?
+        } else {
+            w
+        };
+        Ok(Self {
+            w,
+            b,
+            stats,
+            #[cfg(feature = "cuda")]
+            external_f32,
+        })
+    }
+
     fn forward_cuda_gemm(&self, input: &Tensor) -> Result<Tensor> {
         let input_dim = input.dim(D::Minus1)?;
         let output_dim = self.w.dim(0)?;
@@ -135,11 +156,11 @@ impl QuantMethod for UnquantLinear {
             | QuantMethodConfig::Afq { .. }
             | QuantMethodConfig::MXFP4 { .. } => unreachable!(),
             QuantMethodConfig::Unquantized(l) => {
-                let layer = Self {
-                    w: l.weight().clone(),
-                    b: l.bias().cloned(),
-                    stats: ImatrixLayerStats::empty(),
-                };
+                let layer = Self::from_parts(
+                    l.weight().clone(),
+                    l.bias().cloned(),
+                    ImatrixLayerStats::empty(),
+                )?;
                 #[cfg(feature = "metal")]
                 layer.prepare_metal_kernels(layer.w.dtype())?;
                 Ok(layer)
@@ -170,6 +191,13 @@ impl QuantMethod for UnquantLinear {
         let legacy_bf16 = use_legacy_bf16_fallback(a);
 
         self.stats.process(a)?;
+
+        #[cfg(feature = "cuda")]
+        if let Some(plan) = &self.external_f32 {
+            return plan
+                .run(a, &self.w, self.b.as_ref())
+                .map_err(|e| candle_core::Error::Msg(format!("{e:#}")));
+        }
 
         // Try custom GEMV for single-token decode (batch_size=1)
         #[cfg(feature = "cuda")]
@@ -408,11 +436,11 @@ impl QuantMethod for UnquantLinear {
     }
 
     fn add_delta_w(&self, delta: &Tensor) -> Result<Arc<dyn QuantMethod>> {
-        Ok(Arc::new(Self {
-            w: (&self.w + delta)?,
-            b: self.b.clone(),
-            stats: self.stats.clone(),
-        }))
+        Ok(Arc::new(Self::from_parts(
+            (&self.w + delta)?,
+            self.b.clone(),
+            self.stats.clone(),
+        )?))
     }
 
     fn dtype_and_device(&self) -> (DType, candle_core::Device) {
@@ -635,10 +663,20 @@ impl QuantMethod for UnquantLinear {
     }
 
     fn unquant_weight_bias(&self) -> Option<(Tensor, Option<Tensor>)> {
+        // Borrowing raw weights would bypass the selected external executor.
+        #[cfg(feature = "cuda")]
+        if self.external_f32.is_some() {
+            return None;
+        }
         Some((self.w.clone(), self.b.clone()))
     }
 
     fn unquant_forward_weight(&self) -> Option<Tensor> {
+        // Borrowing raw weights would bypass the selected external executor.
+        #[cfg(feature = "cuda")]
+        if self.external_f32.is_some() {
+            return None;
+        }
         Some(self.w.clone())
     }
 

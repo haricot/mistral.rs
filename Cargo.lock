@@ -3925,7 +3925,9 @@ dependencies = [
  "image",
  "indexmap 2.13.0",
  "mistralrs-core",
+ "mistralrs-kernel-runtime",
  "mistralrs-macros",
+ "mistralrs-quant",
  "rand 0.9.4",
  "reqwest 0.13.5",
  "schemars 1.2.0",
@@ -4131,6 +4133,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mistralrs-kernel-runtime"
+version = "0.10.0"
+dependencies = [
+ "anyhow",
+ "candle-core",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+]
+
+[[package]]
 name = "mistralrs-macros"
 version = "0.10.0"
 dependencies = [
@@ -4236,6 +4250,7 @@ dependencies = [
  "lazy_static",
  "libc",
  "memmap2",
+ "mistralrs-kernel-runtime",
  "mistralrs-metal-compile",
  "objc2-foundation",
  "objc2-metal",

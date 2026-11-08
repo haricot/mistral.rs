@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "status": "S1_F32_STANDALONE_IMPLEMENTED_GPU_PENDING",
+  "status": "F32_UNQUANTLINEAR_ENGINE_INTEGRATION_GPU_PENDING",
   "branch": "legacy-dynamic-providers-poc",
   "mistral_base": "f592ba9fabf70c6063cbfc5c8a685363a86d806a",
   "candle_baseline": "9cba2e898af3d25a89257f1f2ec5acece0404dcb",
@@ -547,10 +547,19 @@
       "shared_memory_tiled"
     ],
     "candle_source_change_required": false,
-    "scope": "Standalone execution mechanism proof, not yet production model integration",
+    "scope": "Shared F32 runtime, UnquantLinear hook and local Mistral SDK engine proof; not full Legacy coverage",
     "implementation_path": "legacy-provider-poc/f32",
     "implemented": true,
     "gpu_validated": false,
-    "same_binary_external_swap_proven": false
+    "same_binary_external_swap_proven": false,
+    "integration": {
+      "path": "legacy-provider-poc/inference",
+      "runtime_crate": "mistralrs-kernel-runtime",
+      "profile_schema": "ASD-LINEAR-PROFILE-V1",
+      "purpose": "validation_only",
+      "tuner": false,
+      "fixture": "generated local one-layer Llama",
+      "gpu_validated": false
+    }
   }
 }

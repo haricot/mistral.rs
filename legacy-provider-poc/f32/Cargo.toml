@@ -9,9 +9,10 @@ publish = false
 
 [features]
 default = []
-cuda = ["candle-core/cuda"]
+cuda = ["candle-core/cuda", "mistralrs-kernel-runtime/cuda"]
 
 [dependencies]
+mistralrs-kernel-runtime = { path = "../../mistralrs-kernel-runtime" }
 candle-core = { version = "0.11.0", git = "https://github.com/haricot/candle.git", rev = "9cba2e898af3d25a89257f1f2ec5acece0404dcb" }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }

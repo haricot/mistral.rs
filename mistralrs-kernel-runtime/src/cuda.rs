@@ -19,6 +19,10 @@ pub struct PreparedLinear {
 
 impl PreparedLinear {
     pub fn load(module: VerifiedModule, device: &Device) -> Result<Self> {
+        Self::load_ref(&module, device)
+    }
+
+    pub fn load_ref(module: &VerifiedModule, device: &Device) -> Result<Self> {
         let cc = compute_capability(device)?;
         module.manifest.admit(cc, [1, 1, 1])?;
         let function = device
@@ -30,7 +34,7 @@ impl PreparedLinear {
             )?
             .into_cuda_function();
         Ok(Self {
-            manifest: module.manifest,
+            manifest: module.manifest.clone(),
             function,
             device: device.clone(),
             cc,
@@ -88,8 +92,7 @@ impl CustomOp2 for PreparedLinear {
         let device = x.device();
         let xs = x.as_cuda_slice::<f32>()?;
         let ws = w.as_cuda_slice::<f32>()?;
-        // NaNs reveal unwritten outputs; initialization is on the same Candle stream.
-        let mut output = device.clone_htod(&vec![f32::NAN; m * n])?;
+        let mut output = device.alloc_zeros::<f32>(m * n)?;
         let [bx, by, bz] = self.manifest.block;
         let config = LaunchConfig {
             grid_dim: ((n as u32).div_ceil(bx), (m as u32).div_ceil(by), 1),

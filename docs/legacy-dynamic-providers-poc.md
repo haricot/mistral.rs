@@ -1,9 +1,10 @@
 # Legacy Dynamic Providers — plan de démonstration
 
-Statut : **S1 F32 implemente en demonstration isolee ; validation GPU physique en attente.**
+Statut : **F32 raccorde a UnquantLinear ; preuve moteur locale et profil ASD lineaire manuel ajoutes ; validation GPU physique en attente.**
 
 Implementation et commandes : [`legacy-provider-poc/f32/README.md`](../legacy-provider-poc/f32/README.md).
-Le raccordement aux chemins de modeles et les etapes suivantes restent planifies.
+Raccordement et commandes moteur : [`legacy-provider-poc/inference/README.md`](../legacy-provider-poc/inference/README.md).
+Les formats quantifies et les autres contrats restent planifies ; aucun tuner n'est ajoute.
 
 Branche Mistral : `legacy-dynamic-providers-poc`.
 Base figée : `f592ba9fabf70c6063cbfc5c8a685363a86d806a` (`legacy_v3`).

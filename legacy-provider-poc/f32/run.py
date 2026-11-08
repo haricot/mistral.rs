@@ -27,7 +27,7 @@ def source_scope():
     demo = tomllib.loads((HERE / "Cargo.toml").read_text())
     assert root["workspace"]["dependencies"]["candle-core"]["rev"] == CANDLE_REV
     assert demo["dependencies"]["candle-core"]["rev"] == CANDLE_REV
-    assert demo["features"] == {"default": [], "cuda": ["candle-core/cuda"]}
+    assert demo["features"] == {"default": [], "cuda": ["candle-core/cuda", "mistralrs-kernel-runtime/cuda"]}
     assert not (HERE / "build.rs").exists()
     print("PROVIDER_F32_SOURCE_SCOPE=PASS", flush=True)
 
@@ -82,6 +82,7 @@ def main():
         run(["cargo", "fmt", "--manifest-path", HERE / "Cargo.toml", "--", "--check"])
         run(cargo("check"))
         run(cargo("test"))
+        run(["cargo", "test", "--locked", "--manifest-path", ROOT / "Cargo.toml", "-p", "mistralrs-kernel-runtime"])
         print("PROVIDER_F32_CPU=PASS", flush=True)
         return
     cc = os.environ.get("CUDA_COMPUTE_CAP", "61")

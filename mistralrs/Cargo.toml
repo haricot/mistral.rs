@@ -309,3 +309,11 @@ nccl = ["mistralrs-core/nccl"]
 ring = ["mistralrs-core/ring"]
 # Python code execution tool
 code-execution = ["mistralrs-core/code-execution"]
+
+[dev-dependencies]
+mistralrs-kernel-runtime.workspace = true
+mistralrs-quant.workspace = true
+
+[[example]]
+name = "provider_f32_inference"
+path = "examples/advanced/provider_f32/main.rs"

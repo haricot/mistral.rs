@@ -46,7 +46,7 @@ trusted packages. Host format conversion or a new ABI still requires host suppor
 
 Nine cases cover M=1/4/5 and N/K=(17,33)/(32,64)/(31,65), including tile tails.
 GPU validation also rejects offset, wrong layout/dtype/K, another Candle device
-instance and CPU tensors. Output starts with NaNs to detect missing writes.
+instance and CPU tensors. Output initialization uses the Candle CUDA stream.
 Numerical tolerances are `atol=1e-5`, `rtol=1e-5`; nonfinite values fail. Artifact
 build disables contraction and flush-to-zero. Candle TF32/reduced F32 precision
 is explicitly disabled for the reference. No performance claim is made.
@@ -94,3 +94,7 @@ explicitly separate and emits architecture and A/B/A evidence.
 
 The next step after physical success is one real Mistral operation integration;
 this demonstration does not yet replace any Legacy V3 provider.
+
+The shared executor now lives in `mistralrs-kernel-runtime`. See
+[`../inference/README.md`](../inference/README.md) for its UnquantLinear and real
+Mistral engine integration with a minimal manual ASD linear profile.

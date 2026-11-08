@@ -1,9 +1,14 @@
-name: Legacy external F32 provider mechanism
+name: Mistral external F32 provider integration
 on:
   push:
     branches: [legacy-dynamic-providers-poc]
     paths:
-      - legacy-provider-poc/f32/**
+      - legacy-provider-poc/**
+      - mistralrs-kernel-runtime/**
+      - mistralrs-quant/**
+      - mistralrs/examples/advanced/provider_f32/**
+      - mistralrs/Cargo.toml
+      - Cargo.lock
       - .github/workflows/legacy-provider-f32-poc.yml
       - Cargo.toml
   workflow_dispatch:
@@ -22,7 +27,7 @@ env:
 jobs:
   cpu:
     runs-on: ubuntu-26.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
@@ -31,11 +36,19 @@ jobs:
         with:
           toolchain: 1.99.0
           components: rustfmt
-      - run: python3 legacy-provider-poc/f32/run.py cpu
+      - run: python3 -m unittest discover -s legacy-provider-poc/inference -p test_review.py -v
+      - run: python3 legacy-provider-poc/inference/run.py cpu --output "$RUNNER_TEMP/provider-f32"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: provider-f32-cpu-inference
+          path: |
+            ${{ runner.temp }}/provider-f32/*-model.json
+            ${{ runner.temp }}/provider-f32/*-operator.json
+            ${{ runner.temp }}/provider-f32/evidence.json
+          if-no-files-found: error
   cuda-compile:
-    needs: cpu
     runs-on: ubuntu-26.04
-    timeout-minutes: 45
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix:
@@ -50,11 +63,12 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           persist-credentials: false
-      - run: python3 legacy-provider-poc/f32/run.py cuda-compile --output "$RUNNER_TEMP/provider-f32"
+      - run: python3 legacy-provider-poc/inference/run.py cuda-compile --output "$RUNNER_TEMP/provider-f32"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: provider-f32-sm${{ matrix.cc }}
           path: |
             ${{ runner.temp }}/provider-f32/packages
-            ${{ runner.temp }}/provider-f32/build-evidence.json
+            ${{ runner.temp }}/provider-f32/*.profile.json
+            ${{ runner.temp }}/provider-f32/evidence.json
           if-no-files-found: error
