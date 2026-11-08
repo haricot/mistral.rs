@@ -6,7 +6,7 @@ use mistralrs::{
 };
 use mistralrs_kernel_runtime::{compare, digest, execution_evidence, oracle};
 use mistralrs_quant::{QuantMethod, QuantMethodConfig, UnquantLinear};
-use std::{path::PathBuf, time::Duration};
+use std::{io::Write, path::PathBuf, time::Duration};
 
 const PROMPT: &str = "hello world mechanism";
 const GENERATION_TOKENS: usize = 4;
@@ -96,7 +96,7 @@ fn request() -> RequestBuilder {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    ensure!(args.len() >= 3, "usage: provider_f32_inference operator|model cpu|cuda OUTPUT [MODEL_DIR] [remove-control-plane]");
+    ensure!(args.len() >= 3, "usage: provider_f32_inference operator|model cpu|cuda OUTPUT [MODEL_DIR] [await-control-plane-removal]");
     let device = device(&args[1])?;
     #[cfg(feature = "cuda")]
     candle_core::cuda_backend::set_gemm_reduced_precision_f32(false);
@@ -121,23 +121,25 @@ async fn main() -> Result<()> {
             .build()
             .await?;
         let provider_after_load = execution_evidence();
-        let removed = args.get(4).is_some_and(|s| s == "remove-control-plane");
+        let removed = args
+            .get(4)
+            .is_some_and(|s| s == "await-control-plane-removal");
         if removed {
+            println!("PROVIDER_F32_MODEL_PREPARED");
+            std::io::stdout().flush()?;
+            let mut continuation = String::new();
+            std::io::stdin().read_line(&mut continuation)?;
+            ensure!(
+                continuation.trim() == "continue",
+                "missing control-plane removal handshake"
+            );
             let profile_path = PathBuf::from(std::env::var(
                 mistralrs_kernel_runtime::profile::PROFILE_ENV,
             )?);
-            let loaded = mistralrs_kernel_runtime::profile::LoadedProfile::read(&profile_path)?;
-            let parent = profile_path.parent().context("profile parent")?;
-            let mut files = std::collections::HashSet::new();
-            for d in loaded.decisions {
-                let manifest = parent.join(&d.decision.manifest);
-                files.insert(manifest.parent().unwrap().join(&d.module.manifest.artifact));
-                files.insert(manifest);
-            }
-            files.insert(profile_path);
-            for path in files {
-                std::fs::remove_file(path)?;
-            }
+            ensure!(
+                !profile_path.exists(),
+                "profile still exists after removal handshake"
+            );
         }
         let (logits, prompt_tokens) =
             tokio::time::timeout(REQUEST_TIMEOUT, model.send_raw_chat_request(request())).await??;

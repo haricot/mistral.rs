@@ -135,8 +135,26 @@ def main():
             if command == "model":
                 argv += [model_path]
                 if remove:
-                    argv += ["remove-control-plane"]
-            run(argv, env=selected_env)
+                    argv += ["await-control-plane-removal"]
+            if command == "model" and remove:
+                child = subprocess.Popen(list(map(str, argv)), env=selected_env,
+                                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+                while True:
+                    line = child.stdout.readline()
+                    if not line:
+                        raise RuntimeError(f"model exited before control-plane handshake: {child.wait()}")
+                    print(line, end="", flush=True)
+                    if line.strip() == "PROVIDER_F32_MODEL_PREPARED":
+                        break
+                owned_files = [selected_profile, selected_profile.parent / "a/module.json",
+                               selected_profile.parent / "a/kernel.ptx"]
+                for owned in owned_files:
+                    owned.unlink()
+                rest, _ = child.communicate("continue\n", timeout=180)
+                print(rest, end="", flush=True)
+                assert child.returncode == 0 and all(not p.exists() for p in owned_files)
+            else:
+                run(argv, env=selected_env)
             report = json.loads(path.read_text())
             assert report["binary_sha256"] == binary_hash and report["status"] == "PASS"
             reports[f"{label}-{command}"] = report
