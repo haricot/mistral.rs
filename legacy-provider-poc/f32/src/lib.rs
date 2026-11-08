@@ -160,9 +160,9 @@ impl VerifiedModule {
             "PTX target differs from manifest"
         );
         ensure!(
-            tokens
-                .windows(2)
-                .any(|t| t[0] == ".entry" && t[1].split('(').next() == Some(&manifest.entry)),
+            tokens.windows(2).any(
+                |t| t[0] == ".entry" && t[1].split('(').next() == Some(manifest.entry.as_str())
+            ),
             "entry symbol missing from PTX"
         );
         Ok(Self { manifest, ptx })
@@ -260,15 +260,45 @@ mod tests {
             .unwrap()
             .to_string()
             .contains("SHA256"));
-        for ptx in [
-            ".target sm_61\n.entry other() {}",
-            ".target sm_75\n.entry linear() {}",
+        for (ptx, reason) in [
+            (
+                ".target sm_61\n.address_size 64\n.entry other() {}",
+                "entry symbol missing",
+            ),
+            (
+                ".target sm_75\n.address_size 64\n.entry linear() {}",
+                "PTX target differs",
+            ),
+            (
+                ".target sm_61\n.address_size 32\n.entry linear() {}",
+                "64-bit PTX pointers",
+            ),
         ] {
             m.sha256 = digest(ptx.as_bytes());
             std::fs::write(dir.path().join(&m.artifact), ptx).unwrap();
             std::fs::write(&path, serde_json::to_vec(&m).unwrap()).unwrap();
-            assert!(VerifiedModule::read(&path).is_err());
+            assert!(VerifiedModule::read(&path)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains(reason));
         }
+    }
+
+    #[test]
+    fn rejects_oversized_artifact_before_reading() {
+        let (dir, path, m) = fixture();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(dir.path().join(m.artifact))
+            .unwrap()
+            .set_len(MAX_ARTIFACT_BYTES + 1)
+            .unwrap();
+        assert!(VerifiedModule::read(&path)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("artifact budget"));
     }
 
     #[test]

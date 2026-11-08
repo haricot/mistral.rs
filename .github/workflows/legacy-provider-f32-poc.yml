@@ -11,7 +11,7 @@ permissions:
   contents: read
 concurrency:
   group: provider-f32-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 env:
   RUSTFLAGS: -C target-cpu=x86-64
   CARGO_BUILD_JOBS: '2'
