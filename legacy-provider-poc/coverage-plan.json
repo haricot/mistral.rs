@@ -1,0 +1,534 @@
+{
+  "schema_version": 1,
+  "status": "PLAN_ONLY_NOT_IMPLEMENTED",
+  "branch": "legacy-dynamic-providers-poc",
+  "mistral_base": "f592ba9fabf70c6063cbfc5c8a685363a86d806a",
+  "candle_baseline": "9cba2e898af3d25a89257f1f2ec5acece0404dcb",
+  "reference_run": {
+    "repository": "haricot/mistral.rs",
+    "run_id": 42380889678,
+    "scope": "Historical baseline only; no qualification transfer to this branch"
+  },
+  "asd_reference": {
+    "repository": "haricot/candle",
+    "sha": "ffae6d8f72063197a690ab626660344846c38c84",
+    "abi": "asd.xwo.f32.v1",
+    "scope": "Convolution F32 ABI; reuse mechanisms, define separate operation ABIs"
+  },
+  "fp8_kernel_reference": {
+    "repository": "haricot/candle",
+    "sha": "b10f7b545690d5b579ac439283329d315d6f404a",
+    "scope": "W8ABF16 source reference; not the Candle dependency for S1"
+  },
+  "old_legacy_sha": "e4f7349cf973b5603ccbfe344e90c4d019a62754",
+  "old_inventory": [
+    {
+      "path": "Cargo.lock",
+      "destination": "shared pinned dependencies/toolchain",
+      "kind": "build_contract",
+      "phase": "S5",
+      "planned_action": "Keep workspace/toolchain ownership in Mistral; generic runtime feature, baseline kernels and separately built external artifacts.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "Cargo.toml",
+      "destination": "integration: explicit feature union and architecture guards; env-only activation retired",
+      "kind": "build_contract",
+      "phase": "S5",
+      "planned_action": "Keep workspace/toolchain ownership in Mistral; generic runtime feature, baseline kernels and separately built external artifacts.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistral-integration/sources.json",
+      "destination": "excluded: obsolete integration identity",
+      "kind": "exclude",
+      "phase": "S0",
+      "planned_action": "Historical integration identity; do not restore it.",
+      "status": "planned",
+      "present_in_mistral_base": false
+    },
+    {
+      "path": "mistralrs-cli/Cargo.toml",
+      "destination": "integration: explicit feature union and architecture guards; env-only activation retired",
+      "kind": "build_contract",
+      "phase": "S5",
+      "planned_action": "Keep workspace/toolchain ownership in Mistral; generic runtime feature, baseline kernels and separately built external artifacts.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-cli/src/args/mod.rs",
+      "destination": "support: cross-format/backend test contracts only",
+      "kind": "validation_or_entrypoint",
+      "phase": "S6",
+      "planned_action": "Keep CPU/GPU/backend and command-line contracts; add external-provider evidence and generic feature forwarding.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-core/Cargo.toml",
+      "destination": "integration: explicit feature union and architecture guards; env-only activation retired",
+      "kind": "build_contract",
+      "phase": "S5",
+      "planned_action": "Keep workspace/toolchain ownership in Mistral; generic runtime feature, baseline kernels and separately built external artifacts.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-core/build.rs",
+      "destination": "integration: explicit feature union and architecture guards; env-only activation retired",
+      "kind": "build_contract",
+      "phase": "S5",
+      "planned_action": "Keep workspace/toolchain ownership in Mistral; generic runtime feature, baseline kernels and separately built external artifacts.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-core/src/cuda/ffi.rs",
+      "destination": "shared compatibility retained by the v2 source union",
+      "kind": "cuda_host_adapter",
+      "phase": "S3",
+      "planned_action": "Version the adapter/launch contract; keep device/context/stream and ownership checks in the host.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-core/src/cuda/moe.rs",
+      "destination": "shared SIMT retained; integration combines feature-gated tests",
+      "kind": "moe_provider",
+      "phase": "S3",
+      "planned_action": "Keep routing semantics; replace architecture-specific construction with a contracted indexed/grouped provider. Package CUDA implementations externally.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-core/src/cuda/moe_gemm_hfma2.cu",
+      "destination": "shared compatibility retained by the v2 source union",
+      "kind": "moe_provider",
+      "phase": "S3",
+      "planned_action": "Keep routing semantics; replace architecture-specific construction with a contracted indexed/grouped provider. Package CUDA implementations externally.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-core/src/cuda/moe_utils.h",
+      "destination": "shared compatibility retained by the v2 source union",
+      "kind": "moe_provider",
+      "phase": "S3",
+      "planned_action": "Keep routing semantics; replace architecture-specific construction with a contracted indexed/grouped provider. Package CUDA implementations externally.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-core/src/paged_attention/cache_engine.rs",
+      "destination": "FP8 v2: compact weights and actual KV routing",
+      "kind": "attention_kv_bundle",
+      "phase": "S4",
+      "planned_action": "Keep cache allocation/scheduler in Mistral; describe layout/scales/state and bind a complete compatible provider bundle before allocation.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-core/src/paged_attention/config.rs",
+      "destination": "FP8 v2: compact weights and actual KV routing",
+      "kind": "attention_kv_bundle",
+      "phase": "S4",
+      "planned_action": "Keep cache allocation/scheduler in Mistral; describe layout/scales/state and bind a complete compatible provider bundle before allocation.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-core/src/paged_attention/fp8_support.rs",
+      "destination": "FP8 v2: compact weights and actual KV routing",
+      "kind": "attention_kv_bundle",
+      "phase": "S4",
+      "planned_action": "Keep cache allocation/scheduler in Mistral; describe layout/scales/state and bind a complete compatible provider bundle before allocation.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-core/src/paged_attention/legacy_fp8_backend.rs",
+      "destination": "FP8 v2: compact weights and actual KV routing",
+      "kind": "attention_kv_bundle",
+      "phase": "S4",
+      "planned_action": "Keep cache allocation/scheduler in Mistral; describe layout/scales/state and bind a complete compatible provider bundle before allocation.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-core/src/paged_attention/mod.rs",
+      "destination": "FP8 v2: compact weights and actual KV routing",
+      "kind": "attention_kv_bundle",
+      "phase": "S4",
+      "planned_action": "Keep cache allocation/scheduler in Mistral; describe layout/scales/state and bind a complete compatible provider bundle before allocation.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-core/src/pipeline/multimodal.rs",
+      "destination": "FP8 v2: compact weights and actual KV routing",
+      "kind": "model_integration",
+      "phase": "S4",
+      "planned_action": "Keep model/pipeline logic in Mistral; obtain backend/cache requirements from the selected provider bundle.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-core/src/pipeline/normal.rs",
+      "destination": "FP8 v2: compact weights and actual KV routing",
+      "kind": "model_integration",
+      "phase": "S4",
+      "planned_action": "Keep model/pipeline logic in Mistral; obtain backend/cache requirements from the selected provider bundle.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-core/tests/campaign_backends.rs",
+      "destination": "FP4 v2 fixtures; generic backend assertion retained in support",
+      "kind": "validation_or_entrypoint",
+      "phase": "S6",
+      "planned_action": "Historical path absent from the pinned Legacy V3 tree; S0 must identify its replacement tests/fixtures or mark the coverage as missing before any removal.",
+      "status": "planned",
+      "present_in_mistral_base": false
+    },
+    {
+      "path": "mistralrs-core/tests/campaign_paged_fp8.rs",
+      "destination": "FP8 v2: compact weights and actual KV routing",
+      "kind": "validation_or_entrypoint",
+      "phase": "S6",
+      "planned_action": "Keep CPU/GPU/backend and command-line contracts; add external-provider evidence and generic feature forwarding.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-core/tests/legacy_sm61_runtime.rs",
+      "destination": "support: cross-format/backend test contracts only",
+      "kind": "validation_or_entrypoint",
+      "phase": "S6",
+      "planned_action": "Keep CPU/GPU/backend and command-line contracts; add external-provider evidence and generic feature forwarding.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-paged-attn/Cargo.toml",
+      "destination": "integration: explicit feature union and architecture guards; env-only activation retired",
+      "kind": "build_contract",
+      "phase": "S5",
+      "planned_action": "Keep workspace/toolchain ownership in Mistral; generic runtime feature, baseline kernels and separately built external artifacts.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-paged-attn/build.rs",
+      "destination": "integration: explicit feature union and architecture guards; env-only activation retired",
+      "kind": "build_contract",
+      "phase": "S5",
+      "planned_action": "Keep workspace/toolchain ownership in Mistral; generic runtime feature, baseline kernels and separately built external artifacts.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-paged-attn/src/cuda/attention/dtype_bfloat16.cuh",
+      "destination": "BF16 v2: software BF16 and range-preserving fixes",
+      "kind": "attention_kv_bundle",
+      "phase": "S4",
+      "planned_action": "Keep cache allocation/scheduler in Mistral; describe layout/scales/state and bind a complete compatible provider bundle before allocation.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-paged-attn/src/cuda/backend/paged_attention.rs",
+      "destination": "shared compatibility retained by the v2 source union",
+      "kind": "attention_kv_bundle",
+      "phase": "S4",
+      "planned_action": "Keep cache allocation/scheduler in Mistral; describe layout/scales/state and bind a complete compatible provider bundle before allocation.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-paged-attn/src/cuda/flashinfer/math.cuh",
+      "destination": "shared compatibility retained by the v2 source union",
+      "kind": "attention_kv_bundle",
+      "phase": "S4",
+      "planned_action": "Keep cache allocation/scheduler in Mistral; describe layout/scales/state and bind a complete compatible provider bundle before allocation.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-paged-attn/src/cuda/flashinfer/utils.cuh",
+      "destination": "shared compatibility retained by the v2 source union",
+      "kind": "attention_kv_bundle",
+      "phase": "S4",
+      "planned_action": "Keep cache allocation/scheduler in Mistral; describe layout/scales/state and bind a complete compatible provider bundle before allocation.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-paged-attn/src/cuda/mod.rs",
+      "destination": "shared compatibility retained by the v2 source union",
+      "kind": "attention_kv_bundle",
+      "phase": "S4",
+      "planned_action": "Keep cache allocation/scheduler in Mistral; describe layout/scales/state and bind a complete compatible provider bundle before allocation.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-paged-attn/src/cuda/quantization/fp8/nvidia/quant_utils.cuh",
+      "destination": "FP8 v2: compact weights and actual KV routing",
+      "kind": "attention_kv_bundle",
+      "phase": "S4",
+      "planned_action": "Keep cache allocation/scheduler in Mistral; describe layout/scales/state and bind a complete compatible provider bundle before allocation.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-pyo3/Cargo.toml",
+      "destination": "integration: explicit feature union and architecture guards; env-only activation retired",
+      "kind": "build_contract",
+      "phase": "S5",
+      "planned_action": "Keep workspace/toolchain ownership in Mistral; generic runtime feature, baseline kernels and separately built external artifacts.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-quant/Cargo.toml",
+      "destination": "integration: explicit feature union and architecture guards; env-only activation retired",
+      "kind": "build_contract",
+      "phase": "S5",
+      "planned_action": "Keep workspace/toolchain ownership in Mistral; generic runtime feature, baseline kernels and separately built external artifacts.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-quant/build.rs",
+      "destination": "integration: explicit feature union and architecture guards; env-only activation retired",
+      "kind": "build_contract",
+      "phase": "S5",
+      "planned_action": "Keep workspace/toolchain ownership in Mistral; generic runtime feature, baseline kernels and separately built external artifacts.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-quant/kernels/embedding/gather_rows.cu",
+      "destination": "shared compatibility retained by the v2 source union",
+      "kind": "embedding_provider",
+      "phase": "S3",
+      "planned_action": "Preserve row codecs and index checks; expose capability-based CUDA provider, preserve existing CPU/Metal behavior.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-quant/src/blockwise_fp8/ffi.rs",
+      "destination": "FP8 v2: compact weights and actual KV routing",
+      "kind": "weight_format_provider",
+      "phase": "S2",
+      "planned_action": "Preserve decoding, scale conventions, QuantMethod behavior and bias semantics; register built-in or external implementations by operation contract.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-quant/src/blockwise_fp8/mod.rs",
+      "destination": "FP8 v2: compact weights and actual KV routing",
+      "kind": "weight_format_provider",
+      "phase": "S2",
+      "planned_action": "Preserve decoding, scale conventions, QuantMethod behavior and bias semantics; register built-in or external implementations by operation contract.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-quant/src/embedding/mod.rs",
+      "destination": "shared compatibility retained by the v2 source union",
+      "kind": "embedding_provider",
+      "phase": "S3",
+      "planned_action": "Preserve row codecs and index checks; expose capability-based CUDA provider, preserve existing CPU/Metal behavior.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-quant/src/fp8/quantize.rs",
+      "destination": "FP8 v2: compact weights and actual KV routing",
+      "kind": "weight_format_provider",
+      "phase": "S2",
+      "planned_action": "Preserve decoding, scale conventions, QuantMethod behavior and bias semantics; register built-in or external implementations by operation contract.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-quant/src/gguf/archive.rs",
+      "destination": "shared compatibility retained by the v2 source union",
+      "kind": "weight_format_provider",
+      "phase": "S2",
+      "planned_action": "Preserve decoding, scale conventions, QuantMethod behavior and bias semantics; register built-in or external implementations by operation contract.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-quant/src/gguf/mod.rs",
+      "destination": "shared compatibility retained by the v2 source union",
+      "kind": "weight_format_provider",
+      "phase": "S2",
+      "planned_action": "Preserve decoding, scale conventions, QuantMethod behavior and bias semantics; register built-in or external implementations by operation contract.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-quant/src/lib.rs",
+      "destination": "shared compatibility retained by the v2 source union",
+      "kind": "weight_format_provider",
+      "phase": "S2",
+      "planned_action": "Preserve decoding, scale conventions, QuantMethod behavior and bias semantics; register built-in or external implementations by operation contract.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-quant/src/metal_kernels/embedding.metal",
+      "destination": "shared compatibility retained by the v2 source union",
+      "kind": "embedding_provider",
+      "phase": "S3",
+      "planned_action": "Preserve row codecs and index checks; expose capability-based CUDA provider, preserve existing CPU/Metal behavior.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-quant/src/moe/mod.rs",
+      "destination": "shared compatibility retained by the v2 source union",
+      "kind": "moe_provider",
+      "phase": "S3",
+      "planned_action": "Keep routing semantics; replace architecture-specific construction with a contracted indexed/grouped provider. Package CUDA implementations externally.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-quant/src/mxfp8/mod.rs",
+      "destination": "FP8 v2: compact weights and actual KV routing",
+      "kind": "weight_format_provider",
+      "phase": "S2",
+      "planned_action": "Preserve decoding, scale conventions, QuantMethod behavior and bias semantics; register built-in or external implementations by operation contract.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-quant/src/nvfp4/mod.rs",
+      "destination": "FP4 v2: Pascal E7 adapted to current API",
+      "kind": "weight_format_provider",
+      "phase": "S2",
+      "planned_action": "Preserve decoding, scale conventions, QuantMethod behavior and bias semantics; register built-in or external implementations by operation contract.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-quant/src/pertensor_fp8/mod.rs",
+      "destination": "FP8 v2: compact weights and actual KV routing",
+      "kind": "weight_format_provider",
+      "phase": "S2",
+      "planned_action": "Preserve decoding, scale conventions, QuantMethod behavior and bias semantics; register built-in or external implementations by operation contract.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-quant/src/unquantized/mod.rs",
+      "destination": "BF16 v2: software BF16 and range-preserving fixes",
+      "kind": "weight_format_provider",
+      "phase": "S2",
+      "planned_action": "Preserve decoding, scale conventions, QuantMethod behavior and bias semantics; register built-in or external implementations by operation contract.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-server-core/Cargo.toml",
+      "destination": "integration: explicit feature union and architecture guards; env-only activation retired",
+      "kind": "build_contract",
+      "phase": "S5",
+      "planned_action": "Keep workspace/toolchain ownership in Mistral; generic runtime feature, baseline kernels and separately built external artifacts.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-server-core/src/mistralrs_for_server_builder.rs",
+      "destination": "support: cross-format/backend test contracts only",
+      "kind": "validation_or_entrypoint",
+      "phase": "S6",
+      "planned_action": "Keep CPU/GPU/backend and command-line contracts; add external-provider evidence and generic feature forwarding.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs/Cargo.toml",
+      "destination": "integration: explicit feature union and architecture guards; env-only activation retired",
+      "kind": "build_contract",
+      "phase": "S5",
+      "planned_action": "Keep workspace/toolchain ownership in Mistral; generic runtime feature, baseline kernels and separately built external artifacts.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "rust-toolchain.toml",
+      "destination": "shared pinned dependencies/toolchain",
+      "kind": "build_contract",
+      "phase": "S5",
+      "planned_action": "Keep workspace/toolchain ownership in Mistral; generic runtime feature, baseline kernels and separately built external artifacts.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    }
+  ],
+  "additional_known_paths": [
+    {
+      "path": "mistralrs-quant/src/nvfp4/pascal.rs",
+      "phase": "S2",
+      "planned_action": "Split ModelOpt validation/preparation from implementation identity; keep original as numerical reference.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-core/tests/bf16_sm61_standalone.rs",
+      "phase": "S6",
+      "planned_action": "Preserve physical BF16 range regression; report actual architecture.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-quant/tests/fp8_sm61_standalone.rs",
+      "phase": "S6",
+      "planned_action": "Preserve packed BF16/F16 and expert residency regressions.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-quant/tests/bf16_standalone_cpu.rs",
+      "phase": "S6",
+      "planned_action": "Preserve BF16 CPU contract.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-quant/tests/fp8_standalone_cpu.rs",
+      "phase": "S6",
+      "planned_action": "Preserve FP8 CPU contract.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-quant/tests/fp4_standalone_cpu.rs",
+      "phase": "S6",
+      "planned_action": "Preserve FP4 CPU contract.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    },
+    {
+      "path": "mistralrs-quant/tests/nvfp4_checkpoint_tests.rs",
+      "phase": "S6",
+      "planned_action": "Preserve checkpoint and scale-convention rejection tests.",
+      "status": "planned",
+      "present_in_mistral_base": true
+    }
+  ],
+  "qualification": {
+    "runtime_implemented": false,
+    "gpu_validated": false,
+    "same_binary_external_swap_proven": false,
+    "full_legacy_coverage_proven": false
+  },
+  "coverage_rule": "S0 must extend this seed from the effective pinned Legacy V3 delta and static/capability/build gate audit; all discovered paths need a disposition before claiming complete coverage."
+}
