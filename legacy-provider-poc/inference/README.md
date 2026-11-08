@@ -99,5 +99,6 @@ registered and the user's ASD store is not accessed.
 
 `CARGO_TARGET_DIR` can select a persistent build cache. `cuda-compile` builds the
 actual inference executable and external modules without executing on a GPU.
-The hosted workflow runs CPU inference and CUDA compilation for SM61/75/80;
-physical CUDA inference remains a separate operator-run qualification.
+The hosted workflow runs CPU inference and a single CUDA SM61 compile job.
+CPU and CUDA use separate persistent Cargo build caches between workflow runs.
+Physical CUDA inference remains a separate operator-run qualification.
