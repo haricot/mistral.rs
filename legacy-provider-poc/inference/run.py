@@ -82,7 +82,10 @@ def check_provider(report, selected, engine):
     evidence = report["provider"]
     assert evidence["purpose"] == "validation_only" and evidence["fallback_used"] is False
     assert evidence["resolved_modules"] == 1
-    seen = [d for d in evidence["decisions"] if d["submissions"]]
+    before = {d["decision_id"]: d["submissions"]
+              for d in report.get("provider_after_load", {}).get("decisions", [])}
+    seen = [d for d in evidence["decisions"]
+            if d["submissions"] > before.get(d["decision_id"], 0)]
     assert seen and all(d["artifact_sha256"] == selected["decisions"][0]["artifact_sha256"] for d in seen)
     assert evidence["devices"] and all(d["compute_capability"] == selected["target_cc"] for d in evidence["devices"])
     shapes = {tuple(d["shape"]) for d in seen}

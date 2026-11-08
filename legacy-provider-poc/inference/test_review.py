@@ -29,13 +29,24 @@ class ReviewTests(unittest.TestCase):
                 compare_models(actual, reference)
 
     def test_rejects_prefill_only_provider_evidence(self):
-        decisions = [dict(shape=[3, n, k], submissions=1, artifact_sha256="abc") for n, k in MODEL_SHAPES]
+        decisions = [dict(decision_id=f"prefill-{n}-{k}", shape=[3, n, k], submissions=1, artifact_sha256="abc") for n, k in MODEL_SHAPES]
         evidence = dict(purpose="validation_only", fallback_used=False, resolved_modules=1,
                         prepared_layers=8, decisions=decisions,
                         devices=[dict(compute_capability=61)])
         selected = dict(target_cc=61, decisions=[dict(artifact_sha256="abc")])
         with self.assertRaises(AssertionError):
             check_provider(dict(provider=evidence, provider_after_load=dict(prepared_layers=8)), selected, True)
+
+    def test_rejects_provider_submissions_only_during_model_load(self):
+        decisions = [dict(decision_id=f"{m}-{n}-{k}", shape=[m,n,k], submissions=2,
+                          artifact_sha256="abc") for m in [1,3] for n,k in MODEL_SHAPES]
+        evidence = dict(purpose="validation_only", fallback_used=False, resolved_modules=1,
+                        prepared_layers=8, decisions=decisions,
+                        devices=[dict(compute_capability=61)])
+        report = dict(provider=evidence, provider_after_load=copy.deepcopy(evidence))
+        selected = dict(target_cc=61, decisions=[dict(artifact_sha256="abc")])
+        with self.assertRaises(AssertionError):
+            check_provider(report, selected, True)
 
     def test_local_checkpoint_is_deterministic(self):
         with tempfile.TemporaryDirectory() as tmp:

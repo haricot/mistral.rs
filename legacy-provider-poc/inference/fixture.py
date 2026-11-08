@@ -21,9 +21,11 @@ def create_model(directory):
                   eos_token_id=31, pad_token_id=31)
     (directory / "config.json").write_text(json.dumps(config, indent=2) + "\n")
     tokens = ["<s>", "hello", "world", "mechanism", "proof"] + [f"word{i}" for i in range(5, 31)] + ["</s>"]
-    tokenizer = dict(version="1.0", truncation=None, padding=None, added_tokens=[],
+    tokenizer = dict(version="1.0", truncation=None, padding=None, added_tokens=[dict(id=i, content=t, single_word=False,
+                         lstrip=False, rstrip=False, normalized=False, special=True)
+                         for i,t in [(0,"<s>"),(31,"</s>")]],
                      normalizer=None, pre_tokenizer={"type": "Whitespace"}, post_processor=None,
-                     decoder=None, model={"type": "WordLevel", "vocab": {t:i for i,t in enumerate(tokens)},
+                     decoder=dict(type="ByteLevel", add_prefix_space=False, trim_offsets=True, use_regex=True), model={"type": "WordLevel", "vocab": {t:i for i,t in enumerate(tokens)},
                                           "unk_token": "<s>"})
     (directory / "tokenizer.json").write_text(json.dumps(tokenizer) + "\n")
     (directory / "tokenizer_config.json").write_text(json.dumps(dict(
