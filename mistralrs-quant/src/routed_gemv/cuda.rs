@@ -118,6 +118,7 @@ unsafe extern "C" {
         lanes: i32,
         stream: CUstream,
     ) -> i32;
+    #[cfg(has_scalar_fp8_kernels)]
     fn routed_gemv_mxfp8(
         a: *const Launch,
         dtype: i32,
@@ -125,6 +126,7 @@ unsafe extern "C" {
         lanes: i32,
         stream: CUstream,
     ) -> i32;
+    #[cfg(has_scalar_fp8_kernels)]
     fn routed_gemv_fp8(
         a: *const Launch,
         dtype: i32,
@@ -220,6 +222,10 @@ struct Codec {
 }
 
 fn codec(w: &RoutedWeights) -> Option<Codec> {
+    #[cfg(not(has_scalar_fp8_kernels))]
+    if matches!(w.codec, RoutedCodec::Mxfp8 | RoutedCodec::Fp8 { .. }) {
+        return None;
+    }
     let k = w.k;
     let (unit, unit_bytes, row_bytes) = match w.codec {
         RoutedCodec::Nvfp4 => {
@@ -477,8 +483,12 @@ fn launch(run: Run<'_>) -> Result<Option<Tensor>> {
                         routed_gemv_nvfp4(&launch, codec.unit as i32, dtype, mode, lanes, cu)
                     }
                     RoutedCodec::Mxfp4 => routed_gemv_mxfp4(&launch, dtype, mode, lanes, cu),
+                    #[cfg(has_scalar_fp8_kernels)]
                     RoutedCodec::Mxfp8 => routed_gemv_mxfp8(&launch, dtype, mode, lanes, cu),
+                    #[cfg(has_scalar_fp8_kernels)]
                     RoutedCodec::Fp8 { .. } => routed_gemv_fp8(&launch, dtype, mode, lanes, cu),
+                    #[cfg(not(has_scalar_fp8_kernels))]
+                    RoutedCodec::Mxfp8 | RoutedCodec::Fp8 { .. } => return Ok(None),
                     RoutedCodec::Afq { bits, .. } => {
                         routed_gemv_afq(&launch, bits as i32, dtype, mode, lanes, cu)
                     }
