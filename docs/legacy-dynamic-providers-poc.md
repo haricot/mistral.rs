@@ -1,6 +1,9 @@
 # Legacy Dynamic Providers — plan de démonstration
 
-Statut : **PLAN UNIQUEMENT — runtime non implémenté**.
+Statut : **S1 F32 implemente en demonstration isolee ; validation GPU physique en attente.**
+
+Implementation et commandes : [`legacy-provider-poc/f32/README.md`](../legacy-provider-poc/f32/README.md).
+Le raccordement aux chemins de modeles et les etapes suivantes restent planifies.
 
 Branche Mistral : `legacy-dynamic-providers-poc`.
 Base figée : `f592ba9fabf70c6063cbfc5c8a685363a86d806a` (`legacy_v3`).
@@ -82,7 +85,7 @@ Les pointeurs CUDA ne suffisent pas : tailles, formes et types doivent être vé
 Le contexte, le device, le stream, les durées de vie et la propriété des allocations
 sont explicites. Le fournisseur reçoit le stream de l'appelant et ne crée pas un
 autre contexte caché. La géométrie de lancement doit être bornée et vérifiable ;
-pour S1, des décisions par forme exacte évitent un langage de programme dans le manifeste.
+pour S1, une regle fixe (une sortie par thread, division plafond) evite un langage de programme dans le manifeste.
 
 Séparer :
 1. éligibilité matérielle, numérique, layout et ressources ;
@@ -162,7 +165,7 @@ Seul le support CUDA déjà disponible dans la Candle de référence est nécess
 
 Livrables :
 - un petit exécutable de démonstration, avant le raccordement aux modèles ;
-- premier contrat proposé : `mistral.linear.f32.v1` ;
+- premier contrat implemente : `mistral.linear.f32.v1` ;
 - lecture/vérification du manifeste, identifiant opaque, hash du PTX, ABI, formes,
   architecture et géométrie de lancement ;
 - chargement PTX via les API publiques de la Candle existante ; CUBIN pourra être
@@ -283,8 +286,9 @@ versionnées du runtime.
 La branche `legacy_v3`, ses références qualifiées et les modules intégrés restent
 la référence pendant la démonstration. Aucun déplacement de `cuda_legacy`,
 aucune promotion, aucun lancement/enregistrement de runner physique et aucune
-modification d'un store ASD utilisateur ne sont réalisés par ce commit de plan.
+modification d'un store ASD utilisateur ne sont realises par cette demonstration.
 Les essais de modules utilisent un store isolé explicitement désigné.
 
-Le premier travail d'implémentation est S0/S1. Les autres lots forment la feuille
-de route de couverture et ne sont pas revendiqués comme réalisés.
+S1 dispose du demonstrateur F32 isole. La preuve GPU physique reste a produire.
+L'audit effectif S0 et les autres lots restent la feuille de route de couverture ;
+ils ne sont pas revendiques comme realises.

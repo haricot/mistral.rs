@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "status": "PLAN_ONLY_NOT_IMPLEMENTED",
+  "status": "S1_F32_STANDALONE_IMPLEMENTED_GPU_PENDING",
   "branch": "legacy-dynamic-providers-poc",
   "mistral_base": "f592ba9fabf70c6063cbfc5c8a685363a86d806a",
   "candle_baseline": "9cba2e898af3d25a89257f1f2ec5acece0404dcb",
@@ -547,6 +547,10 @@
       "shared_memory_tiled"
     ],
     "candle_source_change_required": false,
-    "scope": "Standalone execution mechanism proof, not yet production model integration"
+    "scope": "Standalone execution mechanism proof, not yet production model integration",
+    "implementation_path": "legacy-provider-poc/f32",
+    "implemented": true,
+    "gpu_validated": false,
+    "same_binary_external_swap_proven": false
   }
 }
