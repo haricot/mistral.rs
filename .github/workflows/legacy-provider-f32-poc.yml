@@ -28,6 +28,8 @@ jobs:
   cpu:
     runs-on: ubuntu-26.04
     timeout-minutes: 60
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.ci-target/provider-f32-cpu
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
@@ -36,6 +38,12 @@ jobs:
         with:
           toolchain: 1.99.0
           components: rustfmt
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          workspaces: . -> .ci-target/provider-f32-cpu
+          shared-key: provider-f32-cpu
+          cache-on-failure: 'true'
+          cache-workspace-crates: 'true'
       - run: python3 -m unittest discover -s legacy-provider-poc/inference -p test_review.py -v
       - run: python3 legacy-provider-poc/inference/run.py cpu --output "$RUNNER_TEMP/provider-f32"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -49,24 +57,27 @@ jobs:
   cuda-compile:
     runs-on: ubuntu-26.04
     timeout-minutes: 75
-    strategy:
-      fail-fast: false
-      matrix:
-        cc: ['61', '75', '80']
     container:
       image: ghcr.io/haricot/mistral-ci-sm61@sha256:1ea7476aee23aed947918bb7159aaf82ae9f4e98caec19db1160768000354eee
     env:
-      CUDA_COMPUTE_CAP: ${{ matrix.cc }}
+      CUDA_COMPUTE_CAP: '61'
       NVCC_CCBIN: g++
       LIBRARY_PATH: /usr/local/cuda/lib64/stubs
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.ci-target/provider-f32-cuda-sm61
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           persist-credentials: false
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          workspaces: . -> .ci-target/provider-f32-cuda-sm61
+          shared-key: provider-f32-cuda12.9-sm61-1ea7476
+          cache-on-failure: 'true'
+          cache-workspace-crates: 'true'
       - run: python3 legacy-provider-poc/inference/run.py cuda-compile --output "$RUNNER_TEMP/provider-f32"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: provider-f32-sm${{ matrix.cc }}
+          name: provider-f32-sm61
           path: |
             ${{ runner.temp }}/provider-f32/packages
             ${{ runner.temp }}/provider-f32/*.profile.json
