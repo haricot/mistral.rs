@@ -41,20 +41,24 @@ réutilisable sur une seule opération, avec les noyaux existants.
   branche `asd_core_v3_standalone`.
 - ASD possède déjà découverte, manifeste, identité, hachage, chargement, cache et refresh.
   Son ABI `asd.xwo.f32.v1` et ses signatures exactes concernent les convolutions F32 :
-  elles ne doivent pas être présentées comme une ABI linéaire FP8/FP4 existante.
+  elles ne doivent pas être présentées comme une ABI linéaire F32 ou FP8/FP4 existante.
 - Référence W8ABF16 récente :
   `haricot/candle@b10f7b545690d5b579ac439283329d315d6f404a`.
   Ses deux fichiers fournisseur/noyaux sont identiques à ceux du donneur Candle 9cba2e8.
-  Cette référence 0.11.1 n'est pas la dépendance de S1.
+  Cette référence 0.11.1 n'est pas la dépendance de S1. W8ABF16 est reporté à S2 :
+  sa disponibilité n'est pas une condition de la première démonstration.
 - Le remplacement de la dépendance par une future `cuda_legacy` consolidée est un
   changement séparé et qualifié après la preuve initiale.
 - Les chargeurs, conventions des checkpoints, routage, scheduler et cache KV restent
   sous la responsabilité de Mistral. Candle conserve ses opérations génériques.
 - Réutiliser/exposer au minimum le mécanisme technique du chargeur ASD ; ne pas
   importer son tuner, son catalogue de convolutions ni copier un second système complet.
-  S0 doit trancher l'API publique minimale accessible depuis le device CUDA existant.
-  Une extension Candle éventuellement nécessaire doit être petite, identifiée et
-  épinglée, sans remplacer toute la dépendance par une branche ASD complète.
+  Pour S1, la Candle de référence expose déjà CudaDevice::get_or_load_custom_func
+  (PTX fourni à l'exécution), cuda_stream() et les allocations CUDA typées. Le
+  premier exécutable peut réutiliser ces API sans modifier Candle ni importer ASD.
+  Le nom de cache du module doit inclure l'identité du contenu, pour qu'un autre
+  artefact ne réutilise pas par erreur un ancien module sous le même nom.
+  Les extensions ultérieures éventuelles restent séparées et versionnées.
 - La production des artefacts est séparée du build Cargo normal. Les premiers paquets
   peuvent être construits par un outil de démonstration explicite avec CUDA 12.9 ;
   leur production durable relève de la filière tuner/artefacts.
@@ -102,12 +106,16 @@ comme un cache KV ne changent pas de format pendant une génération.
 
 Le fichier `legacy-provider-poc/coverage-plan.json` classe les 50 chemins de
 l'inventaire historique, et ajoute sept chemins connus de Legacy V3.
-Certains chemins historiques ont déjà disparu ou été remplacés (notamment\n\`mistralrs-core/tests/campaign_backends.rs\`) : le fichier enregistre leur présence\nou absence dans la base, sans les recréer ni prétendre que leur couverture subsiste.\nIl s'agit d'une amorce : S0 doit aussi couvrir le delta effectif de Legacy V3 et
+Certains chemins historiques ont déjà disparu ou été remplacés (notamment
+`mistralrs-core/tests/campaign_backends.rs`) : le fichier enregistre leur présence
+ou absence dans la base, sans les recréer ni prétendre que leur couverture subsiste.
+Il s'agit d'une amorce : S0 doit aussi couvrir le delta effectif de Legacy V3 et
 toutes les gardes de compilation/capacités découvertes. Aucune complétude n'est
 revendiquée par le simple nombre 50.
 
 | Facette | Hôte conservé | Surface fournisseur et validation |
 | --- | --- | --- |
+| F32 dense (S1) | Tenseurs contigus sans biais, device et stream Candle | PTX simple et PTX avec tuilage, même contrat F32 ; preuve A/B/A sans changer Candle |
 | BF16 dense | Formes, biais, préparation/snapshot des poids | BF16 natif ou calcul F32 avec plage BF16 préservée ; arrondis avant/après biais explicites |
 | FP8 dense | Décodage du checkpoint, convention des échelles | Poids E4M3FN compacts, activations F16/BF16, accumulation/sortie F32 ; aucune réduction BF16 vers F16 implicite |
 | FP8 per-tensor / MXFP8 | Lecteurs et contrat de mise à l'échelle | Offres distinctes selon format et disposition des échelles ; ne pas assimiler tous les FP8 |
@@ -136,7 +144,7 @@ Livrables :
 - audit des enums fermées, de `Sm61`/`pascal`, des égalités d'architecture,
   des `cfg`, FFI, conversions, layouts, réservations et build scripts ;
 - matrice opération × format × activations × layout × architecture ;
-- spécification écrite du premier contrat W8ABF16 et du protocole de préparation ;
+- spécification écrite du premier contrat linéaire F32 et du protocole de préparation ;
 - décision sur l'API minimale de chargement et sur les besoins de binaire de base
   (PTX/fatbin/bibliothèques) pour les architectures que l'on souhaite couvrir.
 
@@ -144,36 +152,51 @@ Passage : aucun chemin recensé sans destination ; les restrictions de qualifica
 ne sont pas confondues avec des impossibilités matérielles. Aucun élargissement
 automatique de `== 61` vers `< 80`.
 
-### S1 — Preuve externe W8ABF16, même binaire
+### S1 — Preuve externe F32, même binaire
+
+La première opération est un linéaire sans biais : Y[M,N] = X[M,K] × W[N,K]^T.
+Poids, activations, accumulation et sortie sont F32 ; les tenseurs sont contigus
+et sans offset. Ce contrat n'exige ni W8ABF16, ni nouveau fournisseur de
+quantification, ni fonctionnalités Cargo cuda-legacy-bf16/fp8/fp4.
+Seul le support CUDA déjà disponible dans la Candle de référence est nécessaire.
 
 Livrables :
-- un point d'extension dans le fournisseur FP8 existant ;
-- registre d'offres par contrat et identifiants opaques ;
-- chargement CUBIN/PTX avec cache, identité, architecture et ABI vérifiées ;
-- paquets A et B avec deux implémentations correctes et distinctes du même contrat :
-  par exemple le chemin GEMV et le chemin prefill4 existants, avec leurs géométries
-  de lancement et traitements des queues déclarés ;
-- sélection explicite de A ou B par données, sans nouvelle variante Rust ;
-- lancement sur un device/stream Candle existant.
+- un petit exécutable de démonstration, avant le raccordement aux modèles ;
+- premier contrat proposé : `mistral.linear.f32.v1` ;
+- lecture/vérification du manifeste, identifiant opaque, hash du PTX, ABI, formes,
+  architecture et géométrie de lancement ;
+- chargement PTX via les API publiques de la Candle existante ; CUBIN pourra être
+  ajouté ensuite sans en faire un prérequis du premier lot ;
+- deux noyaux externes distincts : A = produit scalaire simple par sortie,
+  B = multiplication avec tuilage en mémoire partagée ;
+- device, allocations et stream Candle existants ; aucune recompilation Candle ;
+- les mêmes entrées et poids sont utilisés par A et B, sans référence à une carte
+  particulière dans le code appelant.
 
 Preuve :
-- construire une fois le binaire de démonstration et enregistrer son SHA-256 ;
-- exécuter A, B, puis A avec les mêmes tenseurs et ce même binaire ;
-- hashes d'artefacts distincts, fournisseur/symbole réellement exécuté observables ;
-- comparer à une référence CPU indépendante et au fournisseur intégré ;
-- tester M=1,4,5 au minimum, queues N/K autorisées, bloc d'échelles, valeurs BF16
-  hors plage F16, sortie F32, poids compacts et absence de duplication dense ;
-- vérifier rejets : mauvais ABI, format, scales, layout, architecture, symbole,
-  artefact ou budget ; aucun fallback silencieux en mode fournisseur exigé ;
-- tester les durées de vie lors du refresh et les erreurs avant lancement.
+- compiler une fois le binaire de démonstration et enregistrer son SHA-256 ;
+- construire les deux PTX séparément du build du programme ;
+- exécuter A, B, puis A avec ce même binaire ;
+- hashes d'artefacts distincts et symbole réellement lancé observables ;
+- comparer à une référence CPU indépendante et à Tensor::matmul F32 de Candle ;
+- tester M=1,4,5 au minimum, plus des dimensions N/K non multiples de la tuile ;
+- annoncer les tolérances F32 et les modes de calcul ; aucune réduction implicite
+  vers F16/BF16 ou TF32 ;
+- vérifier les rejets : mauvais ABI, dtype, forme, offset, architecture, symbole,
+  artefact ou budget ; aucun fallback silencieux dans cette preuve ;
+- inclure une vérification CPU des manifestes sans initialisation CUDA ;
+- qualifier les durées de vie du module et l'identité du cache lors des remplacements.
 
-Passage : remplacement externe démontré sur SM61, avec binaire inchangé.
-Cela ne prouve pas encore la couverture complète de Legacy V3 ni le même binaire
-sur toutes les générations de GPU.
+Passage : chargement et remplacement externes numériquement corrects, binaire
+inchangé, sur la machine disponible. Cela prouve le mécanisme d'extension ;
+cela ne qualifie pas encore FP8/FP4, l'intégration d'un modèle ni toutes les cartes.
+W8ABF16 sera le premier raccordement quantifié de S2 lorsque sa version Candle
+sera disponible et validée chez l'opérateur.
 
 ### S2 — Fournisseurs de poids et préparation
 
-Adapter BF16 dense, FP8 F16/BF16, FP8 per-tensor/MXFP8 réellement présents, NVFP4,
+Après la preuve F32, raccorder W8ABF16 puis adapter BF16 dense, FP8 F16/BF16,
+FP8 per-tensor/MXFP8 réellement présents, NVFP4,
 MXFP4 et GGUF existant au même mécanisme d'offres par opération.
 Conserver les chargeurs et les conventions de scales dans les adaptateurs hôtes.
 Séparer les chemins compacts, développés et approximatifs et leur coût mémoire.

@@ -18,7 +18,7 @@
   "fp8_kernel_reference": {
     "repository": "haricot/candle",
     "sha": "b10f7b545690d5b579ac439283329d315d6f404a",
-    "scope": "W8ABF16 source reference; not the Candle dependency for S1"
+    "scope": "Future S2 W8ABF16 source reference; not required by the initial F32 proof or the S1 Candle dependency"
   },
   "old_legacy_sha": "e4f7349cf973b5603ccbfe344e90c4d019a62754",
   "old_inventory": [
@@ -530,5 +530,23 @@
     "same_binary_external_swap_proven": false,
     "full_legacy_coverage_proven": false
   },
-  "coverage_rule": "S0 must extend this seed from the effective pinned Legacy V3 delta and static/capability/build gate audit; all discovered paths need a disposition before claiming complete coverage."
+  "coverage_rule": "S0 must extend this seed from the effective pinned Legacy V3 delta and static/capability/build gate audit; all discovered paths need a disposition before claiming complete coverage.",
+  "first_demo": {
+    "phase": "S1",
+    "operation": "linear",
+    "abi": "mistral.linear.f32.v1",
+    "weights": "f32",
+    "activations": "f32",
+    "accumulation": "f32",
+    "output": "f32",
+    "bias": false,
+    "layout": "contiguous_zero_offset",
+    "artifact_kind": "ptx",
+    "implementations": [
+      "simple_per_output",
+      "shared_memory_tiled"
+    ],
+    "candle_source_change_required": false,
+    "scope": "Standalone execution mechanism proof, not yet production model integration"
+  }
 }
