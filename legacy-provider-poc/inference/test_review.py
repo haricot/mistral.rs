@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from fixture import create_model, HIDDEN, MODEL_SHAPES
+from fixture import create_model, HIDDEN, INTERMEDIATE, MODEL_SHAPES
 from run import compare_models, check_provider, profile, reuse_existing, sha
 
 
@@ -48,6 +48,34 @@ class ReviewTests(unittest.TestCase):
         selected = dict(target_cc=61, decisions=[dict(artifact_sha256="abc")])
         with self.assertRaises(AssertionError):
             check_provider(report, selected, True)
+
+    def test_packed_gate_up_execution_requires_fused_not_individual_projection(self):
+        active = [(HIDDEN, HIDDEN), (HIDDEN, INTERMEDIATE),
+                  (2 * INTERMEDIATE, HIDDEN)]
+        selected = dict(target_cc=61, decisions=[
+            dict(shape=[m, n, k], artifact_sha256="abc")
+            for m in (1, 3) for n, k in MODEL_SHAPES
+        ])
+        decisions = [
+            dict(decision_id=f"{m}-{n}-{k}", shape=[m, n, k],
+                 submissions=1, artifact_sha256="abc")
+            for m in (1, 3) for n, k in active
+        ]
+        evidence = dict(purpose="validation_only", fallback_used=False,
+                        resolved_modules=1, prepared_layers=10, decisions=decisions,
+                        devices=[dict(compute_capability=61)])
+        report = dict(provider=evidence,
+                      provider_after_load=dict(prepared_layers=10, decisions=[]))
+        check_provider(report, selected, True)
+        for omitted in ((1, 2 * INTERMEDIATE, HIDDEN),
+                        (3, 2 * INTERMEDIATE, HIDDEN)):
+            with self.subTest(omitted=omitted):
+                broken = copy.deepcopy(report)
+                broken["provider"]["decisions"] = [
+                    d for d in decisions if tuple(d["shape"]) != omitted
+                ]
+                with self.assertRaisesRegex(AssertionError, "required provider shapes"):
+                    check_provider(broken, selected, True)
 
     def test_packed_projection_has_exact_prefill_and_decode_decisions(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -125,3 +153,4 @@ class ReviewTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
