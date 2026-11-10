@@ -5,7 +5,14 @@ import struct
 HIDDEN = 32
 INTERMEDIATE = 64
 VOCAB = 32
-MODEL_SHAPES = [(HIDDEN, HIDDEN), (INTERMEDIATE, HIDDEN), (HIDDEN, INTERMEDIATE)]
+# The Llama loader also prepares a packed F32 projection with 4 * HIDDEN rows.
+# It must have an exact ASD decision: configured providers cannot fall back.
+MODEL_SHAPES = [
+    (HIDDEN, HIDDEN),
+    (INTERMEDIATE, HIDDEN),
+    (HIDDEN, INTERMEDIATE),
+    (4 * HIDDEN, HIDDEN),
+]
 OPERATOR_SHAPE = (17, 33)
 ROW_COUNTS = [1, 3, 5, 6]
 
