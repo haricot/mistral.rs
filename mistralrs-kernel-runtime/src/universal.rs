@@ -13,6 +13,9 @@ pub const MAX_MANIFEST_BYTES: u64 = 256 * 1024;
 pub const MAX_KERNEL_BYTES: u64 = 32 * 1024 * 1024;
 pub const MAX_ARGUMENTS: usize = 32;
 pub const MAX_TENSOR_BYTES: usize = 1024 * 1024 * 1024;
+pub const MAX_DISCOVERY_DEPTH: usize = 8;
+pub const MAX_DISCOVERED_PACKAGES: usize = 512;
+pub const MANIFEST_FILENAME: &str = "manifest.json";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -380,10 +383,43 @@ impl VerifiedKernel {
 
 #[derive(Default)]
 pub struct KernelCatalog {
-    modules: HashMap<(String, String), Arc<VerifiedKernel>>,
+    modules: HashMap<(String, String, u32), Arc<VerifiedKernel>>,
 }
 
 impl KernelCatalog {
+    pub fn discover(root: &Path) -> Result<Self> {
+        let root = root.canonicalize()?;
+        ensure!(root.is_dir(), "kernel package root is not a directory");
+        let mut pending = vec![(root, 0usize)];
+        let mut paths = Vec::new();
+        while let Some((directory, depth)) = pending.pop() {
+            for entry in std::fs::read_dir(directory)? {
+                let entry = entry?;
+                let kind = entry.file_type()?;
+                ensure!(!kind.is_symlink(), "symlink in kernel package catalogue");
+                if kind.is_dir() {
+                    ensure!(
+                        depth < MAX_DISCOVERY_DEPTH,
+                        "kernel package nesting limit exceeded"
+                    );
+                    pending.push((entry.path(), depth + 1));
+                } else if kind.is_file() && entry.file_name() == MANIFEST_FILENAME {
+                    paths.push(entry.path());
+                    ensure!(
+                        paths.len() <= MAX_DISCOVERED_PACKAGES,
+                        "kernel package count exceeded"
+                    );
+                }
+            }
+        }
+        paths.sort();
+        ensure!(
+            !paths.is_empty(),
+            "no kernel manifests found in package root"
+        );
+        Self::load(&paths)
+    }
+
     pub fn load(paths: &[PathBuf]) -> Result<Self> {
         let mut result = Self::default();
         for path in paths {
@@ -391,10 +427,11 @@ impl KernelCatalog {
             let key = (
                 module.manifest.operation.clone(),
                 module.manifest.implementation_id.clone(),
+                module.manifest.target_cc,
             );
             ensure!(
                 !result.modules.contains_key(&key),
-                "duplicate operation/implementation identity"
+                "duplicate operation/implementation/architecture identity"
             );
             result.modules.insert(key, module);
         }
@@ -406,13 +443,39 @@ impl KernelCatalog {
         implementation_id: &str,
         request: &LaunchRequest,
     ) -> Result<&Arc<VerifiedKernel>> {
-        let key = (request.operation.clone(), implementation_id.to_owned());
-        let module = self
+        self.resolve_candidates(request, Some(implementation_id))
+    }
+
+    pub fn resolve(&self, request: &LaunchRequest) -> Result<&Arc<VerifiedKernel>> {
+        self.resolve_candidates(request, None)
+    }
+
+    fn resolve_candidates(
+        &self,
+        request: &LaunchRequest,
+        implementation_id: Option<&str>,
+    ) -> Result<&Arc<VerifiedKernel>> {
+        let mut candidates: Vec<_> = self
             .modules
-            .get(&key)
-            .context("no explicitly selected kernel provider")?;
-        module.manifest.admit(request)?;
-        Ok(module)
+            .values()
+            .filter(|module| {
+                module.manifest.operation == request.operation
+                    && implementation_id.is_none_or(|id| module.manifest.implementation_id == id)
+                    && module.manifest.target_cc <= request.cc
+                    && module.manifest.admit(request).is_ok()
+            })
+            .collect();
+        candidates.sort_by_key(|module| std::cmp::Reverse(module.manifest.target_cc));
+        let chosen = candidates
+            .first()
+            .context("no compatible dynamic kernel package")?;
+        ensure!(
+            candidates
+                .get(1)
+                .is_none_or(|other| other.manifest.target_cc != chosen.manifest.target_cc),
+            "ambiguous dynamic kernel variants at the same architecture level"
+        );
+        Ok(chosen)
     }
 
     pub fn len(&self) -> usize {
@@ -580,6 +643,67 @@ mod tests {
             representation: None,
         };
         assert!(catalog.select("pascal.f32.scalar", &request).is_err());
+    }
+
+    #[test]
+    fn discovers_external_packages_and_selects_by_device_capability() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("kernel-packages/cuda");
+        let catalog = KernelCatalog::discover(&root).unwrap();
+        assert_eq!(catalog.len(), 2);
+
+        let tensor = Argument::Tensor {
+            dtype: ElementType::F32,
+            shape: vec![256],
+            contiguous: true,
+            start_offset: 0,
+            representation: None,
+        };
+        let mut request = LaunchRequest {
+            operation: "tensor.elementwise.scale.v1".into(),
+            cc: 61,
+            args: vec![
+                tensor.clone(),
+                Argument::Scalar {
+                    dtype: ElementType::F32,
+                },
+                tensor,
+                Argument::Scalar {
+                    dtype: ElementType::U32,
+                },
+            ],
+            grid: [2, 1, 1],
+            max_dynamic_shared_mem_bytes: 0,
+        };
+        let low = catalog.resolve(&request).unwrap();
+        assert_eq!(low.manifest.target_cc, 61);
+        request.cc = 80;
+        let high = catalog.resolve(&request).unwrap();
+        assert_eq!(high.manifest.target_cc, 80);
+        request.cc = 90;
+        assert_eq!(catalog.resolve(&request).unwrap().manifest.target_cc, 80);
+        assert_eq!(
+            low.ptx.replace(".target sm_61", ".target sm_generic"),
+            high.ptx.replace(".target sm_80", ".target sm_generic")
+        );
+        request.cc = 60;
+        assert!(catalog.resolve(&request).is_err());
+    }
+
+    #[test]
+    fn duplicate_architecture_or_ambiguous_provider_is_refused() {
+        let (_dir, path, request) = fixture();
+        assert!(KernelCatalog::load(&[path.clone(), path.clone()]).is_err());
+        let (other_dir, other_path, _) = fixture();
+        let mut other: KernelManifest =
+            serde_json::from_slice(&std::fs::read(&other_path).unwrap()).unwrap();
+        other.implementation_id = "alternative".into();
+        std::fs::write(&other_path, serde_json::to_vec(&other).unwrap()).unwrap();
+        let catalog = KernelCatalog::load(&[path, other_dir.path().join("manifest.json")]).unwrap();
+        assert!(catalog.resolve(&request).is_err());
+        assert!(catalog.select("pascal.f32.scalar", &request).is_ok());
     }
 
     #[test]

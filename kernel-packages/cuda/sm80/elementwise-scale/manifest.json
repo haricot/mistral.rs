@@ -1,0 +1,20 @@
+{
+  "schema": "DKR-KERNEL-MODULE-V1",
+  "abi": "dkr.typed.v1",
+  "operation": "tensor.elementwise.scale.v1",
+  "implementation_id": "cuda.scale.f32.v1",
+  "artifact": "scale.ptx",
+  "sha256": "00e648bc09c511763a88be61a1bde32c41fb18fa2a30aa9bb03d2d7032122326",
+  "entry": "scale",
+  "target_cc": 80,
+  "min_cc": 80,
+  "max_cc": 120,
+  "block": [128, 1, 1],
+  "shared_mem_bytes": 0,
+  "arguments": [
+    { "kind": "tensor", "name": "input", "dtype": "f32", "rank": 1, "access": "read" },
+    { "kind": "scalar", "name": "alpha", "dtype": "f32" },
+    { "kind": "tensor", "name": "output", "dtype": "f32", "rank": 1, "access": "write" },
+    { "kind": "scalar", "name": "length", "dtype": "u32" }
+  ]
+}

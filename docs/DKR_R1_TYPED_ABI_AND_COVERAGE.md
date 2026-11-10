@@ -15,10 +15,10 @@ The new `mistralrs-kernel-runtime::universal` module has **no ASD dependency**. 
 1. `DKR-KERNEL-MODULE-V1` / `dkr.typed.v1`: a versioned PTX module manifest whose operation identity, implementation ID, entry, SHA256, target and supported compute capabilities are explicit.
 2. An ordered signature of *tensor* and *scalar* parameters. Tensors declare element type, rank, and read/write usage; launch requests must provide matching types, contiguous zero-offset layout, nonzero shapes and an aggregate byte budget.
 3. Content-addressed artifact verification with bounded size, safe relative paths, symlink-escape rejection, PTX address size, architecture and `.entry` argument-width verification. The immutable in-memory verified package does not reread artifacts during selection.
-4. `KernelCatalog::load` and `select` requiring an exact `(operation, implementation_id)` identity. There is no tuner, score-driven selection, implicit architecture substitution or silent CPU fallback.
+4. `KernelCatalog::load` and `discover` for an external package directory, plus `resolve` to select the highest compatible architecture target for the operation and typed arguments. Multiple equally compatible implementations at the same target are refused as ambiguous. `select` remains available to pin one implementation family explicitly. There is no tuner, score-driven selection or silent CPU fallback.
 5. Under the `cuda` feature, `universal_cuda::PreparedKernel::load` reuses Candle's CUDA module cache and provides a checked launch configuration. The actual CUDA launch is **unsafe and adapter-owned**, because the ABI metadata alone cannot prove that borrowed GPU buffers match the launch arguments or that the PTX is memory-safe.
 
-The previous `mistral.linear.f32.v1` profile/session path remains untouched and is not implicitly migrated. In particular, this R1 code does not claim an end-to-end GPU model inference proof.
+The previous `mistral.linear.f32.v1` profile/session path remains untouched and is not implicitly migrated. The new package proof in [`kernel-packages/`](../kernel-packages/README.md) has two PTX variants implementing the same vector operation and an optional CUDA execution example that detects the device. It does not establish an end-to-end GPU model inference proof.
 
 ### Package example
 

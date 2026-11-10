@@ -1,0 +1,38 @@
+.version 8.0
+.target sm_61
+.address_size 64
+
+.visible .entry scale(
+    .param .u64 input,
+    .param .f32 alpha,
+    .param .u64 output,
+    .param .u32 length
+)
+{
+    .reg .pred %p<2>;
+    .reg .b32 %r<6>;
+    .reg .b64 %rd<7>;
+    .reg .f32 %f<3>;
+
+    ld.param.u64 %rd1, [input];
+    ld.param.f32 %f1, [alpha];
+    ld.param.u64 %rd2, [output];
+    ld.param.u32 %r1, [length];
+
+    mov.u32 %r2, %ctaid.x;
+    mov.u32 %r3, %ntid.x;
+    mov.u32 %r4, %tid.x;
+    mad.lo.s32 %r5, %r2, %r3, %r4;
+    setp.ge.u32 %p1, %r5, %r1;
+    @%p1 bra DONE;
+
+    mul.wide.u32 %rd3, %r5, 4;
+    add.u64 %rd4, %rd1, %rd3;
+    ld.global.f32 %f0, [%rd4];
+    mul.f32 %f2, %f0, %f1;
+    add.u64 %rd5, %rd2, %rd3;
+    st.global.f32 [%rd5], %f2;
+
+DONE:
+    ret;
+}

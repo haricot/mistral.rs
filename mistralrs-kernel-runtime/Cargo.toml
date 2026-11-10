@@ -18,3 +18,7 @@ cuda = ["candle-core/cuda"]
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[[example]]
+name = "dkr_scale_cuda"
+required-features = ["cuda"]

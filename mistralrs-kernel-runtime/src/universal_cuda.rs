@@ -1,6 +1,6 @@
 use crate::{
     cuda::compute_capability,
-    universal::{KernelManifest, LaunchRequest, VerifiedKernel},
+    universal::{KernelCatalog, KernelManifest, LaunchRequest, VerifiedKernel},
 };
 use anyhow::{ensure, Result};
 use candle_core::{
@@ -16,6 +16,20 @@ pub struct PreparedKernel {
 }
 
 impl PreparedKernel {
+    pub fn load_auto(
+        catalog: &KernelCatalog,
+        request: &LaunchRequest,
+        device: &Device,
+    ) -> Result<Self> {
+        let cc = compute_capability(device)?;
+        ensure!(
+            request.cc == cc,
+            "request architecture differs from CUDA device"
+        );
+        let selected = catalog.resolve(request)?;
+        Self::load(selected, device)
+    }
+
     pub fn load(module: &VerifiedKernel, device: &Device) -> Result<Self> {
         let cc = compute_capability(device)?;
         module.manifest.validate()?;
