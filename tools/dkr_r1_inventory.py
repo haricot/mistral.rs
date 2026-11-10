@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import re
 from collections import Counter
 from pathlib import Path
 
@@ -77,6 +78,53 @@ CANDLE_ROOT_GROUPS = {
     "unary": "elementwise",
 }
 
+BACKEND_METHOD_GROUPS = {
+    "try_clone": "memory_transfer",
+    "dtype": "host_metadata",
+    "device": "host_metadata",
+    "to_cpu_storage": "device_transfer",
+    "affine": "elementwise",
+    "powf": "elementwise",
+    "elu": "elementwise",
+    "reduce_op": "reduction",
+    "cmp": "elementwise",
+    "to_dtype": "cast",
+    "unary_impl": "elementwise",
+    "binary_impl": "elementwise",
+    "where_cond": "elementwise",
+    "conv1d": "convolution",
+    "conv_transpose1d": "convolution",
+    "conv2d": "convolution",
+    "conv_transpose2d": "convolution",
+    "avg_pool2d": "pooling",
+    "max_pool2d": "pooling",
+    "upsample_nearest1d": "resampling",
+    "upsample_nearest2d": "resampling",
+    "upsample_bilinear2d": "resampling",
+    "gather": "indexing",
+    "scatter_set": "indexing",
+    "scatter_add_set": "indexing",
+    "index_select": "indexing",
+    "index_add": "indexing",
+    "matmul": "dense_linear",
+    "copy_strided_src": "memory_transfer",
+    "copy2d": "memory_transfer",
+    "const_set": "memory_transfer",
+    "new": "device_management",
+    "location": "host_metadata",
+    "same_device": "host_metadata",
+    "zeros_impl": "memory_transfer",
+    "alloc_uninit": "device_management",
+    "storage_from_slice": "device_transfer",
+    "storage_from_cpu_storage": "device_transfer",
+    "storage_from_cpu_storage_owned": "device_transfer",
+    "rand_uniform": "random_number_generation",
+    "rand_normal": "random_number_generation",
+    "set_seed": "device_management",
+    "get_current_seed": "device_management",
+    "synchronize": "device_management",
+}
+
 
 def mistral_family(path: Path) -> str | None:
     parts = path.parts
@@ -113,6 +161,7 @@ def candle_family(path: Path) -> str | None:
 
 def audit(candle_dir: Path | None) -> dict:
     records = []
+    backend_methods = []
     for base in (
         "mistralrs-core", "mistralrs-quant", "mistralrs-paged-attn",
         "mistralrs-vision", "mistralrs-flash-attn", "legacy-provider-poc",
@@ -121,22 +170,38 @@ def audit(candle_dir: Path | None) -> dict:
             path = file.relative_to(ROOT)
             records.append({"source": str(path), "family": mistral_family(path)})
     if candle_dir is not None:
-        kernel_root = candle_dir.resolve() / "candle-kernels" / "src"
+        candle_root = candle_dir.resolve()
+        kernel_root = candle_root / "candle-kernels" / "src"
         if not kernel_root.is_dir():
             raise ValueError(f"Candle kernel source not found: {kernel_root}")
         for file in sorted(kernel_root.rglob("*.cu")):
             path = file.relative_to(kernel_root)
             records.append({"source": f"candle-kernels/src/{path}", "family": candle_family(path)})
+        backend_source = candle_root / "candle-core" / "src" / "backend.rs"
+        method_names = re.findall(
+            r"^\s*(?:unsafe\s+)?fn\s+([a-z][a-z_0-9]*)\s*(?:<[^>]+>)?\s*\(",
+            backend_source.read_text(),
+            re.MULTILINE,
+        )
+        backend_methods = [
+            {"name": name, "family": BACKEND_METHOD_GROUPS.get(name)}
+            for name in method_names
+        ]
 
     missing = [record["source"] for record in records if record["family"] is None]
+    unmapped_methods = [row["name"] for row in backend_methods if row["family"] is None]
     return {
         "schema": "DKR-R1-CUDA-SOURCE-INVENTORY-V1",
-        "scope": "CUDA .cu compilation units only; Rust ops/vendor libraries require separate coverage gates",
+        "scope": "All checked-in CUDA .cu units plus Candle BackendStorage/BackendDevice trait methods; vendor libraries/model-level dispatch require separate gates",
         "candle_checked": candle_dir is not None,
         "files": len(records),
         "families": dict(sorted(Counter(row["family"] for row in records if row["family"]).items())),
         "unclassified": missing,
-        "status": "PASS_SOURCE_CLASSIFICATION" if records and not missing else "REVIEW_UNCLASSIFIED_SOURCE",
+        "backend_methods_checked": bool(backend_methods),
+        "backend_methods": len(backend_methods),
+        "backend_method_families": dict(sorted(Counter(row["family"] for row in backend_methods if row["family"]).items())),
+        "unclassified_backend_methods": unmapped_methods,
+        "status": "PASS_SOURCE_AND_BACKEND_CLASSIFICATION" if records and not missing and not unmapped_methods else "REVIEW_UNCLASSIFIED_OPERATION",
     }
 
 
@@ -146,7 +211,7 @@ def main() -> None:
     args = parser.parse_args()
     result = audit(args.candle_dir)
     print(json.dumps(result, indent=2))
-    if result["unclassified"]:
+    if result["unclassified"] or result["unclassified_backend_methods"]:
         raise SystemExit(1)
 
 

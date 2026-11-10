@@ -48,7 +48,7 @@ PTX is the supported package format in R1. CUBIN/fatbin, runtime NVRTC compilati
 
 ## Complete source-family inventory, not a false completion claim
 
-The audit covers every checked-in `.cu` compilation unit in the integration repository and optionally the exact Candle checkout. The audit fails on new unclassified source files. Classification is not the same as a working dynamic adapter.
+The audit covers every checked-in `.cu` compilation unit in the integration repository and optionally the exact Candle checkout. It also enumerates every method of Candle's `BackendStorage` and `BackendDevice` traits, including operations **without** a dedicated `.cu` file. The audit fails on a new unclassified source or backend method. Classification is not the same as a working dynamic adapter.
 
 ```bash
 python3 tools/dkr_r1_inventory.py --candle-dir /path/to/candle-at-d99f6d7
@@ -56,7 +56,7 @@ cargo test -p mistralrs-kernel-runtime --no-default-features --locked
 cargo fmt --package mistralrs-kernel-runtime -- --check
 ```
 
-`--candle-dir` must point to a checkout of the pinned `cuda_legacy` revision. On the audited revision: **196 CUDA compilation units, 24 mapped source categories, 0 unclassified** (includes 53 FlashAttention SM80-only units, 2 preserved POC units and 28 Candle source units). This is a source coverage gate, **not** 196 runtime-ready packages.
+`--candle-dir` must point to a checkout of the pinned `cuda_legacy` revision. On the audited revision: **196 CUDA compilation units, 24 mapped source categories, 44 Candle backend methods, 0 unclassified** (includes 53 FlashAttention SM80-only units, 2 preserved POC units and 28 Candle source units). This is a source and backend-API classification gate, **not** 196 runtime-ready packages.
 
 | Operation families and origins | Required DKR provider/adapter path | R1 status |
 | --- | --- | --- |
@@ -72,6 +72,8 @@ cargo fmt --package mistralrs-kernel-runtime -- --check
 | RMSNorm/LayerNorm, activation, softmax, unary/binary/ternary, affine | Tensorwise/reduction family and ordered typed scalars | Source mapped; generic typed ABI ready; no execution adapter yet |
 | Embedding, rotary/RoPE, positional transformations | Gather/index contract and positional phase/stride ABI | Source mapped; adapters pending |
 | Copy, cast, layout/packing/transpose, indexing, sorting, reduction | Overlap/memory-stride and output-shape contracts | Source mapped; adapters pending |
+| Pooling (average/max) and nearest/bilinear upsampling | Window, stride, interpolation and shape contracts | Candle backend methods mapped; adapters pending |
+| Random generation (normal/uniform) | RNG state, reproducibility and independent per-stream scheduling | Candle backend methods mapped; adapters pending |
 | Sampling, rejection, top-k, speculative decode | RNG/state and deterministic ordering contracts | Source mapped; adapters pending |
 | LoRA/QLoRA and fused adapter routing | Adapter-rank/weight-format contracts | Source mapped; adapters pending |
 | Multi-GPU collectives, CUDA graphs, allocator, H2D/D2H, synchronization | External runtime/library capability adapter and separate safety gates | Cannot be replaced by a kernel entry point alone |

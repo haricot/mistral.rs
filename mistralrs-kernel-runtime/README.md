@@ -26,7 +26,7 @@ still required; their unsafe argument lifetime/order contract is not hidden
 behind the manifest verifier. The original F32 path is unchanged.
 
 See [DKR-R1 typed ABI and complete coverage inventory](../docs/DKR_R1_TYPED_ABI_AND_COVERAGE.md)
-for the 196 classified CUDA source units, operation families, open adapter work,
+for the 196 classified CUDA source units and 44 Candle backend methods, operation families, open adapter work,
 SM61 restrictions and qualification gates.
 
 ## Historical RFC and ASD integration
