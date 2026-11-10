@@ -74,6 +74,22 @@ feature. The generic Rust dispatch knows only the logical operation
 GPU-model-specific name or architecture switch. The caller must supply the
 external catalog path via `DKR_KERNEL_PACKAGES`.
 
+The generic `KernelExecutionCache` discovers and verifies packages once, then
+keeps up to 128 prepared CUDA functions per exact launch contract and device.
+On a warm hit, no filesystem access, PTX hashing, catalogue resolution, CUDA
+capability query or module loading is repeated. The launch itself still
+validates its typed arguments and CUDA context. A new request shape or device
+must undergo cold resolution before it can enter the cache.
+
+An identical-output repeated launch in the ignored CUDA test verifies cache
+reuse. This establishes the cold/hot separation, **not** zero measured dispatch
+overhead. Before claiming performance parity with static dispatch, benchmark
+the *same kernel algorithm* with warmed modules, equal shapes, identical CUDA
+streams and an A1/B/A2 order. Compare host launch latency and GPU kernel time
+separately, including p50, p95 and per-token decode cost; report the measured
+delta and its variance. Scalar reference PTX and optimized legacy HFMA2 are not
+equivalent workloads for such a comparison.
+
 The external implementation is a scalar, numerically checkable reference for
 F16 and BF16, not a promoted HFMA2/WMMA optimization. It does not use ASD and
 is not numerically qualified on real hardware until the ignored GPU test passes.

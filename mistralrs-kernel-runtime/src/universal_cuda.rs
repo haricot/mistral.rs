@@ -2,11 +2,81 @@ use crate::{
     cuda::compute_capability,
     universal::{KernelCatalog, KernelManifest, LaunchRequest, VerifiedKernel},
 };
-use anyhow::{ensure, Result};
+use anyhow::{anyhow, ensure, Result};
 use candle_core::{
     cuda_backend::cudarc::driver::{CudaFunction, LaunchConfig},
     Device,
 };
+use std::{
+    path::Path,
+    sync::{Arc, Mutex},
+};
+
+const MAX_PREPARED_KERNELS: usize = 128;
+
+struct PreparedEntry {
+    request: LaunchRequest,
+    device: Device,
+    kernel: Arc<PreparedKernel>,
+}
+
+pub struct KernelExecutionCache {
+    catalog: KernelCatalog,
+    prepared: Mutex<Vec<PreparedEntry>>,
+}
+
+impl KernelExecutionCache {
+    pub fn discover(root: &Path) -> Result<Self> {
+        Ok(Self {
+            catalog: KernelCatalog::discover(root)?,
+            prepared: Mutex::new(Vec::new()),
+        })
+    }
+
+    pub fn prepare_for_device(
+        &self,
+        request: &mut LaunchRequest,
+        device: &Device,
+    ) -> Result<Arc<PreparedKernel>> {
+        let mut prepared = self
+            .prepared
+            .lock()
+            .map_err(|_| anyhow!("dynamic kernel preparation cache poisoned"))?;
+        if let Some(entry) = prepared
+            .iter()
+            .find(|entry| {
+                entry.device.same_device(device)
+                    && entry.request.operation == request.operation
+                    && entry.request.args == request.args
+                    && entry.request.grid == request.grid
+                    && entry.request.max_dynamic_shared_mem_bytes
+                        == request.max_dynamic_shared_mem_bytes
+            })
+        {
+            request.cc = entry.request.cc;
+            return Ok(Arc::clone(&entry.kernel));
+        }
+        request.cc = compute_capability(device)?;
+        let kernel = Arc::new(PreparedKernel::load_auto(&self.catalog, request, device)?);
+        if prepared.len() == MAX_PREPARED_KERNELS {
+            prepared.swap_remove(0);
+        }
+        prepared.push(PreparedEntry {
+            request: request.clone(),
+            device: device.clone(),
+            kernel: Arc::clone(&kernel),
+        });
+        Ok(kernel)
+    }
+
+    pub fn prepared_count(&self) -> Result<usize> {
+        Ok(self
+            .prepared
+            .lock()
+            .map_err(|_| anyhow!("dynamic kernel preparation cache poisoned"))?
+            .len())
+    }
+}
 
 pub struct PreparedKernel {
     pub manifest: KernelManifest,

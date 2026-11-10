@@ -1,8 +1,7 @@
 use candle_core::{DType, Result, Tensor};
 use mistralrs_kernel_runtime::{
-    cuda::compute_capability,
-    universal::{Argument, ElementType, KernelCatalog, LaunchRequest},
-    universal_cuda::PreparedKernel,
+    universal::{Argument, ElementType, LaunchRequest},
+    universal_cuda::KernelExecutionCache,
 };
 use std::{path::PathBuf, sync::OnceLock};
 
@@ -10,7 +9,7 @@ const OPERATION: &str = "moe.grouped_gemm.v1";
 const PACKAGE_ROOT_ENV: &str = "DKR_KERNEL_PACKAGES";
 const MAX_ROWS: usize = u32::MAX as usize;
 
-static CATALOG: OnceLock<std::result::Result<KernelCatalog, String>> = OnceLock::new();
+static KERNEL_CACHE: OnceLock<std::result::Result<KernelExecutionCache, String>> = OnceLock::new();
 
 macro_rules! check {
     ($condition:expr, $message:literal) => {
@@ -20,15 +19,17 @@ macro_rules! check {
     };
 }
 
-fn catalog() -> Result<&'static KernelCatalog> {
-    CATALOG
+fn kernel_cache() -> Result<&'static KernelExecutionCache> {
+    KERNEL_CACHE
         .get_or_init(|| {
             std::env::var_os(PACKAGE_ROOT_ENV)
                 .map(PathBuf::from)
                 .ok_or_else(|| {
                     format!("{PACKAGE_ROOT_ENV} must point to trusted CUDA kernel packages")
                 })
-                .and_then(|root| KernelCatalog::discover(&root).map_err(|error| error.to_string()))
+                .and_then(|root| {
+                    KernelExecutionCache::discover(&root).map_err(|error| error.to_string())
+                })
         })
         .as_ref()
         .map_err(|error| candle_core::Error::Msg(error.clone()))
@@ -136,11 +137,9 @@ where
         _ => candle_core::bail!("DKR MoE currently supports F16/BF16"),
     };
     let dev = device.as_cuda_device()?;
-    let cc =
-        compute_capability(device).map_err(|error| candle_core::Error::Msg(error.to_string()))?;
     let mut request = LaunchRequest {
         operation: OPERATION.into(),
-        cc,
+        cc: 0,
         args: vec![
             tensor_arg(element_type, vec![input_m, size_k]),
             tensor_arg(element_type, vec![num_experts, size_n, size_k]),
@@ -158,17 +157,15 @@ where
         grid: [1, 1, 1],
         max_dynamic_shared_mem_bytes: 0,
     };
-    let selected = catalog()?
-        .resolve(&request)
+    let prepared = kernel_cache()?
+        .prepare_for_device(&mut request, device)
         .map_err(|error| candle_core::Error::Msg(error.to_string()))?;
-    let threads = selected.manifest.block[0];
+    let threads = prepared.manifest.block[0];
     check!(
-        selected.manifest.block[1..] == [1, 1],
+        prepared.manifest.block[1..] == [1, 1],
         "DKR MoE requires a one-dimensional launch block"
     );
     request.grid = [output_count_u32.div_ceil(threads), 1, 1];
-    let prepared = PreparedKernel::load_auto(catalog()?, &request, device)
-        .map_err(|error| candle_core::Error::Msg(error.to_string()))?;
 
     let (input_storage, _) = input.storage_and_layout();
     let (weight_storage, _) = weights.storage_and_layout();
@@ -295,6 +292,19 @@ mod tests {
                     assert!((value - expected).abs() < 0.5, "{dtype:?}: {value}");
                 }
             }
+            let prepared_before = kernel_cache()?
+                .prepared_count()
+                .map_err(|error| candle_core::Error::Msg(error.to_string()))?;
+            let repeated = moe_gemm(&input, &weights, &gating, &sorted, &experts, 1, true)?;
+            let prepared_after = kernel_cache()?
+                .prepared_count()
+                .map_err(|error| candle_core::Error::Msg(error.to_string()))?;
+            assert_eq!(prepared_before, prepared_after);
+            let repeated = repeated
+                .to_dtype(DType::F32)?
+                .to_device(&Device::Cpu)?
+                .to_vec2::<f32>()?;
+            assert_eq!(values, repeated);
 
             let sorted = Tensor::new(&[0u32, 1, 2, 3], &device)?;
             let experts = Tensor::new(&[0u32, 1, 0, 1], &device)?;

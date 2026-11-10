@@ -116,7 +116,7 @@ pub enum Argument {
     },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LaunchRequest {
     pub operation: String,
     pub cc: u32,
@@ -455,24 +455,30 @@ impl KernelCatalog {
         request: &LaunchRequest,
         implementation_id: Option<&str>,
     ) -> Result<&Arc<VerifiedKernel>> {
-        let mut candidates: Vec<_> = self
-            .modules
-            .values()
-            .filter(|module| {
-                module.manifest.operation == request.operation
-                    && implementation_id.is_none_or(|id| module.manifest.implementation_id == id)
-                    && module.manifest.target_cc <= request.cc
-                    && module.manifest.admit(request).is_ok()
-            })
-            .collect();
-        candidates.sort_by_key(|module| std::cmp::Reverse(module.manifest.target_cc));
-        let chosen = candidates
-            .first()
-            .context("no compatible dynamic kernel package")?;
+        let mut best: Option<&Arc<VerifiedKernel>> = None;
+        let mut ambiguous = false;
+        for module in self.modules.values() {
+            if module.manifest.operation != request.operation
+                || implementation_id.is_some_and(|id| module.manifest.implementation_id != id)
+                || module.manifest.target_cc > request.cc
+                || module.manifest.admit(request).is_err()
+            {
+                continue;
+            }
+            match best {
+                Some(current) if current.manifest.target_cc > module.manifest.target_cc => {}
+                Some(current) if current.manifest.target_cc == module.manifest.target_cc => {
+                    ambiguous = true;
+                }
+                _ => {
+                    best = Some(module);
+                    ambiguous = false;
+                }
+            }
+        }
+        let chosen = best.context("no compatible dynamic kernel package")?;
         ensure!(
-            candidates
-                .get(1)
-                .is_none_or(|other| other.manifest.target_cc != chosen.manifest.target_cc),
+            !ambiguous,
             "ambiguous dynamic kernel variants at the same architecture level"
         );
         Ok(chosen)

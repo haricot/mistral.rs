@@ -98,9 +98,15 @@ The reference provider deliberately uses scalar math, not promoted HFMA2
 optimization. It has no silent fallback to the statically linked MoE. Its
 separately built PTX and typed CUDA adapter require actual SM61 numeric testing
 before qualification or merging. The external catalogue is loaded once per
-process; packages may be replaced without rebuilding Rust, then the process
-must be restarted to discover the new versions. This step does not migrate the
-remaining CUDA source families or remove build-time specialization elsewhere.
+process; prepared CUDA functions are cached for each typed request and device,
+with a bounded 128-entry cache. Warm requests do not repeat device capability
+queries, provider selection, PTX verification or module loading. Packages may
+be replaced without rebuilding Rust, then the process must be restarted to
+discover the new versions. The remaining tensor validation, launch-argument
+construction and cache lookup have not been proven zero-cost; CPU/GPU latency
+parity requires an A1/B/A2 comparison using the same underlying kernel. This
+step does not migrate the remaining CUDA source families or remove build-time
+specialization elsewhere.
 
 1. **R1a, closed**: exact Candle pin/lock regeneration; independent typed manifest, catalogue and artifact loading; host-only tests and source classification.
 2. **R1b, required**: typed CUDA tensor launch adapters, architecture-feature negotiation and explicit preallocation memory budget (especially packed FP8/FP4 and MoE); negative tests for invalid pointer/order/context, fallback absence and numerical parity.
