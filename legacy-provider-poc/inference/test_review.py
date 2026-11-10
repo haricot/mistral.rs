@@ -1,10 +1,11 @@
 import copy
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
-from fixture import create_model, MODEL_SHAPES
-from run import compare_models, check_provider
+from fixture import create_model, HIDDEN, MODEL_SHAPES
+from run import compare_models, check_provider, profile
 
 
 class ReviewTests(unittest.TestCase):
@@ -47,6 +48,19 @@ class ReviewTests(unittest.TestCase):
         selected = dict(target_cc=61, decisions=[dict(artifact_sha256="abc")])
         with self.assertRaises(AssertionError):
             check_provider(report, selected, True)
+
+    def test_packed_projection_has_exact_prefill_and_decode_decisions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            manifest = directory / "module.json"
+            manifest.write_text(json.dumps({
+                "implementation_id": "test", "sha256": "0" * 64, "target_cc": 61,
+            }))
+            selected = profile(manifest, directory / "A.profile.json", "A")
+            shapes = {tuple(row["shape"]) for row in selected["decisions"]}
+            self.assertIn((1, 4 * HIDDEN, HIDDEN), shapes)
+            self.assertIn((3, 4 * HIDDEN, HIDDEN), shapes)
+            self.assertEqual(len(shapes), len(selected["decisions"]))
 
     def test_local_checkpoint_is_deterministic(self):
         with tempfile.TemporaryDirectory() as tmp:
