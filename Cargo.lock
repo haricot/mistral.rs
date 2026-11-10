@@ -4063,6 +4063,7 @@ dependencies = [
  "mistralrs-audio",
  "mistralrs-code-exec",
  "mistralrs-flash-attn",
+ "mistralrs-kernel-runtime",
  "mistralrs-mcp",
  "mistralrs-metal-compile",
  "mistralrs-paged-attn",

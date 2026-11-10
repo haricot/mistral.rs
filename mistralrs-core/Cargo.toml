@@ -74,6 +74,7 @@ base64.workspace = true
 bytemuck_derive.workspace = true
 mistralrs-paged-attn = { workspace = true, optional = true }
 mistralrs-quant.workspace = true
+mistralrs-kernel-runtime = { workspace = true, optional = true }
 uuid = { workspace = true, features = ["v4"] }
 utoipa = { workspace = true, optional = true }
 schemars.workspace = true
@@ -122,6 +123,7 @@ dispatch2 = { workspace = true, optional = true }
 mistralrs-metal-compile = { workspace = true, optional = true, features = ["metal"] }
 
 [features]
+dkr-moe = ["cuda", "dep:mistralrs-kernel-runtime", "mistralrs-kernel-runtime/cuda"]
 cuda-legacy-bf16 = ["cuda", "candle-core/cuda-legacy-bf16", "mistralrs-quant/cuda-legacy-bf16", "mistralrs-paged-attn/cuda-legacy-bf16"]
 cuda-legacy-fp8 = ["cuda", "candle-core/cuda-legacy-fp8", "mistralrs-quant/cuda-legacy-fp8", "mistralrs-paged-attn/cuda-legacy-fp8"]
 cuda-legacy-fp4 = ["cuda", "candle-core/cuda-legacy-fp4", "mistralrs-quant/cuda-legacy-fp4", "mistralrs-paged-attn/cuda-legacy-fp4"]

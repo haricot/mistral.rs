@@ -83,6 +83,25 @@ The origin classification includes actual checked-in CUDA sources; the table als
 
 ## Progression before Extended or ASD
 
+### DKR-R1.1 external MoE boundary (experimental)
+
+The optional `mistralrs-core/dkr-moe` feature routes `moe_gemm` through the
+generic typed catalogue and CUDA launcher. Its old implementation is preserved
+in `moe_legacy.rs` as the isolated numeric baseline. All new architecture
+package source is under `kernel-packages/cuda/moe/`; `build.py --cc 61` compiles
+the F16/BF16 reference provider independently of Cargo and writes verified PTX
+manifests under `kernel-packages/build/cuda` (ignored by Git). The input and
+output contracts stay stable across architectures, and the dynamic path has no
+Pascal/WMMA branches or compile-time architecture predicates.
+
+The reference provider deliberately uses scalar math, not promoted HFMA2
+optimization. It has no silent fallback to the statically linked MoE. Its
+separately built PTX and typed CUDA adapter require actual SM61 numeric testing
+before qualification or merging. The external catalogue is loaded once per
+process; packages may be replaced without rebuilding Rust, then the process
+must be restarted to discover the new versions. This step does not migrate the
+remaining CUDA source families or remove build-time specialization elsewhere.
+
 1. **R1a, closed**: exact Candle pin/lock regeneration; independent typed manifest, catalogue and artifact loading; host-only tests and source classification.
 2. **R1b, required**: typed CUDA tensor launch adapters, architecture-feature negotiation and explicit preallocation memory budget (especially packed FP8/FP4 and MoE); negative tests for invalid pointer/order/context, fallback absence and numerical parity.
 3. **R1c, required**: migrate operation families incrementally from Candle's `cuda_legacy` and Mistral's CUDA launch points; keep unsupported SM61 MMA/FlashAttention variants behind honest capability rejection and choose qualified SIMT alternatives.

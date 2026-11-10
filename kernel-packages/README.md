@@ -52,3 +52,31 @@ never hand-edit a hash to bypass an integrity failure. Other GPU architecture
 families can be supplied through new folders without changing Rust source,
 provided they respect the same ABI. Native CUBIN and code signatures are beyond
 this PTX-only R1 proof.
+
+## DKR-R1.1: external MoE reference package
+
+The MoE source lives in `kernel-packages/cuda/moe/moe.cu` and is not part of
+`mistralrs-core/src/cuda/*.cu`. Its external package builder targets only the
+requested architecture, and reuses previously compiled artifacts when the
+source, NVCC version and compilation arguments are unchanged:
+
+```sh
+python3 kernel-packages/cuda/moe/build.py --cc 61
+export DKR_KERNEL_PACKAGES="$PWD/kernel-packages/build/cuda"
+cargo test -p mistralrs-core --features 'cuda-legacy,dkr-moe' \
+  --lib dkr_moe_gpu -- --ignored --nocapture
+```
+
+`dkr-moe` opts in to the dynamically loaded provider for `moe_gemm`. The old
+FFI-based MoE is retained in `moe_legacy.rs` for comparison without this
+feature. The generic Rust dispatch knows only the logical operation
+`moe.grouped_gemm.v1`, dtype, shapes and validated launch arguments. It has no
+GPU-model-specific name or architecture switch. The caller must supply the
+external catalog path via `DKR_KERNEL_PACKAGES`.
+
+The external implementation is a scalar, numerically checkable reference for
+F16 and BF16, not a promoted HFMA2/WMMA optimization. It does not use ASD and
+is not numerically qualified on real hardware until the ignored GPU test passes.
+Routed token indices must satisfy the same upstream invariants as the legacy
+MoE: valid expert IDs and a permutation of output token indices. The current
+typed ABI accepts contiguous zero-offset tensors; other layouts are rejected.

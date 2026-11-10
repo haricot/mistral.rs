@@ -133,10 +133,16 @@ fn main() {
 
         let compute_cap = builder.get_compute_cap().unwrap_or(80);
 
-        if compute_cap >= 70 {
+        if cfg!(feature = "dkr-moe") {
+            builder = builder.exclude(&[
+                "moe_gemm_wmma.cu",
+                "moe_gemm.cu",
+                "moe_gemv.cu",
+                "moe_gemm_hfma2.cu",
+            ]);
+        } else if compute_cap >= 70 {
             println!("cargo:rustc-cfg=has_moe_wmma");
         } else {
-            // Pascal needs SIMT instead of WMMA for larger MoE batches.
             builder = builder.exclude(&["moe_gemm_wmma.cu", "moe_gemm.cu"]);
         }
 
