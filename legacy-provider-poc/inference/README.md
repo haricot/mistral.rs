@@ -67,16 +67,30 @@ This runs runtime/parser tests, existing UnquantLinear CPU regressions, the actu
 QuantMethod operator contract and a full local Mistral CPU inference. CUDA is not
 initialized. `cargo check` and formatting checks are included.
 
-On the physical SM61 machine, CUDA 12.9 in PATH:
+On the physical SM61 machine, CUDA 12.9 in PATH, **reuse the already built
+executable and PTX packages** when an earlier run has produced the CPU, baseline
+CUDA and A-operator PASS checkpoints:
 
 ```bash
 set -o pipefail
-CUDA_COMPUTE_CAP=61 NVCC_CCBIN=gcc-14 \
-  python3 legacy-provider-poc/inference/run.py gpu 2>&1 | tee /tmp/provider-f32-inference.log
+python3 legacy-provider-poc/inference/run.py gpu \
+  --reuse-from /path/to/previous-evidence \
+  --output /path/to/new-evidence \
+  2>&1 | tee /path/to/new-gpu-review.log
 ```
 
-The script builds the inference executable once, then separately builds the two
-PTX implementations and their manual exact profiles. The same executable runs:
+The input directory is read-only; the output must be new/empty. The script
+verifies the original executable SHA-256 against previous PASS reports and both
+PTX artifact hashes/SM61 manifests before copying provider packages into the new
+output. **This path invokes neither Cargo nor NVCC**. It regenerates the exact
+ASD JSON decisions and re-executes only the operator/model validations.
+
+For a first-ever run **without** existing binary/PTX evidence, the same script
+supports `python3 legacy-provider-poc/inference/run.py gpu`. That fresh-build
+path compiles the inference executable and both PTX implementations and must
+not be used when only a JSON profile needs correction.
+
+The same executable runs:
 
 1. CPU reference and normal CUDA reference, without an external profile;
 2. profile A, profile B, then profile A2 replay, each in a fresh process;
@@ -91,14 +105,35 @@ CPU/CUDA baseline parity, generated-token/logprob parity and unchanged executabl
 SHA256. A2 logits must equal A logits exactly. Model comparisons use absolute
 and relative tolerance 1e-4. This does not qualify model quality or performance.
 
-Success ends with `PROVIDER_F32_INFERENCE_GPU=PASS`. `OUTPUT=...` is printed before
-building. That temporary directory retains individual operator/model reports,
+Success ends with `PROVIDER_F32_INFERENCE_GPU=PASS`. `OUTPUT=...` identifies
+the evidence directory. That directory retains individual operator/model reports,
 the generated checkpoint, profiles, artifacts, negative-case log and
 `evidence.json`. A2 deletes only its dedicated replay files. No runner is
 registered and the user's ASD store is not accessed.
 
-`CARGO_TARGET_DIR` can select a persistent build cache. `cuda-compile` builds the
-actual inference executable and external modules without executing on a GPU.
+`CARGO_TARGET_DIR` is relevant only to fresh builds; it is not needed with
+`--reuse-from`. `cuda-compile` builds the actual inference executable and external
+modules without executing on a GPU.
 The hosted workflow runs CPU inference and a single CUDA SM61 compile job.
 CPU and CUDA use separate persistent Cargo build caches between workflow runs.
 Physical CUDA inference remains a separate operator-run qualification.
+
+## Physical SM61 qualification (2026-11-10)
+
+The user's GTX 1080 Max-Q run completed A/B/A2 with
+`PROVIDER_F32_INFERENCE_GPU=PASS`, 10 PASS operator/model reports,
+fail-closed missing-decision rejection and post-load control-plane removal.
+The same binary SHA-256
+`6545617b113031f2d9989fd596631e994b38abc5ac79cf9c5f2765cd955abbf7`
+was used throughout. PTX A:
+`34101548978c2d4c4777a87c2c95e16ee59325cea65352f8bb2d136037935eb6`;
+PTX B:
+`9e4cb4ef70cf0077825b94a8cc0b7993612684026fd8b7ff7118411415f19d3c`.
+The evidence records `cargo_invoked=false` and `nvcc_invoked=false`.
+
+The MLP packs `gate_proj` and `up_proj` into a `(128,32)` operation for this
+fixture. Its individual `(64,32)` profile decisions remain declared for
+compatibility, but are not expected to be submitted by the packed inference
+path. Both prefill `M=3` and decode `M=1` exercised the packed operation.
+See PR #34 for the operator-supplied qualification summary. Full per-phase
+JSON reports were retained on the SM61 machine and are not committed here.

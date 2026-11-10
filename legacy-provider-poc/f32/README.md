@@ -62,12 +62,13 @@ python3 legacy-provider-poc/f32/run.py cpu
 Manifest validation and CPU tests need neither CUDA nor GPU initialization.
 `validate MANIFEST` verifies a package without creating a CUDA device.
 
-On the physical SM61 machine, with CUDA 12.9 available in PATH:
+On the physical SM61 machine, with CUDA 12.9 available in PATH,
+the following is a **fresh-build historical POC** (not the cached Mistral
+inference replay):
 
 ```bash
 set -o pipefail
-CUDA_COMPUTE_CAP=61 NVCC_CCBIN=gcc-14 \
-  python3 legacy-provider-poc/f32/run.py gpu 2>&1 | tee /tmp/provider-f32.log
+python3 legacy-provider-poc/f32/run.py gpu 2>&1 | tee /tmp/provider-f32.log
 ```
 
 `OUTPUT=...` identifies a new temporary directory containing the two external
@@ -83,8 +84,7 @@ To compile the CUDA consumer and both artifact implementations without executing
 on a GPU:
 
 ```bash
-CUDA_COMPUTE_CAP=61 NVCC_CCBIN=g++ \
-  python3 legacy-provider-poc/f32/run.py cuda-compile --output /tmp/provider-f32-build
+python3 legacy-provider-poc/f32/run.py cuda-compile --output /tmp/provider-f32-build
 ```
 
 `.github/workflows/legacy-provider-f32-poc.yml` runs CPU contracts and a CUDA
@@ -92,8 +92,9 @@ compile/PTX matrix for SM61/75/80. These jobs do not establish physical executio
 or portability of one Rust binary across all GPUs. Physical validation remains
 explicitly separate and emits architecture and A/B/A evidence.
 
-The next step after physical success is one real Mistral operation integration;
-this demonstration does not yet replace any Legacy V3 provider.
+The real Mistral F32 operation integration and physical SM61 A/B/A2 qualification
+are now recorded in `../inference/README.md`. The standalone executable remains
+a historical mechanism fixture; it does not replace any Legacy V3 provider.
 
 The shared executor now lives in `mistralrs-kernel-runtime`. See
 [`../inference/README.md`](../inference/README.md) for its UnquantLinear and real

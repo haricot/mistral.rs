@@ -5,13 +5,14 @@ import importlib.util
 import json
 import math
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
 
-from fixture import create_model, MODEL_SHAPES, OPERATOR_SHAPE, ROW_COUNTS
+from fixture import create_model, HIDDEN, INTERMEDIATE, MODEL_SHAPES, OPERATOR_SHAPE, ROW_COUNTS
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
@@ -92,16 +93,86 @@ def check_provider(report, selected, engine):
     if engine:
         assert evidence["prepared_layers"] >= 8
         assert report["provider_after_load"]["prepared_layers"] >= 8
-        assert all((m, n, k) in shapes for m in [1, 3] for n, k in MODEL_SHAPES)
+        # The fixture packs the gate/up projections (2 * INTERMEDIATE, HIDDEN).
+        # Individual (INTERMEDIATE, HIDDEN) decisions must remain available in the
+        # exact ASD profile, but are not submitted when the packed path is used.
+        active_pairs = [(HIDDEN, HIDDEN), (HIDDEN, INTERMEDIATE),
+                        (2 * INTERMEDIATE, HIDDEN)]
+        required = {(m, n, k) for m in (1, 3) for n, k in active_pairs}
+        missing = required - shapes
+        assert not missing, f"model did not execute required provider shapes: {sorted(missing)}"
+        declared = {tuple(d["shape"]) for d in selected["decisions"]}
+        required_profile = {(m, n, k) for m in (1, 3) for n, k in MODEL_SHAPES}
+        assert not (required_profile - declared), "profile omits exact model decisions"
     else:
         assert all((m, *OPERATOR_SHAPE) in shapes for m in [1, 3, 6])
+
+
+def reuse_existing(source, output):
+    """Replay previously compiled SM61 artifacts without invoking Cargo or NVCC."""
+    source = Path(source).resolve()
+    output = Path(output).resolve()
+    if source == output or source in output.parents or output in source.parents:
+        raise ValueError("reuse source and output must be separate directories")
+    if not source.is_dir():
+        raise FileNotFoundError(f"missing previous evidence directory: {source}")
+    if any(output.iterdir()):
+        raise FileExistsError(f"reuse output must be empty: {output}")
+
+    binary = source / "target/debug/examples" / EXAMPLE
+    if not binary.is_file() or binary.stat().st_size == 0:
+        raise FileNotFoundError(f"missing previously compiled executable: {binary}")
+    binary_hash = sha(binary)
+
+    # Confirm that this is the same executable which produced earlier PASS reports.
+    for label in ("cpu-model", "baseline-model", "A-operator"):
+        report_path = source / f"{label}.json"
+        if not report_path.is_file():
+            raise FileNotFoundError(f"missing prior PASS checkpoint: {report_path}")
+        report = json.loads(report_path.read_text())
+        if report.get("status") != "PASS" or report.get("binary_sha256") != binary_hash:
+            raise RuntimeError(f"prior checkpoint does not match executable: {report_path}")
+
+    manifests = []
+    package_shas = {}
+    for name, entry in (("a", "linear_simple"), ("b", "linear_tiled")):
+        directory = source / "packages" / name
+        manifest_path = directory / "module.json"
+        if not manifest_path.is_file():
+            raise FileNotFoundError(f"missing prior module manifest: {manifest_path}")
+        manifest = json.loads(manifest_path.read_text())
+        expected = {"schema": 1, "abi": "mistral.linear.f32.v1",
+                    "target_cc": 61, "min_cc": 61, "max_cc": 61,
+                    "artifact": "kernel.ptx", "entry": entry, "dtype": "f32"}
+        if any(manifest.get(key) != value for key, value in expected.items()):
+            raise RuntimeError(f"prior manifest is not the expected SM61 module: {manifest_path}")
+        artifact = directory / "kernel.ptx"
+        if not artifact.is_file() or sha(artifact) != manifest.get("sha256"):
+            raise RuntimeError(f"PTX hash mismatch or artifact missing: {artifact}")
+        ptx = artifact.read_text()
+        if not re.search(r"\.target\s+sm_61\b", ptx) or not re.search(
+                rf"\.entry\s+{entry}\s*\(", ptx):
+            raise RuntimeError(f"PTX target or entry mismatch: {artifact}")
+        destination = output / "packages" / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(directory, destination)
+        if sha(destination / "kernel.ptx") != manifest["sha256"]:
+            raise RuntimeError(f"copied PTX differs from source: {destination}")
+        manifests.append(destination / "module.json")
+        package_shas[name] = manifest["sha256"]
+    print(f"PROVIDER_F32_REUSED_BINARY_SHA256={binary_hash}", flush=True)
+    print("PROVIDER_F32_REUSED_PTX_SM61=PASS", flush=True)
+    return binary, manifests, dict(source=str(source), package_sha256=package_shas)
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("mode", choices=["cpu", "cuda-compile", "gpu"])
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--reuse-from", type=Path, help="prior GPU output; skip all compilation")
     args = parser.parse_args()
+    if args.reuse_from and args.mode != "gpu":
+        parser.error("--reuse-from is only available for gpu mode")
     builder = artifact_builder()
     builder.source_scope()
     output = (args.output or Path(tempfile.mkdtemp(prefix="mistral-provider-f32-"))).resolve()
@@ -110,20 +181,24 @@ def main():
     env = os.environ.copy()
     env.pop(PROFILE_ENV, None)
     env["HF_HUB_OFFLINE"] = "1"
-    target = Path(env.get("CARGO_TARGET_DIR", str(output / "target"))).resolve()
-    env["CARGO_TARGET_DIR"] = str(target)
-    env.setdefault("CARGO_BUILD_JOBS", "2")
-    env.setdefault("CARGO_PROFILE_DEV_OPT_LEVEL", "1")
-    env.setdefault("CARGO_PROFILE_DEV_DEBUG", "0")
-    features = ["--features", "cuda"] if args.mode != "cpu" else []
-    if args.mode == "cpu":
-        run(["cargo", "fmt", "--manifest-path", ROOT / "Cargo.toml", "-p", "mistralrs-kernel-runtime",
-             "-p", "mistralrs-quant", "-p", "mistralrs", "--", "--check"], env=env)
-        run(cargo("check", "-p", "mistralrs", "--example", EXAMPLE), env=env)
-        run(cargo("test", "-p", "mistralrs-kernel-runtime"), env=env)
-        run(cargo("test", "-p", "mistralrs-quant", "--lib", "unquantized::tests"), env=env)
-    run(cargo("build", "-p", "mistralrs", "--example", EXAMPLE, *features), env=env)
-    binary = target / "debug/examples" / EXAMPLE
+    reuse_details = None
+    if args.reuse_from:
+        binary, reused_manifests, reuse_details = reuse_existing(args.reuse_from, output)
+    else:
+        target = Path(env.get("CARGO_TARGET_DIR", str(output / "target"))).resolve()
+        env["CARGO_TARGET_DIR"] = str(target)
+        env.setdefault("CARGO_BUILD_JOBS", "2")
+        env.setdefault("CARGO_PROFILE_DEV_OPT_LEVEL", "1")
+        env.setdefault("CARGO_PROFILE_DEV_DEBUG", "0")
+        features = ["--features", "cuda"] if args.mode != "cpu" else []
+        if args.mode == "cpu":
+            run(["cargo", "fmt", "--manifest-path", ROOT / "Cargo.toml", "-p", "mistralrs-kernel-runtime",
+                 "-p", "mistralrs-quant", "-p", "mistralrs", "--", "--check"], env=env)
+            run(cargo("check", "-p", "mistralrs", "--example", EXAMPLE), env=env)
+            run(cargo("test", "-p", "mistralrs-kernel-runtime"), env=env)
+            run(cargo("test", "-p", "mistralrs-quant", "--lib", "unquantized::tests"), env=env)
+        run(cargo("build", "-p", "mistralrs", "--example", EXAMPLE, *features), env=env)
+        binary = target / "debug/examples" / EXAMPLE
     binary_hash = sha(binary)
     model_path = create_model(output / "model")
     reports = {}
@@ -165,9 +240,12 @@ def main():
     if args.mode == "cpu":
         execute("cpu", device="cpu")
     else:
-        cc = env.get("CUDA_COMPUTE_CAP", "61")
-        assert cc.isdecimal(), "CUDA_COMPUTE_CAP must be numeric"
-        a, b = builder.packages(output / "packages", int(cc))
+        if args.reuse_from:
+            a, b = reused_manifests
+        else:
+            cc = env.get("CUDA_COMPUTE_CAP", "61")
+            assert cc.isdecimal(), "CUDA_COMPUTE_CAP must be numeric"
+            a, b = builder.packages(output / "packages", int(cc))
         selected = {}
         for label, manifest in [("A", a), ("B", b)]:
             selected[label] = profile(manifest, output / f"{label}.profile.json", label)
@@ -209,6 +287,11 @@ def main():
         checkpoint_sha256=sha(model_path / "model.safetensors"),
         scope="F32 UnquantLinear integration, not quantized providers or performance qualification",
         reports=sorted(reports))
+    if reuse_details is not None:
+        evidence["reused_from"] = reuse_details["source"]
+        evidence["reused_package_sha256"] = reuse_details["package_sha256"]
+        evidence["cargo_invoked"] = False
+        evidence["nvcc_invoked"] = False
     (output / "evidence.json").write_text(json.dumps(evidence, indent=2) + "\n")
     print(json.dumps(evidence, indent=2), flush=True)
     print(f"PROVIDER_F32_INFERENCE_{args.mode.upper().replace('-', '_')}=PASS", flush=True)
@@ -216,3 +299,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
