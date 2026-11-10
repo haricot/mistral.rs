@@ -1,5 +1,9 @@
 # DKR-R0 — ASD-first Dynamic Kernel Runtime
 
+> Historical RFC: superseded for implementation ordering by
+> [DKR-R1 independent typed ABI](DKR_R1_TYPED_ABI_AND_COVERAGE.md).
+> Loading and typed contracts are built first; ASD selection is optional later.
+
 **Status:** architecture RFC, not an implementation or promotion gate.  
 **Branch:** `dynamic-kernel-runtime` in `haricot/mistral.rs`.  
 **Evidence base:** [physical SM61 F32 provider A/B/A2 PASS](https://github.com/haricot/mistral.rs/pull/34#issuecomment-6772125988), from the squash-promoted Legacy POC.  

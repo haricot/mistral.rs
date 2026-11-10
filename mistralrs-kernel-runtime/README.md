@@ -2,9 +2,9 @@
 
 Reusable runtime substrate for external, versioned CUDA kernel providers.
 
-## Implemented now: F32 reference
+## Implemented: legacy F32 reference plus independent DKR-R1 loader
 
-The current implementation is intentionally narrow:
+The original F32 execution path remains intentionally narrow:
 
 - `mistral.linear.f32.v1` ABI and schema-1 PTX module manifests (`src/lib.rs`).
 - Strict manifest, PTX-target, hash, entry-symbol, path and resource verification.
@@ -15,9 +15,23 @@ The current implementation is intentionally narrow:
 
 `legacy-provider-poc/inference` is a **historical conformance fixture**, not the permanent runtime API. Keep it until equivalent conformance tests are established outside the demonstration directory.
 
-## Intended generalization
+## DKR-R1 independent typed module ABI
 
-See **[DKR-R0 — ASD-first Dynamic Kernel Runtime](../docs/DYNAMIC_KERNEL_RUNTIME_R0.md)** for:
+The new `src/universal.rs` provides a versioned, content-addressed PTX package
+catalogue and an ordered typed tensor/scalar ABI, without importing ASD.
+Under the CUDA feature, `src/universal_cuda.rs` loads an explicitly selected
+verified function into Candle's context-bound CUDA module cache and validates
+the launch configuration. Executable operation-specific launch adapters are
+still required; their unsafe argument lifetime/order contract is not hidden
+behind the manifest verifier. The original F32 path is unchanged.
+
+See [DKR-R1 typed ABI and complete coverage inventory](../docs/DKR_R1_TYPED_ABI_AND_COVERAGE.md)
+for the 196 classified CUDA source units, operation families, open adapter work,
+SM61 restrictions and qualification gates.
+
+## Historical RFC and ASD integration
+
+See **[DKR-R0 historical ASD-first RFC](../docs/DYNAMIC_KERNEL_RUNTIME_R0.md)** for:
 
 1. Typed per-operation ABIs and manifest versions.
 2. SM61-first, per-architecture content-addressed kernel packages.
@@ -26,6 +40,6 @@ See **[DKR-R0 — ASD-first Dynamic Kernel Runtime](../docs/DYNAMIC_KERNEL_RUNTI
 5. Sequenced migration of F32, quantized GEMV/GEMM, convolution, MoE and other validated families.
 6. Physical-gate requirements before any Legacy/Extended integration.
 
-**RFC status:** the generic catalog and multi-operation dispatcher are not implemented. Do not interpret the design document as proof that FP8/FP4/MoE kernels are dynamically loadable today, and do not merge to `extended` until the targeted gates pass.
+**Current status:** the generic verified catalog exists; executable multi-operation adapters and GPU qualification remain pending. Do not interpret the inventory as proof that FP8/FP4/MoE kernels run dynamically today, and do not merge to `extended` until their targeted gates pass.
 
 The permanent objective is to compile the Rust host environment only when its own sources/ABI change, then select and qualify architecture-specific kernels via external artifacts and ASD profiles without rebuilding that host for an ordinary kernel/profile change.

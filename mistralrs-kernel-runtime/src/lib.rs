@@ -212,11 +212,14 @@ pub fn compare(actual: &[f32], expected: &[f32]) -> Result<f32> {
 }
 
 pub mod profile;
+pub mod universal;
 
 #[cfg(feature = "cuda")]
 pub mod cuda;
 #[cfg(feature = "cuda")]
 pub mod session;
+#[cfg(feature = "cuda")]
+pub mod universal_cuda;
 
 pub fn execution_evidence() -> serde_json::Value {
     #[cfg(feature = "cuda")]

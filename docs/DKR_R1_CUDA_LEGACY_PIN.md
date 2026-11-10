@@ -1,4 +1,4 @@
-# DKR-R1 — Candle CUDA Legacy pin candidate
+# DKR-R1 - Candle CUDA Legacy pin and reproducible lock
 
 **Owner:** `haricot/mistral.rs` branch `dynamic-kernel-runtime` (no Candle branch rename).
 **Candidate branch:** `integration/dkr-r1-cuda-legacy-pin`.
@@ -23,35 +23,34 @@ The Mistral `dynamic-kernel-runtime` branch stays the DKR-R1 host.
 `extended` is a later composition target, **not** this base.
 The `candle-legacy-dispatch` format-neutral linear contract is a
 separate candidate to inspect before reusing adapters; it is not merged here.
-No ASD policy, CUDA source, ABI, PTX, benchmark or release build was changed.
+No existing ASD policy, CUDA source, PTX, benchmark or release build was changed.
+The new independent typed ABI is documented in `DKR_R1_TYPED_ABI_AND_COVERAGE.md`.
 
-## Required lockfile gate
+## Completed lockfile gate
 
-**Do not promote this candidate with an old Cargo.lock.** The new Candle
-workspace version is 0.11.1, and its resolved dependency graph may require
-new lock entries (including the registry version of `zip`).
-This candidate deliberately retains the old lockfile until Cargo can
-regenerate and check it. Manually changing Git source hashes in Cargo.lock
-would not be sufficient.
+**Do not promote with an old Cargo.lock.** Cargo has now resolved the new Candle
+workspace version 0.11.1 and its dependencies, including registry `zip` 9.1.3.
+The lockfile was updated by Cargo, not by manually replacing source hashes.
 
 In a Cargo-equipped checkout of the candidate branch, run:
 
 ```sh
-cargo metadata --format-version 1 --no-deps > /dev/null
+cargo update -p candle-core
+cargo update -p zip@9.5.0 --precise 9.1.3
+cargo metadata --format-version 1 --no-deps --locked > /dev/null
 git diff -- Cargo.toml Cargo.lock
 ```
 
-This resolves the new lockfile **without compiling Rust or invoking NVCC**.
+This resolved the new lockfile **without compiling Rust or invoking NVCC**.
 Review the lockfile delta before committing it. A changed Candle source
 identity is expected to invalidate the corresponding build cache entry;
 unchanged environments and A/B/A2 profile replay must continue to reuse
 exact binaries and PTX.
 
-After the lockfile is committed, run the smallest relevant CPU-only check
-using an existing Rust build cache; only then schedule a single SM61 CUDA
-qualification of the updated candidate. Do not launch multi-architecture
-rebuilds. Continue to use the original F32 binary and PTX for historical
-A/B/A2 replay; do not label it as evidence for the new pin.
+The scoped CPU-only runtime test has passed on the new lock. A new SM61 CUDA
+qualification remains required; do not launch multi-architecture rebuilds.
+Continue to use the original F32 binary and PTX for historical A/B/A2 replay;
+do not label them as evidence for the new pin.
 
 ## DKR-R1 next contract
 
