@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 
-from fixture import create_model, MODEL_SHAPES, OPERATOR_SHAPE, ROW_COUNTS
+from fixture import create_model, HIDDEN, INTERMEDIATE, MODEL_SHAPES, OPERATOR_SHAPE, ROW_COUNTS
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
@@ -93,7 +93,17 @@ def check_provider(report, selected, engine):
     if engine:
         assert evidence["prepared_layers"] >= 8
         assert report["provider_after_load"]["prepared_layers"] >= 8
-        assert all((m, n, k) in shapes for m in [1, 3] for n, k in MODEL_SHAPES)
+        # The fixture packs the gate/up projections (2 * INTERMEDIATE, HIDDEN).
+        # Individual (INTERMEDIATE, HIDDEN) decisions must remain available in the
+        # exact ASD profile, but are not submitted when the packed path is used.
+        active_pairs = [(HIDDEN, HIDDEN), (HIDDEN, INTERMEDIATE),
+                        (2 * INTERMEDIATE, HIDDEN)]
+        required = {(m, n, k) for m in (1, 3) for n, k in active_pairs}
+        missing = required - shapes
+        assert not missing, f"model did not execute required provider shapes: {sorted(missing)}"
+        declared = {tuple(d["shape"]) for d in selected["decisions"]}
+        required_profile = {(m, n, k) for m in (1, 3) for n, k in MODEL_SHAPES}
+        assert not (required_profile - declared), "profile omits exact model decisions"
     else:
         assert all((m, *OPERATOR_SHAPE) in shapes for m in [1, 3, 6])
 
@@ -289,3 +299,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
