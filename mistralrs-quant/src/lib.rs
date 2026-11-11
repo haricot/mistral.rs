@@ -18,7 +18,7 @@ mod afq;
 mod bitsandbytes;
 mod blockwise_fp8;
 mod cpu_rms_norm;
-#[cfg(feature = "dkr-reduce-norm")]
+#[cfg(any(feature = "dkr-reduce-norm", feature = "dkr-gemv"))]
 mod dkr_cuda;
 #[cfg(feature = "dkr-reduce-norm")]
 mod softmax_sinks_dynamic;

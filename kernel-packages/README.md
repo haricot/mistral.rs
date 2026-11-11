@@ -428,3 +428,39 @@ The ignored `dkr_rounded_rms_rope_gpu` candidate test covers three
 dtypes and both block sizes. Its numerical agreement and performance
 have **not** been qualified on SM61. The cudaforge external package
 builder now handles 11 CUDA source families.
+
+
+## DKR-R1.15 — Dense decode GEMV (source-staged, unqualified)
+
+A new opt-in feature, \`mistralrs-quant/dkr-gemv\` (also forwarded by
+\`mistralrs-core/dkr-gemv\`), provides an **external, Pascal-compatible
+SIMT GEMV** for contiguous F16/BF16/F32 tensors. The shapes are weight
+[M, K], input [B, K] (B <= 8), optional bias [M], output [B, M].
+Contiguous view offsets are supported without copying data.
+
+\`linear.gemv.plain.b128.v1\` and
+\`linear.gemv.bias.b128.v1\` are **different typed ABI signatures**.
+No nullable bias tensor is used; the separate kernels and manifests
+avoid optional runtime argument overhead. All kernels use [128, 1, 1]
+threads and a [M, B, 1] grid, performing warp SIMT reductions and F32
+accumulation. No SM70+ instructions or tensor cores are required.
+The thread-local \`LaunchPlanCache\` prevalidates the resolved variant.
+
+**Scope:** This is the narrow decode-phase GEMV route, not dense
+prefill GEMM or the legacy static GEMV tuning matrix. The original
+static dispatcher remains the fallback for noncontiguous and other
+unsupported cases. A deliberate reference SIMT implementation gives
+a parity baseline; the new route is **not yet performance-qualified**
+against the previous optimized GEMV, cuBLAS(Lt), or Pascal DP4A.
+Do not enable the opt-in route by default before the grouped GPU
+parity/performance tests pass.
+
+Test candidate: \`dkr_dense_gemv_gpu\` (F16/BF16/F32, batches 1/3/8,
+with/without bias, odd K). It is ignored until the next grouped GPU
+qualification. The previous local **15/15 DKR-R1.14-SM61** result
+remains the reference baseline.
+
+**Build-cache invariant:** do not set, unset, or export
+\`CUDA_COMPUTE_CAP\` from these build scripts. Pass only
+\`--cc 61\` to the stand-alone PTX builder, preserving the user's
+existing Cargo/NVCC environment and static-kernel build cache.

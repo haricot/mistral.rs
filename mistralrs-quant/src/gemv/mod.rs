@@ -12,6 +12,8 @@
 
 #[cfg(feature = "cuda")]
 mod ffi;
+#[cfg(feature = "dkr-gemv")]
+mod dynamic;
 
 #[cfg(feature = "cuda")]
 use candle_core::{
@@ -313,6 +315,15 @@ pub fn gemv(x: &Tensor, w: &Tensor, bias: Option<&Tensor>) -> Result<Tensor> {
         *shape.last_mut().unwrap() = m;
         shape
     };
+
+    // External DKR route is opt-in. The original static path remains the
+    // fallback for noncontiguous/special layouts and unported cases.
+    #[cfg(feature = "dkr-gemv")]
+    if let Some(result) = dynamic::try_gemv(
+        x, w, bias, batch_size, m, k, &output_shape,
+    )? {
+        return Ok(result);
+    }
 
     // Dispatch based on dtype
     match x.dtype() {

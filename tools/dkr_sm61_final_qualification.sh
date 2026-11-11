@@ -9,12 +9,10 @@ if [[ "${DKR_APPROVE_FINAL:-0}" != "1" ]]; then
 fi
 
 cd "$(dirname "$0")/.."
-: "${CUDA_COMPUTE_CAP:=61}"
-if [[ "$CUDA_COMPUTE_CAP" != "61" ]]; then
-  echo "Refusing non-SM61 compilation: CUDA_COMPUTE_CAP=$CUDA_COMPUTE_CAP" >&2
-  exit 2
-fi
-export CUDA_COMPUTE_CAP
+# NEVER set, unset, or export CUDA_COMPUTE_CAP here:
+# changing its value invalidates upstream build.rs caches and can rebuild hours
+# of static kernels. Only the external PTX builder receives --cc 61.
+echo "CUDA_COMPUTE_CAP left unchanged (${CUDA_COMPUTE_CAP-<unset>})"
 
 if [[ -n "${DKR_CANDLE_DIR:-}" ]]; then
   python3 tools/dkr_operation_matrix.py --candle-dir "$DKR_CANDLE_DIR" \
@@ -38,7 +36,7 @@ cargo nextest run \
   -p mistralrs-kernel-runtime \
   -p mistralrs-quant \
   -p mistralrs-core \
-  --features 'mistralrs-core/cuda-legacy,mistralrs-core/dkr-moe,mistralrs-core/dkr-indexed-copy,mistralrs-core/dkr-gated-add,mistralrs-core/dkr-reduce-norm,mistralrs-core/dkr-add-rms-norm,mistralrs-core/dkr-causal-mask,mistralrs-core/dkr-logits,mistralrs-core/dkr-rms-variants,mistralrs-core/dkr-input-pad,mistralrs-core/dkr-ssm,mistralrs-core/dkr-rounded-rope' \
+  --features 'mistralrs-core/cuda-legacy,mistralrs-core/dkr-moe,mistralrs-core/dkr-indexed-copy,mistralrs-core/dkr-gated-add,mistralrs-core/dkr-reduce-norm,mistralrs-core/dkr-add-rms-norm,mistralrs-core/dkr-causal-mask,mistralrs-core/dkr-logits,mistralrs-core/dkr-rms-variants,mistralrs-core/dkr-input-pad,mistralrs-core/dkr-ssm,mistralrs-core/dkr-rounded-rope,mistralrs-core/dkr-gemv' \
   --run-ignored=all \
   --no-fail-fast \
   --test-threads=1 \
