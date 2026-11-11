@@ -1,15 +1,9 @@
+use crate::cuda::kernel_runtime::kernel_cache;
 use candle_core::{DType, Result, Tensor};
-use mistralrs_kernel_runtime::{
-    universal::{Argument, ElementType, LaunchRequest},
-    universal_cuda::KernelExecutionCache,
-};
-use std::{path::PathBuf, sync::OnceLock};
+use mistralrs_kernel_runtime::universal::{Argument, ElementType, LaunchRequest};
 
 const OPERATION: &str = "moe.grouped_gemm.v1";
-const PACKAGE_ROOT_ENV: &str = "DKR_KERNEL_PACKAGES";
 const MAX_ROWS: usize = u32::MAX as usize;
-
-static KERNEL_CACHE: OnceLock<std::result::Result<KernelExecutionCache, String>> = OnceLock::new();
 
 macro_rules! check {
     ($condition:expr, $message:literal) => {
@@ -17,22 +11,6 @@ macro_rules! check {
             candle_core::bail!($message)
         }
     };
-}
-
-fn kernel_cache() -> Result<&'static KernelExecutionCache> {
-    KERNEL_CACHE
-        .get_or_init(|| {
-            std::env::var_os(PACKAGE_ROOT_ENV)
-                .map(PathBuf::from)
-                .ok_or_else(|| {
-                    format!("{PACKAGE_ROOT_ENV} must point to trusted CUDA kernel packages")
-                })
-                .and_then(|root| {
-                    KernelExecutionCache::discover(&root).map_err(|error| error.to_string())
-                })
-        })
-        .as_ref()
-        .map_err(|error| candle_core::Error::Msg(error.clone()))
 }
 
 fn tensor_arg(dtype: ElementType, shape: Vec<usize>) -> Argument {

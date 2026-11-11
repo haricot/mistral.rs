@@ -108,6 +108,21 @@ parity requires an A1/B/A2 comparison using the same underlying kernel. This
 step does not migrate the remaining CUDA source families or remove build-time
 specialization elsewhere.
 
+### DKR-R1.3 external indexed-copy boundary (experimental)
+
+`dkr-indexed-copy` adds a second production adapter on the same shared CUDA
+execution cache. This covers a distinct operation family: in-place indexed row
+copying for the KV cache. The external module has two bit-preserving PTX entry
+points and three typed manifests for F16, BF16 and F32. The single-architecture
+builder generates the packages separately from Cargo and reuses the unchanged
+output. The static CUDA source is excluded when the feature is enabled.
+
+The optional path preserves storage offsets and rejects invalid destination
+indices in the device kernel. A combined ignored GPU test filter `dkr_` runs
+MoE and indexed-copy tests from one compiled `mistralrs-core` binary. This is
+not a claim that the other source families are already dynamic or that GPU
+performance is unchanged.
+
 1. **R1a, closed**: exact Candle pin/lock regeneration; independent typed manifest, catalogue and artifact loading; host-only tests and source classification.
 2. **R1b, required**: typed CUDA tensor launch adapters, architecture-feature negotiation and explicit preallocation memory budget (especially packed FP8/FP4 and MoE); negative tests for invalid pointer/order/context, fallback absence and numerical parity.
 3. **R1c, required**: migrate operation families incrementally from Candle's `cuda_legacy` and Mistral's CUDA launch points; keep unsupported SM61 MMA/FlashAttention variants behind honest capability rejection and choose qualified SIMT alternatives.

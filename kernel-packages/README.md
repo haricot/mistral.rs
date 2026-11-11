@@ -96,3 +96,26 @@ is not numerically qualified on real hardware until the ignored GPU test passes.
 Routed token indices must satisfy the same upstream invariants as the legacy
 MoE: valid expert IDs and a permutation of output token indices. The current
 typed ABI accepts contiguous zero-offset tensors; other layouts are rejected.
+
+## DKR-R1.3: external indexed row copy
+
+The optional `dkr-indexed-copy` feature routes cache-row copying through the
+same generic `KernelExecutionCache` as MoE. It excludes the static
+`indexed_copy.cu` kernel from the Mistralrs CUDA build, while the legacy Rust
+adapter remains available when the feature is disabled.
+
+```sh
+python3 kernel-packages/cuda/indexed-copy/build.py --cc 61
+export DKR_KERNEL_PACKAGES="$PWD/kernel-packages/build/cuda"
+cargo test -p mistralrs-core --locked \
+  --features 'cuda-legacy,dkr-moe,dkr-indexed-copy' \
+  --lib dkr_ -- --ignored --nocapture
+```
+
+The indexed-copy source compiles exactly once per requested compute capability.
+Three typed manifests (F16, BF16, F32) reference the same PTX bytes, with a
+16-bit or 32-bit entry point according to element size. The kernel copies bits
+without floating-point arithmetic, rejects destination indices outside the
+output row count, and preserves nonzero storage offsets through checked device
+pointers. The test validates in-place results and repeated-launch cache reuse.
+It still requires real-GPU qualification before use in model inference.

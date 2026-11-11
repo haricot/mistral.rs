@@ -133,8 +133,9 @@ fn main() {
 
         let compute_cap = builder.get_compute_cap().unwrap_or(80);
 
+        let mut excluded = Vec::new();
         if cfg!(feature = "dkr-moe") {
-            builder = builder.exclude(&[
+            excluded.extend_from_slice(&[
                 "moe_gemm_wmma.cu",
                 "moe_gemm.cu",
                 "moe_gemv.cu",
@@ -143,7 +144,13 @@ fn main() {
         } else if compute_cap >= 70 {
             println!("cargo:rustc-cfg=has_moe_wmma");
         } else {
-            builder = builder.exclude(&["moe_gemm_wmma.cu", "moe_gemm.cu"]);
+            excluded.extend_from_slice(&["moe_gemm_wmma.cu", "moe_gemm.cu"]);
+        }
+        if cfg!(feature = "dkr-indexed-copy") {
+            excluded.push("indexed_copy.cu");
+        }
+        if !excluded.is_empty() {
+            builder = builder.exclude(&excluded);
         }
 
         let allow_legacy_bf16 = cfg!(feature = "cuda-legacy-bf16") && compute_cap == 61;
