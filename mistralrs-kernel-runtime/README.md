@@ -42,4 +42,12 @@ See **[DKR-R0 historical ASD-first RFC](../docs/DYNAMIC_KERNEL_RUNTIME_R0.md)** 
 
 **Current status:** the generic verified catalog exists; executable multi-operation adapters and GPU qualification remain pending. Do not interpret the inventory as proof that FP8/FP4/MoE kernels run dynamically today, and do not merge to `extended` until their targeted gates pass.
 
+## DKR-R2 batched source preparation
+
+See [DKR-R2 single-batch preparation](../docs/DKR_R2_SINGLE_BATCH_PREPARATION.md)
+for the exhaustive operation-accounting matrix, the first 22 external SM61 CUDA
+entry candidates, fixed optional RMSNorm signatures, sparse logits contracts,
+and the prevalidated launch-plan API. This is **source-only** progress:
+no Rust/NVCC build, GPU qualification or runtime activation has occurred.
+
 The permanent objective is to compile the Rust host environment only when its own sources/ABI change, then select and qualify architecture-specific kernels via external artifacts and ASD profiles without rebuilding that host for an ordinary kernel/profile change.
