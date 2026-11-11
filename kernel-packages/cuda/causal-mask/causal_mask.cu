@@ -1,6 +1,6 @@
 #include <cuda_runtime.h>
 #include <cstdint>
-#include <limits>
+#include <math_constants.h>
 
 // Direct external equivalent of the in-place F32 mask in core/sort.cu.
 extern "C" __global__ void dkr_causal_mask_f32(
@@ -16,6 +16,6 @@ extern "C" __global__ void dkr_causal_mask_f32(
   const int q_idx = (idx / kv_len) % q_len;
   const int q_pos = prefix_len + q_offset + q_idx;
   if (kv_idx > q_pos) {
-    scores[idx] = -std::numeric_limits<float>::infinity();
+    scores[idx] = -CUDART_INF_F;
   }
 }

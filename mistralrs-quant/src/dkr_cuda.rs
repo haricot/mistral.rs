@@ -45,11 +45,6 @@ pub(crate) fn tensor(dtype: ElementType, shape: Vec<usize>) -> Argument {
     }
 }
 
-#[cfg(test)]
-    pub(crate) fn len(&self) -> usize {
-        self.entries.len()
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -57,7 +52,7 @@ mod tests {
     use std::cell::Cell;
 
     #[test]
-    fn dkr_reduction_hot_plan_cache() -> Result<()> {
+    fn dkr_reduction_launch_plan_cache() -> Result<()> {
         let prepares = Cell::new(0);
         let mut cache = LaunchPlanCache::<u32, u32>::new();
         for _ in 0..3 {

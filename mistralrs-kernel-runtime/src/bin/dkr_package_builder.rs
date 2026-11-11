@@ -61,6 +61,7 @@ fn compile_ptx(
         .compute_cap(cc)
         .arg("-std=c++17")
         .arg("-O3")
+        .arg("--expt-relaxed-constexpr")
         .arg("-U__CUDA_NO_HALF_OPERATORS__")
         .arg("-U__CUDA_NO_HALF_CONVERSIONS__")
         .arg("-U__CUDA_NO_HALF2_OPERATORS__")
