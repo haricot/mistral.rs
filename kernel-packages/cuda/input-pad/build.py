@@ -4,6 +4,7 @@
 import argparse
 import hashlib
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -19,6 +20,7 @@ def main():
     parser.add_argument("--cc", type=int, required=True)
     parser.add_argument("--output", type=Path, default=Path("kernel-packages/build/cuda"))
     parser.add_argument("--nvcc", default="nvcc")
+    parser.add_argument("--ptx-file", type=Path, help="PTX already built by cudaforge")
     args = parser.parse_args()
     if not 50 <= args.cc <= 120:
         parser.error("unsupported compute capability")
@@ -31,7 +33,7 @@ def main():
         f"-code=compute_{args.cc}", "-std=c++17", "-O3",
         "-o", str(artifact), str(SOURCE),
     ]
-    version = subprocess.check_output([args.nvcc, "--version"])
+    version = (b"cudaforge:" + hashlib.sha256(args.ptx_file.read_bytes()).digest() if args.ptx_file else subprocess.check_output([args.nvcc, "--version"]))
     identity = digest(SOURCE.read_bytes() + version + "\0".join(command).encode())
     if (stamp.is_file() and stamp.read_text().strip() == identity
             and artifact.is_file() and manifest_file.is_file()
@@ -39,7 +41,10 @@ def main():
         print(f"DKR_INPUT_PAD_REUSED=PASS target_cc={args.cc}")
         return
     directory.mkdir(parents=True, exist_ok=True)
-    subprocess.run(command, check=True)
+    if args.ptx_file is not None:
+        shutil.copyfile(args.ptx_file, artifact)
+    else:
+        subprocess.run(command, check=True)
     tensor = lambda name, rank, access: {
         "kind": "tensor", "name": name, "dtype": "u32", "rank": rank, "access": access,
     }

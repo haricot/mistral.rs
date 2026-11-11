@@ -351,3 +351,53 @@ When the feature is enabled, `ssm.cu` is excluded from the static Mistral
 CUDA build; the CUDA legacy implementation remains selected when the
 feature is off. The ignored `dkr_ssm_scan_gpu` oracle tests all four
 lane factors and an odd, sub-warp state width. No GPU run has occurred.
+
+
+## DKR-R1.13: shared launch-plan cache and cudaforge package builder
+
+The per-thread launch-plan cache implementation is now shared by
+`mistralrs-core` and `mistralrs-quant`, via the public
+`mistralrs-kernel-runtime::launch_plan_cache::LaunchPlanCache`.
+The local cache instances are called `THREAD_LAUNCH_PLANS`.
+Preparation is performed only on a new shape/variant/device key, with
+a per-cache capacity limit of 64. The generic `PrevalidatedLaunchPlan`
+still enforces module/entry/configuration validation before the hot path.
+
+**Build backend**: `cudaforge = 0.1.6` is already pinned in the workspace.
+The optional Cargo feature `mistralrs-kernel-runtime/builder-cudaforge`
+makes `dkr_package_builder` available. The builder calls
+`KernelBuilder::build_ptx()` for each of the ten external CUDA source
+families, always for an explicitly specified architecture. The
+`cudaforge` per-source hash cache handles incremental rebuilds.
+
+Each Python `kernel-packages/cuda/*/build.py` emitter now accepts
+`--ptx-file` to **package a PTX produced by cudaforge** and skip NVCC.
+MoE uses `--ptx-dir` to preserve its two compile-time F16 and BF16
+specializations. Python still generates the typed manifest JSON, SHA256,
+variant paths and content cache; it does not compile kernels in this mode.
+The previous Python+NVCC path remains available for rollback.
+
+The new Rust builder is intentionally independent of the
+`mistralrs-core` application build: no JIT compilation takes place in the
+token decoding hot path, and **no GPU target other than the explicit
+`--cc` is generated**.
+
+To invoke it in the eventual SM61 qualification campaign (not yet run):
+
+```sh
+CUDA_COMPUTE_CAP=61 cargo run -p mistralrs-kernel-runtime \
+  --features builder-cudaforge --bin dkr_package_builder -- \
+  --cc 61 --output kernel-packages/build/cuda
+```
+
+The source-coverage audit is `tools/dkr_operation_matrix.py`, which
+separates *source classified*, *external adapter staged*, and
+*SM61 qualified*. Its verdict deliberately remains
+`MIGRATION_INCOMPLETE` while any source families remain static or
+their GPU parity gates are untested.
+
+A combined, opt-in final-test entry point is
+`tools/dkr_sm61_final_qualification.sh`. It refuses to launch unless
+`DKR_APPROVE_FINAL=1`; the test campaign must only be approved once all
+targeted migrations are complete. It uses one SM61 package build and
+one feature-unified `cargo nextest` campaign, not per-operation CI.

@@ -11,10 +11,12 @@ anyhow.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sha2.workspace = true
+cudaforge = { workspace = true, optional = true }
 
 [features]
 default = []
 cuda = ["candle-core/cuda"]
+builder-cudaforge = ["dep:cudaforge"]
 
 [dev-dependencies]
 tempfile.workspace = true
@@ -22,3 +24,8 @@ tempfile.workspace = true
 [[example]]
 name = "dkr_scale_cuda"
 required-features = ["cuda"]
+
+[[bin]]
+name = "dkr_package_builder"
+path = "src/bin/dkr_package_builder.rs"
+required-features = ["builder-cudaforge"]

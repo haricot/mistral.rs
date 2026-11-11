@@ -29,6 +29,7 @@ def main():
     parser.add_argument("--cc", type=int, required=True)
     parser.add_argument("--output", type=Path, default=Path("kernel-packages/build/cuda"))
     parser.add_argument("--nvcc", default="nvcc")
+    parser.add_argument("--ptx-file", type=Path, help="PTX already built by cudaforge")
     args = parser.parse_args()
     if not 50 <= args.cc <= 120:
         parser.error("unsupported CUDA compute capability")
@@ -42,8 +43,7 @@ def main():
         f"-code=compute_{args.cc}", "-std=c++17", "-O3", "--use_fast_math",
         "-o", str(artifact), str(SOURCE),
     ]
-    identity = digest(SOURCE.read_bytes() + subprocess.check_output(
-        [args.nvcc, "--version"]) + "\0".join(cmd).encode())
+    identity = digest(SOURCE.read_bytes() + (b"cudaforge:" + hashlib.sha256(args.ptx_file.read_bytes()).digest() if args.ptx_file else subprocess.check_output([args.nvcc, "--version"])) + "\0".join(cmd).encode())
     variants = (1, 2, 4, 8)
     if stamp.is_file() and stamp.read_text().strip() == identity and all(
         (root / f"cf{cf}" / "manifest.json").is_file()
@@ -54,7 +54,10 @@ def main():
     ):
         print(f"DKR_SSM_REUSED=PASS target_cc={args.cc}")
         return
-    subprocess.run(cmd, check=True)
+    if args.ptx_file is not None:
+        shutil.copyfile(args.ptx_file, artifact)
+    else:
+        subprocess.run(cmd, check=True)
     sha = digest(artifact.read_bytes())
     signature = [
         tensor("x", 4, "read"), tensor("dt", 3, "read"),

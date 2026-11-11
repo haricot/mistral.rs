@@ -27,6 +27,7 @@ def main() -> None:
     parser.add_argument("--cc", type=int, required=True)
     parser.add_argument("--output", type=Path, default=Path("kernel-packages/build/cuda"))
     parser.add_argument("--nvcc", default="nvcc")
+    parser.add_argument("--ptx-file", type=Path, help="PTX already built by cudaforge")
     args = parser.parse_args()
     if not 50 <= args.cc <= 120:
         parser.error("unsupported CUDA compute capability")
@@ -51,7 +52,7 @@ def main() -> None:
         str(artifact),
         str(SOURCE),
     ]
-    nvcc_version = subprocess.check_output([args.nvcc, "--version"])
+    nvcc_version = (b"cudaforge:" + hashlib.sha256(args.ptx_file.read_bytes()).digest() if args.ptx_file else subprocess.check_output([args.nvcc, "--version"]))
     identity = digest(SOURCE.read_bytes() + nvcc_version + " ".join(command).encode())
     paths = [root / dtype / mode for dtype, mode, _ in VARIANTS]
     if stamp.is_file() and stamp.read_text().strip() == identity:
@@ -65,7 +66,10 @@ def main() -> None:
             print(f"DKR_GATED_ADD_REUSED=PASS target_cc={args.cc}")
             return
 
-    subprocess.run(command, check=True)
+    if args.ptx_file is not None:
+        shutil.copyfile(args.ptx_file, artifact)
+    else:
+        subprocess.run(command, check=True)
     for dtype, mode, entry in VARIANTS:
         folder = root / dtype / mode
         folder.mkdir(parents=True, exist_ok=True)

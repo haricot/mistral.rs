@@ -4,6 +4,7 @@
 import argparse
 import hashlib
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -21,11 +22,12 @@ def main() -> None:
     parser.add_argument("--cc", type=int, required=True)
     parser.add_argument("--output", type=Path, default=Path("kernel-packages/build/cuda"))
     parser.add_argument("--nvcc", default="nvcc")
+    parser.add_argument("--ptx-dir", type=Path, help="directory with cudaforge f16/bf16 PTX")
     args = parser.parse_args()
     if not 50 <= args.cc <= 120:
         parser.error("unsupported CUDA compute capability")
 
-    nvcc_version = subprocess.check_output([args.nvcc, "--version"])
+    nvcc_version = (b"cudaforge:" if args.ptx_dir else subprocess.check_output([args.nvcc, "--version"]))
     for variant, element_type, mode in (("f16", "f16", "0"), ("bf16", "bf16", "1")):
         root = args.output / f"sm{args.cc}" / "moe" / variant
         root.mkdir(parents=True, exist_ok=True)
@@ -44,14 +46,19 @@ def main() -> None:
             str(artifact),
             str(SOURCE),
         ]
-        identity = digest(SOURCE.read_bytes() + nvcc_version + " ".join(command).encode())
+        prebuilt = args.ptx_dir / variant / "moe.ptx" if args.ptx_dir else None
+        identity = digest(SOURCE.read_bytes() + nvcc_version + " ".join(command).encode()
+                          + (bytes.fromhex(digest(prebuilt.read_bytes())) if prebuilt else b""))
         if manifest.is_file() and artifact.is_file() and stamp.is_file() and stamp.read_text().strip() == identity:
             existing = json.loads(manifest.read_text())
             if existing["sha256"] == digest(artifact.read_bytes()):
                 print(f"DKR_MOE_REUSED={variant} target_cc={args.cc}")
                 continue
 
-        subprocess.run(command, check=True)
+        if prebuilt is not None:
+            shutil.copyfile(prebuilt, artifact)
+        else:
+            subprocess.run(command, check=True)
         payload = {
             "schema": "DKR-KERNEL-MODULE-V1",
             "abi": "dkr.typed.v1",
