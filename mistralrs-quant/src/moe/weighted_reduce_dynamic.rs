@@ -1,4 +1,4 @@
-use crate::dkr_cuda::{catalog, dtype, tensor, HotPlanCache};
+use crate::dkr_cuda::{catalog, dtype, tensor, LaunchPlanCache};
 use candle_core::{
     cuda::cudarc::driver::{DevicePtr, DevicePtrMut, PushKernelArg},
     CudaStorage, DType, Result, Storage, Tensor,
@@ -21,8 +21,8 @@ struct PlanKey {
 }
 
 thread_local! {
-    static HOT_PLANS: RefCell<HotPlanCache<PlanKey, PrevalidatedLaunchPlan>> =
-        RefCell::new(HotPlanCache::new());
+    static THREAD_LAUNCH_PLANS: RefCell<LaunchPlanCache<PlanKey, PrevalidatedLaunchPlan>> =
+        RefCell::new(LaunchPlanCache::new());
 }
 
 pub fn moe_weighted_reduce(input: &Tensor, weights: &Tensor, output_dtype: DType) -> Result<Tensor> {
@@ -65,7 +65,7 @@ pub fn moe_weighted_reduce(input: &Tensor, weights: &Tensor, output_dtype: DType
         hidden,
     };
 
-    HOT_PLANS.with(|hot| {
+    THREAD_LAUNCH_PLANS.with(|hot| {
         hot.borrow_mut().with_plan(
             key,
             input.device(),
@@ -186,9 +186,9 @@ mod tests {
                     .to_dtype(input_dtype)?;
                 let weights = Tensor::from_vec(route_weights.to_vec(), (2, 3), &device)?;
                 let result = moe_weighted_reduce(&input, &weights, output_dtype)?;
-                let cached = HOT_PLANS.with(|hot| hot.borrow().len());
+                let cached = THREAD_LAUNCH_PLANS.with(|hot| hot.borrow().len());
                 let repeated = moe_weighted_reduce(&input, &weights, output_dtype)?;
-                assert_eq!(cached, HOT_PLANS.with(|hot| hot.borrow().len()));
+                assert_eq!(cached, THREAD_LAUNCH_PLANS.with(|hot| hot.borrow().len()));
                 assert_eq!(result.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?, expected);
                 assert_eq!(
                     result.to_dtype(DType::F32)?.to_vec2::<f32>()?,

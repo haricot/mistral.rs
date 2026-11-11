@@ -1,4 +1,4 @@
-use crate::cuda::kernel_runtime::{kernel_cache, HotPlanCache};
+use crate::cuda::kernel_runtime::{kernel_cache, LaunchPlanCache};
 use candle_core::{
     backend::BackendStorage,
     cuda::cudarc::driver::{DevicePtr, DevicePtrMut, PushKernelArg},
@@ -22,8 +22,8 @@ struct ScanKey {
 }
 
 thread_local! {
-    static HOT_PLANS: RefCell<HotPlanCache<ScanKey, PrevalidatedLaunchPlan>> =
-        RefCell::new(HotPlanCache::new());
+    static THREAD_LAUNCH_PLANS: RefCell<LaunchPlanCache<ScanKey, PrevalidatedLaunchPlan>> =
+        RefCell::new(LaunchPlanCache::new());
 }
 
 fn tensor(shape: Vec<usize>) -> Argument {
@@ -169,7 +169,7 @@ pub(crate) fn selective_scan_cuda(
         d_state: d_state_u32, items,
     };
     let device = Device::Cuda(dev.clone());
-    HOT_PLANS.with(|hot| {
+    THREAD_LAUNCH_PLANS.with(|hot| {
         hot.borrow_mut().with_plan(
             key,
             &device,

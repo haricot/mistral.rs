@@ -1,4 +1,4 @@
-use crate::cuda::kernel_runtime::{kernel_cache, HotPlanCache};
+use crate::cuda::kernel_runtime::{kernel_cache, LaunchPlanCache};
 use candle_core::{Device, Result};
 use mistralrs_kernel_runtime::universal::{Argument, ElementType, LaunchRequest};
 use mistralrs_kernel_runtime::universal_cuda::PrevalidatedLaunchPlan;
@@ -16,8 +16,8 @@ struct RmsPlanKey {
 }
 
 thread_local! {
-    static HOT_PLANS: RefCell<HotPlanCache<RmsPlanKey, PrevalidatedLaunchPlan>> =
-        RefCell::new(HotPlanCache::new());
+    static THREAD_LAUNCH_PLANS: RefCell<LaunchPlanCache<RmsPlanKey, PrevalidatedLaunchPlan>> =
+        RefCell::new(LaunchPlanCache::new());
 }
 
 fn tensor(dtype: ElementType, shape: Vec<usize>) -> Argument {
@@ -101,7 +101,7 @@ pub(crate) fn with_rms_plan<T>(
         scaled,
         second_norm,
     };
-    HOT_PLANS.with(|hot| {
+    THREAD_LAUNCH_PLANS.with(|hot| {
         hot.borrow_mut()
             .with_plan(key, device, || prepare(key, device), launch)
     })

@@ -1,4 +1,4 @@
-use crate::cuda::kernel_runtime::{kernel_cache, HotPlanCache};
+use crate::cuda::kernel_runtime::{kernel_cache, LaunchPlanCache};
 use candle_core::{
     cuda::cudarc::driver::{DevicePtr, DevicePtrMut, PushKernelArg},
     CudaStorage, DType, Result, Storage, Tensor,
@@ -20,8 +20,8 @@ struct GatedAddPlanKey {
 }
 
 thread_local! {
-    static HOT_PLANS: RefCell<HotPlanCache<GatedAddPlanKey, PrevalidatedLaunchPlan>> =
-        RefCell::new(HotPlanCache::new());
+    static THREAD_LAUNCH_PLANS: RefCell<LaunchPlanCache<GatedAddPlanKey, PrevalidatedLaunchPlan>> =
+        RefCell::new(LaunchPlanCache::new());
 }
 
 fn tensor(dtype: ElementType, shape: Vec<usize>) -> Argument {
@@ -97,7 +97,7 @@ pub(crate) fn try_sigmoid_gated_add(
         unreachable!()
     };
 
-    HOT_PLANS.with(|hot| {
+    THREAD_LAUNCH_PLANS.with(|hot| {
         hot.borrow_mut().with_plan(
             key,
             residual.device(),
@@ -207,10 +207,10 @@ mod tests {
                 let gate = Tensor::zeros((2, 1), dtype, &device)?;
                 let output = try_sigmoid_gated_add(&residual, &value, &gate)?
                     .expect("eligible gated add must use DKR");
-                let prepared_before = HOT_PLANS.with(|hot| hot.borrow().len());
+                let prepared_before = THREAD_LAUNCH_PLANS.with(|hot| hot.borrow().len());
                 let repeated = try_sigmoid_gated_add(&residual, &value, &gate)?
                     .expect("eligible gated add must use DKR");
-                assert_eq!(prepared_before, HOT_PLANS.with(|hot| hot.borrow().len()));
+                assert_eq!(prepared_before, THREAD_LAUNCH_PLANS.with(|hot| hot.borrow().len()));
                 let expected = &residual + value.broadcast_mul(&candle_nn::ops::sigmoid(&gate)?)?;
                 assert_eq!(
                     output.to_dtype(DType::F32)?.to_vec2::<f32>()?,

@@ -1,4 +1,4 @@
-use crate::cuda::kernel_runtime::{kernel_cache, HotPlanCache};
+use crate::cuda::kernel_runtime::{kernel_cache, LaunchPlanCache};
 use candle_core::{DType, Result, Tensor};
 use mistralrs_kernel_runtime::universal::{Argument, ElementType, LaunchRequest};
 use mistralrs_kernel_runtime::universal_cuda::PrevalidatedLaunchPlan;
@@ -19,8 +19,8 @@ struct MoePlanKey {
 }
 
 thread_local! {
-    static HOT_PLANS: RefCell<HotPlanCache<MoePlanKey, PrevalidatedLaunchPlan>> =
-        RefCell::new(HotPlanCache::new());
+    static THREAD_LAUNCH_PLANS: RefCell<LaunchPlanCache<MoePlanKey, PrevalidatedLaunchPlan>> =
+        RefCell::new(LaunchPlanCache::new());
 }
 
 macro_rules! check {
@@ -179,7 +179,7 @@ where
     };
     let mut output = dev.alloc_zeros::<T>(output_count)?;
 
-    HOT_PLANS.with(|hot| {
+    THREAD_LAUNCH_PLANS.with(|hot| {
         hot.borrow_mut().with_plan(
             plan_key,
             device,
@@ -316,13 +316,13 @@ mod tests {
             let prepared_before = kernel_cache()?
                 .prepared_count()
                 .map_err(|error| candle_core::Error::Msg(error.to_string()))?;
-            let plans_before = HOT_PLANS.with(|hot| hot.borrow().len());
+            let plans_before = THREAD_LAUNCH_PLANS.with(|hot| hot.borrow().len());
             let repeated = moe_gemm(&input, &weights, &gating, &sorted, &experts, 1, true)?;
             let prepared_after = kernel_cache()?
                 .prepared_count()
                 .map_err(|error| candle_core::Error::Msg(error.to_string()))?;
             assert_eq!(prepared_before, prepared_after);
-            assert_eq!(plans_before, HOT_PLANS.with(|hot| hot.borrow().len()));
+            assert_eq!(plans_before, THREAD_LAUNCH_PLANS.with(|hot| hot.borrow().len()));
             let repeated = repeated
                 .to_dtype(DType::F32)?
                 .to_device(&Device::Cpu)?

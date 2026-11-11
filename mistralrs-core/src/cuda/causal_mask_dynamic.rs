@@ -1,4 +1,4 @@
-use crate::cuda::kernel_runtime::{kernel_cache, HotPlanCache};
+use crate::cuda::kernel_runtime::{kernel_cache, LaunchPlanCache};
 use candle_core::{
     backend::BackendStorage,
     cuda::cudarc::driver::{DevicePtrMut, PushKernelArg},
@@ -19,8 +19,8 @@ struct MaskPlanKey {
 }
 
 thread_local! {
-    static HOT_PLANS: RefCell<HotPlanCache<MaskPlanKey, PrevalidatedLaunchPlan>> =
-        RefCell::new(HotPlanCache::new());
+    static THREAD_LAUNCH_PLANS: RefCell<LaunchPlanCache<MaskPlanKey, PrevalidatedLaunchPlan>> =
+        RefCell::new(LaunchPlanCache::new());
 }
 
 struct CausalMaskF32 {
@@ -77,7 +77,7 @@ impl InplaceOp1 for CausalMaskF32 {
             q_len,
             kv_len,
         };
-        HOT_PLANS.with(|hot| {
+        THREAD_LAUNCH_PLANS.with(|hot| {
             hot.borrow_mut().with_plan(
                 key,
                 &device,
@@ -167,10 +167,10 @@ mod tests {
         for (q_offset, prefix_len) in [(0, 0), (1, 2)] {
             let scores = Tensor::zeros((2, 3, 5), DType::F32, &device)?;
             cuda_apply_causal_mask_f32(&scores, q_offset, prefix_len)?;
-            let cached = HOT_PLANS.with(|hot| hot.borrow().len());
+            let cached = THREAD_LAUNCH_PLANS.with(|hot| hot.borrow().len());
             let repeated = Tensor::zeros((2, 3, 5), DType::F32, &device)?;
             cuda_apply_causal_mask_f32(&repeated, q_offset, prefix_len)?;
-            assert_eq!(cached, HOT_PLANS.with(|hot| hot.borrow().len()));
+            assert_eq!(cached, THREAD_LAUNCH_PLANS.with(|hot| hot.borrow().len()));
             let actual = scores.flatten_all()?.to_vec1::<f32>()?;
             let repeated_values = repeated.flatten_all()?.to_vec1::<f32>()?;
             assert_eq!(actual, repeated_values);

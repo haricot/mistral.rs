@@ -1,4 +1,4 @@
-use crate::dkr_cuda::{catalog, dtype, tensor, HotPlanCache};
+use crate::dkr_cuda::{catalog, dtype, tensor, LaunchPlanCache};
 use candle_core::{
     cuda::cudarc::driver::{DevicePtr, DevicePtrMut, PushKernelArg},
     CudaStorage, DType, Device, Layout, Result, Shape, Storage, Tensor,
@@ -19,8 +19,8 @@ struct PlanKey {
 }
 
 thread_local! {
-    static HOT_PLANS: RefCell<HotPlanCache<PlanKey, PrevalidatedLaunchPlan>> =
-        RefCell::new(HotPlanCache::new());
+    static THREAD_LAUNCH_PLANS: RefCell<LaunchPlanCache<PlanKey, PrevalidatedLaunchPlan>> =
+        RefCell::new(LaunchPlanCache::new());
 }
 
 fn operation(columns: usize) -> &'static str {
@@ -85,7 +85,7 @@ pub(crate) fn cuda_fwd(
         columns,
     };
 
-    HOT_PLANS.with(|hot| {
+    THREAD_LAUNCH_PLANS.with(|hot| {
         hot.borrow_mut().with_plan(
             key,
             &device,
@@ -186,9 +186,9 @@ mod tests {
                 let sinks = Tensor::from_vec(vec![0.0f32, 1.0], (2,), &device)?
                     .to_dtype(dtype)?;
                 let result = crate::softmax_with_sinks(&logits, &sinks, None)?;
-                let cached = HOT_PLANS.with(|hot| hot.borrow().len());
+                let cached = THREAD_LAUNCH_PLANS.with(|hot| hot.borrow().len());
                 let repeated = crate::softmax_with_sinks(&logits, &sinks, None)?;
-                assert_eq!(cached, HOT_PLANS.with(|hot| hot.borrow().len()));
+                assert_eq!(cached, THREAD_LAUNCH_PLANS.with(|hot| hot.borrow().len()));
                 let flattened = result.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
                 for (index, &value) in flattened.iter().enumerate() {
                     let head = (index / (columns * 2)) % 2;

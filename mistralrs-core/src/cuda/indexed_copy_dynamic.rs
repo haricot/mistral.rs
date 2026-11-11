@@ -1,4 +1,4 @@
-use crate::cuda::kernel_runtime::{kernel_cache, HotPlanCache};
+use crate::cuda::kernel_runtime::{kernel_cache, LaunchPlanCache};
 use candle_core::{CpuStorage, CudaStorage, DType, InplaceOp3, Layout, Result, Tensor};
 use mistralrs_kernel_runtime::universal::{Argument, ElementType, LaunchRequest};
 use mistralrs_kernel_runtime::universal_cuda::PrevalidatedLaunchPlan;
@@ -15,8 +15,8 @@ struct IndexedCopyPlanKey {
 }
 
 thread_local! {
-    static HOT_PLANS: RefCell<HotPlanCache<IndexedCopyPlanKey, PrevalidatedLaunchPlan>> =
-        RefCell::new(HotPlanCache::new());
+    static THREAD_LAUNCH_PLANS: RefCell<LaunchPlanCache<IndexedCopyPlanKey, PrevalidatedLaunchPlan>> =
+        RefCell::new(LaunchPlanCache::new());
 }
 
 struct IndexedRowCopy {
@@ -89,7 +89,7 @@ impl InplaceOp3 for IndexedRowCopy {
         let row_view = row_slice.slice(rows_layout.start_offset()..);
         let (row_ptr, _row_guard) = row_view.device_ptr(&stream);
 
-        HOT_PLANS.with(|hot| {
+        THREAD_LAUNCH_PLANS.with(|hot| {
             hot.borrow_mut().with_plan(
                 plan_key,
                 &device,
@@ -248,13 +248,13 @@ mod tests {
             let prepared_before = kernel_cache()?
                 .prepared_count()
                 .map_err(|error| candle_core::Error::msg(error.to_string()))?;
-            let plans_before = HOT_PLANS.with(|hot| hot.borrow().len());
+            let plans_before = THREAD_LAUNCH_PLANS.with(|hot| hot.borrow().len());
             copy_rows(&src, &dst, &rows)?;
             let prepared_after = kernel_cache()?
                 .prepared_count()
                 .map_err(|error| candle_core::Error::msg(error.to_string()))?;
             assert_eq!(prepared_before, prepared_after);
-            assert_eq!(plans_before, HOT_PLANS.with(|hot| hot.borrow().len()));
+            assert_eq!(plans_before, THREAD_LAUNCH_PLANS.with(|hot| hot.borrow().len()));
             device.synchronize()?;
             assert_eq!(dst.to_dtype(DType::F32)?.to_vec2::<f32>()?, expected);
         }

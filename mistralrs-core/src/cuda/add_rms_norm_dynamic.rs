@@ -1,4 +1,4 @@
-use crate::cuda::kernel_runtime::{kernel_cache, HotPlanCache};
+use crate::cuda::kernel_runtime::{kernel_cache, LaunchPlanCache};
 use candle_core::{
     backend::BackendStorage,
     cuda::cudarc::driver::{DevicePtr, DevicePtrMut, PushKernelArg},
@@ -17,8 +17,8 @@ struct AddRmsNormKey {
 }
 
 thread_local! {
-    static HOT_PLANS: RefCell<HotPlanCache<AddRmsNormKey, PrevalidatedLaunchPlan>> =
-        RefCell::new(HotPlanCache::new());
+    static THREAD_LAUNCH_PLANS: RefCell<LaunchPlanCache<AddRmsNormKey, PrevalidatedLaunchPlan>> =
+        RefCell::new(LaunchPlanCache::new());
 }
 
 fn tensor(dtype: ElementType, shape: Vec<usize>) -> Argument {
@@ -143,7 +143,7 @@ pub fn cuda_add_rms_norm(
                 columns: columns_u32,
                 vectorized,
             };
-            HOT_PLANS.with(|hot| {
+            THREAD_LAUNCH_PLANS.with(|hot| {
                 hot.borrow_mut().with_plan(
                     key,
                     input.device(),
@@ -240,10 +240,10 @@ mod tests {
                 let residual = Tensor::ones((2, columns), dtype, &device)?;
                 let weight = Tensor::ones(columns, dtype, &device)?;
                 let (sum, norm) = cuda_add_rms_norm(&input, &residual, &weight, 1e-6)?;
-                let cached = HOT_PLANS.with(|hot| hot.borrow().len());
+                let cached = THREAD_LAUNCH_PLANS.with(|hot| hot.borrow().len());
                 let (sum_again, norm_again) =
                     cuda_add_rms_norm(&input, &residual, &weight, 1e-6)?;
-                assert_eq!(cached, HOT_PLANS.with(|hot| hot.borrow().len()));
+                assert_eq!(cached, THREAD_LAUNCH_PLANS.with(|hot| hot.borrow().len()));
                 let expected = (&input + &residual)?;
                 assert_eq!(
                     sum.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,

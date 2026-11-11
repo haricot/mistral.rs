@@ -1,4 +1,4 @@
-use crate::cuda::kernel_runtime::{kernel_cache, HotPlanCache};
+use crate::cuda::kernel_runtime::{kernel_cache, LaunchPlanCache};
 use candle_core::{Device, Result};
 use mistralrs_kernel_runtime::universal::{Argument, ElementType, LaunchRequest};
 use mistralrs_kernel_runtime::universal_cuda::PrevalidatedLaunchPlan;
@@ -21,8 +21,8 @@ struct LogitsPlanKey {
 }
 
 thread_local! {
-    static HOT_PLANS: RefCell<HotPlanCache<LogitsPlanKey, PrevalidatedLaunchPlan>> =
-        RefCell::new(HotPlanCache::new());
+    static THREAD_LAUNCH_PLANS: RefCell<LaunchPlanCache<LogitsPlanKey, PrevalidatedLaunchPlan>> =
+        RefCell::new(LaunchPlanCache::new());
 }
 
 fn tensor(dtype: ElementType, length: usize) -> Argument {
@@ -105,7 +105,7 @@ pub(crate) fn with_logits_plans(
     if vocab == 0 {
         candle_core::bail!("sparse logits require nonempty vocabulary");
     }
-    HOT_PLANS.with(|hot| {
+    THREAD_LAUNCH_PLANS.with(|hot| {
         let mut cache = hot.borrow_mut();
         let copy_key = LogitsPlanKey { step: LogitsStep::Copy, vocab, entries: 0 };
         cache.with_plan(copy_key, device, || prepare(copy_key, device), launch_copy)?;
@@ -144,10 +144,10 @@ mod tests {
         let biases = Tensor::from_vec(vec![0.25f32, -0.5], 2, &device)?;
         let biased = crate::ops::cuda_apply_sparse_logits_bias_f32(&input, &ids, &biases)?;
         assert_eq!(biased.to_vec1::<f32>()?, vec![1.25, -2.0, 3.0, 0.0]);
-        let count = HOT_PLANS.with(|hot| hot.borrow().len());
+        let count = THREAD_LAUNCH_PLANS.with(|hot| hot.borrow().len());
         let repeated = crate::ops::cuda_apply_sparse_logits_bias_f32(&input, &ids, &biases)?;
         assert_eq!(biased.to_vec1::<f32>()?, repeated.to_vec1::<f32>()?);
-        assert_eq!(count, HOT_PLANS.with(|hot| hot.borrow().len()));
+        assert_eq!(count, THREAD_LAUNCH_PLANS.with(|hot| hot.borrow().len()));
         Ok(())
     }
 }

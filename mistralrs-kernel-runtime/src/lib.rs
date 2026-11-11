@@ -213,6 +213,7 @@ pub fn compare(actual: &[f32], expected: &[f32]) -> Result<f32> {
 
 pub mod profile;
 pub mod universal;
+pub mod launch_plan_cache;
 
 #[cfg(feature = "cuda")]
 pub mod cuda;
