@@ -48,13 +48,16 @@ pub(crate) fn cuda_fwd(
     let [batch, shape_heads, shape_queries, shape_columns] = shape.dims() else {
         candle_core::bail!("softmax with sinks requires four-dimensional logits")
     };
-    if *shape_heads != heads || *shape_queries != queries || *shape_columns != columns {
+    // Copy dimension values; the owned Shape can then move into the output.
+    let (batch, shape_heads, shape_queries, shape_columns) =
+        (*batch, *shape_heads, *shape_queries, *shape_columns);
+    if shape_heads != heads || shape_queries != queries || shape_columns != columns {
         candle_core::bail!("softmax with sinks shape differs from prepared dimensions")
     }
     if !layout.is_contiguous() || sinks.dims() != [heads] || sinks.dtype() != dtype_value {
         candle_core::bail!("softmax with sinks requires contiguous, same-dtype inputs")
     }
-    if *batch == 0 || heads == 0 || queries == 0 || columns == 0 {
+    if batch == 0 || heads == 0 || queries == 0 || columns == 0 {
         candle_core::bail!("softmax with sinks requires nonempty dimensions")
     }
     let rows = batch
@@ -80,7 +83,7 @@ pub(crate) fn cuda_fwd(
     };
     let key = PlanKey {
         dtype: dtype_value,
-        batch: *batch,
+        batch,
         heads,
         queries,
         columns,
@@ -95,9 +98,9 @@ pub(crate) fn cuda_fwd(
                     operation: operation(columns).into(),
                     cc: 0,
                     args: vec![
-                        tensor(element_type, vec![*batch, heads, queries, columns]),
+                        tensor(element_type, vec![batch, heads, queries, columns]),
                         tensor(element_type, vec![heads]),
-                        tensor(element_type, vec![*batch, heads, queries, columns]),
+                        tensor(element_type, vec![batch, heads, queries, columns]),
                         Argument::Scalar {
                             dtype: ElementType::U32,
                         },
