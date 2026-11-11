@@ -127,6 +127,7 @@ dkr-moe = ["cuda", "dep:mistralrs-kernel-runtime", "mistralrs-kernel-runtime/cud
 dkr-indexed-copy = ["cuda", "dep:mistralrs-kernel-runtime", "mistralrs-kernel-runtime/cuda"]
 dkr-gated-add = ["cuda", "dep:mistralrs-kernel-runtime", "mistralrs-kernel-runtime/cuda"]
 dkr-reduce-norm = ["cuda", "mistralrs-quant/dkr-reduce-norm"]
+dkr-add-rms-norm = ["cuda", "dep:mistralrs-kernel-runtime", "mistralrs-kernel-runtime/cuda"]
 cuda-legacy-bf16 = ["cuda", "candle-core/cuda-legacy-bf16", "mistralrs-quant/cuda-legacy-bf16", "mistralrs-paged-attn/cuda-legacy-bf16"]
 cuda-legacy-fp8 = ["cuda", "candle-core/cuda-legacy-fp8", "mistralrs-quant/cuda-legacy-fp8", "mistralrs-paged-attn/cuda-legacy-fp8"]
 cuda-legacy-fp4 = ["cuda", "candle-core/cuda-legacy-fp4", "mistralrs-quant/cuda-legacy-fp4", "mistralrs-paged-attn/cuda-legacy-fp4"]

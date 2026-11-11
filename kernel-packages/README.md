@@ -190,7 +190,7 @@ the single batch package build followed by one test compilation session:
 python3 kernel-packages/cuda/build_all.py --cc 61
 export DKR_KERNEL_PACKAGES="$PWD/kernel-packages/build/cuda"
 cargo nextest run -p mistralrs-core -p mistralrs-quant --locked \
-  --features 'mistralrs-core/cuda-legacy,mistralrs-core/dkr-moe,mistralrs-core/dkr-indexed-copy,mistralrs-core/dkr-gated-add,mistralrs-core/dkr-reduce-norm' \
+  --features 'mistralrs-core/cuda-legacy,mistralrs-core/dkr-moe,mistralrs-core/dkr-indexed-copy,mistralrs-core/dkr-gated-add,mistralrs-core/dkr-reduce-norm,mistralrs-core/dkr-add-rms-norm' \
   --run-ignored ignored-only -E 'test(/dkr_/)' --no-fail-fast
 ```
 
@@ -198,3 +198,19 @@ The ignored GPU tests cover MoE, indexed-copy, gated-add, weighted reduction
 and sink-aware softmax. End-to-end model validation, exact-rounding/graph
 capture checks and legacy/DKR host/GPU A1/B/A2 measurements are additional
 final promotion gates, not performance claims for this increment.
+
+## DKR-R1.7: fused add + RMSNorm
+
+`mistralrs-core/dkr-add-rms-norm` replaces the CUDA `cuda_add_rms_norm`
+adapter without changing its call signature. A single
+`kernel-packages/cuda/add-rms-norm/build.py --cc 61` invocation produces
+one PTX artifact and 70 typed manifests: scalar blocks 32/1024 for all three
+float types and all 32 warp-aligned vector8 block widths for F16/BF16.
+The vector path is selected only for 16-byte-aligned device pointers and a
+column count divisible by eight; no architecture-specific dispatch is needed.
+
+The legacy fused kernel and C FFI wrappers stay available when the feature
+is off; `sort.cu` still contains other fused normalization and sorting
+kernels. When enabled, a scoped preprocessor guard avoids linking duplicate
+static add+RMSNorm definitions. Host-only contract review precedes the single
+deferred CUDA qualification.

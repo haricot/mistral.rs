@@ -4577,7 +4577,10 @@ pub fn cuda_rms_norm_residual(
     }
 }
 
-#[cfg(feature = "cuda")]
+#[cfg(all(feature = "cuda", feature = "dkr-add-rms-norm"))]
+pub use crate::cuda::add_rms_norm_dynamic::cuda_add_rms_norm;
+
+#[cfg(all(feature = "cuda", not(feature = "dkr-add-rms-norm")))]
 pub fn cuda_add_rms_norm(
     input: &Tensor,
     residual: &Tensor,

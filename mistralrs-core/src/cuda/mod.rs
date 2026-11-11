@@ -1,3 +1,5 @@
+#[cfg(feature = "dkr-add-rms-norm")]
+pub(crate) mod add_rms_norm_dynamic;
 #[cfg(feature = "cuda")]
 pub(crate) mod dflash_context;
 #[cfg(feature = "cuda")]
@@ -15,7 +17,12 @@ pub mod graph;
 pub(crate) mod hyper_connection;
 #[cfg(feature = "cuda")]
 pub(crate) mod indexed_copy;
-#[cfg(any(feature = "dkr-moe", feature = "dkr-indexed-copy", feature = "dkr-gated-add"))]
+#[cfg(any(
+    feature = "dkr-moe",
+    feature = "dkr-indexed-copy",
+    feature = "dkr-gated-add",
+    feature = "dkr-add-rms-norm"
+))]
 pub(crate) mod kernel_runtime;
 #[cfg(feature = "cuda")]
 pub(crate) mod input_packing;

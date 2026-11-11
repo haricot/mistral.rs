@@ -188,6 +188,36 @@ softmax paths. They require separate ABI and numerical audits. R1.6 adds
 ignored GPU parity/cache tests, but does not claim SM61 qualification or
 latency parity until the final combined test and paired A1/B/A2 benchmark.
 
+### DKR-R1.7 external fused add + RMSNorm
+
+`mistralrs-core/dkr-add-rms-norm` routes the existing CUDA
+`cuda_add_rms_norm` call to `tensor.add_rms_norm.{scalar,vec8}.b{block}.v1`
+packages. The operation performs rounded input-plus-residual addition,
+stores the residual output, then normalizes it by F32 RMS reduction and
+elementwise weights in one CUDA launch. It keeps the original data types
+(F16, BF16, F32), the 16-byte aligned half/BF16 vector8 branch, and the
+old launch block choice: 32/1024 for scalar and the rounded/clamped
+32-through-1024 vector widths. The external source preserves floating-point
+operation order and intermediate half/BF16 rounding from `sort.cu`;
+numerical equality on SM61 remains to be measured, not presumed.
+
+The one-build package generator emits 70 typed manifests referencing a
+single PTX compilation per architecture. Each manifest binds the logical
+operation, dtype, vector mode and launch width. The Rust adapter checks
+shapes/dtypes/devices, materializes contiguous inputs where needed,
+honors storage offsets, validates actual device pointer alignment, and caches
+its `PrevalidatedLaunchPlan` per shape/dtype/device/variant. With the feature
+enabled the legacy CUDA add+RMSNorm definitions in the multipurpose `sort.cu`
+are excluded by a narrow preprocessor flag. Disabling the feature restores
+the unchanged FFI path; other fused RMSNorm implementations remain static.
+
+Qualification is deferred to the same final combined SM61 campaign as
+R1.1–R1.6, with scalar/vector cases, numerical parity, repeated-launch plan
+reuse, and paired latency baselines. The remaining fused RMSNorm variants,
+Candle's general RMSNorm/LayerNorm and generic reductions are not yet
+migrated. CUDA Graph capture/replay will be considered only after this
+operation-family migration, as a separately measured optional optimization.
+
 1. **R1a, closed**: exact Candle pin/lock regeneration; independent typed manifest, catalogue and artifact loading; host-only tests and source classification.
 2. **R1b, required**: typed CUDA tensor launch adapters, architecture-feature negotiation and explicit preallocation memory budget (especially packed FP8/FP4 and MoE); negative tests for invalid pointer/order/context, fallback absence and numerical parity.
 3. **R1c, required**: migrate operation families incrementally from Candle's `cuda_legacy` and Mistral's CUDA launch points; keep unsupported SM61 MMA/FlashAttention variants behind honest capability rejection and choose qualified SIMT alternatives.

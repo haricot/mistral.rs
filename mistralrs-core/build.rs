@@ -152,6 +152,11 @@ fn main() {
         if cfg!(feature = "dkr-gated-add") {
             excluded.push("gated_add.cu");
         }
+        if cfg!(feature = "dkr-add-rms-norm") {
+            // sort.cu also contains unrelated kernels; exclude just its
+            // add+RMSNorm definitions, keeping the other FFI entries intact.
+            builder = builder.arg("-DMISTRALRS_DKR_ADD_RMS_NORM");
+        }
         if !excluded.is_empty() {
             builder = builder.exclude(&excluded);
         }

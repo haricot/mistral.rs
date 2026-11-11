@@ -350,6 +350,7 @@ void launch_rms_norm_residual(const void *x, const void *residual,
       reinterpret_cast<T *>(dst), ncols, eps);
 }
 
+#ifndef MISTRALRS_DKR_ADD_RMS_NORM
 template <typename T>
 __global__ void add_rms_norm_vec8_kernel(
     const T *__restrict__ x, const T *__restrict__ residual,
@@ -461,6 +462,7 @@ void launch_add_rms_norm(const void *x, const void *residual,
       reinterpret_cast<T *>(residual_dst), reinterpret_cast<T *>(norm_dst),
       ncols, eps);
 }
+#endif  // MISTRALRS_DKR_ADD_RMS_NORM
 
 template <typename T>
 __global__ void rms_norm_residual_then_rms_norm_vec8_kernel(
@@ -700,6 +702,7 @@ extern "C" void rms_norm_residual_bf16(const void *x, const void *residual,
                                           nrows, ncols, eps, stream);
 }
 
+#ifndef MISTRALRS_DKR_ADD_RMS_NORM
 extern "C" void add_rms_norm_f32(const void *x, const void *residual,
                                  const void *weight, void *residual_dst,
                                  void *norm_dst, const int nrows,
@@ -726,6 +729,7 @@ extern "C" void add_rms_norm_bf16(const void *x, const void *residual,
   launch_add_rms_norm<__nv_bfloat16>(x, residual, weight, residual_dst,
                                      norm_dst, nrows, ncols, eps, stream);
 }
+#endif  // MISTRALRS_DKR_ADD_RMS_NORM
 
 extern "C" void rms_norm_residual_then_rms_norm_f32(
     const void *x, const void *residual, const void *residual_weight,
