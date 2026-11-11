@@ -23,6 +23,7 @@ const PACKAGES: &[Package] = &[
     Package { name: "reduce-norm", source: "reduce_norm.cu", fast_math: true },
     Package { name: "rms-variants", source: "rms_variants.cu", fast_math: true },
     Package { name: "ssm", source: "ssm.cu", fast_math: true },
+    Package { name: "rounded-rope", source: "rounded_rope.cu", fast_math: true },
 ];
 
 fn parse_args() -> Result<(usize, PathBuf, String), Box<dyn std::error::Error>> {

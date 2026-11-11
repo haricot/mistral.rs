@@ -133,6 +133,7 @@ dkr-logits = ["cuda", "dep:mistralrs-kernel-runtime", "mistralrs-kernel-runtime/
 dkr-rms-variants = ["cuda", "dep:mistralrs-kernel-runtime", "mistralrs-kernel-runtime/cuda"]
 dkr-input-pad = ["cuda", "dep:mistralrs-kernel-runtime", "mistralrs-kernel-runtime/cuda"]
 dkr-ssm = ["cuda", "dep:mistralrs-kernel-runtime", "mistralrs-kernel-runtime/cuda"]
+dkr-rounded-rope = ["cuda", "dep:mistralrs-kernel-runtime", "mistralrs-kernel-runtime/cuda"]
 cuda-legacy-bf16 = ["cuda", "candle-core/cuda-legacy-bf16", "mistralrs-quant/cuda-legacy-bf16", "mistralrs-paged-attn/cuda-legacy-bf16"]
 cuda-legacy-fp8 = ["cuda", "candle-core/cuda-legacy-fp8", "mistralrs-quant/cuda-legacy-fp8", "mistralrs-paged-attn/cuda-legacy-fp8"]
 cuda-legacy-fp4 = ["cuda", "candle-core/cuda-legacy-fp4", "mistralrs-quant/cuda-legacy-fp4", "mistralrs-paged-attn/cuda-legacy-fp4"]

@@ -71,6 +71,7 @@ STAGED_OPERATIONS = {
     ],
     "memory_transfer": ["tensor.indexed_row_copy.v1", "layout.pad_decode_u32.v1"],
     "state_space": ["state_space.ssm_scan_f32.v1"],
+    "rotary_position": ["rotary.rounded_rms_rope.v1"],
 }
 
 # Deliberately explicit: the operation entries above do not certify
@@ -142,7 +143,7 @@ def matrix(candle_dir: Path | None) -> dict:
         "source_inventory": inventory,
         "candle_revision_pin": "d99f6d77e507688bd9e4b654fbe20ac9e18238fc",
         "candle_checked": candle_dir is not None,
-        "packages_staged": 10,
+        "packages_staged": 11,
         "families": families,
         "unmapped_families": missing,
         "extraneous_families": extra,

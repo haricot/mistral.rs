@@ -61,6 +61,13 @@ pub(crate) fn try_rms_norm_partial_rotary_neox(
     {
         return Ok(None);
     }
+    #[cfg(feature = "dkr-rounded-rope")]
+    if input.is_contiguous() {
+        return super::rounded_rope_dynamic::run(
+            input, weight, cos, sin, epsilon, dimensions, half_rot,
+        );
+    }
+
     let dev = input.device().as_cuda_device()?;
     let stream = dev.cuda_stream();
     let (input_s, input_l) = input.storage_and_layout();

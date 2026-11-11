@@ -10,6 +10,8 @@ pub(crate) mod rms_variants_dynamic;
 pub(crate) mod input_pad_dynamic;
 #[cfg(feature = "dkr-ssm")]
 pub(crate) mod ssm_dynamic;
+#[cfg(feature = "dkr-rounded-rope")]
+pub(crate) mod rounded_rope_dynamic;
 #[cfg(feature = "cuda")]
 pub(crate) mod dflash_context;
 #[cfg(feature = "cuda")]
@@ -36,7 +38,8 @@ pub(crate) mod indexed_copy;
     feature = "dkr-logits",
     feature = "dkr-rms-variants",
     feature = "dkr-input-pad",
-    feature = "dkr-ssm"
+    feature = "dkr-ssm",
+    feature = "dkr-rounded-rope"
 ))]
 pub(crate) mod kernel_runtime;
 #[cfg(feature = "cuda")]

@@ -401,3 +401,30 @@ A combined, opt-in final-test entry point is
 `DKR_APPROVE_FINAL=1`; the test campaign must only be approved once all
 targeted migrations are complete. It uses one SM61 package build and
 one feature-unified `cargo nextest` campaign, not per-operation CI.
+
+
+## DKR-R1.14: contiguous fused RMSNorm + partial NeoX rotary
+
+The opt-in `mistralrs-core/dkr-rounded-rope` routes **contiguous**
+inputs for the existing `try_rms_norm_partial_rotary_neox` operation
+to an external typed PTX package, with F16/BF16/F32 entries and
+prevalidated 32-thread and 1024-thread block profiles. The adapter
+constructs *views* of the caller's contiguous buffers, not copies;
+their normalized 4D/2D ranks match the typed manifest and keep the
+original storage offset.
+
+The source retains explicit F32 rounding instructions and the
+round-to-input-dtype step between RMSNorm and rotary multiplication.
+It also preserves the original warp reduction strategy. The output
+is restored to the caller's original rank/shape.
+
+**Noncontiguous input stays on the original strided CUDA path**.
+The typed DKR ABI currently only admits contiguous tensors; claiming
+a noncontiguous view as contiguous would be invalid, and forcing a
+packed copy would add an unacceptable hidden GPU allocation. A
+versioned strided-tensor ABI is therefore a separate migration.
+
+The ignored `dkr_rounded_rms_rope_gpu` candidate test covers three
+dtypes and both block sizes. Its numerical agreement and performance
+have **not** been qualified on SM61. The cudaforge external package
+builder now handles 11 CUDA source families.
