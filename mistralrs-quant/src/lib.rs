@@ -18,6 +18,10 @@ mod afq;
 mod bitsandbytes;
 mod blockwise_fp8;
 mod cpu_rms_norm;
+#[cfg(feature = "dkr-reduce-norm")]
+mod dkr_cuda;
+#[cfg(feature = "dkr-reduce-norm")]
+mod softmax_sinks_dynamic;
 pub mod cublaslt;
 #[cfg(feature = "cuda")]
 pub mod cuda_device;

@@ -64,12 +64,12 @@ cargo fmt --package mistralrs-kernel-runtime -- --check
 | FP8 (per-tensor, per-block, MXFP8, KV) | Packed storage + scales + SIMT/DP4A alternative on SM61; no eager full dequantization | Adapter and numerics not yet qualified |
 | FP4 (NVFP4, MXFP4, W4A16) | Packed nibbles/scales and SIMT alternatives; separate MMA-required packages | Adapter and numerics not yet qualified |
 | Quantized GGUF/MMQ/MMVQ, GPTQ, AWQ, HQQ, AFQ, bitsandbytes, Marlin | Versioned format descriptors, group scales, zero points, packing, dequantization and GEMV/GEMM | All source families classified; adapters pending |
-| MoE (top-k/router, expert grouping, indexed/routed/weighted kernels) | Routed tensor descriptors, expert cache/prefetch, capacity/budget, SIMT/HFMA2 fallback and async device orchestration | Source mapped; scheduling and typed launch adapters pending |
+| MoE (top-k/router, expert grouping, indexed/routed/weighted kernels) | Routed tensor descriptors, expert cache/prefetch, capacity/budget, SIMT/HFMA2 fallback and async device orchestration | Grouped GEMM and weighted-reduce external adapters experimental; scheduling and remaining paths pending |
 | Attention/SDPA/FlashAttention, paged/windowed/MLA and GDN | Attention-shape and KV-layout contracts; SIMT alternative to SM80/SM90-only kernels | Source mapped; adapters pending; 53 SM80-only units explicitly incompatible with SM61 |
 | KV cache (copy/reshape/gather/scale/quantization) | Cache-addressing, ownership and consistency ABI | Source mapped; adapters pending |
 | Conv1D/2D/dynamic/spatial, LFM3 | Stride, dilation, groups and padding contracts; cuDNN or SIMT provider | Source mapped; adapters pending |
 | State space/SSM/GDN, hyperconnection, fused model ops | State-layout and recurrent execution contracts | Source mapped; adapters pending |
-| RMSNorm/LayerNorm, activation, softmax, unary/binary/ternary, affine | Tensorwise/reduction family and ordered typed scalars | Experimental fused gated-add adapter; remaining operations pending |
+| RMSNorm/LayerNorm, activation, softmax, unary/binary/ternary, affine | Tensorwise/reduction family and ordered typed scalars | Experimental gated-add and sink-aware softmax adapters; RMSNorm/LayerNorm and remaining paths pending |
 | Embedding, rotary/RoPE, positional transformations | Gather/index contract and positional phase/stride ABI | Source mapped; adapters pending |
 | Copy, cast, layout/packing/transpose, indexing, sorting, reduction | Overlap/memory-stride and output-shape contracts | Source mapped; adapters pending |
 | Pooling (average/max) and nearest/bilinear upsampling | Window, stride, interpolation and shape contracts | Candle backend methods mapped; adapters pending |
@@ -160,6 +160,33 @@ cache. The final GPU campaign will include F16/BF16/F32 numeric parity, the
 existing exact-rounding and CUDA Graph replay cases, and separate host/GPU
 latency measurements. No GPU compilation or qualification is claimed for this
 increment, and the rest of the source inventory remains pending migration.
+
+### DKR-R1.6 external reductions and normalization
+
+`mistralrs-quant/dkr-reduce-norm`, exposed by
+`mistralrs-core/dkr-reduce-norm`, migrates two actual CUDA consumers through
+the same versioned ABI and thread-local prevalidated launch-plan strategy:
+
+- MoE weighted reduction of `[tokens, topk, hidden]` by F32 routing weights,
+  preserving F32 multiply/add rounding order and all nine combinations of
+  F16, BF16 and F32 input/output types.
+- Sink-aware attention softmax used by GPT-OSS, including the sink in the
+  denominator without emitting a sink probability. Five width buckets retain
+  the legacy CUDA block sizes (64, 128, 256, 512 and 1024 threads), across
+  F16/BF16/F32. The optional attention mask is still applied upstream.
+
+`kernel-packages/cuda/reduce-norm/build.py` compiles one PTX module per
+requested architecture, then writes 24 typed manifests for its entry points
+and softmax launch-size variants. Opting in excludes `weighted_reduce.cu`
+and the old softmax kernel section in `ops.cu` from the quant CUDA archive.
+Unopted-in builds retain their old CUDA FFI implementations; CPU and Metal
+paths are unchanged.
+
+This tranche does **not** migrate Candle's general RMSNorm/LayerNorm,
+FP8-fused RMS normalization, generic sum/max reductions or other attention
+softmax paths. They require separate ABI and numerical audits. R1.6 adds
+ignored GPU parity/cache tests, but does not claim SM61 qualification or
+latency parity until the final combined test and paired A1/B/A2 benchmark.
 
 1. **R1a, closed**: exact Candle pin/lock regeneration; independent typed manifest, catalogue and artifact loading; host-only tests and source classification.
 2. **R1b, required**: typed CUDA tensor launch adapters, architecture-feature negotiation and explicit preallocation memory budget (especially packed FP8/FP4 and MoE); negative tests for invalid pointer/order/context, fallback absence and numerical parity.

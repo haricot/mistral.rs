@@ -3,6 +3,10 @@
 pub mod cuda;
 #[cfg(has_fp8_mma_kernels)]
 pub(crate) mod grouped_fp8;
+#[cfg(not(feature = "dkr-reduce-norm"))]
+mod weighted_reduce;
+#[cfg(feature = "dkr-reduce-norm")]
+#[path = "weighted_reduce_dynamic.rs"]
 mod weighted_reduce;
 pub use weighted_reduce::moe_weighted_reduce;
 #[cfg(has_cutlass_moe_kernels)]

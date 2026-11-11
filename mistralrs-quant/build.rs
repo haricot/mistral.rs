@@ -235,6 +235,10 @@ fn main() -> Result<(), String> {
             excluded_files.push("moe_data.cu");
             excluded_files.push("grouped_mm_*.cu");
         }
+        if cfg!(feature = "dkr-reduce-norm") {
+            excluded_files.push("weighted_reduce.cu");
+            builder = builder.arg("-DMISTRALRS_DKR_REDUCE_NORM");
+        }
         if !cutlass_fp8_sm90 {
             excluded_files.push("*_cutlass_sm90.cu");
         }

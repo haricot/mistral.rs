@@ -570,6 +570,8 @@ extern "C" void gptoss_swiglu_interleaved_f32(const float *gate_up,
 //   scores: [batch, heads, q_len, k_len] - softmax probabilities (sink dropped)
 // ============================================================================
 
+#ifndef MISTRALRS_DKR_REDUCE_NORM
+
 // Warp-level reduction for max
 __device__ __forceinline__ float warp_reduce_max(float val) {
 #pragma unroll
@@ -787,6 +789,8 @@ extern "C" void softmax_with_sinks_f32(const float *logits, const float *sinks,
       logits, sinks, mask, output, batch_size, num_heads, q_len, k_len, scale);
   CUDA_CHECK(cudaGetLastError());
 }
+
+#endif
 
 // ============================================================================
 // Fused GLU (Gated Linear Unit) kernel: output = activation(a) * b

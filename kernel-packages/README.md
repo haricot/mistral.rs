@@ -168,3 +168,33 @@ The batch builder reuses packages whose sources, compilation options and NVCC
 version have not changed. These commands are reserved for final qualification,
 not for each migration increment. The new ignored GPU test and the existing
 exact-rounding and graph-capture tests still require SM61 verification.
+
+## DKR-R1.6: MoE weighted reduction and sink-aware softmax
+
+Enable `mistralrs-core/dkr-reduce-norm` to route weighted reduction and
+GPT-OSS sink-aware softmax CUDA entry points through external PTX packages.
+The quant crate's own `dkr-reduce-norm` feature also works independently.
+Default builds retain the original CUDA kernels. General RMSNorm/LayerNorm,
+FP8 fused normalization and generic reductions are not migrated yet.
+
+One NVCC invocation compiles `kernel-packages/cuda/reduce-norm/reduce_norm.cu`
+for the requested architecture. Its 24 typed manifests represent nine MoE
+weighted input/output precision pairs plus three softmax precisions at five
+block widths. R1.4 plans are cached per thread, device and exact signature;
+the CUDA source and generic Rust path have no GPU-model branches.
+
+At the **final** qualification point, not after every source increment, run
+the single batch package build followed by one test compilation session:
+
+```sh
+python3 kernel-packages/cuda/build_all.py --cc 61
+export DKR_KERNEL_PACKAGES="$PWD/kernel-packages/build/cuda"
+cargo nextest run -p mistralrs-core -p mistralrs-quant --locked \
+  --features 'mistralrs-core/cuda-legacy,mistralrs-core/dkr-moe,mistralrs-core/dkr-indexed-copy,mistralrs-core/dkr-gated-add,mistralrs-core/dkr-reduce-norm' \
+  --run-ignored ignored-only -E 'test(/dkr_/)' --no-fail-fast
+```
+
+The ignored GPU tests cover MoE, indexed-copy, gated-add, weighted reduction
+and sink-aware softmax. End-to-end model validation, exact-rounding/graph
+capture checks and legacy/DKR host/GPU A1/B/A2 measurements are additional
+final promotion gates, not performance claims for this increment.

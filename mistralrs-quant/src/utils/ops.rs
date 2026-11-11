@@ -1997,7 +1997,19 @@ impl CustomOp1 for SoftmaxWithSinks {
         }
     }
 
-    #[cfg(feature = "cuda")]
+    #[cfg(all(feature = "cuda", feature = "dkr-reduce-norm"))]
+    fn cuda_fwd(&self, storage: &CudaStorage, layout: &Layout) -> Result<(CudaStorage, Shape)> {
+        crate::softmax_sinks_dynamic::cuda_fwd(
+            storage,
+            layout,
+            &self.sinks,
+            self.num_heads,
+            self.q_len,
+            self.k_len,
+        )
+    }
+
+    #[cfg(all(feature = "cuda", not(feature = "dkr-reduce-norm")))]
     fn cuda_fwd(&self, storage: &CudaStorage, layout: &Layout) -> Result<(CudaStorage, Shape)> {
         use half::{bf16, f16};
 
