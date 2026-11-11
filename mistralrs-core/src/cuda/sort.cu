@@ -245,6 +245,7 @@ __device__ __forceinline__ float rms_block_sum(float value,
   return warp_sums[0];
 }
 
+#ifndef MISTRALRS_DKR_RMS_VARIANTS
 template <typename T>
 __global__ void rms_norm_residual_vec8_kernel(
     const T *__restrict__ x, const T *__restrict__ residual,
@@ -351,6 +352,8 @@ void launch_rms_norm_residual(const void *x, const void *residual,
       reinterpret_cast<const T *>(weight), reinterpret_cast<const T *>(scale),
       reinterpret_cast<T *>(dst), ncols, eps);
 }
+
+#endif  // MISTRALRS_DKR_RMS_VARIANTS
 
 #ifndef MISTRALRS_DKR_ADD_RMS_NORM
 template <typename T>
@@ -466,6 +469,7 @@ void launch_add_rms_norm(const void *x, const void *residual,
 }
 #endif  // MISTRALRS_DKR_ADD_RMS_NORM
 
+#ifndef MISTRALRS_DKR_RMS_VARIANTS
 template <typename T>
 __global__ void rms_norm_residual_then_rms_norm_vec8_kernel(
     const T *__restrict__ x, const T *__restrict__ residual,
@@ -622,6 +626,8 @@ void launch_rms_norm_residual_then_rms_norm(
       reinterpret_cast<T *>(norm_dst), ncols, residual_eps, norm_eps);
 }
 
+#endif  // MISTRALRS_DKR_RMS_VARIANTS
+
 template <typename T>
 __global__ void rms_norm_strided_4d_kernel(
     const T *__restrict__ x, const T *__restrict__ weight, T *__restrict__ dst,
@@ -677,6 +683,7 @@ void launch_rms_norm_strided_4d(
       heads, seq_len, head_dim, eps);
 }
 
+#ifndef MISTRALRS_DKR_RMS_VARIANTS
 extern "C" void rms_norm_residual_f32(const void *x, const void *residual,
                                       const void *weight, const void *scale,
                                       void *dst, const int nrows,
@@ -703,6 +710,8 @@ extern "C" void rms_norm_residual_bf16(const void *x, const void *residual,
   launch_rms_norm_residual<__nv_bfloat16>(x, residual, weight, scale, dst,
                                           nrows, ncols, eps, stream);
 }
+
+#endif  // MISTRALRS_DKR_RMS_VARIANTS
 
 #ifndef MISTRALRS_DKR_ADD_RMS_NORM
 extern "C" void add_rms_norm_f32(const void *x, const void *residual,
@@ -733,6 +742,7 @@ extern "C" void add_rms_norm_bf16(const void *x, const void *residual,
 }
 #endif  // MISTRALRS_DKR_ADD_RMS_NORM
 
+#ifndef MISTRALRS_DKR_RMS_VARIANTS
 extern "C" void rms_norm_residual_then_rms_norm_f32(
     const void *x, const void *residual, const void *residual_weight,
     const void *scale, const void *norm_weight, void *residual_dst,
@@ -762,6 +772,8 @@ extern "C" void rms_norm_residual_then_rms_norm_bf16(
       x, residual, residual_weight, scale, norm_weight, residual_dst, norm_dst,
       nrows, ncols, residual_eps, norm_eps, stream);
 }
+
+#endif  // MISTRALRS_DKR_RMS_VARIANTS
 
 extern "C" void rms_norm_strided_4d_f32(
     const void *x, const void *weight, void *dst, const int64_t stride_b,

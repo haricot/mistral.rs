@@ -4564,7 +4564,9 @@ pub fn cuda_rms_norm_residual(
             "cuda_rms_norm_residual input is too large: nrows={nrows}, ncols={ncols}"
         );
     }
+    #[cfg(not(feature = "dkr-rms-variants"))]
     let nrows_i32 = i32::try_from(nrows).map_err(candle_core::Error::wrap)?;
+    #[cfg(not(feature = "dkr-rms-variants"))]
     let ncols_i32 = i32::try_from(ncols).map_err(candle_core::Error::wrap)?;
 
     let input = input.contiguous()?;
@@ -4591,6 +4593,7 @@ pub fn cuda_rms_norm_residual(
 
     let dev = input_storage.device();
     let stream = dev.cuda_stream();
+    #[cfg(not(feature = "dkr-rms-variants"))]
     let stream_ptr = stream.cu_stream() as i64;
     let shape = input.shape().clone();
 
@@ -4636,6 +4639,53 @@ pub fn cuda_rms_norm_residual(
             let weight_ptr =
                 unsafe { (weight_ptr as *const $ty).add(weight_layout.start_offset()) };
 
+            #[cfg(feature = "dkr-rms-variants")]
+            {
+                use candle_core::cuda_backend::cudarc::driver::PushKernelArg;
+                use mistralrs_kernel_runtime::universal::ElementType;
+                let dtype = match input.dtype() {
+                    DType::F16 => ElementType::F16,
+                    DType::BF16 => ElementType::Bf16,
+                    DType::F32 => ElementType::F32,
+                    _ => unreachable!(),
+                };
+                let rows_u32 = u32::try_from(nrows).map_err(candle_core::Error::wrap)?;
+                let cols_u32 = u32::try_from(ncols).map_err(candle_core::Error::wrap)?;
+                let src_ptr_addr = src_ptr as u64;
+                let residual_ptr_addr = residual_ptr as u64;
+                let weight_ptr_addr = weight_ptr as u64;
+                let out_ptr_addr = out_ptr as u64;
+                let scale_addr = scale_ptr as u64;
+                crate::cuda::rms_variants_dynamic::with_rms_plan(
+                    input.device(),
+                    dtype,
+                    nrows,
+                    ncols,
+                    scale.is_some(),
+                    false,
+                    |plan| {
+                        unsafe {
+                            plan.with_prevalidated_launch(|function, config| {
+                                let mut builder = stream.launch_builder(function);
+                            builder.arg(&src_ptr_addr)
+                                .arg(&residual_ptr_addr)
+                                .arg(&weight_ptr_addr);
+                            if scale.is_some() {
+                                builder.arg(&scale_addr);
+                            }
+                            builder.arg(&out_ptr_addr)
+                                .arg(&rows_u32)
+                                .arg(&cols_u32)
+                                .arg(&eps);
+                                builder.launch(config)?;
+                                Ok(())
+                            })
+                        }
+                        .map_err(|error| candle_core::Error::msg(error.to_string()))
+                    },
+                )?;
+            }
+            #[cfg(not(feature = "dkr-rms-variants"))]
             unsafe {
                 ffi::$ffi_fn(
                     src_ptr as *const c_void,
@@ -5526,7 +5576,9 @@ pub fn cuda_rms_norm_residual_then_rms_norm(
             "cuda_rms_norm_residual_then_rms_norm input is too large: nrows={nrows}, ncols={ncols}"
         );
     }
+    #[cfg(not(feature = "dkr-rms-variants"))]
     let nrows_i32 = i32::try_from(nrows).map_err(candle_core::Error::wrap)?;
+    #[cfg(not(feature = "dkr-rms-variants"))]
     let ncols_i32 = i32::try_from(ncols).map_err(candle_core::Error::wrap)?;
 
     let input = input.contiguous()?;
@@ -5561,6 +5613,7 @@ pub fn cuda_rms_norm_residual_then_rms_norm(
 
     let dev = input_storage.device();
     let stream = dev.cuda_stream();
+    #[cfg(not(feature = "dkr-rms-variants"))]
     let stream_ptr = stream.cu_stream() as i64;
     let shape = input.shape().clone();
 
@@ -5624,6 +5677,58 @@ pub fn cuda_rms_norm_residual_then_rms_norm(
             let norm_weight_ptr =
                 unsafe { (norm_weight_ptr as *const $ty).add(norm_weight_layout.start_offset()) };
 
+            #[cfg(feature = "dkr-rms-variants")]
+            {
+                use candle_core::cuda_backend::cudarc::driver::PushKernelArg;
+                use mistralrs_kernel_runtime::universal::ElementType;
+                let dtype = match input.dtype() {
+                    DType::F16 => ElementType::F16,
+                    DType::BF16 => ElementType::Bf16,
+                    DType::F32 => ElementType::F32,
+                    _ => unreachable!(),
+                };
+                let rows_u32 = u32::try_from(nrows).map_err(candle_core::Error::wrap)?;
+                let cols_u32 = u32::try_from(ncols).map_err(candle_core::Error::wrap)?;
+                let src_ptr_addr = src_ptr as u64;
+                let residual_ptr_addr = residual_ptr as u64;
+                let residual_weight_ptr_addr = residual_weight_ptr as u64;
+                let norm_weight_ptr_addr = norm_weight_ptr as u64;
+                let residual_out_ptr_addr = residual_out_ptr as u64;
+                let norm_out_ptr_addr = norm_out_ptr as u64;
+                let scale_addr = scale_ptr as u64;
+                crate::cuda::rms_variants_dynamic::with_rms_plan(
+                    input.device(),
+                    dtype,
+                    nrows,
+                    ncols,
+                    scale.is_some(),
+                    true,
+                    |plan| {
+                        unsafe {
+                            plan.with_prevalidated_launch(|function, config| {
+                                let mut builder = stream.launch_builder(function);
+                            builder.arg(&src_ptr_addr)
+                                .arg(&residual_ptr_addr)
+                                .arg(&residual_weight_ptr_addr);
+                            if scale.is_some() {
+                                builder.arg(&scale_addr);
+                            }
+                            builder.arg(&norm_weight_ptr_addr)
+                                .arg(&residual_out_ptr_addr)
+                                .arg(&norm_out_ptr_addr)
+                                .arg(&rows_u32)
+                                .arg(&cols_u32)
+                                .arg(&residual_eps)
+                                .arg(&norm_eps);
+                                builder.launch(config)?;
+                                Ok(())
+                            })
+                        }
+                        .map_err(|error| candle_core::Error::msg(error.to_string()))
+                    },
+                )?;
+            }
+            #[cfg(not(feature = "dkr-rms-variants"))]
             unsafe {
                 ffi::$ffi_fn(
                     src_ptr as *const c_void,

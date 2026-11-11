@@ -278,3 +278,29 @@ qualification remain deferred until the remaining operation adapters are
 ready. Python remains a small packaging/compilation orchestrator for now;
 no new Rust toolchain, cudaforge dependency, CI trigger or NVCC invocation is
 required for these source edits.
+
+### DKR-R1.10 host integration
+
+The optional `mistralrs-core/dkr-rms-variants` feature now connects both
+existing Mistral.rs residual RMSNorm entry points to the external package.
+The original host validation, contiguous storage normalization, storage-offset
+handling and CUDA stream remain in place. Four fixed launch signatures
+(residual/residual-then, with/without the scale tensor) avoid a nullable
+device pointer or a runtime scale branch inside the CUDA loop.
+F16, BF16 and F32 are selected by the generic typed manifest, not by an
+SM-specific host branch. Each (dtype, shape, form, scale-presence, device)
+combination has a prevalidated plan; epsilon values remain dynamic scalars.
+
+`MISTRALRS_DKR_RMS_VARIANTS` excludes both legacy residual RMSNorm
+function families from the statically compiled `sort.cu` unit when the
+feature is enabled. Strided 4D RMSNorm stays on its existing ABI pending
+an explicit noncontiguous-tensor extension; it has not silently changed
+to a packed copy. The replacement is a scalar CUDA reference, while the
+legacy SIMD vec8 fast path is kept when the feature is disabled.
+Throughput parity is **not** assumed.
+
+The optional `dkr-logits` and `dkr-rms-variants` features should be
+added to the grouped SM61 `cargo nextest` invocation at final
+qualification. No individual CUDA compilation or CI is authorized
+during staging. The two new ignored GPU tests are
+`dkr_logits_penalties_and_bias_gpu` and `dkr_rms_variants_gpu`.
