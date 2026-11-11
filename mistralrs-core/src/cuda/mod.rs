@@ -6,6 +6,8 @@ pub(crate) mod causal_mask_dynamic;
 pub(crate) mod logits_dynamic;
 #[cfg(feature = "dkr-rms-variants")]
 pub(crate) mod rms_variants_dynamic;
+#[cfg(feature = "dkr-input-pad")]
+pub(crate) mod input_pad_dynamic;
 #[cfg(feature = "cuda")]
 pub(crate) mod dflash_context;
 #[cfg(feature = "cuda")]
@@ -30,7 +32,8 @@ pub(crate) mod indexed_copy;
     feature = "dkr-add-rms-norm",
     feature = "dkr-causal-mask",
     feature = "dkr-logits",
-    feature = "dkr-rms-variants"
+    feature = "dkr-rms-variants",
+    feature = "dkr-input-pad"
 ))]
 pub(crate) mod kernel_runtime;
 #[cfg(feature = "cuda")]

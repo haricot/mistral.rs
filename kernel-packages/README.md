@@ -304,3 +304,26 @@ added to the grouped SM61 `cargo nextest` invocation at final
 qualification. No individual CUDA compilation or CI is authorized
 during staging. The two new ignored GPU tests are
 `dkr_logits_penalties_and_bias_gpu` and `dkr_rms_variants_gpu`.
+
+
+## DKR-R1.11: external U32 decode input padding
+
+The optional `mistralrs-core/dkr-input-pad` feature routes the
+`pad_decode_input_u32` path through a dedicated external PTX entry.
+It reuses the original zero-offset-adjusted input storage pointer and
+output allocation; the CUDA operation duplicates row zero for additional
+decode rows. The launch contract includes two U32 tensors of rank two
+and three signed I32 dimensions. A per-thread prevalidated plan is cached
+by exact input/output shape and CUDA device.
+
+Only `pad_decode_input_u32` is removed from the static
+`input_packing.cu` compilation under this feature. The completion
+input packing kernel stays static because it receives up to 64
+different device pointers by value, which cannot safely be represented
+as an ordinary contiguous tensor in `dkr.typed.v1`.
+No extra dynamic pointer-table allocation is introduced to obscure
+that ABI limitation.
+
+The existing ignored GPU test
+`pads_decode_input_by_aliasing_row_zero_values` covers the operation
+under the feature. It has not run as part of the deferred qualification.

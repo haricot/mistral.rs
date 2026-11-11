@@ -140,21 +140,56 @@ impl CustomOp1 for DecodeInputPadOp {
             .ok_or_else(|| candle_core::Error::msg("decode input pointer overflow"))?;
         let mut output = unsafe { device.alloc::<u32>(output_elements)? };
         let (output_ptr, output_guard) = output.device_ptr_mut(&stream);
-        let status = unsafe {
-            super::ffi::pad_decode_input_u32(
-                input_ptr as *const core::ffi::c_void,
-                output_ptr as *mut core::ffi::c_void,
-                i32::try_from(self.input_rows).map_err(candle_core::Error::wrap)?,
-                i32::try_from(self.output_rows).map_err(candle_core::Error::wrap)?,
-                i32::try_from(self.width).map_err(candle_core::Error::wrap)?,
-                stream.cu_stream() as i64,
-            )
-        };
+        #[cfg(feature = "dkr-input-pad")]
+        {
+            use candle_core::cuda_backend::cudarc::driver::PushKernelArg;
+            let cuda_device = candle_core::Device::Cuda(device.clone());
+            let src = input_ptr as u64;
+            let dst = output_ptr as u64;
+            let input_rows = i32::try_from(self.input_rows).map_err(candle_core::Error::wrap)?;
+            let output_rows = i32::try_from(self.output_rows).map_err(candle_core::Error::wrap)?;
+            let width = i32::try_from(self.width).map_err(candle_core::Error::wrap)?;
+            super::input_pad_dynamic::with_pad_plan(
+                &cuda_device,
+                self.input_rows,
+                self.output_rows,
+                self.width,
+                |plan| {
+                    unsafe {
+                        plan.with_prevalidated_launch(|function, config| {
+                            let mut builder = stream.launch_builder(function);
+                            builder
+                                .arg(&src)
+                                .arg(&dst)
+                                .arg(&input_rows)
+                                .arg(&output_rows)
+                                .arg(&width);
+                            builder.launch(config)?;
+                            Ok(())
+                        })
+                    }
+                    .map_err(|error| candle_core::Error::msg(error.to_string()))
+                },
+            )?;
+        }
+        #[cfg(not(feature = "dkr-input-pad"))]
+        {
+            let status = unsafe {
+                super::ffi::pad_decode_input_u32(
+                    input_ptr as *const core::ffi::c_void,
+                    output_ptr as *mut core::ffi::c_void,
+                    i32::try_from(self.input_rows).map_err(candle_core::Error::wrap)?,
+                    i32::try_from(self.output_rows).map_err(candle_core::Error::wrap)?,
+                    i32::try_from(self.width).map_err(candle_core::Error::wrap)?,
+                    stream.cu_stream() as i64,
+                )
+            };
+            if status != 0 {
+                candle_core::bail!("pad_decode_input_u32 failed with status {status}")
+            }
+        }
         drop(output_guard);
         drop(input_guard);
-        if status != 0 {
-            candle_core::bail!("pad_decode_input_u32 failed with status {status}")
-        }
         Ok((
             CudaStorage::wrap_cuda_slice(output, device.clone()),
             (self.output_rows, self.width).into(),
@@ -256,4 +291,20 @@ mod tests {
         );
         Ok(())
     }
+    #[cfg(feature = "dkr-input-pad")]
+    #[test]
+    #[ignore = "requires CUDA and external U32 decode input pad package"]
+    fn dkr_input_pad_gpu() -> Result<()> {
+        let device = Device::new_cuda(0)?;
+        let input = Tensor::new(&[[8u32, 9], [1, 2], [3, 4]], &device)?
+            .narrow(0, 1, 2)?;
+        let output = pad_decode_input(&input, 5)?;
+        device.synchronize()?;
+        assert_eq!(
+            output.to_vec2::<u32>()?,
+            vec![vec![1, 2], vec![3, 4], vec![1, 2], vec![1, 2], vec![1, 2]],
+        );
+        Ok(())
+    }
+
 }

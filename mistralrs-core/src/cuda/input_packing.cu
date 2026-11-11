@@ -28,6 +28,7 @@ __global__ void pack_completion_input_kernel(const uint32_t *host,
                       : staged.values[row][column - host_width];
 }
 
+#ifndef MISTRALRS_DKR_INPUT_PAD
 __global__ void pad_decode_input_kernel(const uint32_t *input,
                                         uint32_t *output, int input_rows,
                                         int output_rows, int width) {
@@ -42,6 +43,7 @@ __global__ void pad_decode_input_kernel(const uint32_t *input,
   const int source_row = row < input_rows ? row : 0;
   output[index] = input[static_cast<int64_t>(source_row) * width + column];
 }
+#endif  // MISTRALRS_DKR_INPUT_PAD
 
 }
 
@@ -83,6 +85,7 @@ extern "C" int pack_completion_input_u32(
   return static_cast<int>(cudaSuccess);
 }
 
+#ifndef MISTRALRS_DKR_INPUT_PAD
 extern "C" int pad_decode_input_u32(const void *input, void *output,
                                       int input_rows, int output_rows,
                                       int width, int64_t stream) {
@@ -99,3 +102,4 @@ extern "C" int pad_decode_input_u32(const void *input, void *output,
       input_rows, output_rows, width);
   return static_cast<int>(cudaGetLastError());
 }
+#endif  // MISTRALRS_DKR_INPUT_PAD

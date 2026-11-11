@@ -157,6 +157,9 @@ fn main() {
             // add+RMSNorm definitions, keeping the other FFI entries intact.
             builder = builder.arg("-DMISTRALRS_DKR_ADD_RMS_NORM");
         }
+        if cfg!(feature = "dkr-input-pad") {
+            builder = builder.arg("-DMISTRALRS_DKR_INPUT_PAD");
+        }
         if cfg!(feature = "dkr-rms-variants") {
             builder = builder.arg("-DMISTRALRS_DKR_RMS_VARIANTS");
         }
