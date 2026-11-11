@@ -8,6 +8,8 @@ pub(crate) mod logits_dynamic;
 pub(crate) mod rms_variants_dynamic;
 #[cfg(feature = "dkr-input-pad")]
 pub(crate) mod input_pad_dynamic;
+#[cfg(feature = "dkr-ssm")]
+pub(crate) mod ssm_dynamic;
 #[cfg(feature = "cuda")]
 pub(crate) mod dflash_context;
 #[cfg(feature = "cuda")]
@@ -33,7 +35,8 @@ pub(crate) mod indexed_copy;
     feature = "dkr-causal-mask",
     feature = "dkr-logits",
     feature = "dkr-rms-variants",
-    feature = "dkr-input-pad"
+    feature = "dkr-input-pad",
+    feature = "dkr-ssm"
 ))]
 pub(crate) mod kernel_runtime;
 #[cfg(feature = "cuda")]

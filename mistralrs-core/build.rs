@@ -146,6 +146,9 @@ fn main() {
         } else {
             excluded.extend_from_slice(&["moe_gemm_wmma.cu", "moe_gemm.cu"]);
         }
+        if cfg!(feature = "dkr-ssm") {
+            excluded.push("ssm.cu");
+        }
         if cfg!(feature = "dkr-indexed-copy") {
             excluded.push("indexed_copy.cu");
         }

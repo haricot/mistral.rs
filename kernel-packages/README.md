@@ -327,3 +327,27 @@ that ABI limitation.
 The existing ignored GPU test
 `pads_decode_input_by_aliasing_row_zero_values` covers the operation
 under the feature. It has not run as part of the deferred qualification.
+
+
+## DKR-R1.12: external F32 selective SSM scan
+
+The opt-in `mistralrs-core/dkr-ssm` feature routes the Mamba-style
+F32 selective scan through the typed DKR execution cache. The existing
+public `selective_scan_cuda` signature is preserved. The selected
+package is keyed by the state-lane factor (1, 2, 4 or 8), with exact
+batch, sequence, head, head-width and state shape in the hot plan.
+Clamp bounds remain dynamic arguments. One CUDA warp owns each
+(head, head-channel, batch) state slice for the entire sequence.
+
+Unlike the previous reference scan, the new source explicitly masks
+state entries beyond `d_state` in the final warp, so sizes such as 16
+do not read or write beyond the state buffer. This candidate is limited
+to F32, contiguous state storage and `1 <= d_state <= 256`.
+The adapter checks tensor shapes, equal device and 32-bit index budget
+before selecting the external package. The source-only package builder
+compiles all four entry points in **one** PTX invocation for SM61.
+
+When the feature is enabled, `ssm.cu` is excluded from the static Mistral
+CUDA build; the CUDA legacy implementation remains selected when the
+feature is off. The ignored `dkr_ssm_scan_gpu` oracle tests all four
+lane factors and an odd, sub-warp state width. No GPU run has occurred.

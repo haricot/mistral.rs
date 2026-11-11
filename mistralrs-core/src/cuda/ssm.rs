@@ -17,7 +17,7 @@
 ///
 /// Returns:
 /// - `y`:       (batch, seq_len, n_heads, head_dim) - output, f32
-#[cfg(feature = "cuda")]
+#[cfg(all(feature = "cuda", not(feature = "dkr-ssm")))]
 #[allow(clippy::too_many_arguments)]
 pub fn selective_scan_cuda(
     x: &candle_core::Tensor,
@@ -133,6 +133,25 @@ pub fn selective_scan_cuda(
     ));
 
     Ok(y)
+}
+
+#[cfg(all(feature = "cuda", feature = "dkr-ssm"))]
+#[allow(clippy::too_many_arguments)]
+pub fn selective_scan_cuda(
+    x: &candle_core::Tensor,
+    dt: &candle_core::Tensor,
+    a: &candle_core::Tensor,
+    b: &candle_core::Tensor,
+    c: &candle_core::Tensor,
+    d: &candle_core::Tensor,
+    dt_bias: &candle_core::Tensor,
+    state: &mut candle_core::Tensor,
+    dt_min: f32,
+    dt_max: f32,
+) -> candle_core::Result<candle_core::Tensor> {
+    super::ssm_dynamic::selective_scan_cuda(
+        x, dt, a, b, c, d, dt_bias, state, dt_min, dt_max,
+    )
 }
 
 #[cfg(not(feature = "cuda"))]
