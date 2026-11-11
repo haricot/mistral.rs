@@ -50,7 +50,9 @@ impl<K: Copy + Eq, P> LaunchPlanCache<K, P> {
         launch(&self.entries.last().expect("prepared plan missing").plan)
     }
 
-    #[cfg(test)]
+    /// Number of resident prevalidated plans, useful for cache diagnostics.
+    /// Available to downstream crates even when this crate is not built as a test.
+    #[inline]
     pub fn len(&self) -> usize {
         self.entries.len()
     }

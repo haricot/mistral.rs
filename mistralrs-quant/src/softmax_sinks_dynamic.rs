@@ -1,4 +1,5 @@
 use crate::dkr_cuda::{catalog, dtype, tensor, LaunchPlanCache};
+use candle_core::backend::BackendStorage;
 use candle_core::{
     cuda::cudarc::driver::{DevicePtr, DevicePtrMut, PushKernelArg},
     CudaStorage, DType, Device, Layout, Result, Shape, Storage, Tensor,
