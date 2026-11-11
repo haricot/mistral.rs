@@ -128,6 +128,7 @@ dkr-indexed-copy = ["cuda", "dep:mistralrs-kernel-runtime", "mistralrs-kernel-ru
 dkr-gated-add = ["cuda", "dep:mistralrs-kernel-runtime", "mistralrs-kernel-runtime/cuda"]
 dkr-reduce-norm = ["cuda", "mistralrs-quant/dkr-reduce-norm"]
 dkr-gemv = ["cuda", "mistralrs-quant/dkr-gemv"]
+dkr-kv-scales = ["cuda", "mistralrs-paged-attn/dkr-kv-scales"]
 dkr-add-rms-norm = ["cuda", "dep:mistralrs-kernel-runtime", "mistralrs-kernel-runtime/cuda"]
 dkr-causal-mask = ["cuda", "dep:mistralrs-kernel-runtime", "mistralrs-kernel-runtime/cuda"]
 dkr-logits = ["cuda", "dep:mistralrs-kernel-runtime", "mistralrs-kernel-runtime/cuda"]

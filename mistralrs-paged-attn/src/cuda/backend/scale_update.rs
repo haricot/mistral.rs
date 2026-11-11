@@ -31,8 +31,14 @@ impl candle::InplaceOp2 for KvScaleUpdate {
         k: &mut candle::CudaStorage,
         k_layout: &candle::Layout,
         v: &candle::CudaStorage,
-        _: &candle::Layout,
+        _v_layout: &candle::Layout,
     ) -> Result<()> {
+        #[cfg(feature = "dkr-kv-scales")]
+        if super::kv_scales_dynamic::update_if_supported(
+            k, k_layout, v, _v_layout, &self.k_scales, &self.v_scales,
+        )? {
+            return Ok(());
+        }
         use candle::backend::BackendStorage;
         use candle::cuda_backend::cudarc::driver::DevicePtr;
         use candle::cuda_backend::CudaStorageSlice;

@@ -54,6 +54,7 @@ ROUTES = {
 # package checked into this branch; NONE is GPU-qualified by this matrix.
 STAGED_OPERATIONS = {
     "dense_linear": ["linear.gemv.plain.b128.v1", "linear.gemv.bias.b128.v1"],
+    "kv_cache": ["kv_cache.scale_update.atomic_max.v1"],
     "moe": ["moe.grouped_gemm.v1"],
     "reduction": [
         "moe.weighted_reduce.v1",
@@ -144,7 +145,7 @@ def matrix(candle_dir: Path | None) -> dict:
         "source_inventory": inventory,
         "candle_revision_pin": "d99f6d77e507688bd9e4b654fbe20ac9e18238fc",
         "candle_checked": candle_dir is not None,
-        "packages_staged": 12,
+        "packages_staged": 13,
         "families": families,
         "unmapped_families": missing,
         "extraneous_families": extra,

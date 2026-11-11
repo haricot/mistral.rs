@@ -464,3 +464,55 @@ remains the reference baseline.
 \`CUDA_COMPUTE_CAP\` from these build scripts. Pass only
 \`--cc 61\` to the stand-alone PTX builder, preserving the user's
 existing Cargo/NVCC environment and static-kernel build cache.
+
+
+## DKR-R1.16 — FP8 KV-cache scale update (source-staged, unqualified)
+
+The opt-in feature \`mistralrs-paged-attn/dkr-kv-scales\`
+(forwarded through \`mistralrs-core/dkr-kv-scales\`) routes the
+**contiguous, zero-offset F16/BF16/F32 input** scale-update kernel to
+a typed external PTX module. This is the FP8 KV scaling prerequisite,
+**not** an FP8 page quantizer, cache gather, or paged-attention decode
+kernel.
+
+The external ABI is \`kv_cache.scale_update.atomic_max.v1\`:
+two same-dtype flat K/V input buffers, two F32 scalar read-write scale
+buffers, and a U64 element count. Layout normalization is a zero-copy
+logical view, admitted only after the adapter checks the actual Candle
+layout. The original atomic-max semantics are preserved:
+\`k_scale = max(k_scale, max(abs(K)) / 240.0)\`, likewise for V.
+Each block uses 512 threads and 4096 bytes of dynamic shared memory.
+The grid is clamped to 65,535 blocks as in the static kernel.
+Prevalidated launch plans are keyed by dtype/element count/device.
+
+The old FFI entry remains available on non-eligible layouts, without
+introducing a new implicit packing step. The test
+\`dkr_kv_scales_gpu\` is an ignored GPU candidate; it covers
+F16/BF16/F32, nonzero existing scales and repeat-launch plan reuse.
+It has **not been compiled or qualified** on SM61 yet.
+
+### Remaining FP8/FP4 and attention architecture work
+
+The DKR-v1 \`ElementType\` supports \`fp8_e4m3\` and \`u8\` as typed
+tensor storage, but weight formats such as NVFP4/MXFP4 also need
+**explicit storage representations**, group-scale tensor layouts,
+block/group sizes and packed-byte strides. Do not treat packed E2M1
+bytes as a plain \`u8\` tensor with no representation contract.
+The next step is a versioned \`representation\` descriptor
+(\`nvfp4_e2m1:group16\`, \`mxfp4:group32\`, etc.), with a
+separate conversion/scale-parity fixture before GEMM/GEMV dispatch.
+SM61 uses software/SIMT decoding; SM80+ tensor-core entries cannot
+be advertised as SM61-compatible kernels.
+
+For paged attention, \`reshape_and_cache\`, \`gather_kv_cache\`,
+\`paged_attention_v1/v2\`, MLA and FlashInfer layouts are separate
+operations with different strides and page tables. The fixed
+\`dkr.typed.v1\` contiguous argument ABI cannot honestly represent
+all their noncontiguous/indirect accesses. Move them only after an
+explicit indirect-layout/strided ABI and individual kernel parity
+tests. CUDA Graph capture remains deferred.
+
+**Important:** The existing R1.14 15/15 SM61 proof is unchanged. New
+R1.15 and R1.16 optional routes remain staged until the *single*
+grouped GPU qualification. No change to \`CUDA_COMPUTE_CAP\` is
+performed by the DKR final qualification script.

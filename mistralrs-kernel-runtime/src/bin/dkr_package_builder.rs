@@ -25,6 +25,7 @@ const PACKAGES: &[Package] = &[
     Package { name: "ssm", source: "ssm.cu", fast_math: true },
     Package { name: "rounded-rope", source: "rounded_rope.cu", fast_math: true },
     Package { name: "dense-gemv", source: "dense_gemv.cu", fast_math: false },
+    Package { name: "kv-scales", source: "kv_scales.cu", fast_math: false },
 ];
 
 fn parse_args() -> Result<(usize, PathBuf, String), Box<dyn std::error::Error>> {
