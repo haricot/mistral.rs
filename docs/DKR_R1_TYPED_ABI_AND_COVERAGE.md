@@ -69,7 +69,7 @@ cargo fmt --package mistralrs-kernel-runtime -- --check
 | KV cache (copy/reshape/gather/scale/quantization) | Cache-addressing, ownership and consistency ABI | Source mapped; adapters pending |
 | Conv1D/2D/dynamic/spatial, LFM3 | Stride, dilation, groups and padding contracts; cuDNN or SIMT provider | Source mapped; adapters pending |
 | State space/SSM/GDN, hyperconnection, fused model ops | State-layout and recurrent execution contracts | Source mapped; adapters pending |
-| RMSNorm/LayerNorm, activation, softmax, unary/binary/ternary, affine | Tensorwise/reduction family and ordered typed scalars | Source mapped; generic typed ABI ready; no execution adapter yet |
+| RMSNorm/LayerNorm, activation, softmax, unary/binary/ternary, affine | Tensorwise/reduction family and ordered typed scalars | Experimental fused gated-add adapter; remaining operations pending |
 | Embedding, rotary/RoPE, positional transformations | Gather/index contract and positional phase/stride ABI | Source mapped; adapters pending |
 | Copy, cast, layout/packing/transpose, indexing, sorting, reduction | Overlap/memory-stride and output-shape contracts | Source mapped; adapters pending |
 | Pooling (average/max) and nearest/bilinear upsampling | Window, stride, interpolation and shape contracts | Candle backend methods mapped; adapters pending |
@@ -143,6 +143,23 @@ ignored until the single final functional and A1/B/A2 performance campaign.
 
 CUDA Graph capture and replay are a separate final-stage extension. They may
 reduce sequence-level launch overhead, but no core DKR operation requires them.
+
+### DKR-R1.5 external fused gated-add provider
+
+`dkr-gated-add` moves the sigmoid-gated residual addition path to an external
+four-entry PTX package, retaining the same F16/BF16/F32 rounding operations as
+the historical CUDA source. The F32 row-tiled variant remains selected by
+column width; no architecture-specific conditional is added to generic Rust.
+The existing broadcast/layout fallback is preserved, and the provider uses
+R1.4 prevalidated launch plans. Its PTX is built once per requested compute
+capability, then referenced by four typed manifests.
+
+`kernel-packages/cuda/build_all.py --cc 61` is the single batch entry point for
+the migrated package families. Each builder retains its content-based reuse
+cache. The final GPU campaign will include F16/BF16/F32 numeric parity, the
+existing exact-rounding and CUDA Graph replay cases, and separate host/GPU
+latency measurements. No GPU compilation or qualification is claimed for this
+increment, and the rest of the source inventory remains pending migration.
 
 1. **R1a, closed**: exact Candle pin/lock regeneration; independent typed manifest, catalogue and artifact loading; host-only tests and source classification.
 2. **R1b, required**: typed CUDA tensor launch adapters, architecture-feature negotiation and explicit preallocation memory budget (especially packed FP8/FP4 and MoE); negative tests for invalid pointer/order/context, fallback absence and numerical parity.

@@ -15,7 +15,7 @@ pub mod graph;
 pub(crate) mod hyper_connection;
 #[cfg(feature = "cuda")]
 pub(crate) mod indexed_copy;
-#[cfg(any(feature = "dkr-moe", feature = "dkr-indexed-copy"))]
+#[cfg(any(feature = "dkr-moe", feature = "dkr-indexed-copy", feature = "dkr-gated-add"))]
 pub(crate) mod kernel_runtime;
 #[cfg(feature = "cuda")]
 pub(crate) mod input_packing;

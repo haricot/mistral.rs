@@ -139,3 +139,32 @@ migrated. The first and repeated launches are not assumed latency-equivalent
 to the legacy path until the final paired CPU/GPU benchmark is run. One combined
 SM61 CUDA qualification build is planned after all provider migrations; smaller
 source/ABI checks can run between changes without GPU CI.
+
+## DKR-R1.5: external fused sigmoid-gated addition
+
+The optional `dkr-gated-add` feature replaces the statically linked
+`gated_add.cu` launch with an external CUDA package, while preserving the
+legacy adapter when disabled. This follows the same bounded, thread-local
+prevalidated plan path as MoE and indexed-copy.
+
+The package covers F16, BF16 and F32 with the existing dtype-specific sigmoid
+rounding sequence. F32 retains both flat and row-tiled kernels, selected by
+the generic column count rather than a GPU architecture name. The ABI flattens
+the contiguous leading dimensions into rows while preserving storage offsets.
+Nonmatching/broadcast or strided layouts continue through Candle's existing
+fallback without discovering a DKR package.
+
+The eventual single batch command for all external packages is:
+
+```sh
+python3 kernel-packages/cuda/build_all.py --cc 61
+export DKR_KERNEL_PACKAGES="$PWD/kernel-packages/build/cuda"
+cargo test -p mistralrs-core --locked \
+  --features 'cuda-legacy,dkr-moe,dkr-indexed-copy,dkr-gated-add' \
+  --lib dkr_ -- --ignored --nocapture
+```
+
+The batch builder reuses packages whose sources, compilation options and NVCC
+version have not changed. These commands are reserved for final qualification,
+not for each migration increment. The new ignored GPU test and the existing
+exact-rounding and graph-capture tests still require SM61 verification.

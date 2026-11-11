@@ -149,6 +149,9 @@ fn main() {
         if cfg!(feature = "dkr-indexed-copy") {
             excluded.push("indexed_copy.cu");
         }
+        if cfg!(feature = "dkr-gated-add") {
+            excluded.push("gated_add.cu");
+        }
         if !excluded.is_empty() {
             builder = builder.exclude(&excluded);
         }
