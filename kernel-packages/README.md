@@ -229,3 +229,52 @@ per requested architecture and is included automatically by `build_all.py`.
 The original FFI remains available by disabling the feature. Correctness and
 launch-overhead parity will be checked with the other operations only in the
 final GPU qualification session.
+
+
+## DKR-R1.9: sparse logits penalties and bias
+
+The optional `mistralrs-core/dkr-logits` feature retains the existing validated
+tensor allocation, offsets and sampler entry points, but routes F32 sparse
+penalties and sparse bias through the R1.4 prevalidated launch-plan cache.
+The external `kernel-packages/cuda/logits` source emits three entry points:
+a contiguous F32 copy, a sparse penalty update and a sparse bias update.
+Both sampling paths launch copy before update on the same CUDA stream.
+
+The logits contract requires unique token IDs for race-free sparse updates,
+valid in-vocabulary IDs or explicit out-of-range ignore behavior, and a
+contiguous F32 logits tensor. The sampler's sparse count/bias construction
+provides unique IDs; direct callers must preserve that invariant.
+Repetition penalties are applied after frequency/presence penalties,
+matching the previous kernel. The penalty factors themselves remain
+dynamic scalar arguments, not hot-cache keys. The legacy FFI path remains
+selected when the feature is off.
+
+The ignored `dkr_logits_penalties_and_bias_gpu` test has been staged, not
+executed. The feature is not yet numerically or performance qualified.
+
+## DKR-R1.10 source staging: residual RMSNorm variants
+
+The `kernel-packages/cuda/rms-variants` builder emits a single CUDA PTX
+compilation unit with twelve candidate entry points: three dtypes
+(F16, BF16, F32), two residual-normalization forms and two *fixed* ABI
+variants with/without a scale tensor. This avoids nullable CUDA pointers,
+unused scale-buffer allocations and per-element optional checks.
+
+The forms are:
+- residual + RMSNorm(x) * weight, optionally scaled;
+- the preceding residual output followed by a second RMSNorm, with
+  separate residual/normalization epsilon and weight tensors.
+
+These are source-only candidates. The Candle/Mistral host adapters and their
+feature gates have **not** been migrated yet. The existing
+`dkr-add-rms-norm` integration is unchanged. Strided 4D normalization
+requires a new layout-aware typed ABI and is deliberately not advertised as
+supported by the current contiguous-only contract.
+
+Both new builders are discovered by the existing
+`kernel-packages/cuda/build_all.py` batch, so **do not** invoke them
+individually for this migration. The final SM61 compilation and one grouped
+qualification remain deferred until the remaining operation adapters are
+ready. Python remains a small packaging/compilation orchestrator for now;
+no new Rust toolchain, cudaforge dependency, CI trigger or NVCC invocation is
+required for these source edits.

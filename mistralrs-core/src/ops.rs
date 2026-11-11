@@ -3959,6 +3959,56 @@ pub fn cuda_apply_sparse_penalties_f32(
     let token_ptr = unsafe { (token_ptr as *const u32).add(token_layout.start_offset()) };
     let count_ptr = unsafe { (count_ptr as *const f32).add(count_layout.start_offset()) };
 
+    #[cfg(feature = "dkr-logits")]
+    {
+        use candle_core::cuda_backend::cudarc::driver::PushKernelArg;
+        let src_addr = src_ptr as u64;
+        let out_addr = out_ptr as u64;
+        let token_addr = token_ptr as u64;
+        let value_addr = count_ptr as u64;
+        let elems = u32::try_from(elem_count).map_err(candle_core::Error::wrap)?;
+        let entries = u32::try_from(n_tokens).map_err(candle_core::Error::wrap)?;
+        let freq = frequency_penalty;
+        let presence = presence_penalty;
+        let repetition = repetition_penalty;
+        crate::cuda::logits_dynamic::with_logits_plans(
+            input.device(),
+            elem_count,
+            n_tokens,
+            false,
+            |plan| {
+                unsafe {
+                    plan.with_prevalidated_launch(|function, config| {
+                        let mut builder = stream.launch_builder(function);
+                        builder.arg(&src_addr).arg(&out_addr).arg(&elems);
+                        builder.launch(config)?;
+                        Ok(())
+                    })
+                }
+                .map_err(|error| candle_core::Error::msg(error.to_string()))
+            },
+            |plan| {
+                unsafe {
+                    plan.with_prevalidated_launch(|function, config| {
+                        let mut builder = stream.launch_builder(function);
+                        builder
+                            .arg(&out_addr)
+                            .arg(&token_addr)
+                            .arg(&value_addr)
+                            .arg(&elems)
+                            .arg(&entries)
+                            .arg(&freq)
+                            .arg(&presence)
+                            .arg(&repetition);
+                        builder.launch(config)?;
+                        Ok(())
+                    })
+                }
+                .map_err(|error| candle_core::Error::msg(error.to_string()))
+            },
+        )?;
+    }
+    #[cfg(not(feature = "dkr-logits"))]
     unsafe {
         ffi::apply_sparse_penalties_f32(
             src_ptr as *const c_void,
@@ -4086,6 +4136,51 @@ pub fn cuda_apply_sparse_logits_bias_f32(
     let token_ptr = unsafe { (token_ptr as *const u32).add(token_layout.start_offset()) };
     let bias_ptr = unsafe { (bias_ptr as *const f32).add(bias_layout.start_offset()) };
 
+    #[cfg(feature = "dkr-logits")]
+    {
+        use candle_core::cuda_backend::cudarc::driver::PushKernelArg;
+        let src_addr = src_ptr as u64;
+        let out_addr = out_ptr as u64;
+        let token_addr = token_ptr as u64;
+        let value_addr = bias_ptr as u64;
+        let elems = u32::try_from(elem_count).map_err(candle_core::Error::wrap)?;
+        let entries = u32::try_from(n_tokens).map_err(candle_core::Error::wrap)?;
+
+        crate::cuda::logits_dynamic::with_logits_plans(
+            input.device(),
+            elem_count,
+            n_tokens,
+            true,
+            |plan| {
+                unsafe {
+                    plan.with_prevalidated_launch(|function, config| {
+                        let mut builder = stream.launch_builder(function);
+                        builder.arg(&src_addr).arg(&out_addr).arg(&elems);
+                        builder.launch(config)?;
+                        Ok(())
+                    })
+                }
+                .map_err(|error| candle_core::Error::msg(error.to_string()))
+            },
+            |plan| {
+                unsafe {
+                    plan.with_prevalidated_launch(|function, config| {
+                        let mut builder = stream.launch_builder(function);
+                        builder
+                            .arg(&out_addr)
+                            .arg(&token_addr)
+                            .arg(&value_addr)
+                            .arg(&elems)
+                            .arg(&entries);
+                        builder.launch(config)?;
+                        Ok(())
+                    })
+                }
+                .map_err(|error| candle_core::Error::msg(error.to_string()))
+            },
+        )?;
+    }
+    #[cfg(not(feature = "dkr-logits"))]
     unsafe {
         ffi::apply_sparse_logits_bias_f32(
             src_ptr as *const c_void,
