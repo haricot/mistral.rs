@@ -13,16 +13,6 @@ pub struct PreparedKernel {
     function: CudaFunction,
     device: Device,
     cc: u32,
-    module_key: String,
-}
-
-#[derive(Clone, Debug)]
-pub struct PrevalidatedLaunchPlan {
-    module_key: String,
-    cc: u32,
-    grid: [u32; 3],
-    block: [u32; 3],
-    shared_mem_bytes: u32,
 }
 
 impl PreparedKernel {
@@ -42,7 +32,6 @@ impl PreparedKernel {
             function,
             device: device.clone(),
             cc,
-            module_key: module.module_key(),
         })
     }
 
@@ -65,49 +54,6 @@ impl PreparedKernel {
             ),
             shared_mem_bytes: self.manifest.shared_mem_bytes,
         })
-    }
-
-    pub fn prepare_launch(
-        &self,
-        module: &VerifiedKernel,
-        request: &LaunchRequest,
-        device: &Device,
-    ) -> Result<PrevalidatedLaunchPlan> {
-        ensure!(
-            module.module_key() == self.module_key,
-            "launch plan uses a different verified kernel"
-        );
-        let config = self.launch_config(request, device)?;
-        Ok(PrevalidatedLaunchPlan {
-            module_key: self.module_key.clone(),
-            cc: self.cc,
-            grid: [config.grid_dim.0, config.grid_dim.1, config.grid_dim.2],
-            block: [config.block_dim.0, config.block_dim.1, config.block_dim.2],
-            shared_mem_bytes: config.shared_mem_bytes,
-        })
-    }
-
-    // The caller still owns argument values, buffer lifetimes, stream order and immutable shapes.
-    pub unsafe fn with_prevalidated_launch<T>(
-        &self,
-        plan: &PrevalidatedLaunchPlan,
-        device: &Device,
-        launch: impl FnOnce(&CudaFunction, LaunchConfig) -> Result<T>,
-    ) -> Result<T> {
-        ensure!(
-            device.same_device(&self.device),
-            "CUDA context mismatch for prevalidated launch"
-        );
-        ensure!(
-            plan.cc == self.cc && plan.module_key == self.module_key,
-            "prevalidated launch plan does not match prepared kernel"
-        );
-        let config = LaunchConfig {
-            grid_dim: (plan.grid[0], plan.grid[1], plan.grid[2]),
-            block_dim: (plan.block[0], plan.block[1], plan.block[2]),
-            shared_mem_bytes: plan.shared_mem_bytes,
-        };
-        launch(&self.function, config)
     }
 
     // The adapter must supply actual CUDA buffers/scalars in the declared argument order.
