@@ -1,4 +1,6 @@
-use candle_core::{DType, Device, Result};
+use candle_core::{DType, Result};
+#[cfg(test)]
+use candle_core::Device;
 use mistralrs_kernel_runtime::{
     universal::{Argument, ElementType},
     universal_cuda::KernelExecutionCache,

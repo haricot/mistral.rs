@@ -1,4 +1,6 @@
-use candle_core::{Device, Result};
+use candle_core::Result;
+#[cfg(test)]
+use candle_core::Device;
 use mistralrs_kernel_runtime::universal_cuda::KernelExecutionCache;
 use std::{path::PathBuf, sync::OnceLock};
 
