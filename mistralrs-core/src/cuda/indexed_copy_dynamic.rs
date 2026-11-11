@@ -1,8 +1,23 @@
-use crate::cuda::kernel_runtime::kernel_cache;
+use crate::cuda::kernel_runtime::{kernel_cache, HotPlanCache};
 use candle_core::{CpuStorage, CudaStorage, DType, InplaceOp3, Layout, Result, Tensor};
 use mistralrs_kernel_runtime::universal::{Argument, ElementType, LaunchRequest};
+use mistralrs_kernel_runtime::universal_cuda::PrevalidatedLaunchPlan;
+use std::cell::RefCell;
 
 const OPERATION: &str = "tensor.indexed_row_copy.v1";
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct IndexedCopyPlanKey {
+    dtype: ElementType,
+    source_rows: u32,
+    destination_rows: usize,
+    row_elements: u64,
+}
+
+thread_local! {
+    static HOT_PLANS: RefCell<HotPlanCache<IndexedCopyPlanKey, PrevalidatedLaunchPlan>> =
+        RefCell::new(HotPlanCache::new());
+}
 
 struct IndexedRowCopy {
     rows: u32,
@@ -58,44 +73,15 @@ impl InplaceOp3 for IndexedRowCopy {
             dtype => candle_core::bail!("indexed row copy does not support {dtype:?}"),
         };
         let device = Device::Cuda(dst.device().clone());
-        let source_rows = self.rows as usize;
-        let row_elements = usize::try_from(self.row_elements)
-            .map_err(|_| candle_core::Error::msg("indexed row copy row size exceeds usize"))?;
-        let total = source_rows
-            .checked_mul(row_elements)
-            .ok_or_else(|| candle_core::Error::msg("indexed row copy element count overflow"))?;
         let dest_rows = dst_layout.dims()[0];
-        let mut request = LaunchRequest {
-            operation: OPERATION.into(),
-            cc: 0,
-            args: vec![
-                tensor(dtype, vec![source_rows, row_elements]),
-                tensor(dtype, vec![dest_rows, row_elements]),
-                tensor(ElementType::U32, vec![source_rows]),
-                Argument::Scalar {
-                    dtype: ElementType::U32,
-                },
-                Argument::Scalar {
-                    dtype: ElementType::U32,
-                },
-                Argument::Scalar {
-                    dtype: ElementType::U64,
-                },
-            ],
-            grid: [1, 1, 1],
-            max_dynamic_shared_mem_bytes: 0,
-        };
-        let prepared = kernel_cache()?
-            .prepare_for_device(&mut request, &device)
-            .map_err(|error| candle_core::Error::msg(error.to_string()))?;
-        if prepared.manifest.block[1..] != [1, 1] {
-            candle_core::bail!("indexed row copy requires a one-dimensional launch block")
-        }
-        let blocks = total.div_ceil(prepared.manifest.block[0] as usize);
-        request.grid[0] = u32::try_from(blocks)
-            .map_err(|_| candle_core::Error::msg("indexed row copy launch grid overflow"))?;
         let dest_rows_u32 = u32::try_from(dest_rows)
             .map_err(|_| candle_core::Error::msg("indexed row copy destination exceeds u32"))?;
+        let plan_key = IndexedCopyPlanKey {
+            dtype,
+            source_rows: self.rows,
+            destination_rows: dest_rows,
+            row_elements: self.row_elements,
+        };
 
         let cuda = dst.device();
         let stream = cuda.cuda_stream();
@@ -103,38 +89,90 @@ impl InplaceOp3 for IndexedRowCopy {
         let row_view = row_slice.slice(rows_layout.start_offset()..);
         let (row_ptr, _row_guard) = row_view.device_ptr(&stream);
 
-        macro_rules! launch {
-            ($type:ty) => {{
-                let src_slice = src.as_cuda_slice::<$type>()?;
-                let dst_slice = dst.as_cuda_slice_mut::<$type>()?;
-                let src_view = src_slice.slice(src_layout.start_offset()..);
-                let mut dst_view = dst_slice.slice_mut(dst_layout.start_offset()..);
-                let (src_ptr, _src_guard) = src_view.device_ptr(&stream);
-                let (dst_ptr, _dst_guard) = dst_view.device_ptr_mut(&stream);
-                unsafe {
-                    prepared.with_verified_launch(&request, &device, |function, config| {
-                        let mut builder = stream.launch_builder(function);
-                        builder
-                            .arg(&src_ptr)
-                            .arg(&dst_ptr)
-                            .arg(&row_ptr)
-                            .arg(&self.rows)
-                            .arg(&dest_rows_u32)
-                            .arg(&self.row_elements);
-                        builder.launch(config)?;
-                        Ok(())
-                    })
-                }
-                .map_err(|error| candle_core::Error::msg(error.to_string()))?
-            }};
-        }
-        match dst.dtype() {
-            DType::F16 => launch!(half::f16),
-            DType::BF16 => launch!(half::bf16),
-            DType::F32 => launch!(f32),
-            _ => unreachable!(),
-        }
-        Ok(())
+        HOT_PLANS.with(|hot| {
+            hot.borrow_mut().with_plan(
+                plan_key,
+                &device,
+                || {
+                    let source_rows = self.rows as usize;
+                    let row_elements = usize::try_from(self.row_elements).map_err(|_| {
+                        candle_core::Error::msg("indexed row copy row size exceeds usize")
+                    })?;
+                    let total = source_rows.checked_mul(row_elements).ok_or_else(|| {
+                        candle_core::Error::msg("indexed row copy element count overflow")
+                    })?;
+                    let mut request = LaunchRequest {
+                        operation: OPERATION.into(),
+                        cc: 0,
+                        args: vec![
+                            tensor(dtype, vec![source_rows, row_elements]),
+                            tensor(dtype, vec![dest_rows, row_elements]),
+                            tensor(ElementType::U32, vec![source_rows]),
+                            Argument::Scalar {
+                                dtype: ElementType::U32,
+                            },
+                            Argument::Scalar {
+                                dtype: ElementType::U32,
+                            },
+                            Argument::Scalar {
+                                dtype: ElementType::U64,
+                            },
+                        ],
+                        grid: [1, 1, 1],
+                        max_dynamic_shared_mem_bytes: 0,
+                    };
+                    let prepared = kernel_cache()?
+                        .prepare_for_device(&mut request, &device)
+                        .map_err(|error| candle_core::Error::msg(error.to_string()))?;
+                    if prepared.manifest.block[1..] != [1, 1] {
+                        candle_core::bail!(
+                            "indexed row copy requires a one-dimensional launch block"
+                        )
+                    }
+                    let blocks = total.div_ceil(prepared.manifest.block[0] as usize);
+                    request.grid[0] = u32::try_from(blocks).map_err(|_| {
+                        candle_core::Error::msg("indexed row copy launch grid overflow")
+                    })?;
+                    prepared
+                        .prevalidate_launch(&request, &device)
+                        .map_err(|error| candle_core::Error::msg(error.to_string()))
+                },
+                |plan| {
+                    macro_rules! launch {
+                        ($type:ty) => {{
+                            let src_slice = src.as_cuda_slice::<$type>()?;
+                            let dst_slice = dst.as_cuda_slice_mut::<$type>()?;
+                            let src_view = src_slice.slice(src_layout.start_offset()..);
+                            let mut dst_view = dst_slice.slice_mut(dst_layout.start_offset()..);
+                            let (src_ptr, _src_guard) = src_view.device_ptr(&stream);
+                            let (dst_ptr, _dst_guard) = dst_view.device_ptr_mut(&stream);
+                            unsafe {
+                                plan.with_prevalidated_launch(|function, config| {
+                                    let mut builder = stream.launch_builder(function);
+                                    builder
+                                        .arg(&src_ptr)
+                                        .arg(&dst_ptr)
+                                        .arg(&row_ptr)
+                                        .arg(&self.rows)
+                                        .arg(&dest_rows_u32)
+                                        .arg(&self.row_elements);
+                                    builder.launch(config)?;
+                                    Ok(())
+                                })
+                            }
+                            .map_err(|error| candle_core::Error::msg(error.to_string()))?
+                        }};
+                    }
+                    match dst.dtype() {
+                        DType::F16 => launch!(half::f16),
+                        DType::BF16 => launch!(half::bf16),
+                        DType::F32 => launch!(f32),
+                        _ => unreachable!(),
+                    }
+                    Ok(())
+                },
+            )
+        })
     }
 }
 
@@ -210,11 +248,13 @@ mod tests {
             let prepared_before = kernel_cache()?
                 .prepared_count()
                 .map_err(|error| candle_core::Error::msg(error.to_string()))?;
+            let plans_before = HOT_PLANS.with(|hot| hot.borrow().len());
             copy_rows(&src, &dst, &rows)?;
             let prepared_after = kernel_cache()?
                 .prepared_count()
                 .map_err(|error| candle_core::Error::msg(error.to_string()))?;
             assert_eq!(prepared_before, prepared_after);
+            assert_eq!(plans_before, HOT_PLANS.with(|hot| hot.borrow().len()));
             device.synchronize()?;
             assert_eq!(dst.to_dtype(DType::F32)?.to_vec2::<f32>()?, expected);
         }

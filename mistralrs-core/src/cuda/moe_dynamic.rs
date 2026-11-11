@@ -1,9 +1,27 @@
-use crate::cuda::kernel_runtime::kernel_cache;
+use crate::cuda::kernel_runtime::{kernel_cache, HotPlanCache};
 use candle_core::{DType, Result, Tensor};
 use mistralrs_kernel_runtime::universal::{Argument, ElementType, LaunchRequest};
+use mistralrs_kernel_runtime::universal_cuda::PrevalidatedLaunchPlan;
+use std::cell::RefCell;
 
 const OPERATION: &str = "moe.grouped_gemm.v1";
 const MAX_ROWS: usize = u32::MAX as usize;
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct MoePlanKey {
+    dtype: ElementType,
+    input_m: usize,
+    size_k: usize,
+    num_experts: usize,
+    size_n: usize,
+    topk: usize,
+    has_gating: bool,
+}
+
+thread_local! {
+    static HOT_PLANS: RefCell<HotPlanCache<MoePlanKey, PrevalidatedLaunchPlan>> =
+        RefCell::new(HotPlanCache::new());
+}
 
 macro_rules! check {
     ($condition:expr, $message:literal) => {
@@ -115,35 +133,15 @@ where
         _ => candle_core::bail!("DKR MoE currently supports F16/BF16"),
     };
     let dev = device.as_cuda_device()?;
-    let mut request = LaunchRequest {
-        operation: OPERATION.into(),
-        cc: 0,
-        args: vec![
-            tensor_arg(element_type, vec![input_m, size_k]),
-            tensor_arg(element_type, vec![num_experts, size_n, size_k]),
-            tensor_arg(ElementType::U32, vec![size_m]),
-            tensor_arg(ElementType::U32, vec![size_m]),
-            tensor_arg(ElementType::F32, vec![size_m]),
-            tensor_arg(element_type, vec![size_m, size_n]),
-            scalar_arg(),
-            scalar_arg(),
-            scalar_arg(),
-            scalar_arg(),
-            scalar_arg(),
-            scalar_arg(),
-        ],
-        grid: [1, 1, 1],
-        max_dynamic_shared_mem_bytes: 0,
+    let plan_key = MoePlanKey {
+        dtype: element_type,
+        input_m,
+        size_k,
+        num_experts,
+        size_n,
+        topk,
+        has_gating,
     };
-    let prepared = kernel_cache()?
-        .prepare_for_device(&mut request, device)
-        .map_err(|error| candle_core::Error::Msg(error.to_string()))?;
-    let threads = prepared.manifest.block[0];
-    check!(
-        prepared.manifest.block[1..] == [1, 1],
-        "DKR MoE requires a one-dimensional launch block"
-    );
-    request.grid = [output_count_u32.div_ceil(threads), 1, 1];
 
     let (input_storage, _) = input.storage_and_layout();
     let (weight_storage, _) = weights.storage_and_layout();
@@ -181,33 +179,78 @@ where
     };
     let mut output = dev.alloc_zeros::<T>(output_count)?;
 
-    unsafe {
-        prepared.with_verified_launch(&request, device, |function, config| {
-            let stream = dev.cuda_stream();
-            let mut builder = stream.launch_builder(function);
-            builder
-                .arg(input_slice)
-                .arg(weight_slice)
-                .arg(sorted_slice)
-                .arg(experts_slice);
-            if let Some(slice) = gating_slice {
-                builder.arg(slice);
-            } else {
-                builder.arg(scratch.as_ref().expect("missing dummy gating buffer"));
-            }
-            builder
-                .arg(&mut output)
-                .arg(&num_experts_u32)
-                .arg(&topk_u32)
-                .arg(&m_u32)
-                .arg(&n_u32)
-                .arg(&k_u32)
-                .arg(&gating_u32);
-            builder.launch(config)?;
-            Ok(())
-        })
-    }
-    .map_err(|error| candle_core::Error::Msg(error.to_string()))?;
+    HOT_PLANS.with(|hot| {
+        hot.borrow_mut().with_plan(
+            plan_key,
+            device,
+            || {
+                let mut request = LaunchRequest {
+                    operation: OPERATION.into(),
+                    cc: 0,
+                    args: vec![
+                        tensor_arg(element_type, vec![input_m, size_k]),
+                        tensor_arg(element_type, vec![num_experts, size_n, size_k]),
+                        tensor_arg(ElementType::U32, vec![size_m]),
+                        tensor_arg(ElementType::U32, vec![size_m]),
+                        tensor_arg(ElementType::F32, vec![size_m]),
+                        tensor_arg(element_type, vec![size_m, size_n]),
+                        scalar_arg(),
+                        scalar_arg(),
+                        scalar_arg(),
+                        scalar_arg(),
+                        scalar_arg(),
+                        scalar_arg(),
+                    ],
+                    grid: [1, 1, 1],
+                    max_dynamic_shared_mem_bytes: 0,
+                };
+                let prepared = kernel_cache()?
+                    .prepare_for_device(&mut request, device)
+                    .map_err(|error| candle_core::Error::msg(error.to_string()))?;
+                check!(
+                    prepared.manifest.block[1..] == [1, 1],
+                    "DKR MoE requires a one-dimensional launch block"
+                );
+                request.grid = [
+                    output_count_u32.div_ceil(prepared.manifest.block[0]),
+                    1,
+                    1,
+                ];
+                prepared
+                    .prevalidate_launch(&request, device)
+                    .map_err(|error| candle_core::Error::msg(error.to_string()))
+            },
+            |plan| {
+                unsafe {
+                    plan.with_prevalidated_launch(|function, config| {
+                        let stream = dev.cuda_stream();
+                        let mut builder = stream.launch_builder(function);
+                        builder
+                            .arg(input_slice)
+                            .arg(weight_slice)
+                            .arg(sorted_slice)
+                            .arg(experts_slice);
+                        if let Some(slice) = gating_slice {
+                            builder.arg(slice);
+                        } else {
+                            builder.arg(scratch.as_ref().expect("missing dummy gating buffer"));
+                        }
+                        builder
+                            .arg(&mut output)
+                            .arg(&num_experts_u32)
+                            .arg(&topk_u32)
+                            .arg(&m_u32)
+                            .arg(&n_u32)
+                            .arg(&k_u32)
+                            .arg(&gating_u32);
+                        builder.launch(config)?;
+                        Ok(())
+                    })
+                }
+                .map_err(|error| candle_core::Error::msg(error.to_string()))
+            },
+        )
+    })?;
 
     let output = candle_core::CudaStorage::wrap_cuda_slice(output, dev.clone());
     Ok(Tensor::from((Storage::Cuda(output), (size_m, size_n))))
@@ -273,11 +316,13 @@ mod tests {
             let prepared_before = kernel_cache()?
                 .prepared_count()
                 .map_err(|error| candle_core::Error::Msg(error.to_string()))?;
+            let plans_before = HOT_PLANS.with(|hot| hot.borrow().len());
             let repeated = moe_gemm(&input, &weights, &gating, &sorted, &experts, 1, true)?;
             let prepared_after = kernel_cache()?
                 .prepared_count()
                 .map_err(|error| candle_core::Error::Msg(error.to_string()))?;
             assert_eq!(prepared_before, prepared_after);
+            assert_eq!(plans_before, HOT_PLANS.with(|hot| hot.borrow().len()));
             let repeated = repeated
                 .to_dtype(DType::F32)?
                 .to_device(&Device::Cpu)?

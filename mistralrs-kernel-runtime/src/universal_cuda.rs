@@ -85,6 +85,11 @@ pub struct PreparedKernel {
     cc: u32,
 }
 
+pub struct PrevalidatedLaunchPlan {
+    kernel: Arc<PreparedKernel>,
+    config: LaunchConfig,
+}
+
 impl PreparedKernel {
     pub fn load_auto(
         catalog: &KernelCatalog,
@@ -140,6 +145,18 @@ impl PreparedKernel {
         })
     }
 
+    pub fn prevalidate_launch(
+        self: &Arc<Self>,
+        request: &LaunchRequest,
+        device: &Device,
+    ) -> Result<PrevalidatedLaunchPlan> {
+        let config = self.launch_config(request, device)?;
+        Ok(PrevalidatedLaunchPlan {
+            kernel: Arc::clone(self),
+            config,
+        })
+    }
+
     // The adapter must supply actual CUDA buffers/scalars in the declared argument order.
     pub unsafe fn with_verified_launch<T>(
         &self,
@@ -149,5 +166,20 @@ impl PreparedKernel {
     ) -> Result<T> {
         let config = self.launch_config(request, device)?;
         launch(&self.function, config)
+    }
+}
+
+impl PrevalidatedLaunchPlan {
+    // The caller must retain the validated tensor layout and CUDA device invariants for every replay.
+    pub unsafe fn with_prevalidated_launch<T>(
+        &self,
+        launch: impl FnOnce(&CudaFunction, LaunchConfig) -> Result<T>,
+    ) -> Result<T> {
+        let config = LaunchConfig {
+            grid_dim: self.config.grid_dim,
+            block_dim: self.config.block_dim,
+            shared_mem_bytes: self.config.shared_mem_bytes,
+        };
+        launch(&self.kernel.function, config)
     }
 }

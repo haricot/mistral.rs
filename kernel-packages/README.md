@@ -119,3 +119,23 @@ without floating-point arithmetic, rejects destination indices outside the
 output row count, and preserves nonzero storage offsets through checked device
 pointers. The test validates in-place results and repeated-launch cache reuse.
 It still requires real-GPU qualification before use in model inference.
+
+## DKR-R1.4: prevalidated launch plans
+
+MoE and indexed-copy now keep a bounded, thread-local plan cache keyed by the
+validated operation signature and CUDA device. A cold signature resolves its
+external module once, validates the launch geometry and typed ABI, and retains
+the CUDA function and launch configuration in a `PrevalidatedLaunchPlan`.
+
+On a warm signature, neither provider reconstructs `LaunchRequest`, allocates
+argument descriptors, locks the shared module cache, checks compute capability,
+nor repeats manifest admission. Host-side tensor invariants and CUDA buffer
+lifetimes remain checked by the adapters before dispatch. The hot cache lookup
+uses no operating-system mutex and does not allocate after warming.
+
+The generic plan does not require ASD. CUDA Graphs are reserved for later
+sequence-level qualification, after the remaining operation families have been
+migrated. The first and repeated launches are not assumed latency-equivalent
+to the legacy path until the final paired CPU/GPU benchmark is run. One combined
+SM61 CUDA qualification build is planned after all provider migrations; smaller
+source/ABI checks can run between changes without GPU CI.

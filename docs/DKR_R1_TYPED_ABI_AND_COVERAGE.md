@@ -123,6 +123,27 @@ MoE and indexed-copy tests from one compiled `mistralrs-core` binary. This is
 not a claim that the other source families are already dynamic or that GPU
 performance is unchanged.
 
+### DKR-R1.4 prevalidated launch plans
+
+`PrevalidatedLaunchPlan` retains the CUDA function and verified launch
+configuration after one typed admission per signature and device. The MoE and
+indexed-copy adapters use bounded thread-local caches with fixed-size keys.
+Warm dispatch does not recreate the typed request, lock the shared module
+cache, query device capability, or rerun manifest admission. The keyed lookup,
+tensor validation, pointer preparation and CUDA submission still have a cost;
+zero latency regression is a final qualification target, not a measured result.
+
+The original checked `with_verified_launch` API remains available to adapters
+that have not adopted a reusable plan. The prevalidated launch API is unsafe:
+its caller must maintain the previously admitted device, tensor type/layout and
+launch parameter invariants on each replay. The hot-path cache unit test uses
+a scalar mock plan and does not launch a GPU kernel, although the feature-enabled
+crate still has CUDA build dependencies. Real CUDA tests remain intentionally
+ignored until the single final functional and A1/B/A2 performance campaign.
+
+CUDA Graph capture and replay are a separate final-stage extension. They may
+reduce sequence-level launch overhead, but no core DKR operation requires them.
+
 1. **R1a, closed**: exact Candle pin/lock regeneration; independent typed manifest, catalogue and artifact loading; host-only tests and source classification.
 2. **R1b, required**: typed CUDA tensor launch adapters, architecture-feature negotiation and explicit preallocation memory budget (especially packed FP8/FP4 and MoE); negative tests for invalid pointer/order/context, fallback absence and numerical parity.
 3. **R1c, required**: migrate operation families incrementally from Candle's `cuda_legacy` and Mistral's CUDA launch points; keep unsupported SM61 MMA/FlashAttention variants behind honest capability rejection and choose qualified SIMT alternatives.
