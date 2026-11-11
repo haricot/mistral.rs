@@ -190,7 +190,7 @@ the single batch package build followed by one test compilation session:
 python3 kernel-packages/cuda/build_all.py --cc 61
 export DKR_KERNEL_PACKAGES="$PWD/kernel-packages/build/cuda"
 cargo nextest run -p mistralrs-core -p mistralrs-quant --locked \
-  --features 'mistralrs-core/cuda-legacy,mistralrs-core/dkr-moe,mistralrs-core/dkr-indexed-copy,mistralrs-core/dkr-gated-add,mistralrs-core/dkr-reduce-norm,mistralrs-core/dkr-add-rms-norm' \
+  --features 'mistralrs-core/cuda-legacy,mistralrs-core/dkr-moe,mistralrs-core/dkr-indexed-copy,mistralrs-core/dkr-gated-add,mistralrs-core/dkr-reduce-norm,mistralrs-core/dkr-add-rms-norm,mistralrs-core/dkr-causal-mask' \
   --run-ignored ignored-only -E 'test(/dkr_/)' --no-fail-fast
 ```
 
@@ -214,3 +214,18 @@ is off; `sort.cu` still contains other fused normalization and sorting
 kernels. When enabled, a scoped preprocessor guard avoids linking duplicate
 static add+RMSNorm definitions. Host-only contract review precedes the single
 deferred CUDA qualification.
+
+## DKR-R1.8: external in-place F32 causal masking
+
+`mistralrs-core/dkr-causal-mask` replaces the 256-thread in-place F32 causal
+mask kernel from `sort.cu`. Its signed 32-bit query/key geometry and offsets
+are ABI-typed scalars; its scores tensor is declared `read_write`. The
+prevalidated R1.4 plan is reused for each shape/device, while `q_offset` and
+`prefix_len` remain dynamic on the warm path. A contiguous nonzero view
+offset is applied to the device pointer before dispatch.
+
+`kernel-packages/cuda/causal-mask/build.py` emits one PTX and one manifest
+per requested architecture and is included automatically by `build_all.py`.
+The original FFI remains available by disabling the feature. Correctness and
+launch-overhead parity will be checked with the other operations only in the
+final GPU qualification session.

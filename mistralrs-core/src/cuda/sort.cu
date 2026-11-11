@@ -111,6 +111,7 @@ extern "C" void apply_sparse_logits_bias_f32(
       reinterpret_cast<float *>(dst), token_ids, biases, n, n_tokens);
 }
 
+#ifndef MISTRALRS_DKR_CAUSAL_MASK
 __global__ void apply_causal_mask_f32_kernel(float *__restrict__ scores,
                                              const int batch_heads,
                                              const int q_len,
@@ -146,6 +147,7 @@ extern "C" void apply_causal_mask_f32(void *scores, const int batch_heads,
       reinterpret_cast<float *>(scores), batch_heads, q_len, kv_len, q_offset,
       prefix_len);
 }
+#endif  // MISTRALRS_DKR_CAUSAL_MASK
 
 template <typename T>
 __device__ __forceinline__ float rms_residual_to_float(T value) {

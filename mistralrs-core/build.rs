@@ -157,6 +157,9 @@ fn main() {
             // add+RMSNorm definitions, keeping the other FFI entries intact.
             builder = builder.arg("-DMISTRALRS_DKR_ADD_RMS_NORM");
         }
+        if cfg!(feature = "dkr-causal-mask") {
+            builder = builder.arg("-DMISTRALRS_DKR_CAUSAL_MASK");
+        }
         if !excluded.is_empty() {
             builder = builder.exclude(&excluded);
         }

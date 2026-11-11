@@ -1,5 +1,7 @@
 #[cfg(feature = "dkr-add-rms-norm")]
 pub(crate) mod add_rms_norm_dynamic;
+#[cfg(feature = "dkr-causal-mask")]
+pub(crate) mod causal_mask_dynamic;
 #[cfg(feature = "cuda")]
 pub(crate) mod dflash_context;
 #[cfg(feature = "cuda")]
@@ -21,7 +23,8 @@ pub(crate) mod indexed_copy;
     feature = "dkr-moe",
     feature = "dkr-indexed-copy",
     feature = "dkr-gated-add",
-    feature = "dkr-add-rms-norm"
+    feature = "dkr-add-rms-norm",
+    feature = "dkr-causal-mask"
 ))]
 pub(crate) mod kernel_runtime;
 #[cfg(feature = "cuda")]

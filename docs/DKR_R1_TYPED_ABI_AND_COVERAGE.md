@@ -218,6 +218,24 @@ Candle's general RMSNorm/LayerNorm and generic reductions are not yet
 migrated. CUDA Graph capture/replay will be considered only after this
 operation-family migration, as a separately measured optional optimization.
 
+### DKR-R1.8 external in-place causal masking
+
+`mistralrs-core/dkr-causal-mask` migrates the F32 in-place causal attention
+mask to `attention.causal_mask_f32.inplace.v1` with a single 256-thread
+external kernel and one typed manifest. The adapter retains the old
+`[batch_heads, q_len, kv_len]` layout, its separate `q_offset` and
+`prefix_len` launch parameters, nonzero contiguous storage offsets, and
+`-infinity` assignment for future key positions. It prevalidates the launch
+once per shape and device, with offsets passed as ordinary scalar arguments
+on every invocation. Zero-sized dimensions remain no-ops; oversized signed
+index spaces now fail explicitly instead of overflowing in CUDA.
+
+The static `sort.cu` definition is excluded only for the opt-in feature;
+the default FFI implementation and other kernels in the same file remain
+unchanged. This tranche adds an ignored GPU output/cache test but no new
+SM61 compilation or CI. Sparse logit penalties/bias and other attention
+mask families still require separate audits.
+
 1. **R1a, closed**: exact Candle pin/lock regeneration; independent typed manifest, catalogue and artifact loading; host-only tests and source classification.
 2. **R1b, required**: typed CUDA tensor launch adapters, architecture-feature negotiation and explicit preallocation memory budget (especially packed FP8/FP4 and MoE); negative tests for invalid pointer/order/context, fallback absence and numerical parity.
 3. **R1c, required**: migrate operation families incrementally from Candle's `cuda_legacy` and Mistral's CUDA launch points; keep unsupported SM61 MMA/FlashAttention variants behind honest capability rejection and choose qualified SIMT alternatives.

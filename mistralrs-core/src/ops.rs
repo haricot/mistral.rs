@@ -4113,7 +4113,10 @@ pub fn cuda_apply_sparse_logits_bias_f32(
     )))
 }
 
-#[cfg(feature = "cuda")]
+#[cfg(all(feature = "cuda", feature = "dkr-causal-mask"))]
+pub(crate) use crate::cuda::causal_mask_dynamic::cuda_apply_causal_mask_f32;
+
+#[cfg(all(feature = "cuda", not(feature = "dkr-causal-mask")))]
 pub(crate) fn cuda_apply_causal_mask_f32(
     scores: &Tensor,
     q_offset: usize,
