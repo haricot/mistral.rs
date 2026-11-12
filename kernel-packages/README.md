@@ -656,3 +656,44 @@ test; it must not break the fallback on legacy GPUs.
 per build directory. Use one Cargo build at a time when sharing this
 cache root, especially with differing feature configurations. The
 bootstrap utility should only run when no build is active.
+
+
+### DKR-R1.20.2 — Guard against global NVCC flag cache invalidation
+
+Before any R1.21 quantized-linear/paged-attention source patch, run the
+read-only flag audit on the current checkout:
+
+    python3 tools/dkr_nvcc_flag_audit.py
+
+The audit lists every existing MISTRALRS_DKR_* argument in the three
+static CUDA builders, the source files that reference it, and its header
+references. DKR_NVCC_FLAG_AUDIT=PASS means **no new global DKR macro
+was introduced compared with the frozen R1.20 baseline**. It does not
+certify runtime parity or imply that global flags no longer exist.
+
+The existing four core DKR guards are confined to definitions in
+src/cuda/sort.cu and src/cuda/input_packing.cu. Their macros are
+currently passed as global KernelBuilder::arg() values, so they
+invalidate the hash of all core object files on a feature change.
+The existing MISTRALRS_DKR_REDUCE_NORM argument in quant has the
+same builder-wide cache impact. These are **pre-existing** features:
+do not remove or rewrite those compiler options during cache
+bootstrap or R1.21 source staging, or the 82 preserved object-cache
+entries could be invalidated before benefit is measured.
+
+For a future isolated compile domain, keep unchanged files with the
+same baseline NVCC arguments in the stable cache. Only build
+sort.cu and input_packing.cu (or extracted smaller translation
+units) in their own cudaforge builder and static archive with their
+per-family defines, and link both required libraries. Preserve their
+FFI symbols and static fallback layout when an external DKR operation
+is not selected. Any actual build-script split requires a **separate**
+ABI/link parity qualification: it is not introduced by this audit.
+For now, new DKR-R1.21 families must use external PTX packages and
+optional Rust dispatch **without adding any new global -D DKR flags**.
+
+The safe order remains: bootstrap once with
+tools/dkr_cuda_cache_bootstrap.py --apply; inspect the feature-flag
+audit; then run the next grouped campaign only after R1.21 source
+staging. Do not change CUDA_COMPUTE_CAP, the user's feature set, or
+the cached CUDA build root during routine patches.
