@@ -13,6 +13,10 @@ cd "$(dirname "$0")/.."
 # changing its value invalidates upstream build.rs caches and can rebuild hours
 # of static kernels. Only the external PTX builder receives --cc 61.
 echo "CUDA_COMPUTE_CAP left unchanged (${CUDA_COMPUTE_CAP-<unset>})"
+if [[ -n "${MISTRALRS_CUDA_BUILD_ROOT:-}" ]]; then
+  echo "DKR_PERSISTENT_CUDA_OBJECT_CACHE=$MISTRALRS_CUDA_BUILD_ROOT"
+  echo "Use tools/dkr_cuda_cache_bootstrap.py --apply before the first shared-cache build."
+fi
 
 if [[ -n "${DKR_CANDLE_DIR:-}" ]]; then
   python3 tools/dkr_operation_matrix.py --candle-dir "$DKR_CANDLE_DIR" \
@@ -23,7 +27,7 @@ else
 fi
 
 # cudaforge owns nvcc and its incremental cache. Python only emits manifests.
-cargo run -p mistralrs-kernel-runtime \
+cargo run --locked -p mistralrs-kernel-runtime \
   --features builder-cudaforge \
   --bin dkr_package_builder -- \
   --cc 61 --output kernel-packages/build/cuda
@@ -32,11 +36,12 @@ export DKR_KERNEL_PACKAGES="$(pwd)/kernel-packages/build/cuda/sm61"
 
 # A single feature-unified build and grouped DKR test run.
 # --test-threads=1 prevents overlapping GPU test workloads on 8 GiB devices.
-cargo nextest run \
+cargo nextest run --locked \
   -p mistralrs-kernel-runtime \
   -p mistralrs-quant \
   -p mistralrs-paged-attn \
   -p mistralrs-core \
+  --lib \
   --features 'mistralrs-core/cuda-legacy,mistralrs-core/dkr-moe,mistralrs-core/dkr-indexed-copy,mistralrs-core/dkr-gated-add,mistralrs-core/dkr-reduce-norm,mistralrs-core/dkr-add-rms-norm,mistralrs-core/dkr-causal-mask,mistralrs-core/dkr-logits,mistralrs-core/dkr-rms-variants,mistralrs-core/dkr-input-pad,mistralrs-core/dkr-ssm,mistralrs-core/dkr-rounded-rope,mistralrs-core/dkr-gemv,mistralrs-core/dkr-kv-scales,mistralrs-core/dkr-fp8-cast,mistralrs-core/dkr-kv-gather,mistralrs-core/dkr-gemm,mistralrs-core/dkr-fp4-dequant' \
   --run-ignored=all \
   --no-fail-fast \

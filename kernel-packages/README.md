@@ -584,3 +584,75 @@ automatic runtime activation.
 DKR scripts or shell instructions. Only the independent PTX builder's
 `--cc 61` targets Pascal. Do not run `cargo clean` or repeatedly
 compile/test between source-staging milestones.
+
+
+## DKR-R1.20.1 — Preserve static CUDA objects between Cargo feature builds
+
+**Problem verified:** The R1.20 SM61 21/21 campaign built 53 quant, 13 core
+and 15 paged-attention CUDA objects (81 in total), despite all 13 older
+external PTX families being reused. The local environment had no
+`MISTRALRS_CUDA_BUILD_ROOT`. By default these three `build.rs` use
+Cargo's feature-specific `OUT_DIR` for cudaforge's object cache; a
+different feature unification gets a different cache directory.
+
+The pinned cudaforge 0.1.6 implementation stores
+`.cudaforge_cache.json` in `KernelBuilder::out_dir` and keys entries
+by the source/object path, SHA-256 of the source, NVCC argument hash,
+target architecture, and hash of watched headers. It cannot reuse a
+previous Cargo `OUT_DIR` solely because the old objects still exist.
+The existing `MISTRALRS_CUDA_BUILD_ROOT` build-script support gives
+all Cargo builds a stable out_dir for **objects only**, while the actual
+archive `lib*.a` is still linked inside the current Cargo `OUT_DIR`.
+
+**First-time bootstrap (do not rebuild anything yet):**
+
+```bash
+cd /home/np/tmp/mistralrs_provider/mistral.rs
+python3 tools/dkr_cuda_cache_bootstrap.py
+```
+
+This is a dry-run: look for the cached sources from
+`mistralrs-quant` (~53), `mistralrs-core` (~13) and
+`mistralrs-paged-attn` (~15). The number may differ if the latest
+cache was built with other features. For a successful current cache,
+adopt the valid objects, **without nvcc or Cargo**:
+
+```bash
+python3 tools/dkr_cuda_cache_bootstrap.py --apply
+```
+
+This creates `target/dkr-cuda-cache/sm61/{quant,core,paged-attn}/kernels`
+and rewrites only cudaforge cache metadata pointing at the copies.
+It does not touch existing Cargo build artifacts or CUDA environment
+variables, and refuses to overwrite an initialized cache.
+
+**Next combined DKR campaign (not on every source change):**
+
+```bash
+MISTRALRS_CUDA_BUILD_ROOT="$PWD/target/dkr-cuda-cache/sm61" \
+  DKR_APPROVE_FINAL=1 tools/dkr_sm61_final_qualification.sh
+```
+
+This scopes the opt-in environment setting to that command. The
+script must not set/unset `CUDA_COMPUTE_CAP`. On the first invocation,
+Cargo can rebuild its Rust crates once because the environment changed,
+but cudaforge should reuse valid *static CUDA objects* rather than
+recompile them. `Compiling 0 of N` or `All library kernels up-to-date`
+is the expected NVCC result **if the flags, architecture, sources,
+headers and object metadata still match**. There is no guarantee of a
+cache hit if the compiler configuration changes. Do not use
+`cargo clean` or move/delete the shared root.
+
+**Do not disable all statics on SM61:** DKR still covers only a subset
+of input formats/layouts. Dense fallback, indirect paged-attention
+variants, quantized linear operators, copy/swap, scale/FP8 paths, and
+many Candle backend routines require the old library symbols. The
+existing feature-controlled `exclude` filters in the quant/core
+builders already omit several proven-replaced source files. More
+pruning needs a symbol/dispatch audit and a grouped full-inference
+test; it must not break the fallback on legacy GPUs.
+
+**Note on concurrency:** cudaforge 0.1.6 stores a single cache manifest
+per build directory. Use one Cargo build at a time when sharing this
+cache root, especially with differing feature configurations. The
+bootstrap utility should only run when no build is active.
