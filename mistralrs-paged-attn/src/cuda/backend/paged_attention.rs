@@ -123,6 +123,23 @@ impl PagedAttention {
             self.v_scale.as_ref(),
             "paged_attention",
         )?;
+        // Explicitly scaled E4M3 K/V route. Both scale tensors are required
+        // by this fixed ABI; unscaled/complex requests keep the static FFI.
+        #[cfg(feature = "dkr-paged-fp8")]
+        if let (Some(k_scale), Some(v_scale)) =
+            (self.k_scale.as_ref(), self.v_scale.as_ref())
+        {
+            if let Some(result) = super::paged_fp8_dynamic::try_decode(
+                q, q_l, &self.key_cache, &self.value_cache,
+                &self.block_tables, &self.context_lens,
+                k_scale, v_scale,
+                self.softmax_scale, self.softcapping, self.max_context_len,
+                self.alibi_slopes.is_some() || self.sinks.is_some()
+                    || self.sliding_window.is_some(),
+            )? {
+                return Ok(result);
+            }
+        }
         // DKR short-context route: no ALiBi, windowing, sinks, softcap
         // or FP8 KV quantization. All other cases retain v1/v2 FFI.
         #[cfg(feature = "dkr-paged-decode")]

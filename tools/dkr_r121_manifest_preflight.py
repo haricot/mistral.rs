@@ -29,6 +29,10 @@ PACKAGES = {
         "profiles": 3,
         "ops": {"attention.paged.decode.online.v1": (15, 9)},
     },
+    "paged-fp8": {
+        "profiles": 3,
+        "ops": {"attention.paged.fp8_decode.online.v1": (17, 9)},
+    },
     "quant-gemm": {
         "profiles": 6,
         "ops": {
@@ -54,6 +58,7 @@ def validate(pkg, options, root):
         "paged-decode": "paged_decode.cu",
         "nvfp4-gemv": "nvfp4_gemv.cu",
         "quant-gemm": "quant_gemm.cu",
+        "paged-fp8": "paged_fp8.cu",
     }[pkg])
     if not (script.is_file() and cu.is_file()):
         raise AssertionError(f"{pkg}: source or packager missing")
@@ -103,6 +108,10 @@ def validate(pkg, options, root):
                     f"dkr_mxfp4_gemv_{dt}_{mode}"
                     for dt in ("f16", "bf16") for mode in ("plain", "bias")
                 ],
+                "paged-fp8": [
+                    f"dkr_paged_fp8_decode_{dt}"
+                    for dt in ("f16", "bf16", "f32")
+                ],
                 "paged-decode": [
                     f"dkr_paged_decode_{dt}"
                     for dt in ("f16", "bf16", "f32")
@@ -143,7 +152,7 @@ def main():
     build_files = ["mistralrs-quant", "mistralrs-core", "mistralrs-paged-attn"]
     for name in build_files:
         source = (ROOT / name / "build.rs").read_text()
-        for macro in ("DKR_QUANT_GEMV", "DKR_QUANT_GEMM", "DKR_PAGED_DECODE", "DKR_NVFP4_GEMV"):
+        for macro in ("DKR_QUANT_GEMV", "DKR_QUANT_GEMM", "DKR_PAGED_FP8", "DKR_PAGED_DECODE", "DKR_NVFP4_GEMV"):
             if f'-DMISTRALRS_{macro}' in source:
                 raise AssertionError(f"global CUDA flag regression in {name}: {macro}")
     print(f"DKR_R121_MANIFEST_PREFLIGHT=PASS profiles={total} no_cuda_compilation")

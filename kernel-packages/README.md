@@ -833,3 +833,40 @@ S4 adds exactly one external source family (six PTX manifests); it does
 The first grouped CUDA qualification should confirm real PTX compilation,
 Rust type safety, numerical parity, and whether this generic GEMM
 should remain a testing reference rather than a production dispatch.
+
+
+### DKR-R1.21/S5 — Explicitly scaled FP8 paged KV decode
+
+This second R1.21 follow-up adds the optional
+`mistralrs-core/dkr-paged-fp8` feature and external
+`kernel-packages/cuda/paged-fp8` PTX package. It extends the
+short-context online attention reference to **FP8 E4M3 cached K/V**
+without allocating F16/BF16 copies of KV pages:
+
+- F16/BF16/F32 query and output, typed E4M3 K/V pages using the
+  VLLM K-blocked-x and V-token-strided representations.
+- Mandatory **separate F32 K/V scale pointers**, each with one
+  element; the CUDA kernel applies the K scale in each dot product
+  and the V scale in the online weighted sum. No optional/null scale
+  argument is admitted in the new ABI.
+- U32 page tables and context lengths, contiguous tensors, head
+  size 64..512, context up to 256 tokens, stable online softmax.
+- ALiBi, sinks, softcapping != 1.0, sliding windows, absent scales,
+  non-E4M3 cache types and longer/partitioned contexts retain
+  the previously qualified static paged-attention v1/v2 path.
+- One test `dkr_paged_fp8_decode_gpu` with both nontrivial scale
+  values. Separate runtime A/B using
+  `MISTRALRS_DKR_PAGED_FP8=0` in a new process to force static
+  CUDA dispatch without rebuilding the Rust binary.
+
+This is a parity/ABI source candidate, **not GPU-qualified yet**.
+The R1.20 GPU result remains 21/21. With S4 and S5, the branch now
+stages **22 external source families** and two additional ignored GPU
+tests beyond the three already introduced in R1.21/S1-S3.
+
+**Still outstanding in R1.21:** long/partitioned attention v2,
+MLA, per-token dynamic FP8 scales, copy/swap/reshape KV kernels,
+indirect expert grouped GEMM, and comprehensive performance
+qualification on the Pascal device. Do not recompile the static
+CUDA fallback during source-only staging; keep all 82 persisted
+objects and all existing static NVCC flags unchanged.

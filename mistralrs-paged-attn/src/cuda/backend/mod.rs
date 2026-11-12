@@ -8,6 +8,8 @@ mod gather_kv;
 mod kv_gather_dynamic;
 #[cfg(feature = "dkr-paged-decode")]
 mod paged_decode_dynamic;
+#[cfg(feature = "dkr-paged-fp8")]
+mod paged_fp8_dynamic;
 #[cfg(feature = "dkr-kv-scales")]
 mod kv_scales_dynamic;
 mod mla;

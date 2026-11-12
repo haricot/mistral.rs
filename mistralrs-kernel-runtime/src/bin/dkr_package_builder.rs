@@ -34,6 +34,7 @@ const PACKAGES: &[Package] = &[
     Package { name: "paged-decode", source: "paged_decode.cu", fast_math: false },
     Package { name: "nvfp4-gemv", source: "nvfp4_gemv.cu", fast_math: false },
     Package { name: "quant-gemm", source: "quant_gemm.cu", fast_math: false },
+    Package { name: "paged-fp8", source: "paged_fp8.cu", fast_math: false },
 ];
 
 fn parse_args() -> Result<(usize, PathBuf, String), Box<dyn std::error::Error>> {
