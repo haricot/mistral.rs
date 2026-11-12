@@ -34,6 +34,7 @@ dkr-kv-scales = ["cuda", "dep:mistralrs-kernel-runtime", "mistralrs-kernel-runti
 dkr-kv-gather = ["cuda", "dep:mistralrs-kernel-runtime", "mistralrs-kernel-runtime/cuda"]
 dkr-paged-decode = ["cuda", "dep:mistralrs-kernel-runtime", "mistralrs-kernel-runtime/cuda"]
 dkr-paged-fp8 = ["cuda", "dep:mistralrs-kernel-runtime", "mistralrs-kernel-runtime/cuda"]
+dkr-paged-v2 = ["cuda", "dep:mistralrs-kernel-runtime", "mistralrs-kernel-runtime/cuda"]
 cuda-legacy-bf16 = ["cuda", "candle-core/cuda-legacy-bf16"]
 cuda-legacy-fp8 = ["cuda", "candle-core/cuda-legacy-fp8", "candle-core/cuda-legacy-bf16"]
 cuda-legacy-fp4 = ["cuda", "candle-core/cuda-legacy-fp4"]

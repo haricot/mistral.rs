@@ -870,3 +870,79 @@ indirect expert grouped GEMM, and comprehensive performance
 qualification on the Pascal device. Do not recompile the static
 CUDA fallback during source-only staging; keep all 82 persisted
 objects and all existing static NVCC flags unchanged.
+
+
+### DKR-R1.21/S6 — Partitioned long-context paged attention v2
+
+**Staged, not GPU-qualified.** This source migration adds
+`mistralrs-core/dkr-paged-v2` (forwarding to
+`mistralrs-paged-attn/dkr-paged-v2`) with a new `paged-v2`
+cudaforge external source family. The **R1.20 21/21** SM61 baseline
+is still the only authoritative GPU test result.
+
+Two individually typed and prevalidated CUDA kernel ABIs are used:
+
+| Operation | Arguments | CUDA grid | Purpose |
+|---|---|---|---|
+| `attention.paged.v2.partition.p256.v1` | Q, K, V, U32 page table and context lens, F32 partial output, F32 logsumexp, eight U32 scalars, one F32 scale | [query_heads, sequences, ceil(max_context/256)] | Online softmax over a 256-token partition, normalized partial vector and stable LSE |
+| `attention.paged.v2.merge.p256.v1` | F32 partial output, F32 logsumexp, output, four U32 scalars | [query_heads, sequences, 1] | Merge normalized partial vectors weighted by exp(LSE-part - LSE-max) |
+
+Each stage has **three typed profiles**: F16/BF16/F32 query and K/V.
+CUDA block size is 128 threads. The partition size is compiled into
+the entry identity and kept constant at 256, not supplied as a
+mutable runtime kernel parameter.
+
+The scratch layout is F32
+`[sequence, q_head, partition, head_dim]` for partial outputs
+and F32 `[sequence, q_head, partition]` for log-normalizers.
+The implementation reuses `paged_attention.rs::workspace_ensure`:
+the **same long-lived GPU scratch pool as legacy v2**, with 16-byte
+separation and capacity growth that retains previous buffers. Two
+CUDA launches are enqueued in the same current stream and the pool
+guard is held across both launch submissions. CPU-side plan selection
+and PTX module resolution happen only on cache misses via the
+thread-local `LaunchPlanCache`. Output allocation remains the
+usual one output tensor per invocation.
+
+**Admitted runtime scope:** dense VLLM K-blocked-x and V-token-strided
+layouts, contiguous F16/BF16/F32 tensors with matching Q/K/V types,
+U32 page tables and lengths, grouped-query attention with whole
+heads-per-KV-head ratio, supported head widths 64..512, and requested
+maximum context in **257..32768** tokens within the page table
+capacity. A zero context length for a particular sequence writes
+zero output; empty trailing partitions produce LSE=-infinity and
+zero partial outputs, rather than NaNs.
+
+**Explicit fallback:** FP8 K/V, windowing, ALiBi, attention sinks,
+non-default softcapping, unsupported strides/shapes, and out-of-range
+contexts are dispatched through the original static v1/v2 path.
+No legacy NVCC build flag or `CUDA_COMPUTE_CAP` change is introduced.
+The new feature is opt-in at Cargo compile time and
+`MISTRALRS_DKR_PAGED_V2=0` disables it **at process startup**
+for a same-binary static-vs-DKR A/B experiment. The existing static
+v2 code and its workspace remain linked and available.
+
+**Source-only preflight** (never compiles CUDA):
+```bash
+python3 tools/dkr_r121_manifest_preflight.py
+python3 tools/dkr_r121_v2_numeric_preflight.py
+python3 tools/dkr_nvcc_flag_audit.py
+```
+The numeric oracle checks exact log-sum-exp partition/merge identities
+for empty/ragged contexts, 256-token boundaries, up to 8193 tokens,
+and logits with high dynamic range. It does **not** verify NVCC,
+the Rust adapters or the actual device output. The ignored
+`dkr_paged_v2_gpu` test covers F16/BF16/F32, grouped-query
+attention, 777/513-token contexts, partial tails, and launch-plan
+reuse. It is selected by the existing single grouped GPU campaign.
+
+With S6, **23 external source families** and **28 new R1.21 manifest
+profiles** (22 previous + 6) are staged. The next DKR GPU suite
+should select 27 targeted tests (21 previously qualified + six new).
+Do not claim runtime qualification or throughput improvement until
+that grouped campaign runs. Performance of the reference 128-thread
+per-partition reduction may still be inferior to the specialized
+static v2 implementation; compare steady-state TPOT, first-token
+latency, VRAM and long-context scaling before promotion. CUDA Graph
+capture and cross-stream reuse of the shared pool require independent
+qualification before production promotion.

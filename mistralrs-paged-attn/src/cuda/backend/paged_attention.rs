@@ -17,7 +17,7 @@ use std::sync::{Mutex, OnceLock};
 
 const FULL_ATTENTION_WINDOW: usize = 0;
 
-struct WorkspaceSlot {
+pub(super) struct WorkspaceSlot {
     slice: CudaSlice<u8>,
     cap: usize,
     retired: Vec<CudaSlice<u8>>,
@@ -56,7 +56,7 @@ fn validate_kv_cache_scales(
     Ok(())
 }
 
-fn workspace_ensure(
+pub(super) fn workspace_ensure(
     dev: &candle::cuda_backend::CudaDevice,
     bytes: usize,
 ) -> Result<(u64, std::sync::MutexGuard<'static, WorkspaceSlot>)> {
@@ -144,6 +144,21 @@ impl PagedAttention {
         // or FP8 KV quantization. All other cases retain v1/v2 FFI.
         #[cfg(feature = "dkr-paged-decode")]
         if let Some(result) = super::paged_decode_dynamic::try_decode(
+            q, q_l, &self.key_cache, &self.value_cache,
+            &self.block_tables, &self.context_lens,
+            self.softmax_scale, self.softcapping, self.max_context_len,
+            self.alibi_slopes.is_some() || self.sinks.is_some()
+                || self.sliding_window.is_some()
+                || self.k_scale.is_some() || self.v_scale.is_some(),
+        )? {
+            return Ok(result);
+        }
+
+        // Long-context v2: two external typed launches, sharing the
+        // existing persistent scratch pool. No FP8, ALiBi, sinks or windows.
+        // All unqualified layouts retain the static v1/v2 implementation.
+        #[cfg(feature = "dkr-paged-v2")]
+        if let Some(result) = super::paged_v2_dynamic::try_decode(
             q, q_l, &self.key_cache, &self.value_cache,
             &self.block_tables, &self.context_lens,
             self.softmax_scale, self.softcapping, self.max_context_len,

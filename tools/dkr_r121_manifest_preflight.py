@@ -152,7 +152,7 @@ def main():
     build_files = ["mistralrs-quant", "mistralrs-core", "mistralrs-paged-attn"]
     for name in build_files:
         source = (ROOT / name / "build.rs").read_text()
-        for macro in ("DKR_QUANT_GEMV", "DKR_QUANT_GEMM", "DKR_PAGED_FP8", "DKR_PAGED_DECODE", "DKR_NVFP4_GEMV"):
+        for macro in ("DKR_QUANT_GEMV", "DKR_QUANT_GEMM", "DKR_PAGED_FP8", "DKR_PAGED_V2", "DKR_PAGED_DECODE", "DKR_NVFP4_GEMV"):
             if f'-DMISTRALRS_{macro}' in source:
                 raise AssertionError(f"global CUDA flag regression in {name}: {macro}")
     print(f"DKR_R121_MANIFEST_PREFLIGHT=PASS profiles={total} no_cuda_compilation")
