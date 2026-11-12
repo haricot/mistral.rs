@@ -120,23 +120,22 @@ extern "C" __global__ void dkr_fp8_block_gemv_##TAG( \
                  scale_stride, block_y, block_x); \
 }
 
-#define DKR_MXFP4_GEMV(TAG, TYPE, MODE, BIAS) \
-extern "C" __global__ void dkr_mxfp4_gemv_##TAG##_##MODE( \
-    const TYPE* input, const uint8_t* weights, \
-    const uint8_t* scales, \
-    DKR_MXFP4_BIAS_##BIAS \
+#define DKR_MXFP4_PLAIN(TAG, TYPE) \
+extern "C" __global__ void dkr_mxfp4_gemv_##TAG##_plain( \
+    const TYPE* input, const uint8_t* weights, const uint8_t* scales, \
     TYPE* output, uint32_t m, uint32_t n, uint32_t k) { \
-  mxfp4_gemv<TYPE, BIAS>(input, weights, scales, DKR_MXFP4_PTR_##BIAS, \
-                         output, m, n, k); \
+  mxfp4_gemv<TYPE, false>(input, weights, scales, nullptr, output, m, n, k); \
 }
-#define DKR_MXFP4_BIAS_true const TYPE* bias,
-#define DKR_MXFP4_BIAS_false
-#define DKR_MXFP4_PTR_true bias
-#define DKR_MXFP4_PTR_false nullptr
+#define DKR_MXFP4_BIAS(TAG, TYPE) \
+extern "C" __global__ void dkr_mxfp4_gemv_##TAG##_bias( \
+    const TYPE* input, const uint8_t* weights, const uint8_t* scales, \
+    const TYPE* bias, TYPE* output, uint32_t m, uint32_t n, uint32_t k) { \
+  mxfp4_gemv<TYPE, true>(input, weights, scales, bias, output, m, n, k); \
+}
 
 DKR_FP8_GEMV(f16, __half)
 DKR_FP8_GEMV(bf16, __nv_bfloat16)
-DKR_MXFP4_GEMV(f16, __half, plain, false)
-DKR_MXFP4_GEMV(bf16, __nv_bfloat16, plain, false)
-DKR_MXFP4_GEMV(f16, __half, bias, true)
-DKR_MXFP4_GEMV(bf16, __nv_bfloat16, bias, true)
+DKR_MXFP4_PLAIN(f16, __half)
+DKR_MXFP4_PLAIN(bf16, __nv_bfloat16)
+DKR_MXFP4_BIAS(f16, __half)
+DKR_MXFP4_BIAS(bf16, __nv_bfloat16)

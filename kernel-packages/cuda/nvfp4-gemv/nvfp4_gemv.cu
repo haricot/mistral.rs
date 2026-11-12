@@ -70,21 +70,24 @@ __device__ __forceinline__ void nvfp4_gemv(
   }
 }
 
-#define DKR_DEFINE_NVFP4(NAME, TYPE, MODE, HAS_BIAS) \
-extern "C" __global__ void dkr_nvfp4_gemv_##NAME##_##MODE( \
+#define DKR_NVFP4_PLAIN(NAME, TYPE) \
+extern "C" __global__ void dkr_nvfp4_gemv_##NAME##_plain( \
     const TYPE* input, const uint8_t* packed, \
     const __nv_fp8_e4m3* scales, const float* global, \
-    DKR_NVFP4_BIAS_##HAS_BIAS \
     TYPE* output, uint32_t m, uint32_t n, uint32_t k) { \
-  nvfp4_gemv<TYPE, HAS_BIAS>(input, packed, scales, global, \
-      DKR_NVFP4_PTR_##HAS_BIAS, output, m, n, k); \
+  nvfp4_gemv<TYPE, false>(input, packed, scales, global, \
+                          nullptr, output, m, n, k); \
 }
-#define DKR_NVFP4_BIAS_true const TYPE* bias,
-#define DKR_NVFP4_BIAS_false
-#define DKR_NVFP4_PTR_true bias
-#define DKR_NVFP4_PTR_false nullptr
+#define DKR_NVFP4_BIAS(NAME, TYPE) \
+extern "C" __global__ void dkr_nvfp4_gemv_##NAME##_bias( \
+    const TYPE* input, const uint8_t* packed, \
+    const __nv_fp8_e4m3* scales, const float* global, \
+    const TYPE* bias, TYPE* output, uint32_t m, uint32_t n, uint32_t k) { \
+  nvfp4_gemv<TYPE, true>(input, packed, scales, global, \
+                         bias, output, m, n, k); \
+}
 
-DKR_DEFINE_NVFP4(f16, __half, plain, false)
-DKR_DEFINE_NVFP4(f16, __half, bias, true)
-DKR_DEFINE_NVFP4(bf16, __nv_bfloat16, plain, false)
-DKR_DEFINE_NVFP4(bf16, __nv_bfloat16, bias, true)
+DKR_NVFP4_PLAIN(f16, __half)
+DKR_NVFP4_BIAS(f16, __half)
+DKR_NVFP4_PLAIN(bf16, __nv_bfloat16)
+DKR_NVFP4_BIAS(bf16, __nv_bfloat16)
