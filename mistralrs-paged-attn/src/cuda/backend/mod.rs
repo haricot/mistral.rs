@@ -4,6 +4,8 @@ mod fa3;
 mod flash_attn_sinks;
 mod flashinfer;
 mod gather_kv;
+#[cfg(feature = "dkr-kv-gather")]
+mod kv_gather_dynamic;
 #[cfg(feature = "dkr-kv-scales")]
 mod kv_scales_dynamic;
 mod mla;
