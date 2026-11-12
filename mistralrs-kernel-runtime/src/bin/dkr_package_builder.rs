@@ -30,6 +30,7 @@ const PACKAGES: &[Package] = &[
     Package { name: "kv-gather", source: "kv_gather.cu", fast_math: false },
     Package { name: "dense-gemm", source: "dense_gemm.cu", fast_math: false },
     Package { name: "fp4-dequant", source: "fp4_dequant.cu", fast_math: false },
+    Package { name: "quant-gemv", source: "quant_gemv.cu", fast_math: false },
 ];
 
 fn parse_args() -> Result<(usize, PathBuf, String), Box<dyn std::error::Error>> {

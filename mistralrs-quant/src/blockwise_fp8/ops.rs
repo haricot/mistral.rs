@@ -1018,6 +1018,13 @@ pub fn fp8_blockwise_matmul(
 
     use crate::{blockwise_fp8::ffi, utils::slice_ptr};
 
+    #[cfg(feature = "dkr-quant-gemv")]
+    if let Some(output) = crate::quantized_gemv_dynamic::try_fp8(
+        input, weight, scales, weight_block_size,
+    )? {
+        return Ok(output);
+    }
+
     if !ffi::HAVE_BLOCKWISE_GEMM_KERNELS {
         candle_core::bail!("Do not have blockwise FP8 GEMM kernels.");
     }

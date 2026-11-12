@@ -19,6 +19,13 @@ pub fn mxfp4_matmul(
     scale: &Tensor,
     bias: Option<&Tensor>,
 ) -> Result<Tensor> {
+    #[cfg(feature = "dkr-quant-gemv")]
+    if let Some(output) = crate::quantized_gemv_dynamic::try_mxfp4(
+        input, weight, scale, bias,
+    )? {
+        return Ok(output);
+    }
+
     if !ffi::HAVE_MXFP4_GEMM_KERNELS {
         candle_core::bail!("MXFP4 GEMM kernels not available");
     }
