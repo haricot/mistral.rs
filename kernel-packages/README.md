@@ -763,3 +763,41 @@ without changing `CUDA_COMPUTE_CAP` or resetting `target/`.
 When testing new features, retain the same feature list and use the
 existing DKR single-campaign test script; inspect the static cudaforge
 log for "All library kernels up-to-date" before inferring cache hits.
+
+
+### R1.21 CPU-only preflight and same-binary A/B selection
+
+The new families are not performance-qualified yet. Run the
+CPU-only manifest preflight **before** the next grouped CUDA build:
+
+    python3 tools/dkr_r121_manifest_preflight.py
+    python3 tools/dkr_nvcc_flag_audit.py
+
+These commands use synthetic PTX bytes only to exercise Python
+manifest packaging and the source contract. They do not verify real
+NVCC/PTX signatures, Rust linking, GPU parity or performance.
+
+Each new R1.21 feature also has a once-per-process runtime escape
+hatch, so no second Cargo feature compilation is required for
+static-vs-DKR performance comparisons:
+
+| Environment for a separate process | With the R1.21 feature compiled |
+|---|---|
+| MISTRALRS_DKR_QUANT_GEMV=0 | Use existing static FP8/MXFP4 path |
+| MISTRALRS_DKR_PAGED_DECODE=0 | Use existing static paged-attention v1/v2 |
+| MISTRALRS_DKR_NVFP4_GEMV=0 | Use existing resident NVFP4 E7 path |
+
+Without those environment settings, an explicitly compiled DKR
+feature enables the new route on eligible inputs. Settings are
+sampled once per process and must be specified **before launching**
+each benchmark. Change them between process invocations (not during
+a running process). Their effect is only on the DKR routes whose
+features were compiled. The static implementations remain linked
+and available as fallback; no global NVCC flag is added.
+
+Preserve the same binary, same device, model, input shapes, warmup
+and memory configuration across both runs. Compare decode TPOT,
+prefill TTFB, kernel time, VRAM, and semantic/numeric parity. Only
+promote a DKR route if both accuracy and performance acceptance
+criteria are met. The R1.20 21/21 test baseline is unchanged until
+the next grouped campaign qualifies these R1.21 kernels.

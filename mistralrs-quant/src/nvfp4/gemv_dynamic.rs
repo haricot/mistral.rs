@@ -14,6 +14,14 @@ use mistralrs_kernel_runtime::{
     universal_cuda::PrevalidatedLaunchPlan,
 };
 use std::cell::RefCell;
+use std::sync::OnceLock;
+
+fn enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("MISTRALRS_DKR_NVFP4_GEMV").map_or(true, |value| value != "0")
+    })
+}
 
 const BLOCK: usize = 128;
 const MAX_BATCH: usize = 8;
@@ -86,6 +94,9 @@ pub(super) fn try_gemv(
     global: &Tensor,
     bias: Option<&Tensor>,
 ) -> Result<Option<Tensor>> {
+    if !enabled() {
+        return Ok(None);
+    }
     if !matches!(x.dtype(), DType::F16 | DType::BF16)
         || x.rank() != 2 || weight.rank() != 2
         || !x.device().is_cuda()

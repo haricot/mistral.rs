@@ -15,6 +15,13 @@ use mistralrs_kernel_runtime::{
 };
 use std::{cell::RefCell, path::PathBuf, sync::OnceLock};
 
+fn enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("MISTRALRS_DKR_PAGED_DECODE").map_or(true, |value| value != "0")
+    })
+}
+
 const BLOCK: u32 = 128;
 const MAX_CONTEXT: usize = 256;
 const ENV: &str = "DKR_KERNEL_PACKAGES";
@@ -111,6 +118,9 @@ pub(super) fn try_decode(
     max_context_len: usize,
     complex_options: bool,
 ) -> Result<Option<(CudaStorage, Shape)>> {
+    if !enabled() {
+        return Ok(None);
+    }
     let dtype = q.dtype();
     if complex_options
         || softcapping != 1.0 || !softmax_scale.is_finite()
