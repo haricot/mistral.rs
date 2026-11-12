@@ -142,7 +142,7 @@ fn dequant(
     let (Storage::Cuda(ws), Storage::Cuda(ss)) = (&*ws, &*ss) else {
         candle_core::bail!("DKR FP4 requires CUDA tensors");
     };
-    let global_storage = global.map(Tensor::storage_and_layout);
+    let global_storage = global.map(|tensor| tensor.storage_and_layout());
     let (wp, _wg) = slice_ptr_on_stream(ws.as_cuda_slice::<u8>()?,
         wl.start_offset(), &stream);
     let (sp, _sg) = match fmt {

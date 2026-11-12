@@ -109,7 +109,7 @@ pub(super) fn try_gemm(
     let (Storage::Cuda(xs), Storage::Cuda(ws)) = (&*xs, &*ws) else {
         candle_core::bail!("DKR GEMM requires CUDA storage");
     };
-    let bias_storage = bias.map(Tensor::storage_and_layout);
+    let bias_storage = bias.map(|tensor| tensor.storage_and_layout());
     let key = Key { dtype: x.dtype(), m, n, k, bias: bias.is_some() };
     let mi = u32::try_from(m).map_err(candle_core::Error::wrap)?;
     let ni = u32::try_from(n).map_err(candle_core::Error::wrap)?;
