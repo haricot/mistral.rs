@@ -697,3 +697,58 @@ tools/dkr_cuda_cache_bootstrap.py --apply; inspect the feature-flag
 audit; then run the next grouped campaign only after R1.21 source
 staging. Do not change CUDA_COMPUTE_CAP, the user's feature set, or
 the cached CUDA build root during routine patches.
+
+
+## DKR-R1.21/S1-S2 — Fused quantized GEMV and short paged decode (staged)
+
+The SM61 R1.20 baseline **21/21** remains authoritative. R1.21 adds
+two **opt-in, not yet GPU-qualified** external PTX source families:
+`quant-gemv` and `paged-decode`. Both use cudaforge PTX build,
+typed manifests, thread-local prevalidated launch plans, and existing
+CUDA static FFI fallback. No DKR-specific NVCC flag is added to
+the static builders. Total staged external source families: **19**.
+
+- **DKR-R1.21/S1** (`mistralrs-core/dkr-quant-gemv`, forwarding to
+  `mistralrs-quant`): FP8 E4M3 blockwise dense decode GEMV with
+  F32 block scales `[ceil(N/block_y), ceil(K/block_x)]`, and
+  packed E2M1 MXFP4 decode GEMV with E8M0 group32 scales.
+  Separate MXFP4 plain/bias CUDA symbols avoid optional-argument ABI
+  ambiguity. F16 and BF16 inputs, contiguous tensors, batch 1..8,
+  and dimension bounds are checked before selecting the DKR route.
+  Values are decoded and multiplied **within the dot-product kernel**;
+  there is no intermediate dense dequantization allocation.
+  The original CUDA matmul is retained for M>8, unsupported dtypes,
+  layouts and feature-disabled builds.
+  GPU parity test: `dkr_quantized_gemv_gpu`.
+
+- **DKR-R1.21/S2** (`mistralrs-core/dkr-paged-decode`, forwarding to
+  `mistralrs-paged-attn`): VLLM K/V cache short-context decode
+  (max context 256), online softmax, 128 CUDA threads per
+  (sequence, query head), with K blocked-x and V token-strided
+  representations and U32 device page table/context lengths.
+  F16/BF16/F32 query, key, value must share the same dtype.
+  **ALiBi, sinks, softcapping different from 1.0, sliding windows,
+  FP8 cached K/V and long partitioned attention** remain on the
+  existing static paged attention v1/v2 path.
+  GPU parity test: `dkr_paged_decode_gpu`.
+
+  This first short-context kernel favors ABI/functional coverage,
+  **not** superior performance over the heavily optimized
+  paged-attention v1/v2 kernels. Its per-token block reductions can
+  be expensive. Benchmark the static route before considering
+  production promotion.
+
+- **Not yet ported:** NVFP4 resident E7 decode and its per-row
+  global scaling/bias semantics, MXFP4 large-M GEMM, FP8 indexed
+  expert GEMM, routed FP8/MXFP4/NVFP4 GEMV with arbitrary expert
+  indirection, scaled FP8 KV attention, MLA, FlashInfer and
+  speculative/partitioned attention. These are follow-on R1.21
+  stages and **cannot** be classified as migrated by the two
+  initial source families.
+
+For the *next* grouped qualification, use the stable cache root
+`MISTRALRS_CUDA_BUILD_ROOT=.../target/dkr-cuda-cache/sm61`
+without changing `CUDA_COMPUTE_CAP` or resetting `target/`.
+When testing new features, retain the same feature list and use the
+existing DKR single-campaign test script; inspect the static cudaforge
+log for "All library kernels up-to-date" before inferring cache hits.

@@ -123,6 +123,20 @@ impl PagedAttention {
             self.v_scale.as_ref(),
             "paged_attention",
         )?;
+        // DKR short-context route: no ALiBi, windowing, sinks, softcap
+        // or FP8 KV quantization. All other cases retain v1/v2 FFI.
+        #[cfg(feature = "dkr-paged-decode")]
+        if let Some(result) = super::paged_decode_dynamic::try_decode(
+            q, q_l, &self.key_cache, &self.value_cache,
+            &self.block_tables, &self.context_lens,
+            self.softmax_scale, self.softcapping, self.max_context_len,
+            self.alibi_slopes.is_some() || self.sinks.is_some()
+                || self.sliding_window.is_some()
+                || self.k_scale.is_some() || self.v_scale.is_some(),
+        )? {
+            return Ok(result);
+        }
+
         let cache_dtype = match self.key_cache.dtype() {
             DType::F16 => 0,
             DType::BF16 => 1,

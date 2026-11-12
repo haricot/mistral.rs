@@ -6,6 +6,8 @@ mod flashinfer;
 mod gather_kv;
 #[cfg(feature = "dkr-kv-gather")]
 mod kv_gather_dynamic;
+#[cfg(feature = "dkr-paged-decode")]
+mod paged_decode_dynamic;
 #[cfg(feature = "dkr-kv-scales")]
 mod kv_scales_dynamic;
 mod mla;
