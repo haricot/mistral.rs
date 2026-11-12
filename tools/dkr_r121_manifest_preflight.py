@@ -29,6 +29,13 @@ PACKAGES = {
         "profiles": 3,
         "ops": {"attention.paged.decode.online.v1": (15, 9)},
     },
+    "paged-v2": {
+        "profiles": 6,
+        "ops": {
+            "attention.paged.v2.partition.p256.v1": (16, 9),
+            "attention.paged.v2.merge.p256.v1": (7, 4),
+        },
+    },
     "paged-fp8": {
         "profiles": 3,
         "ops": {"attention.paged.fp8_decode.online.v1": (17, 9)},
@@ -59,6 +66,7 @@ def validate(pkg, options, root):
         "nvfp4-gemv": "nvfp4_gemv.cu",
         "quant-gemm": "quant_gemm.cu",
         "paged-fp8": "paged_fp8.cu",
+        "paged-v2": "paged_v2.cu",
     }[pkg])
     if not (script.is_file() and cu.is_file()):
         raise AssertionError(f"{pkg}: source or packager missing")
@@ -107,6 +115,11 @@ def validate(pkg, options, root):
                 ] + [
                     f"dkr_mxfp4_gemv_{dt}_{mode}"
                     for dt in ("f16", "bf16") for mode in ("plain", "bias")
+                ],
+                "paged-v2": [
+                    f"dkr_paged_v2_{stage}_{dt}"
+                    for stage in ("partition", "merge")
+                    for dt in ("f16", "bf16", "f32")
                 ],
                 "paged-fp8": [
                     f"dkr_paged_fp8_decode_{dt}"
