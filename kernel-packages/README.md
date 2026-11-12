@@ -432,19 +432,19 @@ builder now handles 11 CUDA source families.
 
 ## DKR-R1.15 — Dense decode GEMV (source-staged, unqualified)
 
-A new opt-in feature, \`mistralrs-quant/dkr-gemv\` (also forwarded by
-\`mistralrs-core/dkr-gemv\`), provides an **external, Pascal-compatible
+A new opt-in feature, `mistralrs-quant/dkr-gemv` (also forwarded by
+`mistralrs-core/dkr-gemv`), provides an **external, Pascal-compatible
 SIMT GEMV** for contiguous F16/BF16/F32 tensors. The shapes are weight
 [M, K], input [B, K] (B <= 8), optional bias [M], output [B, M].
 Contiguous view offsets are supported without copying data.
 
-\`linear.gemv.plain.b128.v1\` and
-\`linear.gemv.bias.b128.v1\` are **different typed ABI signatures**.
+`linear.gemv.plain.b128.v1` and
+`linear.gemv.bias.b128.v1` are **different typed ABI signatures**.
 No nullable bias tensor is used; the separate kernels and manifests
 avoid optional runtime argument overhead. All kernels use [128, 1, 1]
 threads and a [M, B, 1] grid, performing warp SIMT reductions and F32
 accumulation. No SM70+ instructions or tensor cores are required.
-The thread-local \`LaunchPlanCache\` prevalidates the resolved variant.
+The thread-local `LaunchPlanCache` prevalidates the resolved variant.
 
 **Scope:** This is the narrow decode-phase GEMV route, not dense
 prefill GEMM or the legacy static GEMV tuning matrix. The original
@@ -455,66 +455,66 @@ against the previous optimized GEMV, cuBLAS(Lt), or Pascal DP4A.
 Do not enable the opt-in route by default before the grouped GPU
 parity/performance tests pass.
 
-Test candidate: \`dkr_dense_gemv_gpu\` (F16/BF16/F32, batches 1/3/8,
+Test candidate: `dkr_dense_gemv_gpu` (F16/BF16/F32, batches 1/3/8,
 with/without bias, odd K). It is ignored until the next grouped GPU
 qualification. The previous local **15/15 DKR-R1.14-SM61** result
 remains the reference baseline.
 
 **Build-cache invariant:** do not set, unset, or export
-\`CUDA_COMPUTE_CAP\` from these build scripts. Pass only
-\`--cc 61\` to the stand-alone PTX builder, preserving the user's
+`CUDA_COMPUTE_CAP` from these build scripts. Pass only
+`--cc 61` to the stand-alone PTX builder, preserving the user's
 existing Cargo/NVCC environment and static-kernel build cache.
 
 
 ## DKR-R1.16 — FP8 KV-cache scale update (source-staged, unqualified)
 
-The opt-in feature \`mistralrs-paged-attn/dkr-kv-scales\`
-(forwarded through \`mistralrs-core/dkr-kv-scales\`) routes the
+The opt-in feature `mistralrs-paged-attn/dkr-kv-scales`
+(forwarded through `mistralrs-core/dkr-kv-scales`) routes the
 **contiguous, zero-offset F16/BF16/F32 input** scale-update kernel to
 a typed external PTX module. This is the FP8 KV scaling prerequisite,
 **not** an FP8 page quantizer, cache gather, or paged-attention decode
 kernel.
 
-The external ABI is \`kv_cache.scale_update.atomic_max.v1\`:
+The external ABI is `kv_cache.scale_update.atomic_max.v1`:
 two same-dtype flat K/V input buffers, two F32 scalar read-write scale
 buffers, and a U64 element count. Layout normalization is a zero-copy
 logical view, admitted only after the adapter checks the actual Candle
 layout. The original atomic-max semantics are preserved:
-\`k_scale = max(k_scale, max(abs(K)) / 240.0)\`, likewise for V.
+`k_scale = max(k_scale, max(abs(K)) / 240.0)`, likewise for V.
 Each block uses 512 threads and 4096 bytes of dynamic shared memory.
 The grid is clamped to 65,535 blocks as in the static kernel.
 Prevalidated launch plans are keyed by dtype/element count/device.
 
 The old FFI entry remains available on non-eligible layouts, without
 introducing a new implicit packing step. The test
-\`dkr_kv_scales_gpu\` is an ignored GPU candidate; it covers
+`dkr_kv_scales_gpu` is an ignored GPU candidate; it covers
 F16/BF16/F32, nonzero existing scales and repeat-launch plan reuse.
 It has **not been compiled or qualified** on SM61 yet.
 
 ### Remaining FP8/FP4 and attention architecture work
 
-The DKR-v1 \`ElementType\` supports \`fp8_e4m3\` and \`u8\` as typed
+The DKR-v1 `ElementType` supports `fp8_e4m3` and `u8` as typed
 tensor storage, but weight formats such as NVFP4/MXFP4 also need
 **explicit storage representations**, group-scale tensor layouts,
 block/group sizes and packed-byte strides. Do not treat packed E2M1
-bytes as a plain \`u8\` tensor with no representation contract.
-The next step is a versioned \`representation\` descriptor
-(\`nvfp4_e2m1:group16\`, \`mxfp4:group32\`, etc.), with a
+bytes as a plain `u8` tensor with no representation contract.
+The next step is a versioned `representation` descriptor
+(`nvfp4_e2m1:group16`, `mxfp4:group32`, etc.), with a
 separate conversion/scale-parity fixture before GEMM/GEMV dispatch.
 SM61 uses software/SIMT decoding; SM80+ tensor-core entries cannot
 be advertised as SM61-compatible kernels.
 
-For paged attention, \`reshape_and_cache\`, \`gather_kv_cache\`,
-\`paged_attention_v1/v2\`, MLA and FlashInfer layouts are separate
+For paged attention, `reshape_and_cache`, `gather_kv_cache`,
+`paged_attention_v1/v2`, MLA and FlashInfer layouts are separate
 operations with different strides and page tables. The fixed
-\`dkr.typed.v1\` contiguous argument ABI cannot honestly represent
+`dkr.typed.v1` contiguous argument ABI cannot honestly represent
 all their noncontiguous/indirect accesses. Move them only after an
 explicit indirect-layout/strided ABI and individual kernel parity
 tests. CUDA Graph capture remains deferred.
 
 **Important:** The existing R1.14 15/15 SM61 proof is unchanged. New
 R1.15 and R1.16 optional routes remain staged until the *single*
-grouped GPU qualification. No change to \`CUDA_COMPUTE_CAP\` is
+grouped GPU qualification. No change to `CUDA_COMPUTE_CAP` is
 performed by the DKR final qualification script.
 
 
@@ -527,12 +527,12 @@ implementing these additional source/ABI migrations.
 
 | Milestone | Feature in mistralrs-core | Package | Coverage | Test |
 |---|---|---|---|---|
-| R1.17 | \`dkr-fp8-cast\` | \`fp8-cast\` | six E4M3 F16/BF16/F32 encode/decode signatures | \`dkr_fp8_cast_gpu\` |
-| R1.18 | \`dkr-kv-gather\` | \`kv-gather\` | VLLM layout, contiguous F16/BF16/F32, i32 device page tables | \`dkr_kv_gather_gpu\` |
-| R1.19 | \`dkr-gemm\` | \`dense-gemm\` | opt-in dense prefill GEMM, 16x16 SM61 SIMT, optional bias | \`dkr_dense_gemm_gpu\` |
-| R1.20 | \`dkr-fp4-dequant\` | \`fp4-dequant\` | packed reference NVFP4 (E4M3 group16/global F32) and MXFP4 (E8M0 group32) | \`dkr_fp4_dequant_gpu\` |
+| R1.17 | `dkr-fp8-cast` | `fp8-cast` | six E4M3 F16/BF16/F32 encode/decode signatures | `dkr_fp8_cast_gpu` |
+| R1.18 | `dkr-kv-gather` | `kv-gather` | VLLM layout, contiguous F16/BF16/F32, i32 device page tables | `dkr_kv_gather_gpu` |
+| R1.19 | `dkr-gemm` | `dense-gemm` | opt-in dense prefill GEMM, 16x16 SM61 SIMT, optional bias | `dkr_dense_gemm_gpu` |
+| R1.20 | `dkr-fp4-dequant` | `fp4-dequant` | packed reference NVFP4 (E4M3 group16/global F32) and MXFP4 (E8M0 group32) | `dkr_fp4_dequant_gpu` |
 
-All four are compiled through the existing \`dkr_package_builder --cc 61\`
+All four are compiled through the existing `dkr_package_builder --cc 61`
 when that deferred step is authorized. Total external source families:
 **17**. PTX packaging and test selection remain separate from
 automatic runtime activation.
@@ -543,22 +543,22 @@ automatic runtime activation.
   arguments plus U64 count; exact separate operation identities for
   encode and decode. The existing static conversion is preserved for
   noncontiguous and zero-element layouts.
-- **Paged K/V gather:** \`kv_cache.gather.vllm.contiguous.v1\`;
-  manifest representations \`vllm_k_blocked_x.v1\` and
-  \`vllm_v_token_strided.v1\`. Device page tables and prefix offsets
+- **Paged K/V gather:** `kv_cache.gather.vllm.contiguous.v1`;
+  manifest representations `vllm_k_blocked_x.v1` and
+  `vllm_v_token_strided.v1`. Device page tables and prefix offsets
   remain on GPU. **FP8 scaled gathers, MLA and FlashInfer are not
   migrated**; these paths retain their existing backend.
-- **GEMM:** \`linear.gemm.plain.t16.v1\` and
-  \`linear.gemm.bias.t16.v1\` have distinct signatures, as the GEMV
+- **GEMM:** `linear.gemm.plain.t16.v1` and
+  `linear.gemm.bias.t16.v1` have distinct signatures, as the GEMV
   variant does. This new shared-memory SIMT baseline must be compared
   against cuBLAS(Lt) before production. Its existence is not a claim of
   faster prefill throughput.
-- **Packed FP4:** \`quant.fp4.dequant.nvfp4.v1\` and
-  \`quant.fp4.dequant.mxfp4.v1\` are **reference/parity operators**, not
+- **Packed FP4:** `quant.fp4.dequant.nvfp4.v1` and
+  `quant.fp4.dequant.mxfp4.v1` are **reference/parity operators**, not
   an inference hot-path conversion. The former consumes U8 packed
   E2M1, E4M3 group16 and per-row F32 global multipliers. The latter
   consumes U8 packed E2M1 and U8 E8M0 group32. Separate
-  \`representation\` names and typed manifests prevent silent format
+  `representation` names and typed manifests prevent silent format
   interchangeability. No implicit unpacking is introduced into the
   optimized SM61 GEMM/GEMV paths.
 
@@ -580,7 +580,7 @@ automatic runtime activation.
    all launch plans are prevalidated. No benchmark regression was
    assumed away.
 
-**Cache policy:** never set, unset or export \`CUDA_COMPUTE_CAP\` in
+**Cache policy:** never set, unset or export `CUDA_COMPUTE_CAP` in
 DKR scripts or shell instructions. Only the independent PTX builder's
-\`--cc 61\` targets Pascal. Do not run \`cargo clean\` or repeatedly
+`--cc 61` targets Pascal. Do not run `cargo clean` or repeatedly
 compile/test between source-staging milestones.
