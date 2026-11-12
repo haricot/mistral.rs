@@ -157,8 +157,8 @@ mod tests {
         ];
         for source in [DType::F16, DType::BF16, DType::F32] {
             let x = Tensor::from_vec(values.clone(), values.len(), &device)?.to_dtype(source)?;
-            let encoded = super::ops::dtype_to_fp8(&x)?;
-            let decoded = super::ops::fp8_to_dtype(&encoded, source)?;
+            let encoded = super::super::ops::dtype_to_fp8(&x)?;
+            let decoded = super::super::ops::fp8_to_dtype(&encoded, source)?;
             let actual = decoded.to_dtype(DType::F32)?.to_vec1::<f32>()?;
             for (original, output) in values.iter().zip(actual.iter()) {
                 let expected = (*original).clamp(-448.0, 448.0);
@@ -166,9 +166,9 @@ mod tests {
                     "FP8 E4M3 cast dtype={source:?}: {output} != {expected}");
             }
             let cached = HOT_PLANS.with(|hot| hot.borrow().len());
-            let again = super::ops::dtype_to_fp8(&x)?;
+            let again = super::super::ops::dtype_to_fp8(&x)?;
             assert_eq!(cached, HOT_PLANS.with(|hot| hot.borrow().len()));
-            let roundtrip = super::ops::fp8_to_dtype(&again, source)?;
+            let roundtrip = super::super::ops::fp8_to_dtype(&again, source)?;
             assert_eq!(
                 actual,
                 roundtrip.to_dtype(DType::F32)?.to_vec1::<f32>()?

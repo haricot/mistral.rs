@@ -1,5 +1,8 @@
 use std::sync::{atomic::AtomicUsize, Arc};
 
+#[cfg(feature = "dkr-gemm")]
+mod dense_gemm_dynamic;
+
 use candle_core::{quantized::GgmlDType, DType, Device, DeviceLocation, Result, Shape, Tensor, D};
 use candle_nn::Linear;
 use safetensors::tensor::Dtype;
@@ -83,6 +86,15 @@ impl UnquantLinear {
         *output_shape.last_mut().unwrap() = output_dim;
 
         let input = input.contiguous()?.reshape((rows, input_dim))?;
+        // Experimental DKR reference GEMM; cuBLAS remains the default without
+        // the explicit feature, preserving all existing performance paths.
+        #[cfg(feature = "dkr-gemm")]
+        if let Some(output) =
+            dense_gemm_dynamic::try_gemm(&input, &self.w, self.b.as_ref())?
+        {
+            return output.reshape(output_shape);
+        }
+
         let output = input.matmul(&self.w.t()?)?;
         let output = match self.b.as_ref() {
             Some(bias) => output.broadcast_add(bias)?,
