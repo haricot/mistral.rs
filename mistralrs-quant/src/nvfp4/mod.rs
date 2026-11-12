@@ -10,6 +10,8 @@ use crate::{
 };
 
 mod csf;
+#[cfg(feature = "dkr-fp4-dequant")]
+pub(crate) mod dequant_dynamic;
 #[cfg(all(feature = "cuda", feature = "cutile"))]
 mod decode;
 pub mod embedding;
