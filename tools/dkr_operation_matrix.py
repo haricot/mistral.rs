@@ -55,6 +55,7 @@ ROUTES = {
 STAGED_OPERATIONS = {
     "dense_linear": ["linear.gemv.plain.b128.v1", "linear.gemv.bias.b128.v1"],
     "kv_cache": ["kv_cache.scale_update.atomic_max.v1"],
+    "fp8_linear_and_norm": ["quant.fp8_e4m3.encode.v1", "quant.fp8_e4m3.decode.v1"],
     "moe": ["moe.grouped_gemm.v1"],
     "reduction": [
         "moe.weighted_reduce.v1",

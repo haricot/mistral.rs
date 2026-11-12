@@ -62,6 +62,13 @@ impl CustomOp1 for Fp8ToDtype {
 
         use crate::utils::slice_ptr;
 
+        #[cfg(feature = "dkr-fp8-cast")]
+        if let Some(result) = super::dynamic::try_cast(
+            input_s, input_l, DType::F8E4M3, self.target_dtype,
+        )? {
+            return Ok(result);
+        }
+
         if !super::ffi::HAVE_SCALAR_FP8_KERNELS {
             candle_core::bail!("Do not have scalar FP8 kernels.");
         }
@@ -224,6 +231,13 @@ impl CustomOp1 for DtypeToFp8 {
         use half::{bf16, f16};
 
         use crate::utils::slice_ptr;
+
+        #[cfg(feature = "dkr-fp8-cast")]
+        if let Some(result) = super::dynamic::try_cast(
+            input_s, input_l, self.source_dtype, DType::F8E4M3,
+        )? {
+            return Ok(result);
+        }
 
         if !super::ffi::HAVE_SCALAR_FP8_KERNELS {
             candle_core::bail!("Do not have scalar FP8 kernels.");
