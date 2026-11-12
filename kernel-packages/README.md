@@ -990,7 +990,7 @@ manifests** (two operations; three typed variants for writing):
   to have unique non-padding destinations, as in the original kernel;
   host-side DKR dispatch does not read back device metadata.
 - **Still not migrated**: arbitrary `swap_blocks` between CPU and GPU,
-  cross-device transfers, dependent/self-overlapping block
+  cross-device transfers, dependent/cyclic block
   permutations, and scoped FP8 quantized cache writing. Those are
   transport/synchronization contracts, not safe byte-copy
   substitutions; retain the original path until separately proven.
@@ -1009,5 +1009,6 @@ manifests** (two operations; three typed variants for writing):
   cannot prove GPU execution or precision. When all staged S1–S7
   packages are included, expect **24 PTX source families and 32 new
   R1.21 manifest profiles**. The deferred grouped GPU campaign
-  would select **29 targeted tests**, provided no further tests
-  are added in S8.
+  would select **29 GPU-designated DKR tests**, plus one CPU-only
+  mapping-independence test covered by the same test-name filter,
+  provided no further tests are added in S8.
