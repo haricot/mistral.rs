@@ -19,6 +19,8 @@ pub mod embedding;
 mod pascal;
 #[cfg(feature = "cuda")]
 pub(crate) mod portable;
+#[cfg(feature = "dkr-nvfp4-gemv")]
+mod gemv_dynamic;
 #[cfg(all(feature = "cuda", feature = "cutile"))]
 pub(crate) mod prepare;
 
@@ -982,6 +984,29 @@ impl QuantMethod for Nvfp4Layer {
             *shape.last_mut().unwrap() = self.parts.weight.dim(0)?;
             return Tensor::zeros(shape, x.dtype(), x.device());
         }
+        // Experimental fused NVFP4 W4A16 decode. Restrict to rank-2
+        // weights, <=8 rows, and the checkpoint's exact output dtype.
+        // Pascal E7 stays resident as the fallback for other inputs.
+        #[cfg(feature = "dkr-nvfp4-gemv")]
+        if x.device().is_cuda()
+            && self.parts.activation == Nvfp4ActivationMode::None
+            && x.dtype() == self.parts.dtype
+        {
+            let k = x.dim(D::Minus1)?;
+            let rows = x.elem_count() / k;
+            if rows <= 8 {
+                let input = x.contiguous()?.reshape((rows, k))?;
+                if let Some(output) = gemv_dynamic::try_gemv(
+                    &input, &self.parts.weight, &self.parts.scales,
+                    &self.parts.global_scales, self.parts.bias.as_ref(),
+                )? {
+                    let mut shape = x.dims().to_vec();
+                    *shape.last_mut().unwrap() = self.parts.weight.dim(0)?;
+                    return output.reshape(shape);
+                }
+            }
+        }
+
         #[cfg(all(feature = "cuda", feature = "cuda-legacy-fp4"))]
         if let Some(legacy) = &self.legacy {
             let k = x.dim(D::Minus1)?;

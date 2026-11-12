@@ -699,14 +699,14 @@ staging. Do not change CUDA_COMPUTE_CAP, the user's feature set, or
 the cached CUDA build root during routine patches.
 
 
-## DKR-R1.21/S1-S2 — Fused quantized GEMV and short paged decode (staged)
+## DKR-R1.21/S1-S3 — Quantized GEMV and short paged decode (staged)
 
 The SM61 R1.20 baseline **21/21** remains authoritative. R1.21 adds
-two **opt-in, not yet GPU-qualified** external PTX source families:
-`quant-gemv` and `paged-decode`. Both use cudaforge PTX build,
+three **opt-in, not yet GPU-qualified** external PTX source families:
+`quant-gemv`, `paged-decode` and `nvfp4-gemv`. All three use cudaforge PTX build,
 typed manifests, thread-local prevalidated launch plans, and existing
 CUDA static FFI fallback. No DKR-specific NVCC flag is added to
-the static builders. Total staged external source families: **19**.
+the static builders. Total staged external source families: **20**.
 
 - **DKR-R1.21/S1** (`mistralrs-core/dkr-quant-gemv`, forwarding to
   `mistralrs-quant`): FP8 E4M3 blockwise dense decode GEMV with
@@ -738,13 +738,24 @@ the static builders. Total staged external source families: **19**.
   be expensive. Benchmark the static route before considering
   production promotion.
 
-- **Not yet ported:** NVFP4 resident E7 decode and its per-row
+- **DKR-R1.21/S3** (`mistralrs-core/dkr-nvfp4-gemv`): fused SM61
+  NVFP4 W4A16 decode GEMV with packed E2M1 weights, E4M3 scales in
+  groups of 16 and F32 per-row global multipliers, with separate
+  bias/plain typed ABIs. The new opt-in route is selected only for
+  CUDA F16/BF16 activations that match the layer output dtype, rank-2
+  weights, unquantized activations, and up to eight rows. Other
+  shapes, input types, and modes retain the resident Candle E7
+  or existing portable implementation.
+  GPU parity test: `dkr_nvfp4_gemv_gpu`. This is an experimental
+  reference kernel; it has not been performance-qualified against E7.
+
+- **Not yet ported:** NVFP4 E7-scale-rounding parity and its per-row
   global scaling/bias semantics, MXFP4 large-M GEMM, FP8 indexed
   expert GEMM, routed FP8/MXFP4/NVFP4 GEMV with arbitrary expert
   indirection, scaled FP8 KV attention, MLA, FlashInfer and
   speculative/partitioned attention. These are follow-on R1.21
-  stages and **cannot** be classified as migrated by the two
-  initial source families.
+  stages and **cannot** be classified as migrated by the first
+  three source families.
 
 For the *next* grouped qualification, use the stable cache root
 `MISTRALRS_CUDA_BUILD_ROOT=.../target/dkr-cuda-cache/sm61`

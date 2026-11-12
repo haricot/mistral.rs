@@ -59,6 +59,7 @@ STAGED_OPERATIONS = {
     "fp4_linear": ["quant.fp4.dequant.nvfp4.v1", "quant.fp4.dequant.mxfp4.v1"],
     "quantized_decode_gemv": ["quant.fp8.blockwise.gemv.b128.v1", "quant.mxfp4.gemv.plain.b128.v1", "quant.mxfp4.gemv.bias.b128.v1"],
     "paged_attention": ["attention.paged.decode.online.v1"],
+    "nvfp4_decode": ["quant.nvfp4.gemv.plain.b128.v1", "quant.nvfp4.gemv.bias.b128.v1"],
     "moe": ["moe.grouped_gemm.v1"],
     "reduction": [
         "moe.weighted_reduce.v1",

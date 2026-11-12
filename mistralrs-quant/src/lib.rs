@@ -18,7 +18,7 @@ mod afq;
 mod bitsandbytes;
 mod blockwise_fp8;
 mod cpu_rms_norm;
-#[cfg(any(feature = "dkr-reduce-norm", feature = "dkr-gemv", feature = "dkr-fp8-cast", feature = "dkr-gemm", feature = "dkr-fp4-dequant", feature = "dkr-quant-gemv"))]
+#[cfg(any(feature = "dkr-reduce-norm", feature = "dkr-gemv", feature = "dkr-fp8-cast", feature = "dkr-gemm", feature = "dkr-fp4-dequant", feature = "dkr-quant-gemv", feature = "dkr-nvfp4-gemv"))]
 mod dkr_cuda;
 #[cfg(feature = "dkr-quant-gemv")]
 mod quantized_gemv_dynamic;
