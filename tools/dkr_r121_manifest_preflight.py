@@ -29,6 +29,14 @@ PACKAGES = {
         "profiles": 3,
         "ops": {"attention.paged.decode.online.v1": (15, 9)},
     },
+    "quant-gemm": {
+        "profiles": 6,
+        "ops": {
+            "quant.fp8.blockwise.gemm.t16.v1": (10, 6),
+            "quant.mxfp4.gemm.plain.t16.v1": (7, 3),
+            "quant.mxfp4.gemm.bias.t16.v1": (8, 3),
+        },
+    },
     "nvfp4-gemv": {
         "profiles": 4,
         "ops": {
@@ -45,6 +53,7 @@ def validate(pkg, options, root):
         "quant-gemv": "quant_gemv.cu",
         "paged-decode": "paged_decode.cu",
         "nvfp4-gemv": "nvfp4_gemv.cu",
+        "quant-gemm": "quant_gemm.cu",
     }[pkg])
     if not (script.is_file() and cu.is_file()):
         raise AssertionError(f"{pkg}: source or packager missing")
@@ -69,7 +78,7 @@ def validate(pkg, options, root):
         data = json.loads(path.read_text())
         if data["schema"] != "DKR-KERNEL-MODULE-V1" or data["abi"] != "dkr.typed.v1":
             raise AssertionError(f"{path}: invalid schema or ABI")
-        if data["target_cc"] != 61 or data["block"] not in ([128, 1, 1],):
+        if data["target_cc"] != 61 or data["block"] not in ([128, 1, 1], [16, 16, 1]):
             raise AssertionError(f"{path}: wrong SM61 geometry")
         op = data["operation"]
         if op not in options["ops"]:
@@ -97,6 +106,13 @@ def validate(pkg, options, root):
                 "paged-decode": [
                     f"dkr_paged_decode_{dt}"
                     for dt in ("f16", "bf16", "f32")
+                ],
+                "quant-gemm": [
+                    f"dkr_fp8_block_gemm_{dt}"
+                    for dt in ("f16", "bf16")
+                ] + [
+                    f"dkr_mxfp4_gemm_{dt}_{mode}"
+                    for dt in ("f16", "bf16") for mode in ("plain", "bias")
                 ],
                 "nvfp4-gemv": [
                     f"dkr_nvfp4_gemv_{dt}_{mode}"
@@ -127,7 +143,7 @@ def main():
     build_files = ["mistralrs-quant", "mistralrs-core", "mistralrs-paged-attn"]
     for name in build_files:
         source = (ROOT / name / "build.rs").read_text()
-        for macro in ("DKR_QUANT_GEMV", "DKR_PAGED_DECODE", "DKR_NVFP4_GEMV"):
+        for macro in ("DKR_QUANT_GEMV", "DKR_QUANT_GEMM", "DKR_PAGED_DECODE", "DKR_NVFP4_GEMV"):
             if f'-DMISTRALRS_{macro}' in source:
                 raise AssertionError(f"global CUDA flag regression in {name}: {macro}")
     print(f"DKR_R121_MANIFEST_PREFLIGHT=PASS profiles={total} no_cuda_compilation")

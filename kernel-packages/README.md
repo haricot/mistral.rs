@@ -801,3 +801,35 @@ prefill TTFB, kernel time, VRAM, and semantic/numeric parity. Only
 promote a DKR route if both accuracy and performance acceptance
 criteria are met. The R1.20 21/21 test baseline is unchanged until
 the next grouped campaign qualifies these R1.21 kernels.
+
+
+### DKR-R1.21/S4 — Fused quantized prefill GEMM, experimental
+
+- Feature: `mistralrs-core/dkr-quant-gemm`, forwarding to
+  `mistralrs-quant/dkr-quant-gemm`.
+- External cudaforge PTX: `kernel-packages/cuda/quant-gemm`.
+  F16/BF16 activations, FP8 E4M3 blockwise weight + F32 scale
+  matrix (ceil(N/by), ceil(K/bx)), or packed MXFP4 E2M1 weights
+  with E8M0 scales (N,K/32). MXFP4 has two *different* plain/bias
+  signatures. No intermediate float weight tensor is allocated.
+- Strict shape gate: 2D contiguous tensors, valid dtype/layout,
+  K aligned to 32 for MXFP4, `M > 8` (the earlier GEMV path handles
+  M=1..8), and checked u32 launch dimensions. Fallback: existing
+  specialized static GEMM or vendor implementation.
+- Kernel geometry: 16x16 thread blocks, one output element/thread,
+  F32 accumulation. This intentionally prioritizes a transparent
+  parity oracle. It is **not** a claim to outperform tiled/specialized
+  static SM61 GEMM, cuBLAS(Lt), or existing DP4A variants.
+- Test: `dkr_quantized_gemm_gpu`, with odd M/N tiles, FP8 row
+  blocking and both MXFP4 bias signatures. Remains ignored until
+  the next grouped SM61 qualification.
+- Once-per-process runtime comparison:
+  `MISTRALRS_DKR_QUANT_GEMM=0` disables this route even with the
+  feature compiled, for a same-binary DKR-versus-static performance
+  A/B. By default the route is enabled only if its feature is built.
+
+S4 adds exactly one external source family (six PTX manifests); it does
+**not** change any static CUDA build.rs or add a global NVCC macro.
+The first grouped CUDA qualification should confirm real PTX compilation,
+Rust type safety, numerical parity, and whether this generic GEMM
+should remain a testing reference rather than a production dispatch.

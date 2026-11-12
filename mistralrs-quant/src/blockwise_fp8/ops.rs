@@ -1025,6 +1025,15 @@ pub fn fp8_blockwise_matmul(
         return Ok(output);
     }
 
+    // Larger-M prefill: opt-in fused external PTX. The decode GEMV above
+    // and the optimized static GEMM below remain independently selectable.
+    #[cfg(feature = "dkr-quant-gemm")]
+    if let Some(output) = crate::quantized_gemm_dynamic::try_fp8(
+        input, weight, scales, weight_block_size,
+    )? {
+        return Ok(output);
+    }
+
     if !ffi::HAVE_BLOCKWISE_GEMM_KERNELS {
         candle_core::bail!("Do not have blockwise FP8 GEMM kernels.");
     }
