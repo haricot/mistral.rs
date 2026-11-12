@@ -133,7 +133,7 @@ pub(super) fn try_decode(
         || key_cache.dtype() != DType::F8E4M3
         || value_cache.dtype() != DType::F8E4M3
         || k_scale.dtype() != DType::F32 || v_scale.dtype() != DType::F32
-        || k_scale.dims() != [1] || v_scale.dims() != [1]
+        || k_scale.elem_count() != 1 || v_scale.elem_count() != 1
         || !k_scale.is_contiguous() || !v_scale.is_contiguous()
         || block_table.dtype() != DType::U32
         || context_lens.dtype() != DType::U32

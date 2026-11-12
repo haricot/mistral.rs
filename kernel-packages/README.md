@@ -846,7 +846,7 @@ without allocating F16/BF16 copies of KV pages:
 - F16/BF16/F32 query and output, typed E4M3 K/V pages using the
   VLLM K-blocked-x and V-token-strided representations.
 - Mandatory **separate F32 K/V scale pointers**, each with one
-  element; the CUDA kernel applies the K scale in each dot product
+  element (scalar or one-element contiguous view, normalized to [1] in the plan); the CUDA kernel applies the K scale in each dot product
   and the V scale in the online weighted sum. No optional/null scale
   argument is admitted in the new ABI.
 - U32 page tables and context lengths, contiguous tensors, head
