@@ -42,7 +42,7 @@ cargo nextest run --locked \
   -p mistralrs-paged-attn \
   -p mistralrs-core \
   --lib \
-  --features 'mistralrs-core/cuda-legacy,mistralrs-core/dkr-moe,mistralrs-core/dkr-indexed-copy,mistralrs-core/dkr-gated-add,mistralrs-core/dkr-reduce-norm,mistralrs-core/dkr-add-rms-norm,mistralrs-core/dkr-causal-mask,mistralrs-core/dkr-logits,mistralrs-core/dkr-rms-variants,mistralrs-core/dkr-input-pad,mistralrs-core/dkr-ssm,mistralrs-core/dkr-rounded-rope,mistralrs-core/dkr-gemv,mistralrs-core/dkr-kv-scales,mistralrs-core/dkr-fp8-cast,mistralrs-core/dkr-kv-gather,mistralrs-core/dkr-gemm,mistralrs-core/dkr-fp4-dequant,mistralrs-core/dkr-quant-gemv,mistralrs-core/dkr-paged-decode,mistralrs-core/dkr-nvfp4-gemv,mistralrs-core/dkr-quant-gemm,mistralrs-core/dkr-paged-fp8,mistralrs-core/dkr-paged-v2' \
+  --features 'mistralrs-core/cuda-legacy,mistralrs-core/dkr-moe,mistralrs-core/dkr-indexed-copy,mistralrs-core/dkr-gated-add,mistralrs-core/dkr-reduce-norm,mistralrs-core/dkr-add-rms-norm,mistralrs-core/dkr-causal-mask,mistralrs-core/dkr-logits,mistralrs-core/dkr-rms-variants,mistralrs-core/dkr-input-pad,mistralrs-core/dkr-ssm,mistralrs-core/dkr-rounded-rope,mistralrs-core/dkr-gemv,mistralrs-core/dkr-kv-scales,mistralrs-core/dkr-fp8-cast,mistralrs-core/dkr-kv-gather,mistralrs-core/dkr-gemm,mistralrs-core/dkr-fp4-dequant,mistralrs-core/dkr-quant-gemv,mistralrs-core/dkr-paged-decode,mistralrs-core/dkr-nvfp4-gemv,mistralrs-core/dkr-quant-gemm,mistralrs-core/dkr-paged-fp8,mistralrs-core/dkr-paged-v2,mistralrs-core/dkr-kv-cache-ops' \
   --run-ignored=all \
   --no-fail-fast \
   --test-threads=1 \

@@ -612,6 +612,15 @@ fn update_cache<
         dtype => candle::bail!("cache dtype {dtype:?} is not supported"),
     };
     validate_kv_cache_scales(key_cache.dtype(), k_scale, v_scale, "reshape_and_cache")?;
+    // Optional DKR contiguous VLLM store. FP8 scaled writes, alternate
+    // layouts and unsupported dtypes retain the original FFI kernel.
+    #[cfg(feature = "dkr-kv-cache-ops")]
+    if super::kv_cache_ops_dynamic::try_reshape(
+        key, value, key_cache, value_cache, slot_mapping, k_scale, v_scale,
+    )? {
+        return Ok(());
+    }
+
 
     let (k, k_l) = key.storage_and_layout();
     let k = match &*k {

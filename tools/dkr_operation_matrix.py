@@ -54,7 +54,7 @@ ROUTES = {
 # package checked into this branch; NONE is GPU-qualified by this matrix.
 STAGED_OPERATIONS = {
     "dense_linear": ["linear.gemv.plain.b128.v1", "linear.gemv.bias.b128.v1", "linear.gemm.plain.t16.v1", "linear.gemm.bias.t16.v1"],
-    "kv_cache": ["kv_cache.scale_update.atomic_max.v1", "kv_cache.gather.vllm.contiguous.v1"],
+    "kv_cache": ["kv_cache.scale_update.atomic_max.v1", "kv_cache.gather.vllm.contiguous.v1", "kv_cache.copy_blocks.bytes.b256.v1", "kv_cache.reshape_store.vllm.b256.v1"],
     "fp8_linear_and_norm": ["quant.fp8_e4m3.encode.v1", "quant.fp8_e4m3.decode.v1"],
     "fp4_linear": ["quant.fp4.dequant.nvfp4.v1", "quant.fp4.dequant.mxfp4.v1"],
     "quantized_decode_gemv": ["quant.fp8.blockwise.gemv.b128.v1", "quant.mxfp4.gemv.plain.b128.v1", "quant.mxfp4.gemv.bias.b128.v1"],

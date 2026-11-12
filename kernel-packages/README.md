@@ -946,3 +946,68 @@ static v2 implementation; compare steady-state TPOT, first-token
 latency, VRAM and long-context scaling before promotion. CUDA Graph
 capture and cross-stream reuse of the shared pool require independent
 qualification before production promotion.
+
+
+### DKR-R1.21/S7 — KV page copy + VLLM slot write (staged)
+
+**Source-stage only**; neither new symbol has been compiled or qualified
+on SM61. The authoritative GPU baseline remains R1.20 21/21.
+
+One external cudaforge PTX source family
+`kernel-packages/cuda/kv-cache-ops` provides **four fixed ABI
+manifests** (two operations; three typed variants for writing):
+
+| Operation | ABI | Runtime scope |
+|---|---|---|
+| `kv_cache.copy_blocks.bytes.b256.v1` | i64 per-layer K/V pointer tables, i64 [pair,2] page mappings, 2 u32 sizes, 2 u64 per-page byte counts | Device-resident metadata already built by `copy_blocks`; F16/BF16/F32/E4M3 pages are copied *bit-exactly*. |
+| `kv_cache.reshape_store.vllm.b256.v1` | key/value inputs, K/V caches with VLLM layout representations, i64 slots, 6 u32 sizes | Contiguous F16/BF16/F32 token-to-page writes (including -1 padding). F16/BF16/F32 signatures are distinct; no runtime optional scale pointer. |
+
+- Feature: `mistralrs-core/dkr-kv-cache-ops` forwarding to
+  `mistralrs-paged-attn/dkr-kv-cache-ops`.
+- Cached typed plans with fixed 256-thread launch blocks; source CUDA
+  units compiled with the same `cudaforge` PTX builder as existing DKR.
+  No new `build.rs` NVCC option and no change to
+  `CUDA_COMPUTE_CAP` or the 82-object static CUDA build cache.
+- `copy_blocks` validates dtype/device/stream/capability, mapping
+  bounds and cache layout exactly as before. DKR reuses its single
+  existing device metadata allocation and keeps the static FFI for
+  repeated destinations and cross-copy dependencies. Graph capture
+  remains explicitly rejected by copy_blocks, as in the original path.
+  The DKR copy operates at the byte level, preserving FP8 payloads,
+  including NaNs/signs, without decoding or quantizing.
+  Because the ABI passes **indirect raw pointers**, the manifest's
+  pointer-table tensors are read-only but the referenced cache pages
+  are modified. The Rust adapter enforces their lifecycle and
+  provenance; this operation must not be exposed to unchecked
+  arbitrary pointers.
+- `reshape_and_cache` uses the signed i64 slot mapping directly,
+  skips negative/padding entries and checks out-of-range slots before
+  writing. For contiguous, same-dtype, supported VLLM layouts it
+  writes K/V without intermediate buffers or host readbacks.
+  FP8 E4M3 *scaled writes* still require the existing
+  `scaled_convert` static backend; similarly rank/stride variants
+  excluded by the ABI retain that backend. Slot mappings are assumed
+  to have unique non-padding destinations, as in the original kernel;
+  host-side DKR dispatch does not read back device metadata.
+- **Still not migrated**: arbitrary `swap_blocks` between CPU and GPU,
+  cross-device transfers, dependent/self-overlapping block
+  permutations, and scoped FP8 quantized cache writing. Those are
+  transport/synchronization contracts, not safe byte-copy
+  substitutions; retain the original path until separately proven.
+- Runtime same-binary opt-out: set `MISTRALRS_DKR_KV_COPY=0` or
+  `MISTRALRS_DKR_KV_RESHAPE=0` before launching the process.
+  Production should keep DKR features off until GPU parity and A/B
+  profiling pass.
+- Two ignored GPU tests: `dkr_kv_cache_copy_gpu` exercises the
+  view-offset/FP8 exact-copy path, and `dkr_kv_cache_reshape_gpu`
+  exercises page layout, padding and plan residency.
+- Source-only tests (no Cargo/NVCC): `python3
+  tools/dkr_r121_manifest_preflight.py`, `python3
+  tools/dkr_r121_s7_cpu_preflight.py`, and `python3
+  tools/dkr_nvcc_flag_audit.py`. They validate packaging, a
+  standalone CPU byte/layout oracle, and static NVCC flags, but
+  cannot prove GPU execution or precision. When all staged S1–S7
+  packages are included, expect **24 PTX source families and 32 new
+  R1.21 manifest profiles**. The deferred grouped GPU campaign
+  would select **29 targeted tests**, provided no further tests
+  are added in S8.

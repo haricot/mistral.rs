@@ -1,4 +1,6 @@
 use std::{collections::HashMap, iter::zip, mem::size_of, sync::Arc};
+#[cfg(feature = "dkr-kv-cache-ops")]
+use std::collections::HashSet;
 
 use crate::cuda::backend::{slice_ptr, slice_ptr_on_stream};
 use crate::cuda::ffi::{copy_blocks_bf16, copy_blocks_f16, copy_blocks_f32, copy_blocks_u8};
@@ -21,6 +23,18 @@ fn ensure_allocation_stream<T>(
         );
     }
     Ok(())
+}
+
+#[cfg(feature = "dkr-kv-cache-ops")]
+fn dkr_copy_pairs_independent(mapping: &HashMap<usize, Vec<usize>>) -> bool {
+    let sources: HashSet<usize> = mapping.keys().copied().collect();
+    let mut destinations = HashSet::new();
+    mapping.iter().all(|(src, targets)| {
+        targets.iter().all(|dst| {
+            destinations.insert(*dst)
+                && (*src == *dst || !sources.contains(dst))
+        })
+    })
 }
 
 pub fn copy_blocks(
@@ -202,6 +216,27 @@ pub fn copy_blocks(
     let numel_per_block_key = i32::try_from(numel_per_block_key)?;
     let numel_per_block_value = i32::try_from(numel_per_block_value)?;
 
+    // DKR byte-exact SM61 block copies operate directly on the existing
+    // device pointer tables. Only independent source->destination pairs
+    // are selected: arbitrary dependency cycles/repeated destinations
+    // retain the legacy kernel's original behavior.
+    #[cfg(feature = "dkr-kv-cache-ops")]
+    if dkr_copy_pairs_independent(block_mapping)
+        && super::kv_cache_ops_dynamic::try_copy_blocks(
+            cache_dev, &stream, metadata_ptr, value_cache_ptr as u64,
+            block_mapping_ptr as u64, num_layers as usize, num_pairs as usize,
+            usize::try_from(numel_per_block_key)?
+                .checked_mul(dtype.size_in_bytes())
+                .ok_or_else(|| candle_core::Error::msg("key block byte size overflow"))?,
+            usize::try_from(numel_per_block_value)?
+                .checked_mul(dtype.size_in_bytes())
+                .ok_or_else(|| candle_core::Error::msg("value block byte size overflow"))?,
+        )?
+    {
+        drop(cache_guards);
+        return Ok(());
+    }
+
     match dtype {
         candle_core::DType::BF16 => unsafe {
             copy_blocks_bf16(
@@ -372,6 +407,26 @@ pub unsafe fn swap_blocks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "dkr-kv-cache-ops")]
+    #[test]
+    fn dkr_kv_copy_independence_contract() {
+        assert!(dkr_copy_pairs_independent(&HashMap::from([
+            (0, vec![2]), (1, vec![3]),
+        ])));
+        assert!(dkr_copy_pairs_independent(&HashMap::from([
+            (0, vec![0]), (1, vec![3]),
+        ])));
+        assert!(!dkr_copy_pairs_independent(&HashMap::from([
+            (0, vec![1]), (1, vec![3]),
+        ])));
+        assert!(!dkr_copy_pairs_independent(&HashMap::from([
+            (0, vec![2]), (1, vec![2]),
+        ])));
+        assert!(!dkr_copy_pairs_independent(&HashMap::from([
+            (0, vec![1]), (1, vec![0]),
+        ])));
+    }
 
     #[test]
     fn copy_blocks_uses_device_metadata_and_view_offsets() -> Result<()> {
