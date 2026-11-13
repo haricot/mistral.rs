@@ -17,6 +17,17 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 PACKAGES = {
+    "routed-quant": {
+        "profiles": 24,
+        "ops": {
+            f"moe.routed.{codec}.{stage}.plain.v1": (
+                (14, 9) if codec == "fp8" else
+                (12, 6) if codec == "nvfp4" else (11, 6)
+            )
+            for codec in ("fp8", "mxfp8", "mxfp4", "nvfp4")
+            for stage in ("gemv", "gemm")
+        },
+    },
     "quant-gemv": {
         "profiles": 6,
         "ops": {
@@ -75,6 +86,7 @@ def validate(pkg, options, root):
         "paged-fp8": "paged_fp8.cu",
         "paged-v2": "paged_v2.cu",
         "kv-cache-ops": "kv_cache_ops.cu",
+        "routed-quant": "routed_quant.cu",
     }[pkg])
     if not (script.is_file() and cu.is_file()):
         raise AssertionError(f"{pkg}: source or packager missing")
@@ -104,6 +116,12 @@ def validate(pkg, options, root):
         op = data["operation"]
         if op not in options["ops"]:
             raise AssertionError(f"{path}: unexpected op {op}")
+        if pkg == "routed-quant":
+            expected_block = (
+                [128, 1, 1] if ".gemv." in op else [16, 16, 1]
+            )
+            if data["block"] != expected_block:
+                raise AssertionError(f"{path}: wrong routed stage/block geometry")
         expected_total, expected_scalars = options["ops"][op]
         args = data["arguments"]
         if len(args) != expected_total:
@@ -123,6 +141,12 @@ def validate(pkg, options, root):
                 ] + [
                     f"dkr_mxfp4_gemv_{dt}_{mode}"
                     for dt in ("f16", "bf16") for mode in ("plain", "bias")
+                ],
+                "routed-quant": [
+                    f"dkr_routed_{stage}_{codec}_{dt}"
+                    for stage in ("gemv", "gemm")
+                    for codec in ("fp8", "mxfp8", "mxfp4", "nvfp4")
+                    for dt in ("f16", "bf16", "f32")
                 ],
                 "kv-cache-ops": [
                     "dkr_kv_copy_blocks_bytes",
@@ -157,6 +181,10 @@ def validate(pkg, options, root):
         ):
             raise AssertionError(f"{path}: unexpected symbol identity")
         counts[op] = counts.get(op, 0) + 1
+    if pkg == "routed-quant" and (
+        len(counts) != 8 or any(v != 3 for v in counts.values())
+    ):
+        raise AssertionError(f"{pkg}: expected 3 typed manifests per 8 routed operations")
     subprocess.run(invocation, check=True, capture_output=True, text=True)
     print(f"DKR_R121_MANIFEST_PREFLIGHT={pkg}:PASS profiles={len(manifests)} "
           f"operations={len(counts)}")
@@ -178,7 +206,7 @@ def main():
     build_files = ["mistralrs-quant", "mistralrs-core", "mistralrs-paged-attn"]
     for name in build_files:
         source = (ROOT / name / "build.rs").read_text()
-        for macro in ("DKR_QUANT_GEMV", "DKR_QUANT_GEMM", "DKR_PAGED_FP8", "DKR_PAGED_V2", "DKR_KV_CACHE_OPS", "DKR_PAGED_DECODE", "DKR_NVFP4_GEMV"):
+        for macro in ("DKR_QUANT_GEMV", "DKR_QUANT_GEMM", "DKR_PAGED_FP8", "DKR_PAGED_V2", "DKR_KV_CACHE_OPS", "DKR_ROUTED_QUANT", "DKR_PAGED_DECODE", "DKR_NVFP4_GEMV"):
             if f'-DMISTRALRS_{macro}' in source:
                 raise AssertionError(f"global CUDA flag regression in {name}: {macro}")
     print(f"DKR_R121_MANIFEST_PREFLIGHT=PASS profiles={total} no_cuda_compilation")

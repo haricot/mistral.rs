@@ -61,7 +61,12 @@ STAGED_OPERATIONS = {
     "quantized_prefill_gemm": ["quant.fp8.blockwise.gemm.t16.v1", "quant.mxfp4.gemm.plain.t16.v1", "quant.mxfp4.gemm.bias.t16.v1"],
     "paged_attention": ["attention.paged.decode.online.v1", "attention.paged.fp8_decode.online.v1", "attention.paged.v2.partition.p256.v1", "attention.paged.v2.merge.p256.v1"],
     "nvfp4_decode": ["quant.nvfp4.gemv.plain.b128.v1", "quant.nvfp4.gemv.bias.b128.v1"],
-    "moe": ["moe.grouped_gemm.v1"],
+    "moe": [
+        "moe.grouped_gemm.v1",
+        *[f"moe.routed.{codec}.{stage}.plain.v1"
+          for codec in ("fp8", "mxfp8", "mxfp4", "nvfp4")
+          for stage in ("gemv", "gemm")],
+    ],
     "reduction": [
         "moe.weighted_reduce.v1",
         "attention.softmax_sinks.v1",

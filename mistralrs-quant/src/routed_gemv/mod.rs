@@ -6,6 +6,8 @@ use crate::{GluActivationType, QuantMethod};
 
 #[cfg(feature = "cuda")]
 mod cuda;
+#[cfg(feature = "dkr-routed-quant")]
+mod dynamic;
 #[cfg(all(test, feature = "cuda"))]
 mod tests;
 
@@ -74,6 +76,12 @@ pub fn try_routed_gather(
     indices: &Tensor,
     weights: &RoutedWeights,
 ) -> Result<Option<Tensor>> {
+    // S8 is explicitly opt-in even when the Cargo feature is compiled.
+    // Historical fused decode and grouped-MoE paths remain the default.
+    #[cfg(feature = "dkr-routed-quant")]
+    if let Some(output) = dynamic::try_gather(x, indices, weights)? {
+        return Ok(Some(output));
+    }
     #[cfg(feature = "cuda")]
     if x.device().is_cuda() && cuda::enabled() {
         return cuda::gather(x, indices, weights);

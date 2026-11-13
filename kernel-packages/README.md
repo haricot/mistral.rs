@@ -1012,3 +1012,88 @@ manifests** (two operations; three typed variants for writing):
   would select **29 GPU-designated DKR tests**, plus one CPU-only
   mapping-independence test covered by the same test-name filter,
   provided no further tests are added in S8.
+
+
+### DKR-R1.21/S8 — Direct Routed Quantized GEMV/GEMM (staged)
+
+**Not GPU-qualified yet.** One new cudaforge-owned PTX unit
+(`kernel-packages/cuda/routed-quant/routed_quant.cu`) implements
+**eight fixed plain-routed operations**, in three activation dtypes
+(F16, BF16, F32), for **24 manifest profiles**:
+
+| Codec | Weight layout | Scales | Fixed operation pair |
+|---|---|---|---|
+| FP8 blockwise | E4M3 `[E,N,K]` | F32 `[E,ceil(N/by),ceil(K/bx)]` | `moe.routed.fp8.gemv.plain.v1`, `moe.routed.fp8.gemm.plain.v1` |
+| MXFP8 | E4M3 `[E,N,K]` | U8 E8M0 `[E,N,K/32]` | `moe.routed.mxfp8.gemv.plain.v1`, `moe.routed.mxfp8.gemm.plain.v1` |
+| MXFP4 | U8 packed E2M1 `[E,N,K/2]` | U8 E8M0 `[E,N,K/32]` | `moe.routed.mxfp4.gemv.plain.v1`, `moe.routed.mxfp4.gemm.plain.v1` |
+| NVFP4 | U8 packed E2M1 `[E,N,K/2]` | E4M3 `[E,N,K/16]` plus F32 per-expert row globals `[E,N]` | `moe.routed.nvfp4.gemv.plain.v1`, `moe.routed.nvfp4.gemm.plain.v1` |
+
+The ABI is specialized by codec: NVFP4 includes the F32 global
+tensor, while FP8 blockwise adds three scale-shape scalars. Other
+codecs do not pay for absent global or scale parameters. There is
+**no optional CUDA pointer** and no static `build.rs` NVCC flag.
+The output is `[tokens,topk,N]` in the input activation dtype.
+
+The kernel reads the U32 expert IDs `[tokens,topk]` on device,
+without materializing selected experts, sorting assignments or
+expanding quantized weights. The contiguous input can be either
+`[tokens,K]` (one activation shared across routes) or
+`[tokens,1|topk,K]`. The adapter normalizes its typed launch
+descriptor to `[tokens,input_routes,K]` with pointer and explicit
+route-stride semantics, without a new device tensor allocation.
+All same-device dtype and shape contracts are checked before
+launch; unknown codecs, noncontiguous tensors, bias, scalar/global
+FP8 scale broadcast, and unsupported/mismatched scale metadata
+return to the old routed GEMV or dense/individual gather backend.
+
+- **GEMV** uses a 128-thread reduction per output column and routed
+  assignment, with `tokens<=16`.
+- **GEMM** uses a 16x16 thread tile across assignments and columns,
+  with `tokens>16`. This is a SIMT functional reference, **not**
+  a replacement for sorted grouped GEMM, MMQ or optimized DP4A
+  before benchmarking. Expert indirection remains per assignment.
+- The fixed dtype/codec paths use FP32 accumulators, decoding FP8 or
+  FP4 values directly during each dot product. E8M0 follows OCP
+  semantics (exponent 0 is 2^-127, exponent 255 represents NaN).
+  Out-of-range U32 expert indices are guarded before cache access
+  and produce zero rather than accessing out-of-bounds memory; the
+  caller remains responsible for validating the router's indices.
+- The optional feature `mistralrs-core/dkr-routed-quant` forwards to
+  `mistralrs-quant/dkr-routed-quant`. Even when built, S8 remains
+  **off by default** to preserve the existing fused decode and
+  sorted grouped prefill paths; set
+  `MISTRALRS_DKR_ROUTED_QUANT=1` **before process startup** to
+  select S8 on eligible direct gather projections. Remove/unset
+  the variable or set it to 0 in another process to compare static
+  and DKR with the *same binary*.
+- **Deliberately not replaced:** full fused
+  `gate -> GLU -> up -> down -> topk-weight-reduce`, LoRA,
+  per-expert bias, AFQ codecs, grouped expert sorting, expert
+  residency/prefetch cache and all unqualified layouts. In a whole
+  routed-FFN, the pre-existing fused/optimized MoE fast paths may
+  bypass `try_routed_gather`; S8 qualifies direct projection
+  routing only, not a full fused MoE pipeline.
+- Two ignored GPU tests
+  `dkr_routed_quant_gemv_gpu` and
+  `dkr_routed_quant_gemm_gpu` exercise dtype-by-codec parity,
+  expert IDs and shared/per-route input strides. The CPU-only test
+  `dkr_r121_s8_cpu_preflight.py` covers E4M3, E2M1, E8M0,
+  per-expert scales, route ordering and GEMV/GEMM boundaries. It
+  cannot establish CUDA linkability or device performance.
+
+With S8, **25 external PTX source families** are staged (24
+previously plus routed-quant), and **56 new R1.21 manifest
+profiles** are defined (32 previously plus 24). The deferred
+S9 campaign will need to qualify the two new routed GPU tests in
+addition to the 29 GPU-designated tests from R1.20–S7, while
+retaining all static fallback families and the 82-object SM61
+cache. No additional NVCC or Cargo compilation should run until
+that single qualification campaign.
+
+CPU-only preflight, after pulling the branch:
+
+```bash
+python3 tools/dkr_r121_manifest_preflight.py
+python3 tools/dkr_r121_s8_cpu_preflight.py
+python3 tools/dkr_nvcc_flag_audit.py
+```
