@@ -56,6 +56,22 @@ def builder_packages() -> set[str]:
     return set(names)
 
 
+def manifest_family(relative: Path) -> str:
+    """Accept both family/manifest.json and family/profile/.../manifest.json.
+
+    Historical DKR families (such as causal-mask, input-pad) intentionally
+    place their manifests directly in the family directory; R1.21 typed
+    packages use one or more subdirectories. Both are valid.
+    """
+    if (
+        len(relative.parts) < 2
+        or relative.name != "manifest.json"
+        or any(part in (".", "..", "") for part in relative.parts)
+    ):
+        raise AssertionError(f"manifest has no family directory: {relative}")
+    return relative.parts[0]
+
+
 def verify(root: Path, cc: int) -> tuple[int, int, int]:
     if not root.is_dir():
         raise AssertionError(
@@ -78,9 +94,7 @@ def verify(root: Path, cc: int) -> tuple[int, int, int]:
         if not path.is_relative_to(root):
             raise AssertionError(f"manifest path escapes package root: {manifest}")
         relative = path.relative_to(root)
-        if len(relative.parts) < 3:
-            raise AssertionError(f"manifest has no family/profile: {relative}")
-        family = relative.parts[0]
+        family = manifest_family(relative)
         if family not in expected:
             raise AssertionError(f"unexpected PTX family: {family}")
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -162,7 +176,18 @@ def self_test() -> None:
             raise AssertionError(
                 f"PTX validator accepted an invalid module: {entry=} {arch=}"
             )
-    print("DKR_S9_PTX_AUDIT_SELF_TEST=PASS cases=4 no_cuda_compilation")
+    # Test both layouts, including the historical flat-family manifest
+    # that stopped the first S9 attempt before cargo nextest.
+    assert manifest_family(Path("causal-mask/manifest.json")) == "causal-mask"
+    assert manifest_family(Path("moe/f16/manifest.json")) == "moe"
+    assert manifest_family(Path("routed-quant/gemm/mxfp4/bf16/manifest.json")) == "routed-quant"
+    try:
+        manifest_family(Path("manifest.json"))
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("accepted manifest without a family")
+    print("DKR_S9_PTX_AUDIT_SELF_TEST=PASS cases=8 no_cuda_compilation")
 
 
 def main() -> None:
