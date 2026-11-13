@@ -1097,3 +1097,37 @@ python3 tools/dkr_r121_manifest_preflight.py
 python3 tools/dkr_r121_s8_cpu_preflight.py
 python3 tools/dkr_nvcc_flag_audit.py
 ```
+
+
+### S9 boundary guard — verify compiled PTX before grouped GPU tests
+
+The final single SM61 campaign now has **two failure barriers**:
+
+1. Before any compilation: run the 56-profile fixture-manifest preflight,
+   S6/S7/S8 CPU numerical/layout oracles, global NVCC flag audit, and
+   `python3 tools/dkr_s9_ptx_manifest_audit.py --self-test`.
+   The self-test checks the PTX target/entry parser against one good
+   fixture and three deliberately invalid ones; it does NOT load or
+   compile real kernels.
+2. After `cudaforge` compiles the 25 package families, but **before
+   `cargo nextest` builds the large CUDA crates**:
+   `python3 tools/dkr_s9_ptx_manifest_audit.py --root
+   "$DKR_KERNEL_PACKAGES" --cc 61`.
+   This inspects every actual manifest and PTX: SHA256 integrity,
+   canonical package identity, exact `.target sm_61`, real exported
+   `.entry` symbol, launch block geometry, and all 56 R1.21 typed
+   profiles. Missing symbols, wrong architecture, malformed ABIs and
+   incomplete packages abort the campaign early.
+
+The external PTX validator does not verify Rust compilation,
+kernel numerical parity, launch runtime safety, throughput or
+GPU utilization. These remain the responsibility of the **one
+explicitly authorized** S9 `cargo nextest` SM61 campaign and
+performance A/B runs. Do not use the live PTX audit before the
+cudaforge build; without compiled artifacts, it must fail.
+
+Static CUDA cache preservation remains based on
+`MISTRALRS_CUDA_BUILD_ROOT` and the previously bootstrapped
+82 object files. The object count alone cannot certify their hash
+reuse; examine the eventual builder logs for cache hits. No
+`CUDA_COMPUTE_CAP` mutation or `cargo clean` is introduced.

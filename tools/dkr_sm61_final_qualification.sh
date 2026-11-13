@@ -26,6 +26,15 @@ else
   python3 tools/dkr_operation_matrix.py
 fi
 
+# Cheap source-only checks FIRST. A failure here must not trigger a
+# long static CUDA/Cargo rebuild. No CUDA_COMPUTE_CAP mutation.
+python3 tools/dkr_r121_manifest_preflight.py
+python3 tools/dkr_r121_v2_numeric_preflight.py
+python3 tools/dkr_r121_s7_cpu_preflight.py
+python3 tools/dkr_r121_s8_cpu_preflight.py
+python3 tools/dkr_nvcc_flag_audit.py
+python3 tools/dkr_s9_ptx_manifest_audit.py --self-test
+
 # cudaforge owns nvcc and its incremental cache. Python only emits manifests.
 cargo run --locked -p mistralrs-kernel-runtime \
   --features builder-cudaforge \
@@ -33,6 +42,11 @@ cargo run --locked -p mistralrs-kernel-runtime \
   --cc 61 --output kernel-packages/build/cuda
 
 export DKR_KERNEL_PACKAGES="$(pwd)/kernel-packages/build/cuda/sm61"
+
+# Real PTX gate: check actual compiled .entry symbols, architecture and SHA
+# for EVERY typed manifest. Fail BEFORE cargo nextest builds the Rust crates.
+python3 tools/dkr_s9_ptx_manifest_audit.py \
+  --root "$DKR_KERNEL_PACKAGES" --cc 61
 
 # A single feature-unified build and grouped DKR test run.
 # --test-threads=1 prevents overlapping GPU test workloads on 8 GiB devices.
