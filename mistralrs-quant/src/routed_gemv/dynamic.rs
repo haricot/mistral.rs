@@ -333,7 +333,7 @@ fn dispatch(x: &Tensor, ids: &Tensor, weights: &RoutedWeights)
                 macro_rules! launch {
                     ($ty:ty) => {{
                         let mut output = unsafe { cuda.alloc::<$ty>(output_len)? };
-                        let (out_ptr, _output_guard) =
+                        let (out_ptr, output_guard) =
                             slice_ptr_mut_on_stream(&mut output, 0, &stream);
                         unsafe {
                             plan.with_prevalidated_launch(|function, config| {
@@ -352,6 +352,10 @@ fn dispatch(x: &Tensor, ids: &Tensor, weights: &RoutedWeights)
                                 Ok(())
                             })
                         }.map_err(|err| candle_core::Error::msg(err.to_string()))?;
+                        // SyncOnDrop holds a mutable borrow of output. Release
+                        // the stream guard after launch, before transferring
+                        // ownership into CudaStorage (as in legacy routed GEMV).
+                        drop(output_guard);
                         Ok(Some(Tensor::from((
                             Storage::Cuda(CudaStorage::wrap_cuda_slice(
                                 output, cuda.clone(),
