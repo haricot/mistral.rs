@@ -24,6 +24,10 @@ BUILDER_SOURCE = (
     / "dkr_package_builder.rs"
 )
 PACKAGE_PATTERN = re.compile(r'Package\s*\{\s*name:\s*"([^"]+)"')
+# Builder source-directory name -> manifest family directory.
+# Audited against all 25 kernel-packages/cuda/*/build.py emitters:
+# logits/build.py deliberately writes sm61/sparse-logits/.
+PACKAGE_OUTPUT_FAMILY = {"logits": "sparse-logits"}
 PTX_TARGET = re.compile(r'(?m)^\s*\.target\s+sm_(\d+)(?=\s|,|$)')
 PTX_ENTRY = re.compile(
     r'(?m)^\s*(?:(?:\.(?:visible|weak|extern))\s+)*'
@@ -53,7 +57,14 @@ def builder_packages() -> set[str]:
     names = PACKAGE_PATTERN.findall(text)
     if len(names) != len(set(names)) or not names:
         raise AssertionError("duplicate or empty cudaforge package list")
-    return set(names)
+    if not PACKAGE_OUTPUT_FAMILY.keys() <= set(names):
+        raise AssertionError("family alias maps an absent cudaforge builder package")
+    # 'name' here identifies the *source* family, not necessarily the
+    # destination directory containing its manifest.json.
+    outputs = [PACKAGE_OUTPUT_FAMILY.get(name, name) for name in names]
+    if len(outputs) != len(set(outputs)):
+        raise AssertionError("duplicate cudaforge manifest output family")
+    return set(outputs)
 
 
 def manifest_family(relative: Path) -> str:
@@ -187,7 +198,13 @@ def self_test() -> None:
         pass
     else:
         raise AssertionError("accepted manifest without a family")
-    print("DKR_S9_PTX_AUDIT_SELF_TEST=PASS cases=8 no_cuda_compilation")
+    # Source family 'logits' intentionally packages into 'sparse-logits';
+    # test the naming contract before a costly CUDA/Rust build.
+    expected_families = builder_packages()
+    assert len(expected_families) == 25
+    assert "sparse-logits" in expected_families
+    assert "logits" not in expected_families
+    print("DKR_S9_PTX_AUDIT_SELF_TEST=PASS cases=9 no_cuda_compilation")
 
 
 def main() -> None:
