@@ -1131,3 +1131,34 @@ Static CUDA cache preservation remains based on
 82 object files. The object count alone cannot certify their hash
 reuse; examine the eventual builder logs for cache hits. No
 `CUDA_COMPUTE_CAP` mutation or `cargo clean` is introduced.
+
+
+### S9 local SM61 campaign — persistent-cache launch guard
+
+S9 requires an explicit operator approval flag
+`DKR_APPROVE_FINAL=1` **and** an absolute
+`MISTRALRS_CUDA_BUILD_ROOT` pointing to the existing
+`$PWD/target/dkr-cuda-cache/sm61` cache. The campaign verifies
+the three `{quant,core,paged-attn}/kernels/.cudaforge_cache.json`
+indices and at least the 82 previously seeded `.o` files
+**before** starting any Cargo compilation. If any check fails,
+it exits nonzero rather than accidentally rebuilding static CUDA.
+These are presence checks, not proof of hash-eligible cache hits.
+
+From the repository root on the actual GTX 1080 Max-Q SM61 host:
+
+```bash
+git pull --ff-only origin feature/dkr-r1-1-external-moe
+MISTRALRS_CUDA_BUILD_ROOT="$PWD/target/dkr-cuda-cache/sm61" \
+  DKR_APPROVE_FINAL=1 bash tools/dkr_sm61_final_qualification.sh \
+  2>&1 | tee dkr-s9-sm61.log
+```
+
+When using `tee`, retain the script's failure status with
+`set -o pipefail` in the invoking shell. To avoid ambiguity,
+prefer `set -o pipefail` before the displayed command.
+The campaign does **not** set, unset, or change
+`CUDA_COMPUTE_CAP`, invoke `cargo clean`, or use any GitHub
+runner that lacks the cached Pascal build objects. The standard
+repository CUDA workflow uses an ARM64 machine and is **not**
+a drop-in replacement for this local SM61 qualification.

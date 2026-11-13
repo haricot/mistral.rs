@@ -13,10 +13,32 @@ cd "$(dirname "$0")/.."
 # changing its value invalidates upstream build.rs caches and can rebuild hours
 # of static kernels. Only the external PTX builder receives --cc 61.
 echo "CUDA_COMPUTE_CAP left unchanged (${CUDA_COMPUTE_CAP-<unset>})"
-if [[ -n "${MISTRALRS_CUDA_BUILD_ROOT:-}" ]]; then
-  echo "DKR_PERSISTENT_CUDA_OBJECT_CACHE=$MISTRALRS_CUDA_BUILD_ROOT"
-  echo "Use tools/dkr_cuda_cache_bootstrap.py --apply before the first shared-cache build."
+# Abort BEFORE even the lightweight Cargo builder if the persistent static
+# cudaforge object cache is not the one bootstrapped for this SM61 workspace.
+# Do not assign CUDA_COMPUTE_CAP or mutate the cache here.
+CACHE_ROOT="$(pwd)/target/dkr-cuda-cache/sm61"
+if [[ -z "${MISTRALRS_CUDA_BUILD_ROOT:-}" ]]; then
+  echo "DKR_S9_CACHE_GUARD=FAIL MISTRALRS_CUDA_BUILD_ROOT is unset; refusing an uncached CUDA build" >&2
+  exit 3
 fi
+if [[ "$(realpath -m -- "$MISTRALRS_CUDA_BUILD_ROOT")" != "$CACHE_ROOT" ]]; then
+  echo "DKR_S9_CACHE_GUARD=FAIL unexpected cache root: $MISTRALRS_CUDA_BUILD_ROOT" >&2
+  echo "Expected: $CACHE_ROOT" >&2
+  exit 3
+fi
+for component in quant core paged-attn; do
+  if [[ ! -s "$CACHE_ROOT/$component/kernels/.cudaforge_cache.json" ]]; then
+    echo "DKR_S9_CACHE_GUARD=FAIL missing $component cudaforge cache index" >&2
+    exit 3
+  fi
+done
+cached_objects="$(find "$CACHE_ROOT" -type f -name '*.o' | wc -l)"
+if (( cached_objects < 82 )); then
+  echo "DKR_S9_CACHE_GUARD=FAIL expected at least 82 cached objects, found $cached_objects" >&2
+  exit 3
+fi
+echo "DKR_S9_CACHE_GUARD=PASS root=$CACHE_ROOT objects=$cached_objects indices=3"
+echo "Object presence is not a cache-hit guarantee; inspect compiler logs for reuse."
 
 if [[ -n "${DKR_CANDLE_DIR:-}" ]]; then
   python3 tools/dkr_operation_matrix.py --candle-dir "$DKR_CANDLE_DIR" \
