@@ -16,13 +16,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = "d99f6d77e507688bd9e4b654fbe20ac9e18238fc"
-CANDIDATE = "c74d4a1a1b0351275beed107f9a4cdfa689a2a13"
+CANDIDATE = "e9aa49815484ec0d92a0a504300a787d41c250e5"
 MMQ_FAMILIES = {"mmq_quantize"} | {f"mmq_instance_{codec}" for codec in (
     "q4_0", "q4_1", "q5_0", "q5_1", "q8_0", "q2_k", "q3_k", "q4_k", "q5_k", "q6_k")}
-FAMILIES = {"affine", "binary", "cast", "conv", "fill", "indexing", "reduce", "sort", "ternary", "unary", "quantized", "mmvq_gguf"} | MMQ_FAMILIES
+FAMILIES = {"affine", "binary", "cast", "conv", "fill", "indexing", "reduce", "sort", "ternary", "unary", "quantized", "mmvq_gguf"} | MMQ_FAMILIES | {"moe_gguf", "moe_simt_f16"}
+MOE_FAMILIES = {"moe_gguf", "moe_simt_f16"}
 REMAINING = {
-    "moe/moe_gguf.cu": "STATIC_FFI_GGUF",
-    "moe/moe_simt_f16.cu": "STATIC_FFI_SIMT",
     "moe/moe_wmma.cu": "EXCLUDED_PRE_VOLTA",
     "moe/moe_wmma_gguf.cu": "EXCLUDED_PRE_VOLTA",
     "moe/moe_align.cu": "CUTILE_ONLY",
@@ -30,7 +29,8 @@ REMAINING = {
 
 
 def expected_cuda_units():
-    external = {(f"mmq_gguf/{family}.cu" if family in MMQ_FAMILIES else f"{family}.cu")
+    external = {(f"mmq_gguf/{family}.cu" if family in MMQ_FAMILIES else
+                 f"moe/{family}.cu" if family in MOE_FAMILIES else f"{family}.cu")
                 for family in FAMILIES}
     assert not external.intersection(REMAINING)
     return external | set(REMAINING)
@@ -49,14 +49,23 @@ def candidate_gate(candle):
         raise ValueError("Candle tracked tree is dirty")
     git(candle, "merge-base", "--is-ancestor", BASE, CANDIDATE)
     changed = git(candle, "diff", "--name-only", BASE, CANDIDATE).splitlines()
-    # Current stage reuses the original CUDA algorithms/headers.
+    # Only the reviewed warp-local tail correction and revision marker are allowed.
     changed_cuda = [p for p in changed if p.startswith("candle-kernels/src/")
                     and Path(p).suffix in {".cu", ".cuh", ".h", ".hpp"}]
-    if changed_cuda:
+    allowed = "candle-kernels/src/moe/moe_gguf.cu"
+    if changed_cuda != [allowed]:
         raise ValueError(f"unexpected CUDA source modifications: {changed_cuda}")
+    original = git(candle, "show", f"{BASE}:{allowed}")
+    expected = original.replace("    __syncthreads();",
+        "    // Each warp owns its own shared row. Other warps may return on the N tail.\n    __syncwarp();")
+    expected = expected.replace("constexpr int MATRIX_ROW_PADDING = 512;",
+        'constexpr int MATRIX_ROW_PADDING = 512;\n\n// DKR package revision marker for the reviewed warp-local tail synchronization.\nextern "C" __global__ void candle_dkr_moe_gguf_warp_tail_v1() {}')
+    if (candle / allowed).read_text().strip() != expected.strip():
+        raise ValueError("GGUF CUDA source differs from reviewed synchronization correction")
     core = tomllib.loads((candle / "candle-core/Cargo.toml").read_text())
-    if CANDLE_FEATURE not in core["features"]:
-        raise ValueError("Candle provider feature missing")
+    nn = tomllib.loads((candle / "candle-nn/Cargo.toml").read_text())
+    if CANDLE_FEATURE not in core["features"] or f"candle/{CANDLE_FEATURE}" not in nn["features"].get(CANDLE_FEATURE, []):
+        raise ValueError("Candle core/NN provider feature missing")
     contract = (candle / "candle-kernels/dkr_s31_contract.rs").read_text()
     line = re.search(r'pub const FAMILIES:.*?=\s*&\[(.*?)\];', contract, re.S)
     if not line or set(re.findall(r'"([^"]+)"', line[1])) != FAMILIES:
@@ -71,7 +80,7 @@ def candidate_gate(candle):
         if f'("{name}", "{disposition}")' not in contract:
             raise ValueError(f"remaining source classification changed: {name}")
     loader = (candle / "candle-core/src/cuda_backend/dkr_s31.rs").read_text()
-    for family in FAMILIES - {"mmvq_gguf"} - MMQ_FAMILIES:
+    for family in FAMILIES - {"mmvq_gguf"} - MMQ_FAMILIES - MOE_FAMILIES:
         if f'(kernels::{family.upper()}.index(), "{family}")' not in loader:
             raise ValueError(f"missing native dispatch route {family}")
     if "CANDLE_DKR_S31_DIR" not in loader or "CANDLE_DKR_MODULE_LOADED" not in loader:
@@ -86,6 +95,10 @@ def candidate_gate(candle):
     for family in MMQ_FAMILIES:
         if not (candle / "candle-kernels/src/mmq_gguf" / f"{family}.cu").is_file():
             raise ValueError(f"missing MMQ original compilation unit: {family}")
+    moe = (candle / "candle-nn/src/moe/dkr_moe.rs").read_text()
+    nn_dispatch = (candle / "candle-nn/src/moe.rs").read_text()
+    if not all(fragment in moe for fragment in ("dkr_moe_function", "moe_simt_f16", "moe_gguf", "device_ptr_with_guard")) or not all(fragment in nn_dispatch for fragment in ("dkr_moe::simt", "dkr_moe::gguf")):
+        raise ValueError("Candle-NN external MoE source wiring missing")
     return changed
 
 
@@ -101,15 +114,14 @@ def patch_sources(workspace, core):
     if count != 2:
         raise ValueError("expected exactly two active Candle pins")
     features = tomllib.loads(core)["features"]
-    if PROFILE not in features or f"candle-core/{CANDLE_FEATURE}" in features[PROFILE]:
+    forwarding = [f"candle-core/{CANDLE_FEATURE}", f"candle-nn/{CANDLE_FEATURE}"]
+    if PROFILE not in features or set(forwarding).intersection(features[PROFILE]):
         raise ValueError("unexpected experimental profile")
     anchor = f'{PROFILE} = [\n'
     if core.count(anchor) != 1:
         raise ValueError("experimental feature layout changed")
-    new_core = core.replace(anchor, anchor + f'    "candle-core/{CANDLE_FEATURE}",\n', 1)
-    assert tomllib.loads(new_core)["features"][PROFILE] == [
-        f"candle-core/{CANDLE_FEATURE}", *features[PROFILE]
-    ]
+    new_core = core.replace(anchor, anchor + "".join(f'    "{f}",\n' for f in forwarding), 1)
+    assert tomllib.loads(new_core)["features"][PROFILE] == [*forwarding, *features[PROFILE]]
     return new_workspace, new_core
 
 
@@ -143,8 +155,9 @@ def self_test():
         pass
     else:
         raise AssertionError("accepted an unexpected existing pin")
-    assert len(FAMILIES) == 23 and len(expected_cuda_units()) == 28
-    assert len(REMAINING) == 5 and len(MMQ_FAMILIES) == 11
+    assert f'"candle-nn/{CANDLE_FEATURE}"' in new_core
+    assert len(FAMILIES) == 25 and len(expected_cuda_units()) == 28
+    assert len(REMAINING) == 3 and len(MMQ_FAMILIES) == 11 and len(MOE_FAMILIES) == 2
     print("DKR_CANDLE_INTEGRATION_SELF_TEST=PASS no_cuda_compilation")
 
 
@@ -171,12 +184,16 @@ def main():
             "external_staged": len(FAMILIES), "remaining": REMAINING},
         "conv_expected_entries": 66,
         "sort_expected_entries": 14,
-        "moe_static_ffi_closure_required": True,
+        "moe_native_dispatch": "staged_runtime_unverified",
+        "moe_operational_entries": 10,
+        "moe_gguf_revision_marker": "candle_dkr_moe_gguf_warp_tail_v1",
+        "moe_wmma_static_link_verified": False,
         "fast_mmvq_expected_entries": 243,
         "fast_mmq": "external_native_ptx_cached_sm61_tiling_runtime_unverified",
         "fast_mmq_expected_entries": 163,
         "fast_mmq_plan_capacity_per_thread": 64,
         "mistral_profile": PROFILE, "candle_feature": CANDLE_FEATURE,
+        "candle_feature_forwarding": ["candle-core", "candle-nn"],
         "activation": {"CANDLE_DKR_S31_DIR": "absolute Candle package root",
                        "CANDLE_DKR_TRACE": "1", "DKR_KERNEL_PACKAGES": "existing Mistral package root"},
         "candidate_changed_files": changed,
