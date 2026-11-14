@@ -57,6 +57,8 @@ crossterm = "0.29"
 fuzzy-matcher = "0.3"
 
 [features]
+# Explicit experimental DKR inference; defaults remain unchanged.
+dkr-sm61-experimental = ["cuda-legacy", "mistralrs-core/dkr-sm61-experimental", "mistralrs/dkr-sm61-experimental", "mistralrs-server-core/dkr-sm61-experimental"]
 cuda-legacy-bf16 = ["cuda", "mistralrs-core/cuda-legacy-bf16", "mistralrs-server-core/cuda-legacy-bf16"]
 cuda-legacy-fp8 = ["cuda", "mistralrs-core/cuda-legacy-fp8", "mistralrs-server-core/cuda-legacy-fp8"]
 cuda-legacy-fp4 = ["cuda", "mistralrs-core/cuda-legacy-fp4", "mistralrs-server-core/cuda-legacy-fp4"]

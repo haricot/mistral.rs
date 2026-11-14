@@ -353,8 +353,23 @@ def audit(root, candle, packages):
     core = tomllib.loads((root / "mistralrs-core/Cargo.toml").read_text())["features"]
     wrappers = {
         crate: tomllib.loads((root / crate / "Cargo.toml").read_text())["features"]
-        for crate in ("mistralrs", "mistralrs-cli")
+        for crate in ("mistralrs", "mistralrs-cli", "mistralrs-server-core")
     }
+    profile = "dkr-sm61-experimental"
+    expected_profile = {"cuda-legacy"} | (set(PACKAGE_FEATURE.values()) - {"dkr-fp4-dequant"})
+    if set(core.get(profile, [])) != expected_profile:
+        raise ValueError("experimental SM61 aggregate must select precisely the production feature set")
+    wrapper_profile = {
+        "mistralrs": {"cuda-legacy", f"mistralrs-core/{profile}"},
+        "mistralrs-server-core": {"cuda-legacy", f"mistralrs-core/{profile}"},
+        "mistralrs-cli": {"cuda-legacy", f"mistralrs-core/{profile}",
+                           f"mistralrs/{profile}", f"mistralrs-server-core/{profile}"},
+    }
+    for crate, expected in wrapper_profile.items():
+        if set(wrappers[crate].get(profile, [])) != expected:
+            raise ValueError(f"{crate}: experimental profile forwarding mismatch")
+    if any(profile in table.get("default", []) for table in [core, *wrappers.values()]):
+        raise ValueError("experimental profile must not be enabled by default")
     qualification = (root / QUAL_SCRIPT).read_text()
     package_rows = []
     for family in families:
@@ -409,6 +424,12 @@ def audit(root, candle, packages):
             "listed_not_compiled": sorted(matrix_ops - compiled_ops),
         },
         "packages": package_rows,
+        "experimental_feature_profile": {
+            "name": profile, "core_features": sorted(expected_profile),
+            "wrapper_forwarding": {name: sorted(value) for name, value in wrapper_profile.items()},
+            "default_enabled": False, "cargo_build_verified": False,
+            "runtime_note": "Routed quant requires MISTRALRS_DKR_ROUTED_QUANT=1; other runtime controls remain unchanged.",
+        },
         "fp4_dequant_qualified_name_call_refs": fp4,
         "limitations": [
             "Feature markers and nearby calls are lexical evidence, not AST or reachability.",

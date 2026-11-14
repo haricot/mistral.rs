@@ -123,6 +123,35 @@ dispatch2 = { workspace = true, optional = true }
 mistralrs-metal-compile = { workspace = true, optional = true, features = ["metal"] }
 
 [features]
+# Explicit opt-in: functional SM61 package set, not performance-qualified.
+# Does not enable the standalone FP4 diagnostic dequantization feature.
+dkr-sm61-experimental = [
+    "cuda-legacy",
+    "dkr-add-rms-norm",
+    "dkr-causal-mask",
+    "dkr-fp8-cast",
+    "dkr-gated-add",
+    "dkr-gemm",
+    "dkr-gemv",
+    "dkr-indexed-copy",
+    "dkr-input-pad",
+    "dkr-kv-cache-ops",
+    "dkr-kv-gather",
+    "dkr-kv-scales",
+    "dkr-logits",
+    "dkr-moe",
+    "dkr-nvfp4-gemv",
+    "dkr-paged-decode",
+    "dkr-paged-fp8",
+    "dkr-paged-v2",
+    "dkr-quant-gemm",
+    "dkr-quant-gemv",
+    "dkr-reduce-norm",
+    "dkr-rms-variants",
+    "dkr-rounded-rope",
+    "dkr-routed-quant",
+    "dkr-ssm",
+]
 dkr-moe = ["cuda", "dep:mistralrs-kernel-runtime", "mistralrs-kernel-runtime/cuda"]
 dkr-indexed-copy = ["cuda", "dep:mistralrs-kernel-runtime", "mistralrs-kernel-runtime/cuda"]
 dkr-gated-add = ["cuda", "dep:mistralrs-kernel-runtime", "mistralrs-kernel-runtime/cuda"]
