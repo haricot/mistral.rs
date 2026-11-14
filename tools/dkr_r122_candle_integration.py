@@ -16,10 +16,24 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = "d99f6d77e507688bd9e4b654fbe20ac9e18238fc"
-CANDIDATE = "f86d9349af61d19b5b7efac9fa168dbf32d8de60"
+CANDIDATE = "c74d4a1a1b0351275beed107f9a4cdfa689a2a13"
 MMQ_FAMILIES = {"mmq_quantize"} | {f"mmq_instance_{codec}" for codec in (
     "q4_0", "q4_1", "q5_0", "q5_1", "q8_0", "q2_k", "q3_k", "q4_k", "q5_k", "q6_k")}
-FAMILIES = {"affine", "binary", "cast", "fill", "indexing", "reduce", "ternary", "unary", "quantized", "mmvq_gguf"} | MMQ_FAMILIES
+FAMILIES = {"affine", "binary", "cast", "conv", "fill", "indexing", "reduce", "sort", "ternary", "unary", "quantized", "mmvq_gguf"} | MMQ_FAMILIES
+REMAINING = {
+    "moe/moe_gguf.cu": "STATIC_FFI_GGUF",
+    "moe/moe_simt_f16.cu": "STATIC_FFI_SIMT",
+    "moe/moe_wmma.cu": "EXCLUDED_PRE_VOLTA",
+    "moe/moe_wmma_gguf.cu": "EXCLUDED_PRE_VOLTA",
+    "moe/moe_align.cu": "CUTILE_ONLY",
+}
+
+
+def expected_cuda_units():
+    external = {(f"mmq_gguf/{family}.cu" if family in MMQ_FAMILIES else f"{family}.cu")
+                for family in FAMILIES}
+    assert not external.intersection(REMAINING)
+    return external | set(REMAINING)
 PROFILE = "dkr-sm61-experimental"
 CANDLE_FEATURE = "cuda-dkr-s31"
 
@@ -47,6 +61,15 @@ def candidate_gate(candle):
     line = re.search(r'pub const FAMILIES:.*?=\s*&\[(.*?)\];', contract, re.S)
     if not line or set(re.findall(r'"([^"]+)"', line[1])) != FAMILIES:
         raise ValueError("Candle native module set differs from integration contract")
+    prefix = "candle-kernels/src/"
+    actual = {p.removeprefix(prefix) for p in git(candle, "ls-files", prefix).splitlines()
+              if p.startswith(prefix) and p.endswith(".cu")}
+    expected = expected_cuda_units()
+    if actual != expected:
+        raise ValueError(f"Candle CUDA source inventory drift: extra={sorted(actual-expected)}, missing={sorted(expected-actual)}")
+    for name, disposition in REMAINING.items():
+        if f'("{name}", "{disposition}")' not in contract:
+            raise ValueError(f"remaining source classification changed: {name}")
     loader = (candle / "candle-core/src/cuda_backend/dkr_s31.rs").read_text()
     for family in FAMILIES - {"mmvq_gguf"} - MMQ_FAMILIES:
         if f'(kernels::{family.upper()}.index(), "{family}")' not in loader:
@@ -120,6 +143,8 @@ def self_test():
         pass
     else:
         raise AssertionError("accepted an unexpected existing pin")
+    assert len(FAMILIES) == 23 and len(expected_cuda_units()) == 28
+    assert len(REMAINING) == 5 and len(MMQ_FAMILIES) == 11
     print("DKR_CANDLE_INTEGRATION_SELF_TEST=PASS no_cuda_compilation")
 
 
@@ -142,6 +167,11 @@ def main():
         "status": "SOURCE_INTEGRATION_READY_GPU_QUALIFICATION_REQUIRED",
         "qualified_candle_pin": BASE, "candidate_candle_pin": CANDIDATE,
         "native_module_families": sorted(FAMILIES),
+        "cuda_source_inventory": {"total": len(expected_cuda_units()),
+            "external_staged": len(FAMILIES), "remaining": REMAINING},
+        "conv_expected_entries": 66,
+        "sort_expected_entries": 14,
+        "moe_static_ffi_closure_required": True,
         "fast_mmvq_expected_entries": 243,
         "fast_mmq": "external_native_ptx_cached_sm61_tiling_runtime_unverified",
         "fast_mmq_expected_entries": 163,
