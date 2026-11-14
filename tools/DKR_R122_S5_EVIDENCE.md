@@ -14,7 +14,7 @@ Physical cache events use SHA-256, target and symbol; do not sum these as
 logical dispatch counts. Plan cache hit/miss/eviction rows are independent.
 
 The runtime exposes runtime_evidence() and attaches a snapshot to
-execution_evidence(). 3 selected test functions emit snapshots via a scope
+execution_evidence(). Selected test functions emit snapshots via a scope
 guard. Extend scope guards to remaining tests in S6. For eventual nextest
 qualification use DKR_TELEMETRY=1 and --no-capture; each test process must emit
 one cumulative snapshot. Parse with tools/dkr_r122_s5_evidence.py --log FILE.

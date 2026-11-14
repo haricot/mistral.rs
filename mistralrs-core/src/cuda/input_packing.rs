@@ -281,6 +281,7 @@ mod tests {
     #[test]
     #[ignore = "requires CUDA"]
     fn pads_decode_input_by_aliasing_row_zero_values() -> Result<()> {
+        #[cfg(feature="dkr-input-pad")]
         let _dkr_runtime_evidence = mistralrs_kernel_runtime::RuntimeEvidenceGuard;
         let device = Device::new_cuda(0)?;
         let input = Tensor::new(&[[8u32, 9], [1, 2], [3, 4]], &device)?.narrow(0, 1, 2)?;
