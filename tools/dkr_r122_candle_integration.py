@@ -183,9 +183,24 @@ def main():
     if not a.candle_dir:
         p.error("--candle-dir required")
     changed = candidate_gate(a.candle_dir.resolve())
-    patch_sources((ROOT / "Cargo.toml").read_text(), (ROOT / "mistralrs-core/Cargo.toml").read_text())
-    if a.emit_patch:
-        emit_patch(a.emit_patch)
+    workspace = (ROOT / "Cargo.toml").read_text()
+    core = (ROOT / "mistralrs-core/Cargo.toml").read_text()
+    deps = tomllib.loads(workspace)["workspace"]["dependencies"]
+    pins = {deps[name].get("rev") for name in CANDLE_PINS}
+    if pins == {BASE}:
+        patch_sources(workspace, core)
+        if a.emit_patch:
+            emit_patch(a.emit_patch)
+    elif pins == {CANDIDATE}:
+        if a.emit_patch:
+            raise ValueError("integration candidate already pinned; no patch needed")
+        features = tomllib.loads(core)["features"][PROFILE]
+        required = {f"candle-core/{CANDLE_FEATURE}", f"candle-nn/{CANDLE_FEATURE}",
+                    "mistralrs-kernel-runtime/shared-registry"}
+        if not required.issubset(features) or deps["dkr-kernel-registry"].get("rev") != CANDIDATE:
+            raise ValueError("integration branch feature/registry pin mismatch")
+    else:
+        raise ValueError(f"inconsistent Candle revisions: {pins}")
     print(json.dumps({
         "status": "SOURCE_INTEGRATION_READY_GPU_QUALIFICATION_REQUIRED",
         "qualified_candle_pin": BASE, "candidate_candle_pin": CANDIDATE,
