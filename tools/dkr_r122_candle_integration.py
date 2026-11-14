@@ -16,8 +16,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = "d99f6d77e507688bd9e4b654fbe20ac9e18238fc"
-CANDIDATE = "c8a75a5256f4f3b855be8649fdbd2ff71f955904"
-FAMILIES = {"affine", "binary", "cast", "fill", "indexing", "reduce", "ternary", "unary"}
+CANDIDATE = "543f7b55a7e3c1a686a36c1d751422d7d558e87d"
+FAMILIES = {"affine", "binary", "cast", "fill", "indexing", "reduce", "ternary", "unary", "quantized", "mmvq_gguf"}
 PROFILE = "dkr-sm61-experimental"
 CANDLE_FEATURE = "cuda-dkr-s31"
 
@@ -46,11 +46,15 @@ def candidate_gate(candle):
     if not line or set(re.findall(r'"([^"]+)"', line[1])) != FAMILIES:
         raise ValueError("Candle native module set differs from integration contract")
     loader = (candle / "candle-core/src/cuda_backend/dkr_s31.rs").read_text()
-    for family in FAMILIES:
+    for family in FAMILIES - {"mmvq_gguf"}:
         if f'(kernels::{family.upper()}.index(), "{family}")' not in loader:
             raise ValueError(f"missing native dispatch route {family}")
     if "CANDLE_DKR_S31_DIR" not in loader or "CANDLE_DKR_MODULE_LOADED" not in loader:
         raise ValueError("Candle activation or module trace contract missing")
+    mmvq = (candle / "candle-core/src/quantized/fast_mmvq.rs").read_text()
+    device = (candle / "candle-core/src/cuda_backend/device.rs").read_text()
+    if not all(fragment in mmvq for fragment in ("try_dkr_launch", "dev.dkr_mmvq_func", "plain_cuda{batch}")) or "fn dkr_mmvq_func" not in device:
+        raise ValueError("fast MMVQ external dispatch wiring missing")
     return changed
 
 
@@ -130,6 +134,8 @@ def main():
         "status": "SOURCE_INTEGRATION_READY_GPU_QUALIFICATION_REQUIRED",
         "qualified_candle_pin": BASE, "candidate_candle_pin": CANDIDATE,
         "native_module_families": sorted(FAMILIES),
+        "fast_mmvq_expected_entries": 243,
+        "fast_mmq": "static_pending_native_launch_plan_port",
         "mistral_profile": PROFILE, "candle_feature": CANDLE_FEATURE,
         "activation": {"CANDLE_DKR_S31_DIR": "absolute Candle package root",
                        "CANDLE_DKR_TRACE": "1", "DKR_KERNEL_PACKAGES": "existing Mistral package root"},
