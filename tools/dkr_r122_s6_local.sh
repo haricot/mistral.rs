@@ -43,11 +43,14 @@ if ! git diff --quiet "$BASE" HEAD -- kernel-packages/cuda mistralrs-kernel-runt
     echo "Typed package source provenance differs; review/rebuild separately"; exit 3
 fi
 python3 tools/dkr_s9_ptx_manifest_audit.py --root "$TYPED" --cc 61
+df -h "$ORIG/target" /tmp
 echo "DKR_S6_PREFLIGHT=PASS run=$RUN"
 if [[ "${1:-}" == "--preflight" ]]; then exit 0; fi
 [[ "${DKR_APPROVE_S6:-0}" == 1 ]] || { echo "Set DKR_APPROVE_S6=1 for native PTX and grouped build"; exit 2; }
 export DKR_KERNEL_PACKAGES="$TYPED"
 export DKR_TELEMETRY=1 CANDLE_DKR_TRACE=1 MISTRALRS_DKR_ROUTED_QUANT=1
+# Test the actual GGUF paths rather than an inherited dequantize-all override.
+unset CANDLE_DEQUANTIZE_ALL CANDLE_DEQUANTIZE_ALL_F16
 NATIVE="$RUN/native-sm61"
 mkdir -p "$NATIVE"
 # Cudaforge owns incremental native PTX build and its ABI checks.
@@ -56,13 +59,13 @@ cargo run --manifest-path "$CANDLE/tools/dkr-s31-builder/Cargo.toml" \
 python3 tools/dkr_r122_s6_evidence.py --native-root "$NATIVE"
 # Fingerprint archive inputs; failed archive is never used.
 export CARGO_TARGET_DIR="$ORIG/target/dkr-r122-s6-cargo"
-KEY="$( { git rev-parse HEAD; sha256sum Cargo.lock; rustc -Vv; nvcc --version; cargo nextest --version; printf '%s\n' "${CUDA_COMPUTE_CAP-}" "${RUSTFLAGS-}" "${CUDA_HOME-}" "${CUDA_PATH-}" "${CUDA_VISIBLE_DEVICES-}"; } | sha256sum | cut -d' ' -f1 )"
+KEY="$( { git rev-parse HEAD; printf '%s\n' "$ROOT" "$CACHE" "$CARGO_TARGET_DIR"; sha256sum Cargo.lock; rustc -Vv; nvcc --version; cargo nextest --version; printf '%s\n' "${CUDA_COMPUTE_CAP-}" "${RUSTFLAGS-}" "${CUDA_HOME-}" "${CUDA_PATH-}" "${CUDA_VISIBLE_DEVICES-}" "${CARGO_ENCODED_RUSTFLAGS-}" "${CC-}" "${CXX-}" "${NVCC-}" "${CARGO_BUILD_TARGET-}"; } | sha256sum | cut -d' ' -f1 )"
 ARCHIVE="$RUN/tests.tar.zst"
 FILTER='test(dkr_) or test(prevalidated_) or test(pads_decode_input_by_aliasing_row_zero_values)'
 if [[ ! -s "$ARCHIVE" || ! -f "$RUN/archive.key" || "$(cat "$RUN/archive.key")" != "$KEY" ]]; then
     cargo nextest archive --locked -p mistralrs-kernel-runtime -p mistralrs-quant -p mistralrs-paged-attn -p mistralrs-core \
       --lib --features 'mistralrs-core/dkr-sm61-experimental,mistralrs-core/dkr-fp4-dequant' \
-      -E "$FILTER" --archive-file "$RUN/tests-building.tar.zst" 2>&1 | tee "$RUN/archive-build.log"
+      --archive-file "$RUN/tests-building.tar.zst" 2>&1 | tee "$RUN/archive-build.log"
     mv "$RUN/tests-building.tar.zst" "$ARCHIVE"
     printf '%s\n' "$KEY" > "$RUN/archive.key"
 else
