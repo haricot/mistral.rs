@@ -330,10 +330,19 @@ mod tests {
                         let expected: f32 = (0..k).map(|i|
                             x_f32[row*k+i] * fp8_weight_f32[col*k+i] * 0.5
                         ).sum();
-                        assert!(
-                            (fp8_actual[row][col] - expected).abs()
-                                < if dtype == DType::BF16 { 0.025 } else { 0.009 },
-                            "FP8 {dtype:?} m={m} row={row} col={col}"
+                        // All fixture inputs, decoded weights, products and
+                        // partial sums are exactly representable in F32. The
+                        // kernel rounds only once, when storing the output.
+                        // For m=1,row=0,col=0 the F32 result is 8.15625:
+                        // a BF16 midpoint, rounding ties-to-even to 8.125.
+                        let rounded = match dtype {
+                            DType::F16 => half::f16::from_f32(expected).to_f32(),
+                            DType::BF16 => half::bf16::from_f32(expected).to_f32(),
+                            _ => unreachable!(),
+                        };
+                        assert_eq!(
+                            fp8_actual[row][col], rounded,
+                            "FP8 {dtype:?} m={m} row={row} col={col}; F32 reference={expected}, rounded reference={rounded}"
                         );
                     }
                 }
