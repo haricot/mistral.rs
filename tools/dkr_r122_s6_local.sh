@@ -21,7 +21,17 @@ fi
 command -v nvcc; command -v jq; command -v nvidia-smi
 nvidia-smi --query-gpu=index,name,compute_cap --format=csv,noheader
 [[ "$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | tr -d '[:space:]')" == 6.1 ]] || { echo "Expected one physical SM61 GPU"; exit 3; }
-cargo nextest --version
+NEXT_VERSION="$(cargo nextest --version)"
+printf '%s\n' "$NEXT_VERSION"
+# S6 policy floor: a recent release with modern target metadata support.
+# The old 0.9.47 graph parser fails on arm64ec-pc-windows-msvc even on Linux.
+python3 - "$NEXT_VERSION" <<'PYVERSION'
+import re, sys
+m = re.search(r"\b(\d+)\.(\d+)\.(\d+)\b", sys.argv[1])
+if not m or tuple(map(int, m.groups())) < (0, 9, 145):
+    sys.exit("DKR_S6_NEXTEST=FAIL use recent nextest (S6 policy >=0.9.145); see https://nexte.st/docs/installation/pre-built-binaries/")
+print("DKR_S6_NEXTEST=PASS")
+PYVERSION
 RUN="$ORIG/target/dkr-r122-s6/$(git rev-parse --short=12 HEAD)"
 mkdir -p "$RUN"
 exec 9>"$RUN/.lock"
@@ -52,11 +62,22 @@ export DKR_TELEMETRY=1 CANDLE_DKR_TRACE=1 MISTRALRS_DKR_ROUTED_QUANT=1
 # Test the actual GGUF paths rather than an inherited dequantize-all override.
 unset CANDLE_DEQUANTIZE_ALL CANDLE_DEQUANTIZE_ALL_F16
 NATIVE="$RUN/native-sm61"
-mkdir -p "$NATIVE"
-# Cudaforge owns incremental native PTX build and its ABI checks.
-cargo run --manifest-path "$CANDLE/tools/dkr-s31-builder/Cargo.toml" \
-  --target-dir "$ORIG/target/dkr-s31-builder" --release -- --output "$NATIVE" 2>&1 | tee "$RUN/native-build.log"
-python3 tools/dkr_r122_s6_evidence.py --native-root "$NATIVE"
+if [[ -n "${DKR_S6_REUSE_NATIVE_RUN:-}" ]]; then
+    PRIOR="$(realpath "$DKR_S6_REUSE_NATIVE_RUN")"
+    [[ "$PRIOR" == "$ORIG/target/dkr-r122-s6/"* ]] || { echo "Invalid prior run path"; exit 3; }
+    [[ "$(jq -er .candidate "$PRIOR/closure.json")" == "$(jq -er .candidate "$RUN/closure.json")" ]] || { echo "Prior Candle candidate differs"; exit 3; }
+    grep -Fxq 'CANDLE_DKR_S31_PACKAGES=STAGED target=sm61 families=25' "$PRIOR/native-build.log"
+    NATIVE="$PRIOR/native-sm61"
+    python3 tools/dkr_r122_s6_evidence.py --native-root "$NATIVE"
+    echo "DKR_S6_NATIVE_PTX=REUSED root=$NATIVE"
+else
+    mkdir -p "$NATIVE"
+    # Cudaforge owns incremental native PTX build and its ABI checks.
+    cargo run --manifest-path "$CANDLE/tools/dkr-s31-builder/Cargo.toml" \
+      --target-dir "$ORIG/target/dkr-s31-builder" --release -- --output "$NATIVE" 2>&1 | tee "$RUN/native-build.log"
+    python3 tools/dkr_r122_s6_evidence.py --native-root "$NATIVE"
+fi
+printf '%s\n' "$NATIVE" > "$RUN/native-root.txt"
 # Fingerprint archive inputs; failed archive is never used.
 export CARGO_TARGET_DIR="$ORIG/target/dkr-r122-s6-cargo"
 KEY="$( { git rev-parse HEAD; printf '%s\n' "$ROOT" "$CACHE" "$CARGO_TARGET_DIR"; sha256sum Cargo.lock; rustc -Vv; nvcc --version; cargo nextest --version; printf '%s\n' "${CUDA_COMPUTE_CAP-}" "${RUSTFLAGS-}" "${CUDA_HOME-}" "${CUDA_PATH-}" "${CUDA_VISIBLE_DEVICES-}" "${CARGO_ENCODED_RUSTFLAGS-}" "${CC-}" "${CXX-}" "${NVCC-}" "${CARGO_BUILD_TARGET-}"; } | sha256sum | cut -d' ' -f1 )"

@@ -22,3 +22,15 @@ Existing typed tests supply numeric oracles. Evidence gate checks native
 family coverage and presence of typed adapter success; not every typed
 operation is guarded. Missing coverage gives REVIEW_REQUIRED, never full
 qualification PASS. Outputs retained under target/dkr-r122-s6.
+
+## S6.1 recovery: nextest metadata compatibility
+
+Nextest 0.9.47 fails on the arm64ec-pc-windows-msvc dependency target.
+Require a recent nextest (policy floor 0.9.145, not the first known compatible
+version) before any PTX construction. Install a prebuilt binary from the
+official nextest documentation; no Rust/CUDA rebuild required for installation.
+For the already completed native PTX build at 7b3b19cf8b62, set
+DKR_S6_REUSE_NATIVE_RUN to that run directory. The script checks matching
+Candle revision, successful original builder log, and repeats the artifact
+inventory/hash audit before using the original PTX in place. No copy or clean.
+This relies on trusted local files and does not claim signed provenance.
