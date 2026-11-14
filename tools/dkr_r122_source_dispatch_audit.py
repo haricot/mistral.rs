@@ -1,0 +1,291 @@
+#!/usr/bin/env python3
+"""R1.22/S1: source-only inventory and production dispatch discovery.
+
+No Cargo, NVCC, GPU or cache writes. A lexical call-site candidate is not a
+reachable runtime route. A compiled manifest is not a performance certificate.
+Run with the pinned, clean Candle checkout; never silently accept another rev.
+"""
+import argparse
+import collections
+import json
+import re
+import subprocess
+import sys
+import tomllib
+from pathlib import Path
+
+from dkr_r1_inventory import (
+    ROOT, mistral_family, candle_family, BACKEND_METHOD_GROUPS,
+)
+from dkr_s9_ptx_manifest_audit import builder_packages, verify
+
+# Package output family -> qualification feature (core forwards to leaf crates).
+PACKAGE_FEATURE = {
+    name: "dkr-" + name for name in (
+        "add-rms-norm", "causal-mask", "gated-add", "indexed-copy",
+        "input-pad", "moe", "reduce-norm", "rms-variants", "ssm",
+        "rounded-rope", "kv-scales", "fp8-cast", "kv-gather",
+        "fp4-dequant", "quant-gemv", "paged-decode", "nvfp4-gemv",
+        "quant-gemm", "paged-fp8", "paged-v2", "kv-cache-ops",
+        "routed-quant",
+    )
+}
+PACKAGE_FEATURE.update({
+    "sparse-logits": "dkr-logits", "dense-gemv": "dkr-gemv",
+    "dense-gemm": "dkr-gemm",
+})
+
+SOURCE_ROOTS = (
+    "mistralrs-core", "mistralrs-quant", "mistralrs-paged-attn",
+    "mistralrs-vision", "mistralrs-flash-attn", "legacy-provider-poc",
+)
+QUAL_SCRIPT = "tools/dkr_sm61_final_qualification.sh"
+FEATURE_PATTERN = re.compile(r'feature\s*=\s*"(?P<feature>dkr-[^"]+)"')
+CALL_PATTERN = re.compile(r'\b(?:[a-zA-Z_]\w*::)+[a-zA-Z_]\w*\s*\(')
+METHOD_PATTERN = re.compile(
+    r"^\s*(?:unsafe\s+)?fn\s+([a-z][a-z_0-9]*)\s*(?:<[^>]+>)?\s*\(",
+    re.MULTILINE,
+)
+
+
+def git(root, *args):
+    return subprocess.check_output(["git", "-C", str(root), *args], text=True).strip()
+
+
+def tracked(root):
+    # ls-files is NUL-delimited; avoid including generated build/cache trees.
+    return [Path(p) for p in git(root, "ls-files", "-z").split("\0") if p]
+
+
+def require_clean(root, label):
+    if git(root, "status", "--porcelain", "--untracked-files=no"):
+        raise ValueError(f"{label}: tracked worktree/index is dirty")
+    if git(root, "rev-parse", "--show-toplevel") != str(root.resolve()):
+        raise ValueError(f"{label}: expected repository root")
+
+
+def pinned_candle(root):
+    workspace = tomllib.loads((root / "Cargo.toml").read_text())
+    deps = workspace["workspace"]["dependencies"]
+    pins = {deps[name]["rev"] for name in ("candle-core", "candle-nn")}
+    if len(pins) != 1:
+        raise ValueError(f"Candle dependency revisions disagree: {pins}")
+    pin = pins.pop()
+    if not re.fullmatch(r"[0-9a-f]{40}", pin):
+        raise ValueError(f"not a full Candle commit SHA: {pin}")
+    return pin
+
+
+def rust_candidates(path, source):
+    """Return feature markers and nearby qualified calls, NOT a Rust AST.
+
+    A module declaration or import alone must not count as a call. Keep
+    test-looking files/sections separate; cfg expressions and macro expansion
+    still require manual review. Lines are evidence pointers, not proof.
+    """
+    lines = source.splitlines()
+    test_hint = path.name in ("tests.rs", "test.rs") or path.stem.endswith("_tests")
+    out = []
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("//"):
+            continue
+        if re.search(r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]", line):
+            test_hint = True
+        for feature in sorted({m["feature"] for m in FEATURE_PATTERN.finditer(line)}):
+            calls = []
+            # Nearby lexical calls are deliberately only candidates; even
+            # a feature marker on a module does not prove a call is gated.
+            for j in range(i + 1, min(i + 9, len(lines))):
+                s = lines[j].strip()
+                if s.startswith(("//", "use ", "mod ", "pub mod ", "#[")):
+                    continue
+                for match in CALL_PATTERN.finditer(s):
+                    calls.append({"line": j + 1, "call": match.group().rstrip("(").strip()})
+            out.append({
+                "feature": feature, "path": str(path), "line": i + 1,
+                "test_hint": test_hint, "nearby_calls": calls,
+            })
+    return out
+
+
+def exact_function_refs(root, paths, names):
+    """Specific FP4 gap: qualified references to adapter functions."""
+    refs = []
+    pattern = re.compile(r"\bdequant_dynamic::(" + "|".join(names) + r")\s*\(")
+    for path in paths:
+        if path.name == "dequant_dynamic.rs":
+            continue
+        for i, line in enumerate((root / path).read_text().splitlines(), 1):
+            if not line.lstrip().startswith("//") and pattern.search(line):
+                refs.append({"path": str(path), "line": i, "text": line.strip()})
+    return refs
+
+
+def source_records(root, paths, candle=False):
+    rows = []
+    for path in paths:
+        if path.suffix != ".cu":
+            continue
+        if candle:
+            if path.parts[:2] != ("candle-kernels", "src"):
+                continue
+            family = candle_family(Path(*path.parts[2:]))
+        else:
+            if not path.parts or path.parts[0] not in SOURCE_ROOTS:
+                continue
+            family = mistral_family(path)
+        rows.append({"path": str(path), "family": family})
+    return rows
+
+
+def audit(root, candle, packages):
+    require_clean(root, "mistral.rs")
+    require_clean(candle, "Candle")
+    pin = pinned_candle(root)
+    if git(candle, "rev-parse", "HEAD") != pin:
+        raise ValueError(f"Candle checkout must be exactly {pin}")
+    paths, candle_paths = tracked(root), tracked(candle)
+    mist_units = source_records(root, paths)
+    candle_units = source_records(candle, candle_paths, candle=True)
+    backend_path = candle / "candle-core/src/backend.rs"
+    methods = [
+        {"method": name, "family": BACKEND_METHOD_GROUPS.get(name)}
+        for name in METHOD_PATTERN.findall(backend_path.read_text())
+    ]
+    if not mist_units or not candle_units or not methods:
+        raise ValueError("empty source or backend inventory")
+    families = sorted(builder_packages())
+    if set(families) != set(PACKAGE_FEATURE):
+        raise ValueError("package/feature map differs from current cudaforge builder")
+    count, manifests, r121 = verify(packages, 61)
+    if count != len(families):
+        raise ValueError("manifest family count mismatch")
+    by_family = collections.defaultdict(list)
+    for path in sorted(packages.rglob("manifest.json")):
+        data = json.loads(path.read_text())
+        by_family[path.relative_to(packages).parts[0]].append({
+            "operation": data["operation"], "entry": data["entry"],
+            "implementation_id": data.get("implementation_id"),
+            "sha256": data["sha256"], "manifest": str(path.relative_to(packages)),
+        })
+    rust_paths = [
+        p for p in paths if p.suffix == ".rs" and len(p.parts) > 2
+        and p.parts[0] in SOURCE_ROOTS and p.parts[1] == "src"
+    ]
+    candidate_map = collections.defaultdict(list)
+    for path in rust_paths:
+        for row in rust_candidates(path, (root / path).read_text()):
+            candidate_map[row["feature"]].append(row)
+    core = tomllib.loads((root / "mistralrs-core/Cargo.toml").read_text())["features"]
+    wrappers = {
+        crate: tomllib.loads((root / crate / "Cargo.toml").read_text())["features"]
+        for crate in ("mistralrs", "mistralrs-cli")
+    }
+    qualification = (root / QUAL_SCRIPT).read_text()
+    package_rows = []
+    for family in families:
+        feature = PACKAGE_FEATURE[family]
+        if feature not in core or f"mistralrs-core/{feature}" not in qualification:
+            raise ValueError(f"{family}: missing core feature or qualification selection")
+        candidates = candidate_map[feature]
+        production = [r for r in candidates if not r["test_hint"] and r["nearby_calls"]]
+        package_rows.append({
+            "family": family, "feature": feature,
+            "core_feature_dependencies": core[feature],
+            "wrapper_explicit_same_name_feature": {
+                name: feature in features for name, features in wrappers.items()
+            },
+            "profiles": by_family[family],
+            "operations": sorted({p["operation"] for p in by_family[family]}),
+            "feature_markers": candidates,
+            "non_test_nearby_call_candidates": len(production),
+            "dispatch_status": "LEXICAL_CANDIDATES_REVIEW_REQUIRED" if production
+                else "NO_NON_TEST_NEARBY_CALL_CANDIDATE",
+            "model_dispatch_verified": False,
+            "performance_qualified": False,
+        })
+    unknown = [r for r in mist_units + candle_units + methods if r["family"] is None]
+    fp4 = exact_function_refs(root, rust_paths, ("dequant_nvfp4", "dequant_mxfp4"))
+    return {
+        "schema": "DKR-R122-SOURCE-DISPATCH-AUDIT-V1",
+        "mistral_revision": git(root, "rev-parse", "HEAD"),
+        "candle_revision": pin,
+        "target_cc": 61,
+        "source_inventory": {
+            "mistral_units": mist_units, "candle_units": candle_units,
+            "backend_methods": methods, "unclassified": unknown,
+        },
+        "ptx_audit": {"families": count, "manifests": manifests, "r121_profiles": r121},
+        "compiled_operations": len({p["operation"] for rows in by_family.values() for p in rows}),
+        "packages": package_rows,
+        "fp4_dequant_qualified_name_call_refs": fp4,
+        "limitations": [
+            "Feature markers and nearby calls are lexical evidence, not AST or reachability.",
+            "An absent wrapper feature does not prevent explicit dependency feature selection.",
+            "FP4 reference scan does not resolve imports, aliases, macros or indirection.",
+            "GPU qualification logs and model-level route telemetry are separate evidence.",
+            "External PTX integrity does not prove correspondence to current source.",
+            "Inventory classifies source units, not every operation or specialization.",
+        ],
+        "status": "FAIL_UNCLASSIFIED" if unknown else "SOURCE_DISCOVERY_PASS_DISPATCH_REVIEW_REQUIRED",
+    }
+
+
+def self_test():
+    assert len(PACKAGE_FEATURE) == 25
+    sample = '''// #[cfg(feature = "dkr-no")]
+#[cfg(feature = "dkr-fp4-dequant")]
+mod dequant_dynamic;
+
+#[cfg(feature = "dkr-quant-gemv")]
+if let Some(out) = crate::quantized_gemv_dynamic::try_fp8(x)? {
+    return Ok(out);
+}
+#[cfg(test)]
+mod tests {
+    #[cfg(feature = "dkr-gemm")]
+    crate::dynamic::run();
+}
+'''
+    rows = rust_candidates(Path("src/ops.rs"), sample)
+    assert [r["feature"] for r in rows] == ["dkr-fp4-dequant", "dkr-quant-gemv", "dkr-gemm"]
+    assert not rows[1]["test_hint"] and rows[2]["test_hint"]
+    assert any(c["call"] == "crate::quantized_gemv_dynamic::try_fp8" for c in rows[1]["nearby_calls"])
+    assert source_records(ROOT, [Path("mistralrs-core/src/cuda/sort.cu")])[0]["family"] == "sampling_and_sort"
+    assert source_records(ROOT, [Path("candle-kernels/src/cast.cu")], True)[0]["family"] == "cast"
+    print("DKR_R122_SOURCE_AUDIT_SELF_TEST=PASS no_cuda_compilation")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--candle-dir", type=Path)
+    parser.add_argument("--packages", type=Path, default=ROOT / "kernel-packages/build/cuda/sm61")
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--self-test", action="store_true")
+    args = parser.parse_args()
+    if args.self_test:
+        self_test()
+        return
+    if args.candle_dir is None:
+        parser.error("--candle-dir is required for R1.22")
+    report = audit(ROOT, args.candle_dir.resolve(), args.packages.resolve())
+    payload = json.dumps(report, indent=2) + "\n"
+    if args.output:
+        args.output.write_text(payload)
+    else:
+        print(payload, end="")
+    print(f"DKR_R122_SOURCE_AUDIT={report['status']} "
+          f"mistral_units={len(report['source_inventory']['mistral_units'])} "
+          f"candle_units={len(report['source_inventory']['candle_units'])} "
+          f"backend_methods={len(report['source_inventory']['backend_methods'])} "
+          f"packages={report['ptx_audit']['families']} "
+          f"operations={report['compiled_operations']}", file=sys.stderr)
+    sys.exit(1 if report["source_inventory"]["unclassified"] else 0)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (ValueError, OSError, KeyError, AssertionError, subprocess.CalledProcessError) as error:
+        print(f"DKR_R122_SOURCE_AUDIT=FAIL {error}", file=sys.stderr)
+        sys.exit(1)
