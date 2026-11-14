@@ -82,19 +82,120 @@ REVIEWED_ROUTES = {
 }
 
 
+# S2: inspect the other fifteen package entry points, including both
+# codec routes and both KV-cache operations. Do not equate this with
+# model-level reachability or certify a performance improvement.
+REVIEWED_ROUTES.update({
+    "dense-gemm": ("mistralrs-quant/src/unquantized/mod.rs", (
+        '#[cfg(feature = "dkr-gemm")]',
+        'dense_gemm_dynamic::try_gemm(&input, &self.w, self.b.as_ref())?',
+    )),
+    "dense-gemv": ("mistralrs-quant/src/gemv/mod.rs", (
+        '#[cfg(feature = "dkr-gemv")]',
+        'if let Some(result) = dynamic::try_gemv(',
+    )),
+    "fp8-cast": ("mistralrs-quant/src/scalar_fp8/ops.rs", (
+        '#[cfg(feature = "dkr-fp8-cast")]',
+        'input_s, input_l, DType::F8E4M3, self.target_dtype,',
+        'input_s, input_l, self.source_dtype, DType::F8E4M3,',
+        'super::dynamic::try_cast(',
+    )),
+    "input-pad": ("mistralrs-core/src/cuda/input_packing.rs", (
+        '#[cfg(feature = "dkr-input-pad")]',
+        'super::input_pad_dynamic::with_pad_plan(',
+    )),
+    "kv-cache-ops": ("mistralrs-paged-attn/src/cuda/backend/cache.rs", (
+        '#[cfg(feature = "dkr-kv-cache-ops")]',
+        '&& super::kv_cache_ops_dynamic::try_copy_blocks(',
+    )),
+    "kv-gather": ("mistralrs-paged-attn/src/cuda/backend/gather_kv.rs", (
+        '#[cfg(feature = "dkr-kv-gather")]',
+        '&& super::kv_gather_dynamic::try_gather(',
+    )),
+    "kv-scales": ("mistralrs-paged-attn/src/cuda/backend/scale_update.rs", (
+        '#[cfg(feature = "dkr-kv-scales")]',
+        'if super::kv_scales_dynamic::update_if_supported(',
+    )),
+    "paged-decode": ("mistralrs-paged-attn/src/cuda/backend/paged_attention.rs", (
+        '#[cfg(feature = "dkr-paged-decode")]',
+        'if let Some(result) = super::paged_decode_dynamic::try_decode(',
+    )),
+    "paged-fp8": ("mistralrs-paged-attn/src/cuda/backend/paged_attention.rs", (
+        '#[cfg(feature = "dkr-paged-fp8")]',
+        'if let Some(result) = super::paged_fp8_dynamic::try_decode(',
+    )),
+    "paged-v2": ("mistralrs-paged-attn/src/cuda/backend/paged_attention.rs", (
+        '#[cfg(feature = "dkr-paged-v2")]',
+        'if let Some(result) = super::paged_v2_dynamic::try_decode(',
+    )),
+    "quant-gemm": ("mistralrs-quant/src/blockwise_fp8/ops.rs", (
+        '#[cfg(feature = "dkr-quant-gemm")]',
+        'if let Some(output) = crate::quantized_gemm_dynamic::try_fp8(',
+    )),
+    "quant-gemv": ("mistralrs-quant/src/blockwise_fp8/ops.rs", (
+        '#[cfg(feature = "dkr-quant-gemv")]',
+        'if let Some(output) = crate::quantized_gemv_dynamic::try_fp8(',
+    )),
+    "reduce-norm": ("mistralrs-quant/src/utils/ops.rs", (
+        '#[cfg(all(feature = "cuda", feature = "dkr-reduce-norm"))]',
+        'crate::softmax_sinks_dynamic::cuda_fwd(',
+    )),
+    "rounded-rope": ("mistralrs-core/src/cuda/rounded_rope.rs", (
+        '#[cfg(feature = "dkr-rounded-rope")]',
+        'return super::rounded_rope_dynamic::run(',
+    )),
+    "routed-quant": ("mistralrs-quant/src/routed_gemv/mod.rs", (
+        '#[cfg(feature = "dkr-routed-quant")]',
+        'if let Some(output) = dynamic::try_gather(x, indices, weights)?',
+    )),
+})
+EXTRA_ROUTES = {
+    "kv-cache-ops": [("mistralrs-paged-attn/src/cuda/backend/paged_attention.rs", (
+        '#[cfg(feature = "dkr-kv-cache-ops")]',
+        'if super::kv_cache_ops_dynamic::try_reshape(',
+    ))],
+    "quant-gemv": [("mistralrs-quant/src/mxfp4/ops.rs", (
+        '#[cfg(feature = "dkr-quant-gemv")]',
+        'if let Some(output) = crate::quantized_gemv_dynamic::try_mxfp4(',
+    ))],
+    "quant-gemm": [("mistralrs-quant/src/mxfp4/ops.rs", (
+        '#[cfg(feature = "dkr-quant-gemm")]',
+        'if let Some(output) = crate::quantized_gemm_dynamic::try_mxfp4(',
+    ))],
+    "reduce-norm": [("mistralrs-quant/src/moe/mod.rs", (
+        '#[cfg(feature = "dkr-reduce-norm")]',
+        '#[path = "weighted_reduce_dynamic.rs"]',
+        'pub use weighted_reduce::moe_weighted_reduce;',
+    ))],
+}
+
+# Explicit unresolved constraints; not a runtime fallback guarantee.
+ROUTE_REVIEW_NOTES = {
+    "quant-gemm": "Outer FP8/MXFP4 layer dispatch still checks static kernel capability flags; reference GEMM performance not qualified.",
+    "quant-gemv": "Outer FP8/MXFP4 layer dispatch still checks static kernel capability flags; SM61 legacy FP8 enables the FP8 flag.",
+    "routed-quant": "Runtime opt-in MISTRALRS_DKR_ROUTED_QUANT=1; routed gather wiring does not prove all fused FFN/GLU paths use DKR.",
+    "dense-gemm": "Reference external GEMM is not a performance-qualified substitute for cuBLAS.",
+    "paged-v2": "Selection follows FP8 and short-context routes; model shapes and fallback paths still require runtime evidence.",
+    "reduce-norm": "Feature-selected implementations are not necessarily runtime-switchable to the static route.",
+}
+
+
+
 def reviewed_route(root, family):
     if family not in REVIEWED_ROUTES:
         return None
-    name, fragments = REVIEWED_ROUTES[family]
-    lines = (root / name).read_text().splitlines()
-    evidence = []
-    for fragment in fragments:
-        matches = [i for i, line in enumerate(lines, 1) if fragment in line
-                   and not line.lstrip().startswith("//")]
-        if not matches:
-            raise ValueError(f"{family}: reviewed source route changed: {fragment}")
-        evidence.append({"fragment": fragment, "lines": matches})
-    return {"path": name, "evidence": evidence}
+    routes = []
+    for name, fragments in [REVIEWED_ROUTES[family], *EXTRA_ROUTES.get(family, [])]:
+        lines = (root / name).read_text().splitlines()
+        evidence = []
+        for fragment in fragments:
+            matches = [i for i, line in enumerate(lines, 1) if fragment in line
+                       and not line.lstrip().startswith("//")]
+            if not matches:
+                raise ValueError(f"{family}: reviewed source route changed: {fragment}")
+            evidence.append({"fragment": fragment, "lines": matches})
+        routes.append({"path": name, "evidence": evidence})
+    return {"routes": routes, "review_note": ROUTE_REVIEW_NOTES.get(family)}
 
 
 SOURCE_ROOTS = (
@@ -292,7 +393,7 @@ def audit(root, candle, packages):
     compiled_ops = {p["operation"] for rows in by_family.values() for p in rows}
     matrix_ops = {op for ops in STAGED_OPERATIONS.values() for op in ops}
     return {
-        "schema": "DKR-R122-SOURCE-DISPATCH-AUDIT-V2",
+        "schema": "DKR-R122-SOURCE-DISPATCH-AUDIT-V3",
         "mistral_revision": git(root, "rev-parse", "HEAD"),
         "candle_revision": pin,
         "target_cc": 61,
@@ -326,6 +427,8 @@ def audit(root, candle, packages):
 
 def self_test():
     assert len(PACKAGE_FEATURE) == 25
+    assert set(REVIEWED_ROUTES) == set(PACKAGE_FEATURE) - {"fp4-dequant"}
+    assert set(EXTRA_ROUTES) <= set(REVIEWED_ROUTES)
     assert len({op for ops in STAGED_OPERATIONS.values() for op in ops}) == 91
     for family in REVIEWED_ROUTES:
         assert reviewed_route(ROOT, family) is not None
