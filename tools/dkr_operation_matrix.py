@@ -80,22 +80,23 @@ STAGED_OPERATIONS = {
     ],
     "reduction": [
         "moe.weighted_reduce.v1",
-        "attention.softmax_sinks.v1",
-        "tensor.add_rms_norm.v1",
-        "tensor.rms_residual.v1",
-        "tensor.rms_residual_then_rms.v1",
+        *[f"attention.softmax_sinks.b{b}.v1" for b in (64, 128, 256, 512, 1024)],
+        *[f"tensor.add_rms_norm.scalar.b{b}.v1" for b in (32, 1024)],
+        *[f"tensor.add_rms_norm.vec8.b{b}.v1" for b in range(32, 1025, 32)],
+        *[f"tensor.{op}.{mode}.v1" for op in ("rms_residual", "rms_residual_then_rms")
+          for mode in ("plain", "scaled")],
     ],
     "fused_tensor_and_convolution": [
-        "tensor.sigmoid_gated_add.v1",
+        *[f"tensor.sigmoid_gated_add.{mode}.v1" for mode in ("flat", "rows")],
     ],
     "sampling_and_sort": [
         "sampling.logits.penalties_sparse.f32.v1",
         "sampling.logits.bias_sparse.f32.v1",
     ],
-    "memory_transfer": ["tensor.indexed_row_copy.v1"],
+    "memory_transfer": ["tensor.indexed_row_copy.v1", "tensor.copy.contiguous.f32.v1"],
     "layout_and_packing": ["layout.pad_decode_u32.v1"],
-    "state_space": ["state_space.ssm_scan_f32.v1"],
-    "rotary_position": ["rotary.rounded_rms_rope.v1"],
+    "state_space": [f"state_space.ssm_scan_f32.cf{cf}.v1" for cf in (1, 2, 4, 8)],
+    "rotary_position": [f"rotary.rounded_rms_rope.b{b}.v1" for b in (32, 1024)],
 }
 
 # Deliberately explicit: the operation entries above do not certify
@@ -163,7 +164,7 @@ def matrix(candle_dir: Path | None) -> dict:
         + inventory["unclassified_backend_methods"]
     )
     return {
-        "schema": "DKR-OPERATION-COVERAGE-V3",
+        "schema": "DKR-OPERATION-COVERAGE-V4",
         "source_inventory": inventory,
         "candle_revision_pin": "d99f6d77e507688bd9e4b654fbe20ac9e18238fc",
         "candle_checked": candle_dir is not None,
