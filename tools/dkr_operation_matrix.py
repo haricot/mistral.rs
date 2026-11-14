@@ -17,6 +17,8 @@ from dkr_r1_inventory import (
     audit,
 )
 
+from dkr_s9_ptx_manifest_audit import builder_packages
+
 ROUTES = {
     "dense_linear": "device_or_vendor",
     "quantized_linear": "device_or_vendor",
@@ -55,12 +57,21 @@ ROUTES = {
 STAGED_OPERATIONS = {
     "dense_linear": ["linear.gemv.plain.b128.v1", "linear.gemv.bias.b128.v1", "linear.gemm.plain.t16.v1", "linear.gemm.bias.t16.v1"],
     "kv_cache": ["kv_cache.scale_update.atomic_max.v1", "kv_cache.gather.vllm.contiguous.v1", "kv_cache.copy_blocks.bytes.b256.v1", "kv_cache.reshape_store.vllm.b256.v1"],
-    "fp8_linear_and_norm": ["quant.fp8_e4m3.encode.v1", "quant.fp8_e4m3.decode.v1"],
-    "fp4_linear": ["quant.fp4.dequant.nvfp4.v1", "quant.fp4.dequant.mxfp4.v1"],
-    "quantized_decode_gemv": ["quant.fp8.blockwise.gemv.b128.v1", "quant.mxfp4.gemv.plain.b128.v1", "quant.mxfp4.gemv.bias.b128.v1"],
-    "quantized_prefill_gemm": ["quant.fp8.blockwise.gemm.t16.v1", "quant.mxfp4.gemm.plain.t16.v1", "quant.mxfp4.gemm.bias.t16.v1"],
-    "paged_attention": ["attention.paged.decode.online.v1", "attention.paged.fp8_decode.online.v1", "attention.paged.v2.partition.p256.v1", "attention.paged.v2.merge.p256.v1"],
-    "nvfp4_decode": ["quant.nvfp4.gemv.plain.b128.v1", "quant.nvfp4.gemv.bias.b128.v1"],
+    "fp8_linear_and_norm": [
+        "quant.fp8_e4m3.encode.v1", "quant.fp8_e4m3.decode.v1",
+        "quant.fp8.blockwise.gemv.b128.v1", "quant.fp8.blockwise.gemm.t16.v1",
+    ],
+    "fp4_linear": [
+        "quant.fp4.dequant.nvfp4.v1", "quant.fp4.dequant.mxfp4.v1",
+        "quant.mxfp4.gemv.plain.b128.v1", "quant.mxfp4.gemv.bias.b128.v1",
+        "quant.mxfp4.gemm.plain.t16.v1", "quant.mxfp4.gemm.bias.t16.v1",
+        "quant.nvfp4.gemv.plain.b128.v1", "quant.nvfp4.gemv.bias.b128.v1",
+    ],
+    "attention": [
+        "attention.paged.decode.online.v1", "attention.paged.fp8_decode.online.v1",
+        "attention.paged.v2.partition.p256.v1", "attention.paged.v2.merge.p256.v1",
+        "attention.causal_mask_f32.inplace.v1",
+    ],
     "moe": [
         "moe.grouped_gemm.v1",
         *[f"moe.routed.{codec}.{stage}.plain.v1"
@@ -76,13 +87,13 @@ STAGED_OPERATIONS = {
     ],
     "fused_tensor_and_convolution": [
         "tensor.sigmoid_gated_add.v1",
-        "attention.causal_mask_f32.inplace.v1",
     ],
     "sampling_and_sort": [
         "sampling.logits.penalties_sparse.f32.v1",
         "sampling.logits.bias_sparse.f32.v1",
     ],
-    "memory_transfer": ["tensor.indexed_row_copy.v1", "layout.pad_decode_u32.v1"],
+    "memory_transfer": ["tensor.indexed_row_copy.v1"],
+    "layout_and_packing": ["layout.pad_decode_u32.v1"],
     "state_space": ["state_space.ssm_scan_f32.v1"],
     "rotary_position": ["rotary.rounded_rms_rope.v1"],
 }
@@ -126,7 +137,7 @@ def matrix(candle_dir: Path | None) -> dict:
         }
     )
     missing = sorted(known - ROUTES.keys())
-    extra = sorted(ROUTES.keys() - known)
+    extra = sorted((ROUTES.keys() | STAGED_OPERATIONS.keys()) - known)
     families = []
     for name in sorted(known):
         staged = STAGED_OPERATIONS.get(name, [])
@@ -136,7 +147,7 @@ def matrix(candle_dir: Path | None) -> dict:
             "source_units_classified": inventory["families"].get(name, 0),
             "candle_backend_methods_classified": [
                 method for method, family in BACKEND_METHOD_GROUPS.items()
-                if family == name
+                if family == name and inventory["backend_methods_checked"]
             ],
             "staged_external_operations": staged,
             "source_family_complete": False,
@@ -152,11 +163,11 @@ def matrix(candle_dir: Path | None) -> dict:
         + inventory["unclassified_backend_methods"]
     )
     return {
-        "schema": "DKR-OPERATION-COVERAGE-V2",
+        "schema": "DKR-OPERATION-COVERAGE-V3",
         "source_inventory": inventory,
         "candle_revision_pin": "d99f6d77e507688bd9e4b654fbe20ac9e18238fc",
         "candle_checked": candle_dir is not None,
-        "packages_staged": 13,
+        "packages_staged": len(builder_packages()),
         "families": families,
         "unmapped_families": missing,
         "extraneous_families": extra,
