@@ -112,6 +112,19 @@ impl PreparedKernel {
             (module.manifest.min_cc..=module.manifest.max_cc).contains(&cc),
             "GPU architecture outside kernel contract"
         );
+        #[cfg(feature = "shared-registry")]
+        let function = {
+            let artifact = dkr_kernel_registry::VerifiedArtifact::new(module.ptx.clone(),
+                module.manifest.target_cc, &module.manifest.sha256).map_err(anyhow::Error::msg)?;
+            let (func, first) = device.as_cuda_device()?
+                .get_or_load_dkr_func(&artifact, &module.manifest.entry)?;
+            if first && std::env::var_os("CANDLE_DKR_TRACE").is_some() {
+                eprintln!("MISTRAL_DKR_MODULE_LOADED operation={} target=sm{} source=external",
+                    module.manifest.operation, module.manifest.target_cc);
+            }
+            func.into_cuda_function()
+        };
+        #[cfg(not(feature = "shared-registry"))]
         let function = device
             .as_cuda_device()?
             .get_or_load_custom_func(&module.manifest.entry, &module.module_key(), &module.ptx)?

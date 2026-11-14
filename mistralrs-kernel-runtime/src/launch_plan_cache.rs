@@ -1,64 +1,26 @@
-//! Validated CUDA launch plans keyed by workload signature and device.
-//!
-//! No CUDA interaction during cache hits. The caller supplies a preparation
-//! closure only when a (signature, device) pair is not resident.
-
+//! Device-aware adapter to the neutral bounded LRU plan cache.
 use candle_core::{Device, Result};
+use dkr_kernel_registry::PlanCache;
 
 const MAX_LAUNCH_PLANS_PER_THREAD: usize = 64;
 
-struct LaunchPlanEntry<K, P> {
-    key: K,
-    device: Device,
-    plan: P,
+struct DeviceKey<K>{key:K,device:Device}
+impl<K:Eq> PartialEq for DeviceKey<K>{
+    fn eq(&self,other:&Self)->bool{self.key==other.key && self.device.same_device(&other.device)}
 }
+impl<K:Eq> Eq for DeviceKey<K>{}
 
-pub struct LaunchPlanCache<K, P> {
-    entries: Vec<LaunchPlanEntry<K, P>>,
+pub struct LaunchPlanCache<K,P>{
+    inner:PlanCache<DeviceKey<K>,P,MAX_LAUNCH_PLANS_PER_THREAD>,
 }
-
-impl<K: Copy + Eq, P> LaunchPlanCache<K, P> {
-    pub const fn new() -> Self {
-        Self { entries: Vec::new() }
+impl<K:Copy+Eq,P> LaunchPlanCache<K,P>{
+    pub const fn new()->Self{Self{inner:PlanCache::new()}}
+    pub fn with_plan<T>(&mut self,key:K,device:&Device,prepare:impl FnOnce()->Result<P>,
+        launch:impl FnOnce(&P)->Result<T>)->Result<T>{
+        self.inner.with_plan(DeviceKey{key,device:device.clone()},prepare,launch)
     }
-
-    pub fn with_plan<T>(
-        &mut self,
-        key: K,
-        device: &Device,
-        prepare: impl FnOnce() -> Result<P>,
-        launch: impl FnOnce(&P) -> Result<T>,
-    ) -> Result<T> {
-        if let Some(index) = self
-            .entries
-            .iter()
-            .position(|entry| entry.key == key && entry.device.same_device(device))
-        {
-            let last = self.entries.len() - 1;
-            self.entries.swap(index, last);
-            return launch(&self.entries[last].plan);
-        }
-        let plan = prepare()?;
-        if self.entries.len() == MAX_LAUNCH_PLANS_PER_THREAD {
-            self.entries.swap_remove(0);
-        }
-        self.entries.push(LaunchPlanEntry {
-            key,
-            device: device.clone(),
-            plan,
-        });
-        launch(&self.entries.last().expect("prepared plan missing").plan)
-    }
-
-    /// Number of resident prevalidated plans, useful for cache diagnostics.
-    /// Available to downstream crates even when this crate is not built as a test.
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
+    pub fn len(&self)->usize{self.inner.len()}
 }
-
-
 
 #[cfg(test)]
 mod tests {

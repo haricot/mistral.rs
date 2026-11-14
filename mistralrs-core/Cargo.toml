@@ -126,6 +126,9 @@ mistralrs-metal-compile = { workspace = true, optional = true, features = ["meta
 # Explicit opt-in: functional SM61 package set, not performance-qualified.
 # Does not enable the standalone FP4 diagnostic dequantization feature.
 dkr-sm61-experimental = [
+    "candle-core/cuda-dkr-s31",
+    "candle-nn/cuda-dkr-s31",
+    "mistralrs-kernel-runtime/shared-registry",
     "cuda-legacy",
     "dkr-add-rms-norm",
     "dkr-causal-mask",

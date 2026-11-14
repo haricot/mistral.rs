@@ -1,8 +1,8 @@
 use crate::digest;
+use dkr_kernel_registry::{Registry, RegistryKey};
 use anyhow::{bail, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
     path::{Component, Path, PathBuf},
     sync::Arc,
 };
@@ -383,7 +383,7 @@ impl VerifiedKernel {
 
 #[derive(Default)]
 pub struct KernelCatalog {
-    modules: HashMap<(String, String, u32), Arc<VerifiedKernel>>,
+    modules: Registry<Arc<VerifiedKernel>>,
 }
 
 impl KernelCatalog {
@@ -424,16 +424,9 @@ impl KernelCatalog {
         let mut result = Self::default();
         for path in paths {
             let module = Arc::new(VerifiedKernel::read(path)?);
-            let key = (
-                module.manifest.operation.clone(),
-                module.manifest.implementation_id.clone(),
-                module.manifest.target_cc,
-            );
-            ensure!(
-                !result.modules.contains_key(&key),
-                "duplicate operation/implementation/architecture identity"
-            );
-            result.modules.insert(key, module);
+            let key = RegistryKey::new(TYPED_ABI, &module.manifest.operation,
+                &module.manifest.implementation_id, module.manifest.target_cc);
+            result.modules.insert(key, module).map_err(|e| anyhow::anyhow!("duplicate operation/implementation/architecture identity: {e}"))?;
         }
         Ok(result)
     }
@@ -455,33 +448,9 @@ impl KernelCatalog {
         request: &LaunchRequest,
         implementation_id: Option<&str>,
     ) -> Result<&Arc<VerifiedKernel>> {
-        let mut best: Option<&Arc<VerifiedKernel>> = None;
-        let mut ambiguous = false;
-        for module in self.modules.values() {
-            if module.manifest.operation != request.operation
-                || implementation_id.is_some_and(|id| module.manifest.implementation_id != id)
-                || module.manifest.target_cc > request.cc
-                || module.manifest.admit(request).is_err()
-            {
-                continue;
-            }
-            match best {
-                Some(current) if current.manifest.target_cc > module.manifest.target_cc => {}
-                Some(current) if current.manifest.target_cc == module.manifest.target_cc => {
-                    ambiguous = true;
-                }
-                _ => {
-                    best = Some(module);
-                    ambiguous = false;
-                }
-            }
-        }
-        let chosen = best.context("no compatible dynamic kernel package")?;
-        ensure!(
-            !ambiguous,
-            "ambiguous dynamic kernel variants at the same architecture level"
-        );
-        Ok(chosen)
+        self.modules.select(TYPED_ABI, &request.operation, implementation_id, request.cc,
+            |module| module.manifest.admit(request).is_ok())
+            .map_err(anyhow::Error::msg)
     }
 
     pub fn len(&self) -> usize {

@@ -11,11 +11,13 @@ anyhow.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sha2.workspace = true
+dkr-kernel-registry.workspace = true
 cudaforge = { workspace = true, optional = true }
 
 [features]
 default = []
 cuda = ["candle-core/cuda"]
+shared-registry = ["cuda", "candle-core/cuda-dkr-s31"]
 builder-cudaforge = ["dep:cudaforge"]
 
 [dev-dependencies]
