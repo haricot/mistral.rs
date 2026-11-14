@@ -16,7 +16,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = "d99f6d77e507688bd9e4b654fbe20ac9e18238fc"
-CANDIDATE = "e9aa49815484ec0d92a0a504300a787d41c250e5"
+CANDIDATE = "4970f252cb4028a2031a811c777f949837816430"
+INTEGRATION_BRANCH = "feature/dkr-r122-s35-shared-registry"
+CANDLE_PINS = ("candle-core", "candle-nn", "candle-flash-attn-v3", "candle-metal-kernels")
 MMQ_FAMILIES = {"mmq_quantize"} | {f"mmq_instance_{codec}" for codec in (
     "q4_0", "q4_1", "q5_0", "q5_1", "q8_0", "q2_k", "q3_k", "q4_k", "q5_k", "q6_k")}
 FAMILIES = {"affine", "binary", "cast", "conv", "fill", "indexing", "reduce", "sort", "ternary", "unary", "quantized", "mmvq_gguf"} | MMQ_FAMILIES | {"moe_gguf", "moe_simt_f16"}
@@ -99,20 +101,26 @@ def candidate_gate(candle):
     nn_dispatch = (candle / "candle-nn/src/moe.rs").read_text()
     if not all(fragment in moe for fragment in ("dkr_moe_function", "moe_simt_f16", "moe_gguf", "device_ptr_with_guard")) or not all(fragment in nn_dispatch for fragment in ("dkr_moe::simt", "dkr_moe::gguf")):
         raise ValueError("Candle-NN external MoE source wiring missing")
+    registry = (candle / "dkr-kernel-registry/src/lib.rs").read_text()
+    registry_manifest = tomllib.loads((candle / "dkr-kernel-registry/Cargo.toml").read_text())
+    if set(registry_manifest.get("dependencies", {})) != {"sha2"}:
+        raise ValueError("neutral registry dependency boundary changed")
+    if not all(fragment in registry for fragment in ("pub struct Registry<", "pub struct VerifiedArtifact", "pub struct PlanCache<")) or "get_or_load_dkr_func" not in device or "dkr_kernel_registry::PlanCache" not in mmq:
+        raise ValueError("shared registry/cache source wiring missing")
     return changed
 
 
 def patch_sources(workspace, core):
     deps = tomllib.loads(workspace)["workspace"]["dependencies"]
-    for name in ("candle-core", "candle-nn"):
+    for name in CANDLE_PINS:
         if deps[name].get("rev") != BASE or deps[name].get("git") != "https://github.com/haricot/candle.git":
             raise ValueError(f"{name}: qualified source pin changed; review before promotion")
-    # Change only the two active workspace dependency lines.
-    pattern = re.compile(r'^(candle-(?:core|nn)\s*=\s*\{[^\n]*\brev\s*=\s*")'
+    # Align all four Candle workspace dependencies in the integration candidate.
+    pattern = re.compile(r'^(candle-(?:core|nn|flash-attn-v3|metal-kernels)\s*=\s*\{[^\n]*\brev\s*=\s*")'
                          + BASE + r'(".*)$', re.M)
     new_workspace, count = pattern.subn(lambda m: m[1] + CANDIDATE + m[2], workspace)
-    if count != 2:
-        raise ValueError("expected exactly two active Candle pins")
+    if count != len(CANDLE_PINS):
+        raise ValueError("expected exactly four active Candle pins")
     features = tomllib.loads(core)["features"]
     forwarding = [f"candle-core/{CANDLE_FEATURE}", f"candle-nn/{CANDLE_FEATURE}"]
     if PROFILE not in features or set(forwarding).intersection(features[PROFILE]):
@@ -144,10 +152,12 @@ def emit_patch(output):
 def self_test():
     workspace = ('[workspace.dependencies]\n'
                  f'candle-core = {{ git = "https://github.com/haricot/candle.git", rev = "{BASE}" }}\n'
-                 f'candle-nn = {{ git = "https://github.com/haricot/candle.git", rev = "{BASE}" }}\n')
+                 f'candle-nn = {{ git = "https://github.com/haricot/candle.git", rev = "{BASE}" }}\n'
+                 f'candle-flash-attn-v3 = {{ git = "https://github.com/haricot/candle.git", rev = "{BASE}" }}\n'
+                 f'candle-metal-kernels = {{ git = "https://github.com/haricot/candle.git", rev = "{BASE}" }}\n')
     core = f'[features]\n{PROFILE} = [\n    "cuda-legacy",\n]\n'
     new_workspace, new_core = patch_sources(workspace, core)
-    assert new_workspace.count(CANDIDATE) == 2 and BASE not in new_workspace
+    assert new_workspace.count(CANDIDATE) == 4 and BASE not in new_workspace
     assert f'"candle-core/{CANDLE_FEATURE}"' in new_core
     try:
         patch_sources(new_workspace, core)
@@ -164,7 +174,7 @@ def self_test():
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--candle-dir", type=Path)
-    p.add_argument("--emit-patch", type=Path)
+    p.add_argument("--emit-patch", type=Path, help="pin/feature-only compatibility patch; use integration branch for full shared-runtime code")
     p.add_argument("--self-test", action="store_true")
     a = p.parse_args()
     if a.self_test:
@@ -198,6 +208,9 @@ def main():
                        "CANDLE_DKR_TRACE": "1", "DKR_KERNEL_PACKAGES": "existing Mistral package root"},
         "candidate_changed_files": changed,
         "patch": str(a.emit_patch) if a.emit_patch else None,
+        "integration_branch": INTEGRATION_BRANCH,
+        "patch_scope": "pin_and_feature_only; full shared registry adapters are on integration branch",
+        "aligned_candle_pins": list(CANDLE_PINS),
         "requires_lockfile_resolution": True,
         "cargo_build_verified": False,
         "gpu_qualified": False,
