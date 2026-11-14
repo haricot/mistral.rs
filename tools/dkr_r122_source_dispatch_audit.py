@@ -36,6 +36,67 @@ PACKAGE_FEATURE.update({
     "dense-gemm": "dkr-gemm",
 })
 
+# Reviewed entry-point evidence for the feature routes missed by the
+# proximity scan. All fragments must be present in the stated tracked file.
+# These prove source wiring, NOT execution by a particular model.
+REVIEWED_ROUTES = {
+    "add-rms-norm": ("mistralrs-core/src/ops.rs", (
+        '#[cfg(all(feature = "cuda", feature = "dkr-add-rms-norm"))]',
+        'pub use crate::cuda::add_rms_norm_dynamic::cuda_add_rms_norm;',
+    )),
+    "causal-mask": ("mistralrs-core/src/ops.rs", (
+        '#[cfg(all(feature = "cuda", feature = "dkr-causal-mask"))]',
+        'pub(crate) use crate::cuda::causal_mask_dynamic::cuda_apply_causal_mask_f32;',
+    )),
+    "gated-add": ("mistralrs-core/src/cuda/gated_add.rs", (
+        '#[cfg(feature = "dkr-gated-add")]',
+        '#[path = "gated_add_dynamic.rs"]',
+        'pub(crate) use provider::try_sigmoid_gated_add;',
+    )),
+    "indexed-copy": ("mistralrs-core/src/cuda/indexed_copy.rs", (
+        '#[cfg(feature = "dkr-indexed-copy")]',
+        '#[path = "indexed_copy_dynamic.rs"]',
+        'pub(crate) use provider::copy_rows;',
+    )),
+    "moe": ("mistralrs-core/src/cuda/moe.rs", (
+        '#[cfg(feature = "dkr-moe")]',
+        '#[path = "moe_dynamic.rs"]',
+        'pub use provider::moe_gemm;',
+    )),
+    "nvfp4-gemv": ("mistralrs-quant/src/nvfp4/mod.rs", (
+        '#[cfg(feature = "dkr-nvfp4-gemv")]',
+        'if let Some(output) = gemv_dynamic::try_gemv(',
+    )),
+    "rms-variants": ("mistralrs-core/src/ops.rs", (
+        '#[cfg(feature = "dkr-rms-variants")]',
+        'crate::cuda::rms_variants_dynamic::with_rms_plan(',
+    )),
+    "sparse-logits": ("mistralrs-core/src/ops.rs", (
+        '#[cfg(feature = "dkr-logits")]',
+        'crate::cuda::logits_dynamic::with_logits_plans(',
+    )),
+    "ssm": ("mistralrs-core/src/cuda/ssm.rs", (
+        '#[cfg(all(feature = "cuda", feature = "dkr-ssm"))]',
+        'super::ssm_dynamic::selective_scan_cuda(',
+    )),
+}
+
+
+def reviewed_route(root, family):
+    if family not in REVIEWED_ROUTES:
+        return None
+    name, fragments = REVIEWED_ROUTES[family]
+    lines = (root / name).read_text().splitlines()
+    evidence = []
+    for fragment in fragments:
+        matches = [i for i, line in enumerate(lines, 1) if fragment in line
+                   and not line.lstrip().startswith("//")]
+        if not matches:
+            raise ValueError(f"{family}: reviewed source route changed: {fragment}")
+        evidence.append({"fragment": fragment, "lines": matches})
+    return {"path": name, "evidence": evidence}
+
+
 SOURCE_ROOTS = (
     "mistralrs-core", "mistralrs-quant", "mistralrs-paged-attn",
     "mistralrs-vision", "mistralrs-flash-attn", "legacy-provider-poc",
@@ -201,6 +262,7 @@ def audit(root, candle, packages):
             raise ValueError(f"{family}: missing core feature or qualification selection")
         candidates = candidate_map[feature]
         production = [r for r in candidates if not r["test_hint"] and r["nearby_calls"]]
+        reviewed = reviewed_route(root, family)
         package_rows.append({
             "family": family, "feature": feature,
             "core_feature_dependencies": core[feature],
@@ -211,17 +273,26 @@ def audit(root, candle, packages):
             "operations": sorted({p["operation"] for p in by_family[family]}),
             "feature_markers": candidates,
             "non_test_nearby_call_candidates": len(production),
-            "dispatch_status": "LEXICAL_CANDIDATES_REVIEW_REQUIRED" if production
+            "reviewed_source_route": reviewed,
+            "dispatch_status": "REVIEWED_SOURCE_WIRING_RUNTIME_UNVERIFIED" if reviewed
+                else "LEXICAL_CANDIDATES_REVIEW_REQUIRED" if production
                 else "NO_NON_TEST_NEARBY_CALL_CANDIDATE",
             "model_dispatch_verified": False,
             "performance_qualified": False,
         })
     unknown = [r for r in mist_units + candle_units + methods if r["family"] is None]
     fp4 = exact_function_refs(root, rust_paths, ("dequant_nvfp4", "dequant_mxfp4"))
+    # FP4 dequantization is explicitly a parity/debug reference; do not
+    # materialize dense weights in the inference hot path just for coverage.
+    fp4_source = (root / "mistralrs-quant/src/nvfp4/dequant_dynamic.rs").read_text()
+    if "Debug/parity dequantization only; no conversion is inserted into inference." in fp4_source and not fp4:
+        for row in package_rows:
+            if row["family"] == "fp4-dequant":
+                row["dispatch_status"] = "DIAGNOSTIC_REFERENCE_ONLY"
     compiled_ops = {p["operation"] for rows in by_family.values() for p in rows}
     matrix_ops = {op for ops in STAGED_OPERATIONS.values() for op in ops}
     return {
-        "schema": "DKR-R122-SOURCE-DISPATCH-AUDIT-V1",
+        "schema": "DKR-R122-SOURCE-DISPATCH-AUDIT-V2",
         "mistral_revision": git(root, "rev-parse", "HEAD"),
         "candle_revision": pin,
         "target_cc": 61,
@@ -246,12 +317,18 @@ def audit(root, candle, packages):
             "External PTX integrity does not prove correspondence to current source.",
             "Inventory classifies source units, not every operation or specialization.",
         ],
-        "status": "FAIL_UNCLASSIFIED" if unknown or excluded_units else "SOURCE_DISCOVERY_PASS_DISPATCH_REVIEW_REQUIRED",
+        "status": "FAIL_UNCLASSIFIED" if unknown or excluded_units else (
+            "FAIL_OPERATION_MATRIX_DELTA" if compiled_ops != matrix_ops
+            else "SOURCE_DISCOVERY_PASS_DISPATCH_REVIEW_REQUIRED"
+        ),
     }
 
 
 def self_test():
     assert len(PACKAGE_FEATURE) == 25
+    assert len({op for ops in STAGED_OPERATIONS.values() for op in ops}) == 91
+    for family in REVIEWED_ROUTES:
+        assert reviewed_route(ROOT, family) is not None
     sample = '''// #[cfg(feature = "dkr-no")]
 #[cfg(feature = "dkr-fp4-dequant")]
 mod dequant_dynamic;
@@ -300,7 +377,7 @@ def main():
           f"backend_methods={len(report['source_inventory']['backend_methods'])} "
           f"packages={report['ptx_audit']['families']} "
           f"operations={report['compiled_operations']}", file=sys.stderr)
-    sys.exit(1 if report["status"] == "FAIL_UNCLASSIFIED" else 0)
+    sys.exit(1 if report["status"].startswith("FAIL_") else 0)
 
 
 if __name__ == "__main__":
