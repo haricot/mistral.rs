@@ -185,6 +185,7 @@ mod tests {
     #[test]
     #[ignore = "requires externally built SM61 DKR KV-scale CUDA PTX"]
     fn dkr_kv_scales_gpu() -> Result<()> {
+        let _dkr_runtime_evidence = mistralrs_kernel_runtime::RuntimeEvidenceGuard;
         let device = Device::new_cuda(0)?;
         for dtype in [DType::F16, DType::BF16, DType::F32] {
             let key = Tensor::from_vec(

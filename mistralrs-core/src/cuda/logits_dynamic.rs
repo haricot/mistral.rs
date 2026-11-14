@@ -129,6 +129,7 @@ mod tests {
     #[test]
     #[ignore = "requires CUDA and the final external logits package build"]
     fn dkr_logits_penalties_and_bias_gpu() -> Result<()> {
+        let _dkr_runtime_evidence = mistralrs_kernel_runtime::RuntimeEvidenceGuard;
         let device = Device::new_cuda(0)?;
         let input = Tensor::from_vec(vec![1.0f32, -2.0, 3.0, 0.5], 4, &device)?;
         let ids = Tensor::from_vec(vec![0u32, 2], 2, &device)?;

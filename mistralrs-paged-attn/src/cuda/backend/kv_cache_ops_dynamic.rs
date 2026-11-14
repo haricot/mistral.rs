@@ -353,6 +353,7 @@ mod tests {
     #[test]
     #[ignore = "requires prebuilt SM61 DKR KV cache ops PTX"]
     fn dkr_kv_cache_copy_gpu() -> Result<()> {
+        let _dkr_runtime_evidence = mistralrs_kernel_runtime::RuntimeEvidenceGuard;
         for dtype in [DType::F16, DType::BF16, DType::F32, DType::F8E4M3] {
             let device = Device::new_cuda(0)?;
             let key = Tensor::from_vec(
@@ -388,6 +389,7 @@ mod tests {
     #[test]
     #[ignore = "requires prebuilt SM61 DKR KV cache ops PTX"]
     fn dkr_kv_cache_reshape_gpu() -> Result<()> {
+        let _dkr_runtime_evidence = mistralrs_kernel_runtime::RuntimeEvidenceGuard;
         let device = Device::new_cuda(0)?;
         for dtype in [DType::F16, DType::BF16, DType::F32] {
             let tokens = 3usize;

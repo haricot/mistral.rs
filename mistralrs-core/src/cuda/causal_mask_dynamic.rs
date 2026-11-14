@@ -163,6 +163,7 @@ mod tests {
     #[test]
     #[ignore = "requires CUDA and externally built causal-mask PTX"]
     fn dkr_causal_mask_gpu() -> Result<()> {
+        let _dkr_runtime_evidence = mistralrs_kernel_runtime::RuntimeEvidenceGuard;
         let device = Device::new_cuda(0)?;
         for (q_offset, prefix_len) in [(0, 0), (1, 2)] {
             let scores = Tensor::zeros((2, 3, 5), DType::F32, &device)?;

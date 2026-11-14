@@ -214,6 +214,7 @@ mod tests {
     #[test]
     #[ignore = "requires prebuilt SM61 DKR KV gather PTX"]
     fn dkr_kv_gather_gpu() -> Result<()> {
+        let _dkr_runtime_evidence = mistralrs_kernel_runtime::RuntimeEvidenceGuard;
         let dev = Device::new_cuda(0)?;
         let keys: Vec<f32> = (0..16).map(|v| v as f32).collect();
         let vals: Vec<f32> = (100..116).map(|v| v as f32).collect();

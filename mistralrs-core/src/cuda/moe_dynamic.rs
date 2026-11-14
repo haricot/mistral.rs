@@ -296,6 +296,7 @@ mod tests {
     #[test]
     #[ignore = "requires CUDA and separately built external MoE PTX packages"]
     fn dkr_moe_gpu() -> Result<()> {
+        let _dkr_runtime_evidence = mistralrs_kernel_runtime::RuntimeEvidenceGuard;
         let device = Device::new_cuda(0)?;
         for dtype in [DType::F16, DType::BF16] {
             let input = Tensor::ones((2, 16), dtype, &device)?;

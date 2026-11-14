@@ -217,6 +217,7 @@ mod tests {
     #[test]
     #[ignore = "requires external rounded RMSNorm+RoPE CUDA PTX and a GPU"]
     fn dkr_rounded_rms_rope_gpu() -> Result<()> {
+        let _dkr_runtime_evidence = mistralrs_kernel_runtime::RuntimeEvidenceGuard;
         let device = Device::new_cuda(0)?;
         for dtype in [DType::F16, DType::BF16, DType::F32] {
             for columns in [16, 1024] {

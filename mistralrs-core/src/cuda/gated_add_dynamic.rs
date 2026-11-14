@@ -199,6 +199,7 @@ mod tests {
     #[test]
     #[ignore = "requires CUDA and separately built external gated-add packages"]
     fn dkr_gated_add_gpu() -> Result<()> {
+        let _dkr_runtime_evidence = mistralrs_kernel_runtime::RuntimeEvidenceGuard;
         let device = Device::new_cuda(0)?;
         for dtype in [DType::BF16, DType::F16, DType::F32] {
             for columns in [3, 513] {

@@ -209,6 +209,7 @@ mod tests {
     #[test]
     #[ignore = "requires CUDA and external F32 SSM scan packages"]
     fn dkr_ssm_scan_gpu() -> Result<()> {
+        let _dkr_runtime_evidence = mistralrs_kernel_runtime::RuntimeEvidenceGuard;
         let device = Device::new_cuda(0)?;
         for d_state in [16, 32, 64, 128, 256] {
             let x = Tensor::ones((1, 2, 1, 1), DType::F32, &device)?;

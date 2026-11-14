@@ -115,6 +115,7 @@ mod tests {
     #[test]
     #[ignore = "requires SM61 GPU and externally built RMSNorm variant packages"]
     fn dkr_rms_variants_gpu() -> Result<()> {
+        let _dkr_runtime_evidence = mistralrs_kernel_runtime::RuntimeEvidenceGuard;
         let device = Device::new_cuda(0)?;
         for dtype in [DType::F16, DType::BF16, DType::F32] {
             for width in [7, 16, 520, 1024] {

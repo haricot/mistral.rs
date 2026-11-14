@@ -251,6 +251,7 @@ mod tests {
     #[test]
     #[ignore = "requires SM61 DKR paged-decode PTX and CUDA GPU"]
     fn dkr_paged_decode_gpu() -> Result<()> {
+        let _dkr_runtime_evidence = mistralrs_kernel_runtime::RuntimeEvidenceGuard;
         let device = Device::new_cuda(0)?;
         for dtype in [DType::F16, DType::BF16, DType::F32] {
             let hd = 64usize;

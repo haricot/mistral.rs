@@ -232,6 +232,7 @@ mod tests {
     #[test]
     #[ignore = "requires CUDA and separately built external indexed copy packages"]
     fn dkr_indexed_copy_gpu() -> Result<()> {
+        let _dkr_runtime_evidence = mistralrs_kernel_runtime::RuntimeEvidenceGuard;
         let device = Device::new_cuda(0)?;
         let expected = vec![
             vec![4., 5., 6.],
