@@ -3,6 +3,7 @@ use crate::{
     universal::{KernelCatalog, KernelManifest, LaunchRequest, VerifiedKernel},
 };
 use anyhow::{anyhow, ensure, Result};
+use dkr_kernel_registry::{telemetry::{self,Event,Handle},TYPED_ABI};
 use candle_core::{
     cuda_backend::cudarc::driver::{CudaFunction, LaunchConfig},
     Device,
@@ -54,12 +55,18 @@ impl KernelExecutionCache {
             })
         {
             request.cc = entry.request.cc;
+            telemetry::handle(TYPED_ABI,&request.operation,"prepared_cache","",request.cc).record(Event::PlanHit);
             return Ok(Arc::clone(&entry.kernel));
         }
         request.cc = compute_capability(device)?;
-        let kernel = Arc::new(PreparedKernel::load_auto(&self.catalog, request, device)?);
+        let ev=telemetry::handle(TYPED_ABI,&request.operation,"prepared_cache","",request.cc);
+        ev.record(Event::PlanMiss);
+        let kernel = match PreparedKernel::load_auto(&self.catalog, request, device) {
+            Ok(kernel)=>Arc::new(kernel),Err(e)=>{ev.record(Event::PrepareError);return Err(e)}
+        };
         if prepared.len() == MAX_PREPARED_KERNELS {
             prepared.swap_remove(0);
+            ev.record(Event::PlanEvicted);
         }
         prepared.push(PreparedEntry {
             request: request.clone(),
@@ -83,6 +90,7 @@ pub struct PreparedKernel {
     function: CudaFunction,
     device: Device,
     cc: u32,
+    evidence: Handle,
 }
 
 pub struct PrevalidatedLaunchPlan {
@@ -129,11 +137,14 @@ impl PreparedKernel {
             .as_cuda_device()?
             .get_or_load_custom_func(&module.manifest.entry, &module.module_key(), &module.ptx)?
             .into_cuda_function();
+        let evidence=telemetry::handle(TYPED_ABI,&module.manifest.operation,&module.manifest.entry,&module.manifest.sha256,module.manifest.target_cc);
+        evidence.record(Event::Resolved);
         Ok(Self {
             manifest: module.manifest.clone(),
             function,
             device: device.clone(),
             cc,
+            evidence,
         })
     }
 
@@ -177,8 +188,12 @@ impl PreparedKernel {
         device: &Device,
         launch: impl FnOnce(&CudaFunction, LaunchConfig) -> Result<T>,
     ) -> Result<T> {
-        let config = self.launch_config(request, device)?;
-        launch(&self.function, config)
+        let config = match self.launch_config(request, device) {
+            Ok(c)=>c, Err(e)=>{self.evidence.record(Event::Rejected);return Err(e)}
+        };
+        let result=launch(&self.function, config);
+        self.evidence.record(if result.is_ok(){Event::AdapterOk}else{Event::AdapterError});
+        result
     }
 }
 
@@ -193,6 +208,8 @@ impl PrevalidatedLaunchPlan {
             block_dim: self.config.block_dim,
             shared_mem_bytes: self.config.shared_mem_bytes,
         };
-        launch(&self.kernel.function, config)
+        let result=launch(&self.kernel.function, config);
+        self.kernel.evidence.record(if result.is_ok(){Event::AdapterOk}else{Event::AdapterError});
+        result
     }
 }

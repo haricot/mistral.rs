@@ -448,9 +448,10 @@ impl KernelCatalog {
         request: &LaunchRequest,
         implementation_id: Option<&str>,
     ) -> Result<&Arc<VerifiedKernel>> {
-        self.modules.select(TYPED_ABI, &request.operation, implementation_id, request.cc,
-            |module| module.manifest.admit(request).is_ok())
-            .map_err(anyhow::Error::msg)
+        let result=self.modules.select(TYPED_ABI, &request.operation, implementation_id, request.cc,
+            |module| module.manifest.admit(request).is_ok());
+        if result.is_err(){dkr_kernel_registry::telemetry::handle(TYPED_ABI,&request.operation,"selection","",request.cc).record(dkr_kernel_registry::telemetry::Event::Rejected);}
+        result.map_err(anyhow::Error::msg)
     }
 
     pub fn len(&self) -> usize {

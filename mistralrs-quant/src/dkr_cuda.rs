@@ -53,6 +53,7 @@ mod tests {
 
     #[test]
     fn dkr_reduction_launch_plan_cache() -> Result<()> {
+        let _dkr_runtime_evidence = mistralrs_kernel_runtime::RuntimeEvidenceGuard;
         let prepares = Cell::new(0);
         let mut cache = LaunchPlanCache::<u32, u32>::new();
         for _ in 0..3 {

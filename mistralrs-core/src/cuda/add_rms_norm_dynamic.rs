@@ -232,6 +232,7 @@ mod tests {
     #[test]
     #[ignore = "requires CUDA and separately built external add-RMSNorm packages"]
     fn dkr_add_rms_norm_gpu() -> Result<()> {
+        let _dkr_runtime_evidence = mistralrs_kernel_runtime::RuntimeEvidenceGuard;
         let device = Device::new_cuda(0)?;
         for dtype in [DType::F16, DType::BF16, DType::F32] {
             // Exercises scalar 32, scalar 1024 and aligned vector8 sizes.

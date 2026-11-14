@@ -16,7 +16,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = "d99f6d77e507688bd9e4b654fbe20ac9e18238fc"
-CANDIDATE = "4970f252cb4028a2031a811c777f949837816430"
+CANDIDATE = "b231d3c4e07b04c0df788ee252979b1890430dd6"
 INTEGRATION_BRANCH = "feature/dkr-r122-s35-shared-registry"
 CANDLE_PINS = ("candle-core", "candle-nn", "candle-flash-attn-v3", "candle-metal-kernels")
 MMQ_FAMILIES = {"mmq_quantize"} | {f"mmq_instance_{codec}" for codec in (

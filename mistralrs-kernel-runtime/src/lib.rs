@@ -222,7 +222,22 @@ pub mod session;
 #[cfg(feature = "cuda")]
 pub mod universal_cuda;
 
+/// Explicit process-local runtime evidence scope for qualification tests.
+pub use dkr_kernel_registry::telemetry::EvidenceGuard as RuntimeEvidenceGuard;
+pub fn runtime_evidence() -> serde_json::Value {
+    dkr_kernel_registry::telemetry::snapshot_json()
+        .and_then(|s|serde_json::from_str(&s).ok())
+        .unwrap_or(serde_json::Value::Null)
+}
 pub fn execution_evidence() -> serde_json::Value {
+    let mut evidence = legacy_execution_evidence();
+    if let Some(snapshot)=dkr_kernel_registry::telemetry::snapshot_json() {
+        evidence["unified_dkr_runtime"]=serde_json::from_str(&snapshot)
+            .unwrap_or_else(|_|serde_json::json!({"error":"snapshot serialization"}));
+    }
+    evidence
+}
+fn legacy_execution_evidence() -> serde_json::Value {
     #[cfg(feature = "cuda")]
     {
         session::evidence()

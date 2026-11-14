@@ -17,7 +17,7 @@ impl<K:Copy+Eq,P> LaunchPlanCache<K,P>{
     pub const fn new()->Self{Self{inner:PlanCache::new()}}
     pub fn with_plan<T>(&mut self,key:K,device:&Device,prepare:impl FnOnce()->Result<P>,
         launch:impl FnOnce(&P)->Result<T>)->Result<T>{
-        self.inner.with_plan(DeviceKey{key,device:device.clone()},prepare,launch)
+        self.inner.with_plan_for(dkr_kernel_registry::TYPED_ABI,"launch_plan",DeviceKey{key,device:device.clone()},prepare,launch)
     }
     pub fn len(&self)->usize{self.inner.len()}
 }

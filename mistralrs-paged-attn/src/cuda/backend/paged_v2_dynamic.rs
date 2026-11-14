@@ -398,6 +398,7 @@ mod tests {
     #[test]
     #[ignore = "requires external staged SM61 v2 PTX and an NVIDIA GPU"]
     fn dkr_paged_v2_gpu() -> Result<()> {
+        let _dkr_runtime_evidence = mistralrs_kernel_runtime::RuntimeEvidenceGuard;
         let cuda = Device::new_cuda(0)?;
         const SEQS: usize = 2;
         const HEADS: usize = 2;

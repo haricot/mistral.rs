@@ -1,7 +1,7 @@
 # DKR-R1.22/S3.5 — isolated joint integration candidate
 
 This branch is NOT the qualified DKR branch. It pins all four direct Candle
-workspace crates and dkr-kernel-registry to 4970f252cb4028a2031a811c777f949837816430. The common crate is
+workspace crates and dkr-kernel-registry to b231d3c4e07b04c0df788ee252979b1890430dd6. The common crate is
 dependency-neutral and lives next to Candle for atomic revision pinning.
 
 The typed manifest validator and launch admission remain in Mistral.rs;
