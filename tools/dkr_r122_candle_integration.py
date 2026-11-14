@@ -16,8 +16,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = "d99f6d77e507688bd9e4b654fbe20ac9e18238fc"
-CANDIDATE = "543f7b55a7e3c1a686a36c1d751422d7d558e87d"
-FAMILIES = {"affine", "binary", "cast", "fill", "indexing", "reduce", "ternary", "unary", "quantized", "mmvq_gguf"}
+CANDIDATE = "f86d9349af61d19b5b7efac9fa168dbf32d8de60"
+MMQ_FAMILIES = {"mmq_quantize"} | {f"mmq_instance_{codec}" for codec in (
+    "q4_0", "q4_1", "q5_0", "q5_1", "q8_0", "q2_k", "q3_k", "q4_k", "q5_k", "q6_k")}
+FAMILIES = {"affine", "binary", "cast", "fill", "indexing", "reduce", "ternary", "unary", "quantized", "mmvq_gguf"} | MMQ_FAMILIES
 PROFILE = "dkr-sm61-experimental"
 CANDLE_FEATURE = "cuda-dkr-s31"
 
@@ -46,7 +48,7 @@ def candidate_gate(candle):
     if not line or set(re.findall(r'"([^"]+)"', line[1])) != FAMILIES:
         raise ValueError("Candle native module set differs from integration contract")
     loader = (candle / "candle-core/src/cuda_backend/dkr_s31.rs").read_text()
-    for family in FAMILIES - {"mmvq_gguf"}:
+    for family in FAMILIES - {"mmvq_gguf"} - MMQ_FAMILIES:
         if f'(kernels::{family.upper()}.index(), "{family}")' not in loader:
             raise ValueError(f"missing native dispatch route {family}")
     if "CANDLE_DKR_S31_DIR" not in loader or "CANDLE_DKR_MODULE_LOADED" not in loader:
@@ -55,6 +57,12 @@ def candidate_gate(candle):
     device = (candle / "candle-core/src/cuda_backend/device.rs").read_text()
     if not all(fragment in mmvq for fragment in ("try_dkr_launch", "dev.dkr_mmvq_func", "plain_cuda{batch}")) or "fn dkr_mmvq_func" not in device:
         raise ValueError("fast MMVQ external dispatch wiring missing")
+    mmq = (candle / "candle-core/src/quantized/fast_mmq.rs").read_text()
+    if not all(fragment in mmq for fragment in ("external::launch", "dev.dkr_mmq_func", "contract::mmq_tile", "PLAN_CAPACITY: usize = 64")) or "fn dkr_mmq_func" not in device:
+        raise ValueError("fast MMQ external launch-plan wiring missing")
+    for family in MMQ_FAMILIES:
+        if not (candle / "candle-kernels/src/mmq_gguf" / f"{family}.cu").is_file():
+            raise ValueError(f"missing MMQ original compilation unit: {family}")
     return changed
 
 
@@ -135,7 +143,9 @@ def main():
         "qualified_candle_pin": BASE, "candidate_candle_pin": CANDIDATE,
         "native_module_families": sorted(FAMILIES),
         "fast_mmvq_expected_entries": 243,
-        "fast_mmq": "static_pending_native_launch_plan_port",
+        "fast_mmq": "external_native_ptx_cached_sm61_tiling_runtime_unverified",
+        "fast_mmq_expected_entries": 163,
+        "fast_mmq_plan_capacity_per_thread": 64,
         "mistral_profile": PROFILE, "candle_feature": CANDLE_FEATURE,
         "activation": {"CANDLE_DKR_S31_DIR": "absolute Candle package root",
                        "CANDLE_DKR_TRACE": "1", "DKR_KERNEL_PACKAGES": "existing Mistral package root"},
