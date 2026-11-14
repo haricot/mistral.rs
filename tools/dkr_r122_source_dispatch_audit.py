@@ -17,7 +17,8 @@ from pathlib import Path
 from dkr_r1_inventory import (
     ROOT, mistral_family, candle_family, BACKEND_METHOD_GROUPS,
 )
-from dkr_s9_ptx_manifest_audit import builder_packages, verify
+from dkr_s9_ptx_manifest_audit import builder_packages, verify, PACKAGE_OUTPUT_FAMILY
+from dkr_operation_matrix import STAGED_OPERATIONS
 
 # Package output family -> qualification feature (core forwards to leaf crates).
 PACKAGE_FEATURE = {
@@ -97,7 +98,9 @@ def rust_candidates(path, source):
             # a feature marker on a module does not prove a call is gated.
             for j in range(i + 1, min(i + 9, len(lines))):
                 s = lines[j].strip()
-                if s.startswith(("//", "use ", "mod ", "pub mod ", "#[")):
+                if s.startswith(("#[", "mod ", "pub mod ", "pub(crate) mod ", "use ", "pub use ")):
+                    break
+                if s.startswith("//"):
                     continue
                 for match in CALL_PATTERN.finditer(s):
                     calls.append({"line": j + 1, "call": match.group().rstrip("(").strip()})
@@ -157,6 +160,15 @@ def audit(root, candle, packages):
     families = sorted(builder_packages())
     if set(families) != set(PACKAGE_FEATURE):
         raise ValueError("package/feature map differs from current cudaforge builder")
+    external_units = [
+        p for p in paths if p.suffix == ".cu" and p.parts[:2] == ("kernel-packages", "cuda")
+    ]
+    external_rows = [{"path": str(p), "package": PACKAGE_OUTPUT_FAMILY.get(p.parts[2], p.parts[2])}
+                     for p in external_units]
+    if {r["package"] for r in external_rows} != set(families):
+        raise ValueError("external source families differ from builder packages")
+    excluded_units = [str(p) for p in paths if p.suffix == ".cu"
+                      and p.parts[0] not in SOURCE_ROOTS and p not in external_units]
     count, manifests, r121 = verify(packages, 61)
     if count != len(families):
         raise ValueError("manifest family count mismatch")
@@ -206,6 +218,8 @@ def audit(root, candle, packages):
         })
     unknown = [r for r in mist_units + candle_units + methods if r["family"] is None]
     fp4 = exact_function_refs(root, rust_paths, ("dequant_nvfp4", "dequant_mxfp4"))
+    compiled_ops = {p["operation"] for rows in by_family.values() for p in rows}
+    matrix_ops = {op for ops in STAGED_OPERATIONS.values() for op in ops}
     return {
         "schema": "DKR-R122-SOURCE-DISPATCH-AUDIT-V1",
         "mistral_revision": git(root, "rev-parse", "HEAD"),
@@ -214,9 +228,14 @@ def audit(root, candle, packages):
         "source_inventory": {
             "mistral_units": mist_units, "candle_units": candle_units,
             "backend_methods": methods, "unclassified": unknown,
+            "external_units": external_rows, "out_of_scope_mistral_cuda_units": excluded_units,
         },
         "ptx_audit": {"families": count, "manifests": manifests, "r121_profiles": r121},
-        "compiled_operations": len({p["operation"] for rows in by_family.values() for p in rows}),
+        "compiled_operations": len(compiled_ops),
+        "operation_matrix_delta": {
+            "compiled_not_listed": sorted(compiled_ops - matrix_ops),
+            "listed_not_compiled": sorted(matrix_ops - compiled_ops),
+        },
         "packages": package_rows,
         "fp4_dequant_qualified_name_call_refs": fp4,
         "limitations": [
@@ -227,7 +246,7 @@ def audit(root, candle, packages):
             "External PTX integrity does not prove correspondence to current source.",
             "Inventory classifies source units, not every operation or specialization.",
         ],
-        "status": "FAIL_UNCLASSIFIED" if unknown else "SOURCE_DISCOVERY_PASS_DISPATCH_REVIEW_REQUIRED",
+        "status": "FAIL_UNCLASSIFIED" if unknown or excluded_units else "SOURCE_DISCOVERY_PASS_DISPATCH_REVIEW_REQUIRED",
     }
 
 
@@ -249,6 +268,7 @@ mod tests {
 '''
     rows = rust_candidates(Path("src/ops.rs"), sample)
     assert [r["feature"] for r in rows] == ["dkr-fp4-dequant", "dkr-quant-gemv", "dkr-gemm"]
+    assert not rows[0]["nearby_calls"]
     assert not rows[1]["test_hint"] and rows[2]["test_hint"]
     assert any(c["call"] == "crate::quantized_gemv_dynamic::try_fp8" for c in rows[1]["nearby_calls"])
     assert source_records(ROOT, [Path("mistralrs-core/src/cuda/sort.cu")])[0]["family"] == "sampling_and_sort"
@@ -280,7 +300,7 @@ def main():
           f"backend_methods={len(report['source_inventory']['backend_methods'])} "
           f"packages={report['ptx_audit']['families']} "
           f"operations={report['compiled_operations']}", file=sys.stderr)
-    sys.exit(1 if report["source_inventory"]["unclassified"] else 0)
+    sys.exit(1 if report["status"] == "FAIL_UNCLASSIFIED" else 0)
 
 
 if __name__ == "__main__":
