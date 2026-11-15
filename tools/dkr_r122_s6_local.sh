@@ -69,9 +69,9 @@ if [[ -n "${DKR_S6_REUSE_NATIVE_RUN:-}" ]]; then
     CURRENT_PIN="$(jq -er .candidate "$RUN/closure.json")"
     if [[ "$PRIOR_PIN" != "$CURRENT_PIN" ]]; then
         # Exact reviewed transition: candidate_gate already validates the
-        # three-file delta and unchanged CUDA device code prefix.
+        # reviewed host/Rust delta and unchanged CUDA device code prefix.
         [[ "$PRIOR_PIN" == b231d3c4e07b04c0df788ee252979b1890430dd6 &&
-           "$CURRENT_PIN" == 63217e3a0ea8a91b0630acbcbc047c471f43761a ]] ||
+           "$CURRENT_PIN" == a43bcbe671ab713a0a7a519efe29e8d67753f922 ]] ||
            { echo "Prior Candle candidate differs"; exit 3; }
         echo "DKR_S67_NATIVE_REUSE=HOST_ONLY_DELTA device source unchanged"
     fi
@@ -103,12 +103,24 @@ else
 fi
 # Same exact binaries, legacy Candle vs external Candle in different processes.
 rm -f "$RUN/native-legacy.json" "$RUN/native-external.json" "$RUN/qualification.json"
+set +e
 env -u CANDLE_DKR_S31_DIR DKR_S6_NATIVE_OUTPUT="$RUN/native-legacy.json" \
-    cargo nextest run --archive-file "$ARCHIVE" --run-ignored=all --no-capture --test-threads=1 \
+    cargo nextest run --archive-file "$ARCHIVE" --workspace-remap "$ROOT" --run-ignored=all --no-capture \
     -E 'test(dkr_s6_native_ab_gpu)' 2>&1 | tee "$RUN/legacy.log"
+A_RC="${PIPESTATUS[0]}"
+printf '%s\n' "$A_RC" > "$RUN/legacy.exit"
 CANDLE_DKR_S31_DIR="$NATIVE" DKR_S6_NATIVE_OUTPUT="$RUN/native-external.json" \
-    cargo nextest run --archive-file "$ARCHIVE" --run-ignored=all --no-fail-fast --no-capture --test-threads=1 \
+    cargo nextest run --archive-file "$ARCHIVE" --workspace-remap "$ROOT" --run-ignored=all --no-fail-fast --no-capture \
     -E "$FILTER" 2>&1 | tee "$RUN/external.log"
+B_RC="${PIPESTATUS[0]}"
+printf '%s\n' "$B_RC" > "$RUN/external.exit"
+set -e
+echo "DKR_S678_LEGACY_EXIT=$A_RC"
+echo "DKR_S678_EXTERNAL_EXIT=$B_RC"
+if [[ "$A_RC" != 0 || "$B_RC" != 0 ]]; then
+    echo "DKR_S678_FINAL=REVIEW_REQUIRED logs=$RUN"
+    exit 4
+fi
 python3 tools/dkr_r122_s6_evidence.py --report-dir "$RUN"
 python3 tools/dkr_r122_s67_final.py --report-dir "$RUN" --native-root "$NATIVE"
 echo "DKR_S67_FINAL_SMOKE=PASS report=$RUN/qualification-s67.json"
