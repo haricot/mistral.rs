@@ -319,3 +319,8 @@ mistralrs-quant.workspace = true
 [[example]]
 name = "provider_f32_inference"
 path = "examples/advanced/provider_f32/main.rs"
+
+[[example]]
+name = "dkr_s684_model"
+path = "examples/advanced/dkr_s684_model/main.rs"
+required-features = ["dkr-sm61-experimental"]
