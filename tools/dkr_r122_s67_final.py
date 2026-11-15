@@ -48,10 +48,10 @@ def main():
     # selection is expected in A; no external fallback or adapter errors in B.
     legacy_external=le["native_external_submission_rows"]
     legacy_mmq = [r for r in le["rows"] if r["operation"]=="fast_mmq" and r["fallback_selected"]]
-    safe_mmq = sum(r["fallback_selected"] for r in legacy_mmq if r["entry"]=="legacy_chunked_mmvq_driver")
+    static_mmq = sum(r["fallback_selected"] for r in legacy_mmq if r["entry"]=="static_ffi")
     failures=[]
-    if safe_mmq != 50 or any(r["entry"]!="legacy_chunked_mmvq_driver" for r in legacy_mmq):
-        failures.append("legacy MMQ quarantine / route coverage")
+    if static_mmq != 50 or any(r["entry"]!="static_ffi" for r in legacy_mmq):
+        failures.append("legacy static MMQ route coverage")
     if not re.search(r"Summary\s+\[[^\]]+\]\s+1 test run: 1 passed",legacy):
         failures.append("legacy test not successful")
     if not re.search(r"Summary\s+\[[^\]]+\]\s+34 tests run: 34 passed, 2428 skipped",external):
@@ -68,8 +68,8 @@ def main():
             "native_submissions":sum(r["submitted"] for r in rows),
             "typed_adapter_success_rows":ee["typed_adapter_success_rows"],
             "telemetry":cov,"counter_failures":counter_bad,"provenance_failures":provenance_bad,
-            "legacy_external_submissions":legacy_external,"legacy_chunked_mmvq_calls":safe_mmq,
-            "legacy_static_mmq_qualified":False,
+            "legacy_external_submissions":legacy_external,"legacy_static_mmq_calls":static_mmq,
+            "legacy_static_mmq_qualified":not failures,
             "ab_parity_qualified_for_smoke_scope":not failures,
             "full_numerical_qualification":False,"production_promotion_approved":False}
     (root/"qualification-s67.json").write_text(json.dumps(report,indent=2)+"\n")

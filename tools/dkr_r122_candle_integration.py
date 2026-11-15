@@ -16,11 +16,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = "d99f6d77e507688bd9e4b654fbe20ac9e18238fc"
-CANDIDATE = "a43bcbe671ab713a0a7a519efe29e8d67753f922"
-INTEGRATION_BRANCH = "feature/dkr-r122-s35-shared-registry"
+CANDIDATE = "08a36261a6b4dd695c291d37c028b16f019fae46"
+QUARANTINED_MMQ = "a43bcbe671ab713a0a7a519efe29e8d67753f922"
+INTEGRATION_BRANCH = "dkr/sm61-static-mmq-qualification"
 CANDLE_PINS = ("candle-core", "candle-nn", "candle-flash-attn-v3", "candle-metal-kernels")
 MMQ_FAMILIES = {"mmq_quantize"} | {f"mmq_instance_{codec}" for codec in (
     "q4_0", "q4_1", "q5_0", "q5_1", "q8_0", "q2_k", "q3_k", "q4_k", "q5_k", "q6_k")}
+MMQ_SOURCE_DIR = "candle-kernels/src/mmq_gguf"
+MMQ_LAUNCH_SOURCES = {f"{MMQ_SOURCE_DIR}/{family}.cu" for family in MMQ_FAMILIES} | {
+    f"{MMQ_SOURCE_DIR}/mmq_launch.cuh",
+}
 FAMILIES = {"affine", "binary", "cast", "conv", "fill", "indexing", "reduce", "sort", "ternary", "unary", "quantized", "mmvq_gguf"} | MMQ_FAMILIES | {"moe_gguf", "moe_simt_f16"}
 MOE_FAMILIES = {"moe_gguf", "moe_simt_f16"}
 REMAINING = {
@@ -56,7 +61,7 @@ def candidate_gate(candle):
                     and Path(p).suffix in {".cu", ".cuh", ".h", ".hpp"}]
     allowed = "candle-kernels/src/moe/moe_gguf.cu"
     simt = "candle-kernels/src/moe/moe_simt_f16.cu"
-    if changed_cuda != [allowed, simt]:
+    if set(changed_cuda) != {allowed, simt} | MMQ_LAUNCH_SOURCES:
         raise ValueError(f"unexpected CUDA source modifications: {changed_cuda}")
     original = git(candle, "show", f"{BASE}:{allowed}")
     expected = original.replace("    __syncthreads();",
@@ -66,7 +71,7 @@ def candidate_gate(candle):
     if (candle / allowed).read_text().strip() != expected.strip():
         raise ValueError("GGUF CUDA source differs from reviewed synchronization correction")
     prior = "b231d3c4e07b04c0df788ee252979b1890430dd6"
-    delta = git(candle, "diff", "--name-only", prior, CANDIDATE).splitlines()
+    delta = git(candle, "diff", "--name-only", prior, QUARANTINED_MMQ).splitlines()
     if set(delta) != {simt, "candle-kernels/src/ffi.rs", "candle-nn/src/moe.rs",
                       "candle-core/src/quantized/cuda.rs", "candle-core/src/quantized/fast_mmq.rs"}:
         raise ValueError(f"unexpected S6.7 Candle delta: {delta}")
@@ -78,11 +83,20 @@ def candidate_gate(candle):
         raise ValueError("SIMT source differs from pinned revision")
     fixed_simt = "63217e3a0ea8a91b0630acbcbc047c471f43761a"
     rust_delta = {"candle-core/src/quantized/cuda.rs", "candle-core/src/quantized/fast_mmq.rs"}
-    if set(git(candle, "diff", "--name-only", fixed_simt, CANDIDATE).splitlines()) != rust_delta:
+    if set(git(candle, "diff", "--name-only", fixed_simt, QUARANTINED_MMQ).splitlines()) != rust_delta:
         raise ValueError("S6.7.8 must be Rust-only relative to qualified external candidate")
-    for p in rust_delta:
-        if (candle / p).read_text().strip() != git(candle, "show", f"{CANDIDATE}:{p}").strip():
-            raise ValueError(f"modified candidate source: {p}")
+    repair_delta = set(git(candle, "diff", "--name-only", QUARANTINED_MMQ, CANDIDATE).splitlines())
+    mmq_ffi = {"candle-kernels/build.rs", "candle-kernels/src/ffi.rs"}
+    if repair_delta != rust_delta | MMQ_LAUNCH_SOURCES | mmq_ffi:
+        raise ValueError(f"unexpected static MMQ repair scope: {sorted(repair_delta)}")
+    quantizer = f"{MMQ_SOURCE_DIR}/mmq_quantize.cu"
+    before = git(candle, "show", f"{QUARANTINED_MMQ}:{quantizer}")
+    after = (candle / quantizer).read_text()
+    device, separator, _ = after.partition(
+        "template <mmq_q8_1_ds_layout layout>\nstatic cudaError_t mmq_launch_quantize("
+    )
+    if not separator or device.replace('#include "mmq_launch.cuh"\n', "") != before.split("// C-linkage quantize launchers", 1)[0]:
+        raise ValueError("MMQ quantize device code changed")
     core = tomllib.loads((candle / "candle-core/Cargo.toml").read_text())
     nn = tomllib.loads((candle / "candle-nn/Cargo.toml").read_text())
     if CANDLE_FEATURE not in core["features"] or f"candle/{CANDLE_FEATURE}" not in nn["features"].get(CANDLE_FEATURE, []):

@@ -47,21 +47,20 @@ fn dkr_s6_native_ab_gpu() -> anyhow::Result<()> {
                 save(&mut out,&format!("{codec:?}/mat/{batch}/{repeat}"),mat.forward(&x)?)?;
             }
         }
-        // Multi-chunk tail, rank-3 input, nonzero contiguous storage offset.
-        // Independent dot products over the observed dequantized operands,
-        // with the same Q8_1 activation error envelope as the S6 CPU audit.
+        // The F32 MMQ quantizer uses float4 loads, so exercise a misaligned view.
+        let offset = 1;
         let qw=&out[&format!("{codec:?}/dequant")];
         for dtype in [DType::F32,DType::F16,DType::BF16] {
-            let all=(0..19*256).map(|i| ((i%11) as f32-5.)/16.).collect::<Vec<_>>();
-            let input=Tensor::from_vec(all.clone(),(19,256),&dev)?.to_dtype(dtype)?
-                .narrow(0,1,18)?.reshape((2,9,256))?;
+            let all=(0..offset+18*256).map(|i| ((i%11) as f32-5.)/16.).collect::<Vec<_>>();
+            let input=Tensor::from_vec(all.clone(),all.len(),&dev)?.to_dtype(dtype)?
+                .narrow(0,offset,18*256)?.reshape((2,9,256))?;
             let got=mat.forward(&input)?;
-            anyhow::ensure!(got.dims()==[2,9,5], "rank-3 MMQ fallback shape");
+            anyhow::ensure!(got.dims()==[2,9,5], "rank-3 MMQ output shape");
             let got=got.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
             for row in 0..18 {
                 for n in 0..5 {
                     let w=&qw[n*256..(n+1)*256];
-                    let x=&all[(row+1)*256..(row+2)*256];
+                    let x=&all[offset+row*256..offset+(row+1)*256];
                     let expected=w.iter().zip(x).map(|(a,b)| (*a as f64)*(*b as f64)).sum::<f64>();
                     let bound=w.iter().map(|a| a.abs() as f64).sum::<f64>()
                         *(0.5*0.3125/127.+0.0002)+0.01

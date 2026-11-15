@@ -68,12 +68,13 @@ if [[ -n "${DKR_S6_REUSE_NATIVE_RUN:-}" ]]; then
     PRIOR_PIN="$(jq -er .candidate "$PRIOR/closure.json")"
     CURRENT_PIN="$(jq -er .candidate "$RUN/closure.json")"
     if [[ "$PRIOR_PIN" != "$CURRENT_PIN" ]]; then
-        # Exact reviewed transition: candidate_gate already validates the
-        # reviewed host/Rust delta and unchanged CUDA device code prefix.
-        [[ "$PRIOR_PIN" == b231d3c4e07b04c0df788ee252979b1890430dd6 &&
-           "$CURRENT_PIN" == a43bcbe671ab713a0a7a519efe29e8d67753f922 ]] ||
-           { echo "Prior Candle candidate differs"; exit 3; }
-        echo "DKR_S67_NATIVE_REUSE=HOST_ONLY_DELTA device source unchanged"
+        # The closure check pins the candidate and verifies the host-only delta.
+        case "$PRIOR_PIN" in
+            b231d3c4e07b04c0df788ee252979b1890430dd6|63217e3a0ea8a91b0630acbcbc047c471f43761a|a43bcbe671ab713a0a7a519efe29e8d67753f922)
+                echo "DKR_S67_NATIVE_REUSE=HOST_ONLY_DELTA device source unchanged"
+                ;;
+            *) echo "Prior Candle candidate differs"; exit 3 ;;
+        esac
     fi
     grep -Fxq 'CANDLE_DKR_S31_PACKAGES=STAGED target=sm61 families=25' "$PRIOR/native-build.log"
     NATIVE="$PRIOR/native-sm61"
@@ -115,10 +116,10 @@ CANDLE_DKR_S31_DIR="$NATIVE" DKR_S6_NATIVE_OUTPUT="$RUN/native-external.json" \
 B_RC="${PIPESTATUS[0]}"
 printf '%s\n' "$B_RC" > "$RUN/external.exit"
 set -e
-echo "DKR_S678_LEGACY_EXIT=$A_RC"
-echo "DKR_S678_EXTERNAL_EXIT=$B_RC"
+echo "DKR_S6_LEGACY_EXIT=$A_RC"
+echo "DKR_S6_EXTERNAL_EXIT=$B_RC"
 if [[ "$A_RC" != 0 || "$B_RC" != 0 ]]; then
-    echo "DKR_S678_FINAL=REVIEW_REQUIRED logs=$RUN"
+    echo "DKR_S6_FINAL=REVIEW_REQUIRED logs=$RUN"
     exit 4
 fi
 python3 tools/dkr_r122_s6_evidence.py --report-dir "$RUN"

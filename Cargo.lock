@@ -692,13 +692,14 @@ checksum = "ade8366b8bd5ba243f0a58f036cc0ca8a2f069cff1a2351ef1cac6b083e16fc0"
 [[package]]
 name = "candle-core"
 version = "0.11.1"
-source = "git+https://github.com/haricot/candle.git?rev=d99f6d77e507688bd9e4b654fbe20ac9e18238fc#d99f6d77e507688bd9e4b654fbe20ac9e18238fc"
+source = "git+https://github.com/haricot/candle.git?rev=08a36261a6b4dd695c291d37c028b16f019fae46#08a36261a6b4dd695c291d37c028b16f019fae46"
 dependencies = [
  "accelerate-src",
  "byteorder",
  "candle-kernels",
  "candle-metal-kernels",
  "cudarc",
+ "dkr-kernel-registry",
  "float8",
  "gemm",
  "half",
@@ -715,6 +716,8 @@ dependencies = [
  "rand_distr 0.5.1",
  "rayon",
  "safetensors",
+ "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.18",
  "tokenizers 0.23.2",
  "yoke",
@@ -725,7 +728,7 @@ dependencies = [
 [[package]]
 name = "candle-flash-attn-v3"
 version = "0.11.1"
-source = "git+https://github.com/haricot/candle.git?rev=d99f6d77e507688bd9e4b654fbe20ac9e18238fc#d99f6d77e507688bd9e4b654fbe20ac9e18238fc"
+source = "git+https://github.com/haricot/candle.git?rev=08a36261a6b4dd695c291d37c028b16f019fae46#08a36261a6b4dd695c291d37c028b16f019fae46"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -738,7 +741,7 @@ dependencies = [
 [[package]]
 name = "candle-kernels"
 version = "0.11.1"
-source = "git+https://github.com/haricot/candle.git?rev=d99f6d77e507688bd9e4b654fbe20ac9e18238fc#d99f6d77e507688bd9e4b654fbe20ac9e18238fc"
+source = "git+https://github.com/haricot/candle.git?rev=08a36261a6b4dd695c291d37c028b16f019fae46#08a36261a6b4dd695c291d37c028b16f019fae46"
 dependencies = [
  "cudaforge",
 ]
@@ -746,7 +749,7 @@ dependencies = [
 [[package]]
 name = "candle-metal-kernels"
 version = "0.11.1"
-source = "git+https://github.com/haricot/candle.git?rev=d99f6d77e507688bd9e4b654fbe20ac9e18238fc#d99f6d77e507688bd9e4b654fbe20ac9e18238fc"
+source = "git+https://github.com/haricot/candle.git?rev=08a36261a6b4dd695c291d37c028b16f019fae46#08a36261a6b4dd695c291d37c028b16f019fae46"
 dependencies = [
  "block2",
  "half",
@@ -761,7 +764,7 @@ dependencies = [
 [[package]]
 name = "candle-nn"
 version = "0.11.1"
-source = "git+https://github.com/haricot/candle.git?rev=d99f6d77e507688bd9e4b654fbe20ac9e18238fc#d99f6d77e507688bd9e4b654fbe20ac9e18238fc"
+source = "git+https://github.com/haricot/candle.git?rev=08a36261a6b4dd695c291d37c028b16f019fae46#08a36261a6b4dd695c291d37c028b16f019fae46"
 dependencies = [
  "accelerate-src",
  "candle-core",
@@ -1866,6 +1869,14 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.114",
+]
+
+[[package]]
+name = "dkr-kernel-registry"
+version = "0.1.0"
+source = "git+https://github.com/haricot/candle.git?rev=08a36261a6b4dd695c291d37c028b16f019fae46#08a36261a6b4dd695c291d37c028b16f019fae46"
+dependencies = [
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -4139,6 +4150,8 @@ version = "0.10.0"
 dependencies = [
  "anyhow",
  "candle-core",
+ "cudaforge",
+ "dkr-kernel-registry",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -4196,6 +4209,7 @@ dependencies = [
  "dispatch2",
  "float8",
  "half",
+ "mistralrs-kernel-runtime",
  "mistralrs-metal-compile",
  "objc2-foundation",
  "objc2-metal",
