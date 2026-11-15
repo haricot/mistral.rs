@@ -3094,3 +3094,6 @@ mod tests {
 
 #[cfg(all(test,feature="dkr-sm61-experimental"))]
 mod dkr_s6_native;
+
+#[cfg(all(test,feature="dkr-sm61-experimental"))]
+mod dkr_s683;
