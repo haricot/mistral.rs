@@ -62,18 +62,27 @@ BIN="$CARGO_TARGET_DIR/debug/examples/dkr_s684_model"
 sha256sum "$BIN" > "$RUN/binary.sha256"
 printf '%s\n' "$HEAD" > "$RUN/revision"
 nvidia-smi --query-gpu=name,compute_cap,driver_version,memory.total,memory.used --format=csv > "$RUN/gpu-before.csv"
-set +e
+# In a conditional pipeline ERR/errexit cannot terminate before the
+# per-leg status is saved. Preserve complete logs; omit huge JSON/template
+# lines ONLY from the terminal, not the evidence files.
 for mode in legacy external; do
     export DKR_S684_MODE="$mode" DKR_S684_OUTPUT="$RUN/$mode.json"
     if [[ "$mode" == external ]]; then export CANDLE_DKR_S31_DIR="$NATIVE"; else unset CANDLE_DKR_S31_DIR; fi
-    "$BIN" 2>&1 | tee "$RUN/$mode.log"
-    codes=("${PIPESTATUS[@]}")
+    if "$BIN" 2>&1 | tee "$RUN/$mode.log" | awk '!/DKR_RUNTIME_EVIDENCE / && !/Discovered and using GGUF chat template/ {print; fflush()}'; then
+        codes=("${PIPESTATUS[@]}")
+    else
+        codes=("${PIPESTATUS[@]}")
+    fi
     rc="${codes[0]}"
-    [[ "${codes[1]}" == 0 ]] || rc=3
+    [[ "${codes[1]}" == 0 && "${codes[2]}" == 0 ]] || rc=3
     printf '%s\n' "$rc" > "$RUN/$mode.exit"
     echo "DKR_S684_${mode}_EXIT=$rc"
 done
-set -e
+echo "DKR_S684_RUN=$RUN"
+if [[ "$(cat "$RUN/legacy.exit")" != 0 || "$(cat "$RUN/external.exit")" != 0 ]]; then
+    echo "DKR_S684=REVIEW_REQUIRED (execution failure; both logs preserved)"
+    exit 4
+fi
 sha256sum -c "$RUN/binary.sha256"
 sha256sum -c "$RUN/model.sha256"
 if [[ -s "$RUN/template.sha256" ]]; then sha256sum -c "$RUN/template.sha256"; fi

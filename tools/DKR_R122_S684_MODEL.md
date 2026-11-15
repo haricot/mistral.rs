@@ -37,3 +37,11 @@ and loading follow the symlink normally. The normal GGUF registry includes
 lfm3, phi3 and llama, but does not list a Nemotron-specific architecture.
 Prefer the cached LFM3 text model for this smoke campaign; verify actual
 metadata and model loader compatibility during execution.
+
+S6.8.4-A.1: the engine rejects max_tokens=0 even on raw requests. Use
+1 (raw response still uses return_raw_logits). Preserve reasoning-only
+responses and compare both output channels; keep all token and logit
+thresholds. Count external submissions only with nonempty digest, not
+embedded launches. Both legs are now guarded by a conditional pipeline
+so the ERR trap cannot abort the second leg. Full logs remain on disk;
+terminal omits the large telemetry and chat-template lines.

@@ -8,7 +8,8 @@ use std::{path::Path, time::Instant};
 
 fn request(text:&str, raw:bool)->RequestBuilder {
     RequestBuilder::new().set_deterministic_sampler()
-        .set_sampler_max_len(if raw { 0 } else { 24 })
+        // The engine validates max_tokens even for raw-logit requests.
+        .set_sampler_max_len(if raw { 1 } else { 24 })
         .set_sampler_ignore_eos(!raw)
         .return_logprobs(!raw)
         .set_sampler_topn_logprobs(if raw {0}else{5})
@@ -46,10 +47,14 @@ async fn generation(model:&Model,text:&str)->Result<Value>{
     let probs=choice.logprobs.as_ref().and_then(|p|p.content.as_ref()).context("missing generated logprobs")?;
     ensure!(response.usage.completion_tokens==24 && probs.len()==24,"incomplete 24-token generation");
     ensure!(probs.iter().all(|p|p.logprob.is_finite()),"nonfinite generation logprob");
-    let content=choice.message.content.as_ref().context("missing generated text")?;
+    // Thinking-enabled templates may place the entire 24-token budget in
+    // reasoning_content. Preserve both channels; do not require final prose.
+    let content=&choice.message.content;
+    let reasoning=&choice.message.reasoning_content;
+    ensure!(content.is_some() || reasoning.is_some(),"both response channels missing");
     // Raw generated token spellings and byte sequences, not retokenized text.
     let tokens=probs.iter().map(|p|json!({"token":p.token,"bytes":p.bytes,"logprob":p.logprob})).collect::<Vec<_>>();
-    Ok(json!({"content":content,"finish_reason":choice.finish_reason,"tokens":tokens,
+    Ok(json!({"content":content,"reasoning_content":reasoning,"finish_reason":choice.finish_reason,"tokens":tokens,
         "usage":response.usage,"wall_seconds":wall}))
 }
 
@@ -96,10 +101,15 @@ async fn main()->Result<()>{
     ];
     let mut results=serde_json::Map::new();
     for (key,prompt) in prompts {
-        let a=raw(&model,&prompt).await?;
-        let b=raw(&model,&prompt).await?;
-        let first=generation(&model,&prompt).await?;
-        let second=generation(&model,&prompt).await?;
+        eprintln!("DKR_S684_CASE_BEGIN {key} raw=1");
+        let a=raw(&model,&prompt).await.with_context(||format!("{key} raw 1"))?;
+        eprintln!("DKR_S684_CASE_BEGIN {key} raw=2");
+        let b=raw(&model,&prompt).await.with_context(||format!("{key} raw 2"))?;
+        eprintln!("DKR_S684_CASE_BEGIN {key} generation=1");
+        let first=generation(&model,&prompt).await.with_context(||format!("{key} generation 1"))?;
+        eprintln!("DKR_S684_CASE_BEGIN {key} generation=2");
+        let second=generation(&model,&prompt).await.with_context(||format!("{key} generation 2"))?;
+        eprintln!("DKR_S684_CASE_PASS {key}");
         results.insert(key.into(),json!({"raw":[a,b],"generation":[first,second]}));
     }
     std::fs::write(dest,serde_json::to_vec(&json!({"schema":"DKR-S684-MODEL-V1",

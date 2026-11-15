@@ -46,7 +46,7 @@ def logits(a,b):
          f"raw logits mismatch rms={rms} max={maximum} cosine={cosine} argmax={ax}/{ay}")
     return {"rms":rms,"max_abs":maximum,"cosine":cosine,"argmax":ax,"vocab":len(x)}
 def generated(a,b):
-    need(a["content"]==b["content"] and a["finish_reason"]==b["finish_reason"],"greedy output differs")
+    need(a["content"]==b["content"] and a["reasoning_content"]==b["reasoning_content"] and a["finish_reason"]==b["finish_reason"],"greedy output differs")
     need(a["usage"]["prompt_tokens"]==b["usage"]["prompt_tokens"],"decode prompt count differs")
     need(a["usage"]["completion_tokens"]==b["usage"]["completion_tokens"]==24,"decode token count")
     need(len(a["tokens"])==len(b["tokens"])==24,"decode logprob inventory")
@@ -80,7 +80,11 @@ def evidence(root,native):
         need(ev["processes"]==1,mode+" snapshot inventory")
         rows=ev["rows"]
         need(not any(r[k] for r in rows for k in ("adapter_error","prepare_error","rejected")),mode+" runtime error")
-        native_rows=[r for r in rows if r["abi"]=="candle.native.ptx.v1" and r["submitted"]]
+        # Legacy bundled launchers also increment submitted, with empty digest
+        # and target_cc=0. Only digest-bearing rows attest external PTX.
+        native_rows=[r for r in rows if r["abi"]=="candle.native.ptx.v1" and r["submitted"] and r["sha256"]]
+        embedded_rows=[r for r in rows if r["abi"]=="candle.native.ptx.v1" and r["submitted"] and not r["sha256"]]
+        need(all(r["target_cc"]==0 for r in embedded_rows),"invalid embedded provenance")
         if mode=="legacy": need(not native_rows,"legacy native contamination")
         else:
             need(native_rows,"native provider not exercised")
@@ -90,6 +94,7 @@ def evidence(root,native):
                 need(r["sha256"]==m["sha256"] and r["target_cc"]==61,"native provenance differs")
             need(not any(r["fallback_selected"] for r in rows if r["abi"]=="candle.native.ptx.v1"),"external native fallback")
         out[mode]={"native_submissions":sum(r["submitted"] for r in native_rows),
+                   "embedded_submissions":sum(r["submitted"] for r in embedded_rows),
                    "native_families":sorted({r["operation"] for r in native_rows}),
                    "typed_success_rows":ev["typed_adapter_success_rows"]}
     return out
