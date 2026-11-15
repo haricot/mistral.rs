@@ -19,3 +19,11 @@ exception is not reproducible or symbols are missing, keep it inconclusive.
 After reviewing the stack, design a minimal legacy-only correction and
 separate numeric qualification. Do not repin Candle or rebuild on speculation.
 The report lists tests without telemetry, not necessarily GPU tests.
+
+## S6.7 recovery after reboot
+
+The original archive records `/tmp/dkr-r122-s4.rkBSDR` as workspace root.
+The diagnostic explicitly remaps that root to the current worktree using
+`--workspace-remap "$ROOT"`; only tooling files may differ from the archived
+revision, as checked by the existing source guard. The archive and original
+PTX remain unchanged. A reboot does not require recompilation.

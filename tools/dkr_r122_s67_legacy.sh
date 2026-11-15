@@ -24,7 +24,9 @@ df -h /tmp "$OUT"
 # nextest handles archive remapping and extraction. List only, no compilation.
 EXTRACT="$(mktemp -d /tmp/dkr-s67-archive.XXXXXX)"
 trap 'rm -rf -- "$EXTRACT"' EXIT
+# The original /tmp worktree may have vanished after reboot.
 cargo nextest list --archive-file "$ARCHIVE" --extract-to "$EXTRACT" \
+    --workspace-remap "$ROOT" \
     --list-type binaries-only --message-format json > "$OUT/binaries.json"
 mapfile -d '' BINS < <(find "$EXTRACT/target" -type f -name 'mistralrs_core-*' -executable -print0)
 [[ "${#BINS[@]}" == 1 ]] || { echo "Expected exactly one archived core test binary, got ${#BINS[@]}"; exit 3; }
