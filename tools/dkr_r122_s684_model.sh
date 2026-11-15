@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
 # S6.8.4-A: model parity on the same executable; no production promotion.
-set -euo pipefail
+set -Eeuo pipefail
+trap 'rc=$?; printf "DKR_S684_ERROR line=%s exit=%s command=%s\n" "$LINENO" "$rc" "$BASH_COMMAND" >&2; exit "$rc"' ERR
 cd "$(dirname "$0")/.."
 ROOT="$(pwd -P)"
 : "${DKR_S6_ORIGINAL_REPO:?set original qualified checkout}"
 : "${DKR_S684_GGUF:?set absolute local single-file GGUF path}"
 ORIG="$(realpath "$DKR_S6_ORIGINAL_REPO")"
-export DKR_S684_GGUF="$(realpath "$DKR_S684_GGUF")"
-[[ -f "$DKR_S684_GGUF" && "$ORIG" != "$ROOT" ]]
-[[ "$DKR_S684_GGUF" == *.gguf ]]
+# Keep the snapshot filename and directory; HF cache files are symlinks
+# to extensionless blobs. Only use the resolved path for diagnostics.
+export DKR_S684_GGUF="$(realpath -s -- "$DKR_S684_GGUF")"
+[[ -f "$DKR_S684_GGUF" ]] || { echo "DKR_S684_ERROR missing model: $DKR_S684_GGUF" >&2; exit 3; }
+[[ "$ORIG" != "$ROOT" ]] || { echo "DKR_S684_ERROR use separate worktree" >&2; exit 3; }
+[[ "$DKR_S684_GGUF" == *.gguf ]] || { echo "DKR_S684_ERROR choose the named GGUF snapshot, not its blob" >&2; exit 3; }
+printf 'DKR_S684_MODEL_PATH=%s\nDKR_S684_MODEL_TARGET=%s\n' "$DKR_S684_GGUF" "$(realpath -- "$DKR_S684_GGUF")"
 git diff --quiet HEAD -- . || { echo "dirty tracked tree"; exit 3; }
 git merge-base --is-ancestor d3dff22d83ab48c046539818c0a1f1fd597240f2 HEAD
 git diff --quiet d3dff22d83ab48c046539818c0a1f1fd597240f2 HEAD -- . ':!tools/**' ':!mistralrs/examples/advanced/dkr_s684_model/**' ':!mistralrs/Cargo.toml'
@@ -38,7 +43,7 @@ flock -n 9
 python3 tools/dkr_r122_s4_dependency_closure.py --locked --output "$RUN/closure.json"
 sha256sum "$DKR_S684_GGUF" > "$RUN/model.sha256"
 if [[ -n "${DKR_S684_CHAT_TEMPLATE:-}" ]]; then
-    export DKR_S684_CHAT_TEMPLATE="$(realpath "$DKR_S684_CHAT_TEMPLATE")"
+    export DKR_S684_CHAT_TEMPLATE="$(realpath -s -- "$DKR_S684_CHAT_TEMPLATE")"
     sha256sum "$DKR_S684_CHAT_TEMPLATE" > "$RUN/template.sha256"
 fi
 echo "DKR_S684_PREFLIGHT=PASS model=$DKR_S684_GGUF"

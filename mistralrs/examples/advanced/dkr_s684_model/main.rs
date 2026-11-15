@@ -59,8 +59,11 @@ async fn main()->Result<()>{
     let mode=std::env::var("DKR_S684_MODE")?;
     ensure!(mode=="legacy"||mode=="external","invalid A/B mode");
     ensure!(std::env::var_os("CANDLE_DKR_S31_DIR").is_some()==(mode=="external"),"native provider mode mismatch");
-    let gguf=std::fs::canonicalize(std::env::var("DKR_S684_GGUF")?)?;
-    ensure!(gguf.is_file(),"GGUF file missing");
+    // A Hugging Face snapshot path is a named symlink to a content blob.
+    // Preserve that filename and parent for the local GGUF loader.
+    let gguf=std::path::PathBuf::from(std::env::var("DKR_S684_GGUF")?);
+    ensure!(gguf.is_absolute() && gguf.is_file(),"absolute local GGUF file missing");
+    ensure!(gguf.extension().and_then(|s|s.to_str())==Some("gguf"),"expected named GGUF file");
     let dest=std::env::var("DKR_S684_OUTPUT")?;
     let parent=gguf.parent().context("GGUF parent")?.to_str().context("non-UTF8 GGUF path")?;
     let filename=gguf.file_name().context("GGUF filename")?.to_str().context("non-UTF8 filename")?;

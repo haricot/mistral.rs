@@ -30,3 +30,10 @@ broader model matrix, performance remain open.
 The example uses existing APIs; it still needs compilation and local GPU
 execution. Model raw output may contain model-specific unsupported shapes
 or logprob semantics; fail rather than relax the qualification silently.
+
+Hugging Face cache: select the named `snapshots/<revision>/*.gguf` file,
+not its extensionless blob. Keep the lexical path in Bash and Rust; hashing
+and loading follow the symlink normally. The normal GGUF registry includes
+lfm3, phi3 and llama, but does not list a Nemotron-specific architecture.
+Prefer the cached LFM3 text model for this smoke campaign; verify actual
+metadata and model loader compatibility during execution.
