@@ -6,6 +6,7 @@ ROOT="$(pwd -P)"
 : "${DKR_S6_ORIGINAL_REPO:?set to original qualified checkout}"
 ORIG="$(realpath "$DKR_S6_ORIGINAL_REPO")"
 [[ "$ORIG" != "$ROOT" ]]
+git diff --quiet HEAD -- . || { echo "Tracked source differs from HEAD"; exit 3; }
 CACHE="$ORIG/target/dkr-cuda-cache/sm61"
 export MISTRALRS_CUDA_BUILD_ROOT="$CACHE"
 for component in quant core paged-attn; do
@@ -54,14 +55,6 @@ if ! git diff --quiet "$BASE" HEAD -- kernel-packages/cuda mistralrs-kernel-runt
 fi
 python3 tools/dkr_s9_ptx_manifest_audit.py --root "$TYPED" --cc 61
 df -h "$ORIG/target" /tmp
-echo "DKR_S6_PREFLIGHT=PASS run=$RUN"
-if [[ "${1:-}" == "--preflight" ]]; then exit 0; fi
-[[ "${DKR_APPROVE_S683:-0}" == 1 ]] || { echo "Set DKR_APPROVE_S683=1 for grouped build"; exit 2; }
-export DKR_KERNEL_PACKAGES="$TYPED"
-export DKR_TELEMETRY=1 CANDLE_DKR_TRACE=1 MISTRALRS_DKR_ROUTED_QUANT=1
-# Test the actual GGUF paths rather than an inherited dequantize-all override.
-unset CANDLE_DEQUANTIZE_ALL CANDLE_DEQUANTIZE_ALL_F16
-NATIVE="$RUN/native-sm61"
 # Reuse only the exact S6.8 sealed native and prior qualification artifacts.
 SEALED="$ORIG/target/dkr-s68/promotion-gate.json"
 QUALIFIED="$ORIG/target/dkr-r122-s6/9ce68d5cc4e1"
@@ -69,6 +62,13 @@ NATIVE="$ORIG/target/dkr-r122-s6/7b3b19cf8b62/native-sm61"
 python3 tools/dkr_r122_s683_audit.py --self-test
 python3 tools/dkr_r122_s683_audit.py --verify-seal "$SEALED" --prior "$QUALIFIED" --native-root "$NATIVE"
 echo "DKR_S683_NATIVE_PTX=REUSED root=$NATIVE"
+echo "DKR_S683_PREFLIGHT=PASS run=$RUN"
+if [[ "${1:-}" == "--preflight" ]]; then exit 0; fi
+[[ "${DKR_APPROVE_S683:-0}" == 1 ]] || { echo "Set DKR_APPROVE_S683=1 for grouped build"; exit 2; }
+export DKR_KERNEL_PACKAGES="$TYPED"
+export DKR_TELEMETRY=1 CANDLE_DKR_TRACE=1 MISTRALRS_DKR_ROUTED_QUANT=1
+# Test the actual GGUF paths rather than an inherited dequantize-all override.
+unset CANDLE_DEQUANTIZE_ALL CANDLE_DEQUANTIZE_ALL_F16
 printf '%s\n' "$NATIVE" > "$RUN/native-root.txt"
 # Fingerprint archive inputs; failed archive is never used.
 export CARGO_TARGET_DIR="$ORIG/target/dkr-r122-s6-cargo"

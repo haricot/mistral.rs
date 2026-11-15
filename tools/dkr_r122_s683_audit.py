@@ -96,8 +96,7 @@ def telemetry(run,native):
             need(ev["native_external_submission_rows"]==0,"legacy external contamination")
             mmq=[r for r in rows if r["operation"]=="fast_mmq" and r["fallback_selected"]]
             mmv=[r for r in rows if r["operation"]=="fast_mmvq" and r["fallback_selected"]]
-            # 210 sequential MMQ (including model-width? computed from inventory),
-            # plus concurrent cases, each executed twice; derive exact counts.
+            # Derive exact route counts from the inventory, two launches per case.
             _,inv=inventory()
             expected_mmq=2*sum(v[3]>8 for v in inv.values())
             expected_mmv=2*sum(v[3]<=8 for v in inv.values())
@@ -142,6 +141,9 @@ def main():
     if not a.run or not a.native_root: p.error("--run and --native-root required")
     root=a.run
     native_audit(a.native_root)
+    closure=read(root/"closure.json")
+    need(closure["candidate"]==PIN and closure["cudarc_version"]=="0.19.10","new dependency closure mismatch")
+    need(sha(root/"tests.tar.zst")== (root/"archive.sha256").read_text().split()[0],"archive hash changed")
     evidence=paired(read(root/"legacy.json"),read(root/"external.json"))
     ev=telemetry(root,a.native_root)
     report={"status":"EXTENDED_GGUF_MATRIX_PASS","numeric":evidence,"telemetry":ev,
