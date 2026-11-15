@@ -59,6 +59,29 @@ fn dkr_s6_native_ab_gpu() -> anyhow::Result<()> {
         let q=QTensor::quantize_onto(&w,GgmlDType::Q8_0,&dev)?;
         save(&mut out,&format!("moe_gguf/{prefill}"),candle_nn::moe::moe_gemm_gguf(&x,&q,&None,&ids,&experts,1,prefill,DType::F32)?)?;
     }
+    // Regression for the bounded SIMT scan: empty experts, non-power-of-two
+    // expert counts, maximum supported count, permuted token IDs and N tail.
+    let sx=Tensor::from_vec((0..4*32).map(|i| (i/32+1) as f32).collect::<Vec<_>>(),(4,32),&dev)?.to_dtype(DType::F16)?;
+    let si=Tensor::new(&[1u32,3,0,2],&dev)?;
+    for e in [3usize,33,1024] {
+        let last=e-1;
+        let se=Tensor::new(&[0u32,0,last as u32,last as u32],&dev)?;
+        let sw=Tensor::from_vec((0..e*5*32).map(|i| ((i/(5*32))%4+i/32%5+1) as f32/8.).collect::<Vec<_>>(),(e,5,32),&dev)?.to_dtype(DType::F16)?;
+        let expected=(0..4).flat_map(|token| (0..5).map(move |n| {
+            let expert=if token%2==0 {last} else {0};
+            ((token+1)*32*(expert%4+n+1)) as f32/8.
+        })).collect::<Vec<_>>();
+        for prefill in [false,true] {
+            let result=candle_nn::moe::moe_gemm(&sx,&sw,&None,&si,&se,1,prefill)?;
+            anyhow::ensure!(result.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?==expected,
+                "SIMT scan regression experts={e} prefill={prefill}");
+        }
+    }
+    // Exact upper bound enforced by both providers, without launching an invalid scan.
+    let sw=Tensor::ones((1025,5,32),DType::F16,&dev)?;
+    let se=Tensor::new(&[0u32,0,1,1],&dev)?;
+    anyhow::ensure!(candle_nn::moe::moe_gemm(&sx,&sw,&None,&si,&se,1,true).is_err(),
+        "SIMT scan accepted >1024 experts");
     dev.synchronize()?;
     std::fs::write(dest,serde_json::to_vec(&out)?)?;
     Ok(())

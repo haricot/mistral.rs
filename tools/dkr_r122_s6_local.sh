@@ -65,7 +65,16 @@ NATIVE="$RUN/native-sm61"
 if [[ -n "${DKR_S6_REUSE_NATIVE_RUN:-}" ]]; then
     PRIOR="$(realpath "$DKR_S6_REUSE_NATIVE_RUN")"
     [[ "$PRIOR" == "$ORIG/target/dkr-r122-s6/"* ]] || { echo "Invalid prior run path"; exit 3; }
-    [[ "$(jq -er .candidate "$PRIOR/closure.json")" == "$(jq -er .candidate "$RUN/closure.json")" ]] || { echo "Prior Candle candidate differs"; exit 3; }
+    PRIOR_PIN="$(jq -er .candidate "$PRIOR/closure.json")"
+    CURRENT_PIN="$(jq -er .candidate "$RUN/closure.json")"
+    if [[ "$PRIOR_PIN" != "$CURRENT_PIN" ]]; then
+        # Exact reviewed transition: candidate_gate already validates the
+        # three-file delta and unchanged CUDA device code prefix.
+        [[ "$PRIOR_PIN" == b231d3c4e07b04c0df788ee252979b1890430dd6 &&
+           "$CURRENT_PIN" == 63217e3a0ea8a91b0630acbcbc047c471f43761a ]] ||
+           { echo "Prior Candle candidate differs"; exit 3; }
+        echo "DKR_S67_NATIVE_REUSE=HOST_ONLY_DELTA device source unchanged"
+    fi
     grep -Fxq 'CANDLE_DKR_S31_PACKAGES=STAGED target=sm61 families=25' "$PRIOR/native-build.log"
     NATIVE="$PRIOR/native-sm61"
     python3 tools/dkr_r122_s6_evidence.py --native-root "$NATIVE"
@@ -101,4 +110,5 @@ CANDLE_DKR_S31_DIR="$NATIVE" DKR_S6_NATIVE_OUTPUT="$RUN/native-external.json" \
     cargo nextest run --archive-file "$ARCHIVE" --run-ignored=all --no-fail-fast --no-capture --test-threads=1 \
     -E "$FILTER" 2>&1 | tee "$RUN/external.log"
 python3 tools/dkr_r122_s6_evidence.py --report-dir "$RUN"
-echo "DKR_S6_LOCAL_SMOKE=PASS report=$RUN/qualification.json"
+python3 tools/dkr_r122_s67_final.py --report-dir "$RUN" --native-root "$NATIVE"
+echo "DKR_S67_FINAL_SMOKE=PASS report=$RUN/qualification-s67.json"
