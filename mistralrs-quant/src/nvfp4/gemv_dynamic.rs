@@ -206,6 +206,7 @@ mod tests {
     #[test]
     #[ignore = "requires SM61 NVFP4 GEMV PTX and CUDA GPU"]
     fn dkr_nvfp4_gemv_gpu() -> Result<()> {
+        let _evidence = mistralrs_kernel_runtime::RuntimeEvidenceGuard;
         let dev = Device::new_cuda(0)?;
         let k = 32usize;
         let n = 5usize;

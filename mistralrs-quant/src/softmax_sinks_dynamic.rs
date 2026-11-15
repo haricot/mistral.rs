@@ -183,6 +183,7 @@ mod tests {
     #[test]
     #[ignore = "requires CUDA and externally built reduction packages"]
     fn dkr_softmax_sinks_gpu() -> Result<()> {
+        let _evidence = mistralrs_kernel_runtime::RuntimeEvidenceGuard;
         let device = Device::new_cuda(0)?;
         for dtype in [DType::F16, DType::BF16, DType::F32] {
             for columns in [3, 64, 65, 128, 129, 256, 257, 512, 513] {

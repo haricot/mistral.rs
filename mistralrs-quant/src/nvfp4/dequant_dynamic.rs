@@ -211,6 +211,7 @@ mod tests {
     #[test]
     #[ignore = "requires prebuilt FP4 dequant PTX on an SM61 GPU"]
     fn dkr_fp4_dequant_gpu() -> Result<()> {
+        let _evidence = mistralrs_kernel_runtime::RuntimeEvidenceGuard;
         let dev = Device::new_cuda(0)?;
         let rows = 2usize;
         let k = 32usize;

@@ -162,6 +162,7 @@ mod tests {
     #[test]
     #[ignore = "requires external PTX and a CUDA device"]
     fn dkr_weighted_reduce_gpu() -> Result<()> {
+        let _evidence = mistralrs_kernel_runtime::RuntimeEvidenceGuard;
         let device = Device::new_cuda(0)?;
         let values: Vec<f32> = (0..42)
             .map(|i| ((i * 17 % 31) as i32 - 15) as f32 / 8.0)

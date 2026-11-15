@@ -149,6 +149,7 @@ mod tests {
     #[test]
     #[ignore = "requires staged scalar FP8 E4M3 PTX on an SM61 GPU"]
     fn dkr_fp8_cast_gpu() -> Result<()> {
+        let _evidence = mistralrs_kernel_runtime::RuntimeEvidenceGuard;
         let device = Device::new_cuda(0)?;
         // Exactly representable values and saturation endpoints.
         let values = vec![

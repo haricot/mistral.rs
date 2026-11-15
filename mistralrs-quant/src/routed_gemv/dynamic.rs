@@ -502,12 +502,14 @@ mod tests {
     #[test]
     #[ignore = "requires SM61 routed-quant PTX and a CUDA GPU"]
     fn dkr_routed_quant_gemv_gpu() -> Result<()> {
+        let _evidence = mistralrs_kernel_runtime::RuntimeEvidenceGuard;
         check_stage(2, 1)
     }
 
     #[test]
     #[ignore = "requires SM61 routed-quant PTX and a CUDA GPU"]
     fn dkr_routed_quant_gemm_gpu() -> Result<()> {
+        let _evidence = mistralrs_kernel_runtime::RuntimeEvidenceGuard;
         check_stage(17, TOPK)
     }
 

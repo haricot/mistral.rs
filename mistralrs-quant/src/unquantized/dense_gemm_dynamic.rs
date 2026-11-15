@@ -174,6 +174,7 @@ mod tests {
     #[test]
     #[ignore = "requires external SM61 DKR dense GEMM PTX"]
     fn dkr_dense_gemm_gpu() -> Result<()> {
+        let _evidence = mistralrs_kernel_runtime::RuntimeEvidenceGuard;
         let dev = Device::new_cuda(0)?;
         for dtype in [DType::F16, DType::BF16, DType::F32] {
             let (m, n, k) = (3usize, 19usize, 65usize);

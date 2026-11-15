@@ -16,7 +16,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = "d99f6d77e507688bd9e4b654fbe20ac9e18238fc"
-CANDIDATE = "b231d3c4e07b04c0df788ee252979b1890430dd6"
+CANDIDATE = "63217e3a0ea8a91b0630acbcbc047c471f43761a"
 INTEGRATION_BRANCH = "feature/dkr-r122-s35-shared-registry"
 CANDLE_PINS = ("candle-core", "candle-nn", "candle-flash-attn-v3", "candle-metal-kernels")
 MMQ_FAMILIES = {"mmq_quantize"} | {f"mmq_instance_{codec}" for codec in (
@@ -51,11 +51,12 @@ def candidate_gate(candle):
         raise ValueError("Candle tracked tree is dirty")
     git(candle, "merge-base", "--is-ancestor", BASE, CANDIDATE)
     changed = git(candle, "diff", "--name-only", BASE, CANDIDATE).splitlines()
-    # Only the reviewed warp-local tail correction and revision marker are allowed.
+    # Reviewed GGUF warp tail and SIMT host-only scan correction.
     changed_cuda = [p for p in changed if p.startswith("candle-kernels/src/")
                     and Path(p).suffix in {".cu", ".cuh", ".h", ".hpp"}]
     allowed = "candle-kernels/src/moe/moe_gguf.cu"
-    if changed_cuda != [allowed]:
+    simt = "candle-kernels/src/moe/moe_simt_f16.cu"
+    if changed_cuda != [allowed, simt]:
         raise ValueError(f"unexpected CUDA source modifications: {changed_cuda}")
     original = git(candle, "show", f"{BASE}:{allowed}")
     expected = original.replace("    __syncthreads();",
@@ -64,6 +65,16 @@ def candidate_gate(candle):
         'constexpr int MATRIX_ROW_PADDING = 512;\n\n// DKR package revision marker for the reviewed warp-local tail synchronization.\nextern "C" __global__ void candle_dkr_moe_gguf_warp_tail_v1() {}')
     if (candle / allowed).read_text().strip() != expected.strip():
         raise ValueError("GGUF CUDA source differs from reviewed synchronization correction")
+    prior = "b231d3c4e07b04c0df788ee252979b1890430dd6"
+    delta = git(candle, "diff", "--name-only", prior, CANDIDATE).splitlines()
+    if set(delta) != {simt, "candle-kernels/src/ffi.rs", "candle-nn/src/moe.rs"}:
+        raise ValueError(f"unexpected S6.7 Candle delta: {delta}")
+    before = git(candle, "show", f"{prior}:{simt}")
+    after = (candle / simt).read_text()
+    if before.split('extern "C" void moe_gemm_simt_f16(', 1)[0] != after.split('extern "C" int moe_gemm_simt_f16(', 1)[0]:
+        raise ValueError("SIMT device source changed")
+    if after.strip() != git(candle, "show", f"{CANDIDATE}:{simt}").strip():
+        raise ValueError("SIMT source differs from pinned revision")
     core = tomllib.loads((candle / "candle-core/Cargo.toml").read_text())
     nn = tomllib.loads((candle / "candle-nn/Cargo.toml").read_text())
     if CANDLE_FEATURE not in core["features"] or f"candle/{CANDLE_FEATURE}" not in nn["features"].get(CANDLE_FEATURE, []):

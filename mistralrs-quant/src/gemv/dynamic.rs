@@ -188,6 +188,7 @@ mod tests {
     #[test]
     #[ignore = "requires externally built DKR dense-GEMV PTX and an SM61 CUDA device"]
     fn dkr_dense_gemv_gpu() -> Result<()> {
+        let _evidence = mistralrs_kernel_runtime::RuntimeEvidenceGuard;
         let device = Device::new_cuda(0)?;
         for dtype in [DType::F16, DType::BF16, DType::F32] {
             for batch in [1, 3, 8] {

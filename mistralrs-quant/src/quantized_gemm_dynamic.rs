@@ -254,6 +254,7 @@ mod tests {
     #[test]
     #[ignore = "requires prebuilt SM61 DKR quantized GEMM PTX"]
     fn dkr_quantized_gemm_gpu() -> Result<()> {
+        let _evidence = mistralrs_kernel_runtime::RuntimeEvidenceGuard;
         let dev = Device::new_cuda(0)?;
         let (m, n, k) = (17usize, 19usize, 64usize);
         for dtype in [DType::F16, DType::BF16] {

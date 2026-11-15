@@ -305,6 +305,7 @@ mod tests {
     #[test]
     #[ignore = "requires SM61 DKR quant-gemv PTX and a CUDA GPU"]
     fn dkr_quantized_gemv_gpu() -> Result<()> {
+        let _evidence = mistralrs_kernel_runtime::RuntimeEvidenceGuard;
         let dev = Device::new_cuda(0)?;
         for dtype in [DType::F16, DType::BF16] {
             for m in [1usize, 3] {
