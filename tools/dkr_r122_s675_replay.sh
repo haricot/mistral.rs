@@ -19,6 +19,10 @@ export DKR_KERNEL_PACKAGES="$ORIG/kernel-packages/build/cuda/sm61"
 export DKR_TELEMETRY=1 MISTRALRS_DKR_ROUTED_QUANT=1
 unset CANDLE_DEQUANTIZE_ALL CANDLE_DEQUANTIZE_ALL_F16
 # Independent B even when A fails; no Cargo or NVCC build.
+if [[ "${1:-}" == "--trace-only" ]]; then
+    [[ "$(cat "$OUT/external.exit")" == 0 && -s "$OUT/native-external.json" && -s "$OUT/external.log" ]]
+    echo "DKR_S675_EXTERNAL_EXIT=0 (preserved)"
+else
 set +e
 CANDLE_DKR_S31_DIR="$NATIVE" CANDLE_DKR_TRACE=1 DKR_S6_NATIVE_OUTPUT="$OUT/native-external.json" \
     cargo nextest run --archive-file "$RUN/tests.tar.zst" --workspace-remap "$ROOT" \
@@ -29,6 +33,7 @@ B_RC="${PIPESTATUS[0]}"
 set -e
 printf '%s\n' "$B_RC" > "$OUT/external.exit"
 echo "DKR_S675_EXTERNAL_EXIT=$B_RC"
+fi
 # GDB trace: stop on the first legacy SIMT invocation then instrument only
 # Runtime API calls in that wrapper; don't call CUDA from the debugger.
 command -v gdb
@@ -57,7 +62,7 @@ class ReturnTrace(gdb.FinishBreakpoint):
         self.name = name
     def stop(self):
         # x86-64 SysV int return register, also works without cudart DWARF.
-        print("DKR_S675_API_RETURN %s status=%d" % (self.name, int(gdb.parse_and_eval("(int)$eax"))))
+        print("DKR_S675_API_RETURN %s status=%d" % (self.name, int(gdb.newest_frame().read_register("eax")) & 0xffffffff))
         return False
 class EntryTrace(gdb.Breakpoint):
     def __init__(self, name):
@@ -67,7 +72,7 @@ class EntryTrace(gdb.Breakpoint):
         print("DKR_S675_API_ENTER "+self.name)
         ReturnTrace(self.name)
         return False
-print("DKR_S675_SIMT_ENTRY pc="+str(gdb.parse_and_eval("$pc")))
+print("DKR_S675_SIMT_ENTRY pc="+str(gdb.newest_frame().read_register("pc")))
 ReturnTrace("moe_gemm_simt_f16")
 for name in ("cudaMemsetAsync", "cudaLaunchKernel", "cudaGetLastError", "cudaPeekAtLastError", "cudaLaunchKernel_ptsz", "cudaMemsetAsync_ptsz"):
     EntryTrace(name)
@@ -85,6 +90,11 @@ printf '%s\n' "$GDB_RC" > "$OUT/gdb.exit"
 echo "DKR_S675_TRACE_EXIT=$GDB_RC"
 echo "=== CUDA API RETURN TRACE ==="
 grep -E '^DKR_S675_(API_RETURN|SIMT_ENTRY)' "$OUT/legacy-trace.log" || true
+if grep -q "Python Exception" "$OUT/legacy-trace.log" || ! grep -q "^DKR_S675_API_RETURN moe_gemm_simt_f16 status=" "$OUT/legacy-trace.log"; then
+    echo "DKR_S675_TRACE=INCOMPLETE"
+    exit 3
+fi
+echo "DKR_S675_TRACE=COMPLETE"
 echo "DKR_S675_REPORT=$OUT"
 # Do not claim promotion even if B succeeds.
 exit 4
