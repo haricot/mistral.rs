@@ -4,10 +4,12 @@ S1A measures whole-process CUDA activity, observer effect and sampled VRAM.
 It deliberately does not report streaming TTFT/TPOT or host dispatch-only
 latency: the sealed example has no streaming or per-request NVTX boundaries.
 Run --self-test, then --preflight, then DKR_APPROVE_R123_S1A=1.
+Use --trace-probe to check one archived CUDA run and --inspect-trace to read an existing export.
 """
 import argparse
 import csv
 import fcntl
+import gzip
 import json
 import math
 import os
@@ -20,6 +22,7 @@ import sys
 import tempfile
 import threading
 import time
+from urllib.request import urlopen
 
 import dkr_r123_s0 as s0
 from dkr_r122_s684b_gate import trace, typed_index
@@ -32,6 +35,9 @@ MODES = ("A", "B")
 GPU_TABLES = ("CUPTI_ACTIVITY_KIND_KERNEL", "CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL",
               "CUPTI_ACTIVITY_KIND_MEMCPY", "CUPTI_ACTIVITY_KIND_MEMSET")
 API_TABLES = ("CUPTI_ACTIVITY_KIND_RUNTIME", "CUPTI_ACTIVITY_KIND_DRIVER")
+NSYS_CUDA129_VERSION = "2025.1.3.140"
+NSYS_REPO = "https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/"
+NSYS_DEB = f"nsight-systems-2025.1.3_{NSYS_CUDA129_VERSION}-1_amd64.deb"
 
 def union_ns(rows):
     total = 0
@@ -52,11 +58,45 @@ def interval_stats(rows):
     return {"count": len(rows), "sum_ns": sum(b-a for a,b in rows),
             "union_ns": union_ns(rows)}
 
-def analyze_sqlite(path):
-    need(path.is_file(), "Nsight sqlite missing")
-    db = sqlite3.connect(path.resolve().as_uri()+"?mode=ro", uri=True)
+def open_trace(path):
+    need(path.is_file(), f"Nsight SQLite missing: {path}")
+    return sqlite3.connect(path.resolve().as_uri()+"?mode=ro", uri=True)
+
+
+def trace_tables(db):
+    return {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+
+
+def trace_inventory(path):
+    db = open_trace(path)
     try:
-        tables = {x[0] for x in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        tables = trace_tables(db)
+        counts = {
+            table: db.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+            if table in tables else None
+            for table in GPU_TABLES + API_TABLES
+        }
+        diagnostics = []
+        if "DIAGNOSTIC_EVENT" in tables:
+            columns = {row[1] for row in db.execute("PRAGMA table_info(DIAGNOSTIC_EVENT)")}
+            if "text" in columns:
+                diagnostics = [str(row[0]) for row in db.execute(
+                    "SELECT text FROM DIAGNOSTIC_EVENT WHERE text IS NOT NULL LIMIT 30"
+                )]
+        return {
+            "sqlite": str(path.resolve()),
+            "tables": sorted(tables),
+            "cuda_rows": counts,
+            "nsight_diagnostics": diagnostics,
+        }
+    finally:
+        db.close()
+
+
+def analyze_sqlite(path):
+    db = open_trace(path)
+    try:
+        tables = trace_tables(db)
         def intervals(table):
             if table not in tables:
                 return []
@@ -66,7 +106,12 @@ def analyze_sqlite(path):
         gpu = {t: intervals(t) for t in GPU_TABLES}
         api = {t: intervals(t) for t in API_TABLES}
         kernels = gpu[GPU_TABLES[0]] + gpu[GPU_TABLES[1]]
-        need(kernels and any(api.values()), "missing CUDA kernel or API activity")
+        missing = []
+        if not kernels:
+            missing.append("GPU kernels")
+        if not any(api.values()):
+            missing.append("CUDA API calls")
+        need(not missing, "missing CUDA activity: " + ", ".join(missing))
         need(not (gpu[GPU_TABLES[0]] and gpu[GPU_TABLES[1]]),
              "two kernel tables: possible duplicated activity, review schema")
         all_gpu = [p for v in gpu.values() for p in v]
@@ -136,6 +181,39 @@ def self_test():
         need(r["gpu_kernel"]["union_ns"]==30 and r["gpu_activity"]["union_ns"]==40
              and r["gpu_inactive_within_activity_span_ns"]==10
              and r["api_activity"]["union_ns"]==8,"trace aggregation regression")
+
+        db = sqlite3.connect(path)
+        try:
+            with db:
+                db.execute(f'DROP TABLE "{GPU_TABLES[0]}"')
+                db.execute('CREATE TABLE DIAGNOSTIC_EVENT (text TEXT)')
+                db.execute("INSERT INTO DIAGNOSTIC_EVENT VALUES ('CUPTI test diagnostic')")
+            info = trace_inventory(path)
+            need(info["cuda_rows"][GPU_TABLES[0]] is None
+                 and info["cuda_rows"][API_TABLES[1]] == 1
+                 and info["nsight_diagnostics"] == ["CUPTI test diagnostic"], "trace inventory regression")
+            try:
+                analyze_sqlite(path)
+            except ValueError as exc:
+                need(str(exc) == "missing CUDA activity: GPU kernels", "wrong API-only trace error")
+            else:
+                need(False, "API-only trace accepted")
+
+            with db:
+                db.execute(f'CREATE TABLE "{GPU_TABLES[1]}" (start INTEGER,end INTEGER)')
+                db.execute(f'INSERT INTO "{GPU_TABLES[1]}" VALUES (10,30)')
+                db.execute(f'DELETE FROM "{API_TABLES[0]}"')
+            need(analyze_sqlite(path)["gpu_kernel"]["count"] == 1, "concurrent kernel/driver trace rejected")
+            with db:
+                db.execute(f'DELETE FROM "{API_TABLES[1]}"')
+            try:
+                analyze_sqlite(path)
+            except ValueError as exc:
+                need(str(exc) == "missing CUDA activity: CUDA API calls", "wrong kernel-only trace error")
+            else:
+                need(False, "kernel-only trace accepted")
+        finally:
+            db.close()
     c=cache_summary([{"abi":"test","plan_hit":9,"plan_miss":1,"plan_evicted":0,
                       "function_hit":1,"function_miss":1,"module_loaded":1}])["test"]
     need(c["plan_hit_rate"]==0.9 and c["function_hit_rate"]==0.5,"cache counter regression")
@@ -201,29 +279,121 @@ def prep(orig, s0_report):
     need(all(os.access(p,os.X_OK) for p in binaries.values()),"archive not executable")
     return rev,modelrun,prior,native,typed,seal,prereq,model,refs,binaries
 
+def installed_cuda129_nsys(paths):
+    for path in paths:
+        path = path.absolute()
+        if not path.is_file() or not os.access(path, os.X_OK):
+            continue
+        try:
+            version = s0.cmd(str(path), "--version", stderr=subprocess.DEVNULL)
+        except (OSError, subprocess.CalledProcessError):
+            continue
+        if any(word.partition("-")[0] == NSYS_CUDA129_VERSION for word in version.split()):
+            return path
+    return None
+
+
+def nsys_package_hash():
+    with urlopen(NSYS_REPO + "Packages.gz", timeout=30) as response:
+        metadata = gzip.decompress(response.read()).decode("utf-8")
+    for entry in metadata.split("\n\n"):
+        fields = dict(line.split(": ", 1) for line in entry.splitlines()
+                      if line[:1].isalpha() and ": " in line)
+        if fields.get("Filename", "").removeprefix("./") == NSYS_DEB:
+            digest = fields.get("SHA256", "")
+            need(len(digest) == 64 and all(c in "0123456789abcdef" for c in digest),
+                 "invalid Nsight package digest in NVIDIA metadata")
+            return digest
+    raise ValueError("Nsight package missing from NVIDIA metadata")
+
+
+def unpack_nsys(package, dest):
+    if shutil.which("dpkg-deb"):
+        subprocess.run(["dpkg-deb", "-x", str(package), str(dest)], check=True)
+        return
+    members = [name for name in s0.cmd("ar", "t", str(package)).splitlines()
+               if name == "data.tar" or name.startswith("data.tar.")]
+    need(len(members) == 1, "unexpected Nsight Debian archive")
+    payload = package.with_name(members[0])
+    with payload.open("xb") as f:
+        subprocess.run(["ar", "p", str(package), members[0]], stdout=f, check=True)
+    subprocess.run(["tar", "-xf", str(payload), "-C", str(dest)], check=True)
+
+
+def cuda129_nsys(allow_install):
+    cache = Path(os.getenv("XDG_CACHE_HOME") or (Path.home() / ".cache")).resolve() / "dkr-nsys"
+    target = cache / NSYS_CUDA129_VERSION
+    candidates = [Path(entry) / "nsys" for entry in os.get_exec_path()]
+    candidates.extend(Path("/opt").glob("cuda*/bin/nsys"))
+    candidates.extend(Path("/opt/nvidia/nsight-systems").glob("*/target-linux-x64/nsys"))
+    candidates.extend(Path("/usr/local").glob("cuda*/bin/nsys"))
+    candidates.extend(target.rglob("target-linux-x64/nsys"))
+    existing = installed_cuda129_nsys(candidates)
+    if existing:
+        return str(existing)
+    need(allow_install, "CUDA 12.9 Nsight missing; run --trace-probe --cuda-129-nsys to cache it")
+    need(os.uname().machine == "x86_64", "automatic Nsight extraction requires Linux x86_64; use --nsys")
+    cache.mkdir(parents=True, exist_ok=True)
+    with (cache / (NSYS_CUDA129_VERSION + ".lock")).open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        existing = installed_cuda129_nsys(target.rglob("target-linux-x64/nsys"))
+        if existing:
+            return str(existing)
+        need(not target.exists(), f"Nsight cache is unusable at {target}; select an executable with --nsys")
+        with tempfile.TemporaryDirectory(prefix="download-", dir=cache) as temp:
+            package = Path(temp) / NSYS_DEB
+            digest = nsys_package_hash()
+            print(f"DKR_R123_S1A_NSYS_DOWNLOAD={NSYS_CUDA129_VERSION}", flush=True)
+            subprocess.run(["curl", "-fL", "--retry", "2", "-o", str(package), NSYS_REPO + NSYS_DEB],
+                           check=True)
+            need(sha(package) == digest, "NVIDIA Nsight package SHA-256 mismatch")
+            extracted = Path(temp) / "extracted"
+            extracted.mkdir()
+            unpack_nsys(package, extracted)
+            paths = [p for p in extracted.rglob("target-linux-x64/nsys")
+                     if p.resolve().is_relative_to(extracted)]
+            installed = installed_cuda129_nsys(paths)
+            need(installed is not None, "Nsight launch/version check failed after extraction")
+            relative = installed.relative_to(extracted)
+            extracted.rename(target)
+            return str(target / relative)
+
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument("--original",type=Path)
     p.add_argument("--s0-report",type=Path)
     p.add_argument("--rounds",type=int,default=1)
-    p.add_argument("--preflight",action="store_true")
-    p.add_argument("--self-test",action="store_true")
-    p.add_argument("--nsys",default="nsys")
+    action = p.add_mutually_exclusive_group()
+    action.add_argument("--preflight", action="store_true")
+    action.add_argument("--self-test", action="store_true")
+    action.add_argument("--inspect-trace", type=Path, metavar="SQLITE")
+    action.add_argument("--trace-probe", action="store_true", help="profile one archived static run")
+    profiler = p.add_mutually_exclusive_group()
+    profiler.add_argument("--nsys", metavar="PATH")
+    profiler.add_argument("--cuda-129-nsys", action="store_true",
+                          help="select Nsight Systems from CUDA 12.9 and cache it if needed for a capture")
     a=p.parse_args()
     if a.self_test:
-        self_test();return
+        self_test()
+        return
+    if a.inspect_trace is not None:
+        print(json.dumps(trace_inventory(a.inspect_trace), indent=2))
+        return
     need(a.original is not None and a.s0_report is not None,"--original and --s0-report required")
     need(1<=a.rounds<=5,"rounds must be 1..5")
+    if not (a.preflight or a.trace_probe):
+        need(os.getenv("DKR_APPROVE_R123_S1A")=="1","set DKR_APPROVE_R123_S1A=1")
     orig=a.original.resolve();s0_report=a.s0_report.resolve()
-    nsys=shutil.which(a.nsys)
-    need(nsys is not None,"Nsight Systems not found; use --nsys /absolute/path/to/nsys")
     rev,modelrun,prior,native,typed,seal,prereq,model,refs,binaries=prep(orig,s0_report)
+    nsys = cuda129_nsys(allow_install=not a.preflight) if a.cuda_129_nsys else shutil.which(a.nsys or "nsys")
+    need(nsys is not None,"Nsight Systems not found; use --nsys /absolute/path/to/nsys")
+    nsys = str(Path(nsys).absolute())
     baseline=s0.gpu()
     need(not compute_apps(),"other GPU compute processes active; stop them before qualification")
     version=s0.cmd(nsys,"--version")
-    print("DKR_R123_S1A_PREFLIGHT=PASS",json.dumps({"gpu":baseline,"nsys":version}),flush=True)
+    print("DKR_R123_S1A_PREFLIGHT=PASS",json.dumps({"gpu":baseline,"nsys":version,"nsys_path":nsys}),flush=True)
     if a.preflight:return
-    need(os.getenv("DKR_APPROVE_R123_S1A")=="1","set DKR_APPROVE_R123_S1A=1")
     base=orig/"target/dkr-r123-s1a"/rev[:12];base.mkdir(parents=True,exist_ok=True)
     lock=(orig/"target/dkr-r122-s684/.lock").open("a")
     fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
@@ -269,7 +439,17 @@ def main():
             rep=run/f"{stem}.nsys-rep";sql=run/f"{stem}.sqlite"
             need(rep.is_file(),"Nsight report missing")
             subprocess.run([nsys,"export","--type=sqlite","--output="+str(sql),str(rep)],check=True)
-            trial["trace"]=analyze_sqlite(sql)
+            try:
+                trial["trace"] = analyze_sqlite(sql)
+            except ValueError as exc:
+                if not sql.is_file():
+                    raise
+                diagnostic = run / f"{stem}.trace-diagnostic.json"
+                info = trace_inventory(sql)
+                info.update(error=str(exc), nsys_version=version, nsys_path=nsys, profile_log=str(log),
+                            parity_exact=True)
+                s0.write(diagnostic, info)
+                raise ValueError(f"{exc}; inspect {diagnostic}") from exc
             trial["nsys_report_sha256"]=sha(rep);trial["sqlite_sha256"]=sha(sql)
         if kind=="memory":
             need(not errors and len(samples)>=2,"memory sampling failed: "+str(errors))
@@ -286,6 +466,17 @@ def main():
         trials.append(trial)
         print(stem,"exact=True",flush=True)
         return trial
+    if a.trace_probe:
+        trial = leg("00-contiguous-A-profile", "contiguous", "A", "profile")
+        report = run / "trace-probe.json"
+        s0.write(report, {"status": "TRACE_PROBE_PASS", "revision": rev, "nsys_version": version,
+                          "nsys_path": nsys, "trial": trial})
+        profile = trial["trace"]
+        print("DKR_R123_S1A_TRACE_PROBE=PASS",
+              f"kernels={profile['gpu_kernel']['count']}",
+              f"api_calls={profile['api_activity']['count']}", flush=True)
+        print("DKR_R123_S1A_TRACE_PROBE_REPORT=" + str(report))
+        return
     brackets=[]
     for i in range(a.rounds):
         for cache in (CACHES if i%2==0 else CACHES[::-1]):
@@ -306,7 +497,7 @@ def main():
                 leg(f"{cache}-{mode}-{kind}",cache,mode,kind)
     need(s0.model_gate(modelrun,prior,native)==seal,"model seal changed during S1A")
     report={"status":"ATTRIBUTION_CAPTURE_COMPLETE","revision":rev,"s0_report_sha256":sha(s0_report),
-            "model_seal":seal,"prerequisites":prereq,"nsys_version":version,
+            "model_seal":seal,"prerequisites":prereq,"nsys_version":version,"nsys_path":nsys,
             "numeric_exact_vs_sealed":True,"new_compilation":False,"cuda_graphs_enabled":False,
             "trials":trials,"observer_brackets":brackets,
             "all_engine_brackets_stable_at_10pct":all(v["stable_control"] for b in brackets
