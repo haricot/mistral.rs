@@ -65,6 +65,42 @@ def trace(root,mode,index,native,static):
             "typed_adapter_ok":sum(r["adapter_ok"] for r in typed),
             "native_submissions":sum(r["submitted"] for r in nat),"embedded_submissions":sum(r["submitted"] for r in emb),
             "paged_allocation_log":"Validated KV cache allocation" in log}
+
+def audit_run(root, index, native):
+    cases = {}
+    telemetry = {}
+    failures = {}
+    rms_operations = {"tensor.rms_residual.plain.v1", "tensor.rms_residual_then_rms.plain.v1"}
+    for cache in ("contiguous", "paged"):
+        legs = (f"static-{cache}", f"external-{cache}")
+        for leg in legs:
+            try:
+                entry = trace(root, leg, index, native, leg.startswith("static"))
+                telemetry[leg] = entry
+                if leg.startswith("external"):
+                    missing = rms_operations - set(entry["typed_operations"])
+                    need(not missing, "missing RMSNorm execution: " + ", ".join(sorted(missing)))
+            except (ValueError, KeyError, OSError) as error:
+                failures[leg] = str(error)
+        try:
+            left, right = (read(root / f"{leg}.json") for leg in legs)
+            need(left["paged_requested"] == (cache == "paged"), "KV configuration mismatch")
+            cases[cache] = compare_models(left, right)
+        except (ValueError, KeyError, OSError) as error:
+            failures[f"{cache}_parity"] = str(error)
+
+    external_ops = set(telemetry.get("external-paged", {}).get("typed_operations", ()))
+    observed_kv = "kv_cache.reshape_store.vllm.b256.v1" in external_ops
+    observed_attention = any(op.startswith("attention.paged.") for op in external_ops)
+    if not observed_kv or not observed_attention:
+        failures["external_paged_route"] = (
+            f"paged KV store observed={observed_kv}, paged attention observed={observed_attention}"
+        )
+    observed_static = telemetry.get("static-paged", {}).get("paged_allocation_log", False)
+    if not observed_static:
+        failures["static_paged_allocation"] = "static paged allocation unobserved"
+    return cases, telemetry, failures, observed_static, observed_kv, observed_attention
+
 def main():
     p=argparse.ArgumentParser()
     p.add_argument("--self-test",action="store_true")
@@ -85,33 +121,27 @@ def main():
             except ValueError: pass
             else: raise AssertionError("forbidden feature accepted")
         print("DKR_S684B_SELF_TEST=PASS");return 0
+    if a.features:
+        print("DKR_S684B_STATIC_FEATURES=PASS", features(a.features))
+        return 0
     if not a.prior or not a.native_root or not a.typed_root: p.error("prior and both roots required")
     native_audit(a.native_root);idx=typed_index(a.typed_root)
-    r=prior(a.prior,a.native_root)
+    prior(a.prior,a.native_root)
     print("DKR_S684B_MODEL_SEAL=PASS")
     if not a.run: return 0
     root=a.run
     count=features(root/"static-features.txt")
-    # All comparisons use the exact S684 prompt/threshold contract.
-    sa=read(root/"static-contiguous.json");sp=read(root/"static-paged.json");ep=read(root/"external-paged.json")
-    old=read(a.prior/"external.json")
-    need(not sa["paged_requested"] and sp["paged_requested"] and ep["paged_requested"],"KV configuration mismatch")
-    contiguous=compare_models(sa,old)
-    paged=compare_models(sp,ep)
-    ev={m:trace(root,m,idx,a.native_root,m.startswith("static")) for m in ("static-contiguous","static-paged","external-paged")}
-    # Paged routing must be observed, not merely requested.
-    ops=set(ev["external-paged"]["typed_operations"])
-    need("kv_cache.reshape_store.vllm.b256.v1" in ops,"external paged KV store unobserved")
-    need(any(x.startswith("attention.paged.") for x in ops),"external paged attention unobserved")
-    # Static allocation log can be absent on certain fixed-budget paths.
-    # Do not equate a requested paged configuration with driver-level proof.
-    observed_static=ev["static-paged"]["paged_allocation_log"]
-    out={"status":"FINAL_MODEL_GATE_PASS_SCOPED" if observed_static else "MODEL_PARITY_PASS_STATIC_PAGED_ATTESTATION_OPEN",
-         "contiguous":contiguous,"paged":paged,"telemetry":ev,
+    cases, ev, failures, observed_static, observed_kv, observed_attention = audit_run(
+        root, idx, a.native_root
+    )
+    out={"status":"REVIEW_REQUIRED" if failures else "FINAL_MODEL_GATE_PASS_SCOPED",
+         "contiguous":cases.get("contiguous"),"paged":cases.get("paged"),"telemetry":ev,
+         "failures":failures,
          "static_cuda_no_dkr_build_verified":True,"static_feature_inventory":count,
-         "all_static_vs_all_external_verified_for_model":True,
+         "all_static_vs_all_external_verified_for_model":not failures,
          "static_paged_allocation_observed":observed_static,
-         "external_paged_execution_observed":True,
+         "external_paged_kv_store_observed":observed_kv,
+         "external_paged_execution_observed":observed_attention,
          "prior_model_report_sha256":sha(a.prior/"qualification-s684-model.json"),
          "artifact_sha256":{p.name:sha(p) for p in sorted(root.glob("*")) if p.is_file() and p.suffix in (".json",".log",".exit",".txt",".sha256")},
          "distinct_driver_contexts_verified":False,"default_cpu_build_verified":False,
@@ -119,7 +149,7 @@ def main():
          "open_gates":["distinct driver context isolation","default CPU regression build","performance qualification","explicit production approval"]+([] if observed_static else ["static paged allocation attestation"])}
     (root/"qualification-s684b.json").write_text(json.dumps(out,indent=2)+"\n")
     print(json.dumps(out,indent=2));print("DKR_S684B="+out["status"])
-    return 0 if observed_static else 4
+    return 4 if failures else 0
 if __name__=="__main__":
     try: sys.exit(main())
     except (ValueError,KeyError,OSError,AssertionError,TypeError) as e:

@@ -112,10 +112,13 @@ def main():
     features(a.run/"static-features.txt")
     subprocess.run(["sha256sum","-c",str(a.run/"binaries.sha256")],check=True)
     subprocess.run(["sha256sum","-c",str(a.run/"model.sha256")],check=True)
+    external_contiguous = ((a.run, "external-contiguous")
+                           if (a.run / "external-contiguous.exit").is_file()
+                           else (a.prior, "external"))
     locations={"static-contiguous":(a.run,"static-contiguous"),
                "static-paged":(a.run,"static-paged"),
                "typed-contiguous":(a.prior,"legacy"),
-               "external-contiguous":(a.prior,"external"),
+               "external-contiguous":external_contiguous,
                "external-paged":(a.run,"external-paged")}
     ds={};ev={};errors={}
     for name,(root,stem) in locations.items():
