@@ -7,7 +7,6 @@ import math
 import subprocess
 import sys
 from pathlib import Path
-from dkr_r122_s684b_gate import prior, features, typed_index, trace
 from dkr_r122_s684_model_audit import logits, generated
 from dkr_r122_s6_evidence import native_audit
 from dkr_r122_s683_audit import need, sha
@@ -56,9 +55,12 @@ def generation_metrics(a,b):
     first=next((i for i,(u,v) in enumerate(zip(x,y)) if (u["token"],u["bytes"])!=(v["token"],v["bytes"])),None)
     if first is None and len(x)!=len(y): first=min(len(x),len(y))
     prefix=min(len(x),len(y)) if first is None else first
+    common_deltas = [abs(x[i]["logprob"] - y[i]["logprob"]) for i in range(prefix)]
+    worst_at = max(range(prefix), key=common_deltas.__getitem__, default=None)
     return {"pass":gate,"reason":why,"token_counts":[len(x),len(y)],
             "first_token_mismatch_zero_based":first,"common_prefix":prefix,
-            "max_logprob_delta_common_prefix":max((abs(x[i]["logprob"]-y[i]["logprob"]) for i in range(prefix)),default=None),
+            "max_logprob_delta_common_prefix":common_deltas[worst_at] if worst_at is not None else None,
+            "max_logprob_delta_token_zero_based":worst_at,
             "same_content":a["content"]==b["content"],"same_reasoning":a["reasoning_content"]==b["reasoning_content"]}
 
 def comparison(a,b,repeat=False):
@@ -99,6 +101,8 @@ def self_test():
     print("DKR_S684B_DIAGNOSTIC_SELF_TEST=PASS")
 
 def main():
+    from dkr_r122_s684b_gate import prior, features, typed_index, trace
+
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument("--self-test",action="store_true")
     for x in ("prior","run","native-root","typed-root","output"):

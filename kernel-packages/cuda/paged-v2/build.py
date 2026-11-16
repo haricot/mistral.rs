@@ -74,11 +74,25 @@ def main():
         f"-code=compute_{args.cc}", "-std=c++17", "-O3",
         "-U__CUDA_NO_HALF_OPERATORS__", "-U__CUDA_NO_HALF_CONVERSIONS__",
         "-U__CUDA_NO_HALF2_OPERATORS__", "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-        "-o", str(first), str(SOURCE),
     ]
+    headers = []
+    if args.cc == 61:
+        command += ["--expt-relaxed-constexpr", "-DALLOW_LEGACY_BF16"]
+        vllm = SOURCE.parents[3] / "mistralrs-paged-attn/src/cuda"
+        headers = [
+            SOURCE.parents[1] / "paged_vllm_compat.cuh",
+            vllm / "pagedattention.cuh",
+            vllm / "cuda_compat.h",
+            vllm / "quantization/fp8/nvidia/quant_utils.cuh",
+            *sorted(path for path in (vllm / "attention").iterdir() if path.is_file()),
+        ]
+    command += ["-o", str(first), str(SOURCE)]
     version = (b"cudaforge:" + digest(args.ptx_file.read_bytes()).encode()
                if args.ptx_file else subprocess.check_output([args.nvcc, "--version"]))
-    identity = digest(SOURCE.read_bytes() + version + "\0".join(command).encode())
+    identity = digest(b"\0".join([
+        SOURCE.read_bytes(), version, "\0".join(command).encode(),
+        *(path.read_bytes() for path in headers),
+    ]))
     stamp = root / "source.sha256"
 
     def target(stage, dt):

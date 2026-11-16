@@ -33,6 +33,7 @@
 #endif
 
 #include <algorithm>
+#include <type_traits>
 
 #ifndef USE_ROCM
 #define WARP_SIZE 32
@@ -107,13 +108,15 @@ inline __device__ float fast_tanh(float x) {
 
 // TODO(woosuk): Merge the last two dimensions of the grid.
 // Grid: (num_heads, num_seqs, max_num_partitions).
+// PARTITION_SIZE is zero for V1.
 template <typename scalar_t, typename cache_t, vllm::Fp8KVCacheDataType kv_dt,
           int HEAD_SIZE, int BLOCK_SIZE, int NUM_THREADS,
-          int PARTITION_SIZE = 0> // Zero means no partitioning.
+          int PARTITION_SIZE = 0, int STATIC_WORKSPACE_FLOATS = 0,
+          typename output_t = scalar_t>
 __device__ void paged_attention_kernel(
     float *__restrict__ exp_sums,   // [num_seqs, num_heads, max_num_partitions]
     float *__restrict__ max_logits, // [num_seqs, num_heads, max_num_partitions]
-    scalar_t *__restrict__ out,     // [num_seqs, num_heads, max_num_partitions,
+    output_t *__restrict__ out,     // [num_seqs, num_heads, max_num_partitions,
                                     // head_size]
     const scalar_t *__restrict__ q, // [num_seqs, num_heads, head_size]
     const cache_t *__restrict__ k_cache, // [num_blocks, num_kv_heads,
@@ -129,7 +132,7 @@ __device__ void paged_attention_kernel(
     const float *__restrict__ alibi_slopes, // [num_heads]
     const int q_stride, const int kv_block_stride, const int kv_head_stride,
     const float *k_scale, const float *v_scale, const float *__restrict__ sinks,
-    const int sliding_window) {
+    const int sliding_window, float *__restrict__ logsumexp = nullptr) {
   const int seq_idx = blockIdx.y;
   const int partition_idx = blockIdx.z;
   const int max_num_partitions = gridDim.z;
@@ -216,9 +219,15 @@ __device__ void paged_attention_kernel(
                    // memory wall right before we use q_vecs
 
   // Memory planning.
-  extern __shared__ char shared_mem[];
   // NOTE(woosuk): We use FP32 for the softmax logits for better accuracy.
-  float *logits = reinterpret_cast<float *>(shared_mem);
+  float *logits;
+  if constexpr (STATIC_WORKSPACE_FLOATS > 0) {
+    __shared__ __align__(16) float workspace[STATIC_WORKSPACE_FLOATS];
+    logits = workspace;
+  } else {
+    extern __shared__ char shared_mem[];
+    logits = reinterpret_cast<float *>(shared_mem);
+  }
   // Workspace for reduction.
   __shared__ float red_smem[2 * NUM_WARPS];
 
@@ -358,6 +367,12 @@ __device__ void paged_attention_kernel(
                           head_idx * max_num_partitions + partition_idx;
     *exp_sums_ptr = exp_sum;
   }
+  if constexpr (STATIC_WORKSPACE_FLOATS > 0) {
+    if (logsumexp != nullptr && thread_idx == 0) {
+      logsumexp[(seq_idx * num_heads + head_idx) * max_num_partitions +
+                partition_idx] = qk_max + logf(exp_sum);
+    }
+  }
 
   // Each thread will fetch 16 bytes from the value cache at a time.
   constexpr int V_VEC_SIZE = MIN(16 / sizeof(scalar_t), BLOCK_SIZE);
@@ -447,7 +462,7 @@ __device__ void paged_attention_kernel(
   __syncthreads();
 
   // Perform reduction across warps.
-  float *out_smem = reinterpret_cast<float *>(shared_mem);
+  float *out_smem = logits;
 #pragma unroll
   for (int i = NUM_WARPS; i > 1; i /= 2) {
     int mid = i / 2;
@@ -480,14 +495,20 @@ __device__ void paged_attention_kernel(
 
   // Write the final output.
   if (warp_idx == 0) {
-    scalar_t *out_ptr =
+    output_t *out_ptr =
         out + seq_idx * num_heads * max_num_partitions * HEAD_SIZE +
         head_idx * max_num_partitions * HEAD_SIZE + partition_idx * HEAD_SIZE;
 #pragma unroll
     for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
       const int row_idx = lane / NUM_V_VECS_PER_ROW + i * NUM_ROWS_PER_ITER;
       if (row_idx < HEAD_SIZE && lane % NUM_V_VECS_PER_ROW == 0) {
-        from_float(*(out_ptr + row_idx), accs[i]);
+        if constexpr (std::is_same_v<output_t, scalar_t>) {
+          from_float(out_ptr[row_idx], accs[i]);
+        } else {
+          scalar_t rounded;
+          from_float(rounded, accs[i]);
+          out_ptr[row_idx] = to_float(rounded);
+        }
       }
     }
   }

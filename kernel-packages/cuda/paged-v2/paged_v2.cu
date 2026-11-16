@@ -5,6 +5,8 @@
 #include <math.h>
 #include <stdint.h>
 
+#include "../paged_vllm_compat.cuh"
+
 // DKR-R1.21/S6: Pascal SIMT partitioned paged-attention v2.
 // Exact input layout: Q[seq,query_head,head_dim],
 // K[block,kv_head,head_dim/x,block_size,x],
@@ -52,6 +54,15 @@ __device__ __forceinline__ void paged_v2_partition(
   const uint32_t seq = blockIdx.y;
   const uint32_t part = blockIdx.z;
   if (seq >= seqs || head >= heads) return;
+  if constexpr (std::is_same_v<T, __half>) {
+    if (dkr_paged::try_vllm_v1(
+            {query, key_cache, value_cache, block_table, context_lens, seqs, heads,
+             kv_heads, head_size, block_size, x, table_stride, max_context, scale},
+            partial, logsumexp)) {
+      return;
+    }
+  }
+
   const uint32_t parts = gridDim.z;
   const uint32_t tid = threadIdx.x;
   const uint64_t scratch_index =

@@ -67,10 +67,12 @@ fn compile_ptx(
     cc: usize,
     fast_math: bool,
     mode: Option<&str>,
+    header_dependencies: &[PathBuf],
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     fs::create_dir_all(out_dir)?;
     let mut builder = cudaforge::KernelBuilder::new()
         .source_files([source])
+        .watch(header_dependencies)
         .out_dir(out_dir)
         .compute_cap(cc)
         .arg("-std=c++17")
@@ -82,6 +84,9 @@ fn compile_ptx(
         .arg("-U__CUDA_NO_BFLOAT16_CONVERSIONS__");
     if fast_math {
         builder = builder.arg("--use_fast_math");
+    }
+    if !header_dependencies.is_empty() {
+        builder = builder.arg("-DALLOW_LEGACY_BF16");
     }
     if let Some(mode) = mode {
         builder = builder.arg(mode);
@@ -134,6 +139,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         root.join(requested_output)
     };
     let sources = root.join("kernel-packages/cuda");
+    let vllm = root.join("mistralrs-paged-attn/src/cuda");
+    let paged_headers = [
+        sources.join("paged_vllm_compat.cuh"),
+        vllm.join("pagedattention.cuh"),
+        vllm.join("cuda_compat.h"),
+        vllm.join("attention"),
+        vllm.join("quantization/fp8/nvidia"),
+    ];
     let work = output.join(format!("sm{cc}/_cudaforge_cache"));
     for pkg in PACKAGES {
         let dir = sources.join(pkg.name);
@@ -149,13 +162,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 ("bf16", "-DDKR_BF16_MODE=1"),
             ] {
                 compile_ptx(
-                    &source, &moe_dir.join(variant), cc, pkg.fast_math, Some(define),
+                    &source, &moe_dir.join(variant), cc, pkg.fast_math, Some(define), &[],
                 )?;
             }
             package(&python, &script, cc, &output, &moe_dir, true, root)?;
         } else {
+            let watched = if cc == 61 && matches!(pkg.name, "paged-decode" | "paged-v2") {
+                paged_headers.as_slice()
+            } else {
+                &[]
+            };
             let compiled = compile_ptx(
-                &source, &work.join(pkg.name), cc, pkg.fast_math, None,
+                &source, &work.join(pkg.name), cc, pkg.fast_math, None, watched,
             )?;
             package(&python, &script, cc, &output, &compiled, false, root)?;
         }

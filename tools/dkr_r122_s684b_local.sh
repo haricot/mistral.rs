@@ -8,8 +8,17 @@ ORIG="$(realpath "$DKR_S6_ORIGINAL_REPO")"
 [[ "$ROOT" != "$ORIG" ]]
 git diff --quiet HEAD -- .
 RMS_SOURCE="kernel-packages/cuda/rms-variants/rms_variants.cu"
+REPLAY_EXCLUDES=(
+    ':!tools/**'
+    ":!$RMS_SOURCE"
+    ':!kernel-packages/cuda/paged-decode/**'
+    ':!kernel-packages/cuda/paged-v2/**'
+    ':!kernel-packages/cuda/paged_vllm_compat.cuh'
+    ':!mistralrs-paged-attn/src/cuda/pagedattention.cuh'
+    ':!mistralrs-kernel-runtime/src/bin/dkr_package_builder.rs'
+)
 git diff --quiet d392cb70c155ffa1a6aa9312cc482f3be5b9f19a HEAD -- . \
-    ':!tools/**' ':!mistralrs/Cargo.toml' ":!$RMS_SOURCE"
+    ':!mistralrs/Cargo.toml' "${REPLAY_EXCLUDES[@]}"
 NATIVE="$ORIG/target/dkr-r122-s6/7b3b19cf8b62/native-sm61"
 TYPED="$ORIG/kernel-packages/build/cuda/sm61"
 BASE="$ORIG/target/dkr-r122-s684/d392cb70c155"
@@ -41,14 +50,26 @@ file_sha() {
 }
 
 ARCHIVE=""
+REUSE_REFERENCE=0
 if [[ -n "${DKR_S684B_REPLAY_FROM:-}" ]]; then
     ARCHIVE="$(realpath "$DKR_S684B_REPLAY_FROM")"
     archived_revision="$(cat "$ARCHIVE/revision.txt")"
-    git diff --quiet "$archived_revision" HEAD -- . ':!tools/**' ":!$RMS_SOURCE"
+    git diff --quiet "$archived_revision" HEAD -- . "${REPLAY_EXCLUDES[@]}"
+    static_build_revision="$archived_revision"
+    if [[ -s "$ARCHIVE/static-build-revision.txt" ]]; then
+        static_build_revision="$(cat "$ARCHIVE/static-build-revision.txt")"
+    fi
     archived_static_sha="$(awk '$2 ~ /\/static-bin$/ { print $1 }' "$ARCHIVE/binaries.sha256")"
     [[ -x "$ARCHIVE/static-bin" && "$(file_sha "$ARCHIVE/static-bin")" == "$archived_static_sha" ]]
     python3 tools/dkr_r122_s684b_gate.py --features "$ARCHIVE/static-features.txt"
     EXT="$ARCHIVE/external-bin"
+    if [[ -f "$ARCHIVE/qualification-s684b.json" && -d "$ARCHIVE/typed/sm61/rms-variants" ]] &&
+       git diff --quiet "$archived_revision" HEAD -- "$RMS_SOURCE"; then
+        python3 tools/dkr_r122_s684b_gate.py --verify-reference "$ARCHIVE"
+        cmp --silent "$ARCHIVE/model.sha256" "$PRIOR/model.sha256"
+        TYPED="$ARCHIVE/typed/sm61"
+        REUSE_REFERENCE=1
+    fi
 else
     EXT="${DKR_S684B_EXTERNAL_BIN:-$CARGO_TARGET_DIR/debug/examples/dkr_s684_model}"
 fi
@@ -74,7 +95,7 @@ if [[ -n "$ARCHIVE" ]]; then
     cp --reflink=auto "$ARCHIVE/static-bin" "$RUN/static-bin"
     [[ "$(file_sha "$RUN/static-bin")" == "$archived_static_sha" ]]
     cp "$ARCHIVE/static-features.txt" "$RUN/static-features.txt"
-    printf '%s\n' "$archived_revision" > "$RUN/static-build-revision.txt"
+    printf '%s\n' "$static_build_revision" > "$RUN/static-build-revision.txt"
     echo "DKR_S684B_BINARIES=REUSED"
 else
     shared_cache="$ORIG/target/dkr-cuda-cache/sm61"
@@ -93,16 +114,30 @@ sha256sum "$RUN/static-bin" "$RUN/external-bin" > "$RUN/binaries.sha256"
 STAGED_TYPED="$RUN/typed/sm61"
 mkdir -p "$STAGED_TYPED"
 for family in "$TYPED"/*; do
-    if [[ "$family" != "$TYPED/rms-variants" ]]; then
-        cp -a --reflink=auto "$family" "$STAGED_TYPED/"
-    fi
+    case "$(basename "$family")" in
+        paged-decode|paged-v2|_cudaforge_cache) continue ;;
+        rms-variants) [[ "$REUSE_REFERENCE" == 1 ]] || continue ;;
+    esac
+    cp -a --reflink=auto "$family" "$STAGED_TYPED/"
 done
-python3 kernel-packages/cuda/rms-variants/build.py --cc 61 --output "$RUN/typed"
+if [[ "$REUSE_REFERENCE" == 0 ]]; then
+    python3 kernel-packages/cuda/rms-variants/build.py --cc 61 --output "$RUN/typed"
+else
+    echo "DKR_RMS_VARIANTS=REUSED"
+fi
+for family in paged-decode paged-v2; do
+    python3 "kernel-packages/cuda/$family/build.py" --cc 61 --output "$RUN/typed"
+done
 python3 tools/dkr_s9_ptx_manifest_audit.py --root "$STAGED_TYPED" --cc 61
 
 # The DKR paged kernels use VLLM pages. Both paged legs must use that layout.
 export MISTRALRS_FLASHINFER_DECODE=0
 for leg in static-contiguous static-paged external-contiguous external-paged; do
+    if [[ "$REUSE_REFERENCE" == 1 && "$leg" != external-paged ]]; then
+        cp --reflink=auto "$ARCHIVE/$leg."{exit,json,log} "$RUN/"
+        echo "DKR_S684B_$leg=REUSED"
+        continue
+    fi
     export DKR_S684_OUTPUT="$RUN/$leg.json"
     export DKR_S684_PAGED=0
     [[ "$leg" != *-paged ]] || export DKR_S684_PAGED=1

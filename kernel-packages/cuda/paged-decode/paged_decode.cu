@@ -5,6 +5,8 @@
 #include <math_constants.h>
 #include <stdint.h>
 
+#include "../paged_vllm_compat.cuh"
+
 // DKR-R1.21/S2: short-context online-softmax paged decode on Pascal.
 // Simple contiguous VLLM layouts; Q/K/V have equal dtype.
 // No ALiBi, sink, sliding window, quantized KV, softcap, or v2 partition.
@@ -50,6 +52,15 @@ __device__ __forceinline__ void short_decode(
   const uint32_t head = blockIdx.x;
   const uint32_t seq = blockIdx.y;
   if (seq >= num_seqs || head >= num_heads) return;
+
+  if constexpr (std::is_same_v<T, __half>) {
+    if (dkr_paged::try_vllm_v1(
+            {q, key, value, block_table, context_lens, num_seqs, num_heads,
+             kv_heads, head_size, block_size, x, table_stride, max_context, scale},
+            output, nullptr)) {
+      return;
+    }
+  }
 
   const uint32_t tid = threadIdx.x;
   const uint32_t kvhead = head / (num_heads / kv_heads);
