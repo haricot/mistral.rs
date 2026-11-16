@@ -105,6 +105,18 @@ def observer(left, profiled, right):
             "control_drift_pct":100*abs(right-left)/mid,
             "stable_control":abs(right-left)/mid<=0.10}
 
+def cache_summary(rows):
+    events=("plan_hit","plan_miss","plan_evicted","function_hit","function_miss","module_loaded")
+    result={}
+    for abi in sorted({r["abi"] for r in rows}):
+        selected=[r for r in rows if r["abi"]==abi]
+        counts={k:sum(r[k] for r in selected) for k in events}
+        for prefix in ("plan","function"):
+            total=counts[prefix+"_hit"]+counts[prefix+"_miss"]
+            counts[prefix+"_hit_rate"]=counts[prefix+"_hit"]/total if total else None
+        result[abi]=counts
+    return result
+
 def self_test():
     need(union_ns([(0,10),(5,12),(15,20),(20,22)])==19,"union regression")
     need(union_ns([])==0,"empty union")
@@ -124,6 +136,9 @@ def self_test():
         need(r["gpu_kernel"]["union_ns"]==30 and r["gpu_activity"]["union_ns"]==40
              and r["gpu_inactive_within_activity_span_ns"]==10
              and r["api_activity"]["union_ns"]==8,"trace aggregation regression")
+    c=cache_summary([{"abi":"test","plan_hit":9,"plan_miss":1,"plan_evicted":0,
+                      "function_hit":1,"function_miss":1,"module_loaded":1}])["test"]
+    need(c["plan_hit_rate"]==0.9 and c["function_hit_rate"]==0.5,"cache counter regression")
     print("DKR_R123_S1A_SELF_TEST=PASS")
 
 def compute_apps():
@@ -266,6 +281,7 @@ def main():
         if kind=="telemetry":
             trial["telemetry"]=trace(run,stem,typed_index(typed),native,mode=="A")
             trial["runtime_counters"]=merge(log.read_text().splitlines())
+            trial["cache_counters_by_abi"]=cache_summary(trial["runtime_counters"]["rows"])
         s0.write(run/f"{stem}.metrics.json",trial)
         trials.append(trial)
         print(stem,"exact=True",flush=True)
@@ -297,7 +313,9 @@ def main():
                 for d in b["metrics"].values() for v in d.values()),
             "ttft_streaming_measured":False,"tpot_streaming_measured":False,
             "host_dispatch_only_measured":False,"per_request_gpu_attribution":False,
-            "true_peak_vram_measured":False,"launch_cache_hits_measured":False,
+            "true_peak_vram_measured":False,
+            "launch_cache_hits_measured":any(c["plan_hit_rate"] is not None for t in trials
+                if t["kind"]=="telemetry" for c in t["cache_counters_by_abi"].values()),
             "performance_promotion_approved":False,"production_promotion_approved":False}
     out=run/"attribution-s1a.json";s0.write(out,report)
     for t in trials:
@@ -308,6 +326,8 @@ def main():
                   "gpu_inactive_span_ms=",round(q["gpu_inactive_within_activity_span_ns"]/1e6,3))
         if t["kind"]=="memory":
             print(t["stem"],"sampled_peak_device_mib=",t["memory"]["sampled_peak_device_mib"])
+        if t["kind"]=="telemetry":
+            print(t["stem"],"cache_counters_by_abi=",json.dumps(t["cache_counters_by_abi"],sort_keys=True))
     print("DKR_R123_S1A="+report["status"])
     print("DKR_R123_S1A_REPORT="+str(out))
 
