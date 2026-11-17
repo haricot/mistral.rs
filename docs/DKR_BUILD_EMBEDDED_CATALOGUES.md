@@ -37,3 +37,30 @@ numerical parity against the sealed reference, identical external routes and
 submission counts between both candidate modes, and the expected catalogue source
 telemetry. Timing results report drift and do not automatically approve a
 performance promotion.
+
+## Repeated startup comparison without rebuilding
+
+Use the completed embedded comparison as provenance for its existing candidate:
+
+```bash
+python3 tools/dkr_r123_s1a_embedded_repeat.py \
+  --original "$DKR_S6_ORIGINAL_REPO" --s0-report "$DKR_S0_REPORT" \
+  --prior-report /absolute/path/to/embedded-catalogue-comparison.json --rounds 3
+```
+
+This runner checks that compiled sources match the candidate revision, verifies
+the previous raw evidence and binary hashes, and never invokes a compiler. It
+records one warmup per mode, excludes these two warmups by design, then measures
+three static/embedded/embedded/static rounds in fresh processes. All timed
+measurements remain in the report. Two separate telemetry processes verify exact
+parity, embedded catalogue sources and unchanged external route counts. Copied
+inputs remain unavailable during every embedded execution.
+
+The report `embedded-startup-repeat.json` compares each embedded process with a
+linear interpolation between the surrounding static controls, using process
+midpoint timestamps. It records per-bracket drift and the full sample range for
+both modes. By default, spread above 5 percent in process duration, model loading,
+time before the first raw inference or the remaining inference phase produces
+`REVIEW_REQUIRED` and exit code 4, while preserving the report. This is a timing
+stability threshold, not an allowed regression. Performance promotion remains a
+separate decision.
