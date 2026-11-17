@@ -692,7 +692,7 @@ checksum = "ade8366b8bd5ba243f0a58f036cc0ca8a2f069cff1a2351ef1cac6b083e16fc0"
 [[package]]
 name = "candle-core"
 version = "0.11.1"
-source = "git+https://github.com/haricot/candle.git?rev=08a36261a6b4dd695c291d37c028b16f019fae46#08a36261a6b4dd695c291d37c028b16f019fae46"
+source = "git+https://github.com/haricot/candle.git?rev=95f9087c5210908c9ff7356bf35e914cddac178a#95f9087c5210908c9ff7356bf35e914cddac178a"
 dependencies = [
  "accelerate-src",
  "byteorder",
@@ -728,7 +728,7 @@ dependencies = [
 [[package]]
 name = "candle-flash-attn-v3"
 version = "0.11.1"
-source = "git+https://github.com/haricot/candle.git?rev=08a36261a6b4dd695c291d37c028b16f019fae46#08a36261a6b4dd695c291d37c028b16f019fae46"
+source = "git+https://github.com/haricot/candle.git?rev=95f9087c5210908c9ff7356bf35e914cddac178a#95f9087c5210908c9ff7356bf35e914cddac178a"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -741,7 +741,7 @@ dependencies = [
 [[package]]
 name = "candle-kernels"
 version = "0.11.1"
-source = "git+https://github.com/haricot/candle.git?rev=08a36261a6b4dd695c291d37c028b16f019fae46#08a36261a6b4dd695c291d37c028b16f019fae46"
+source = "git+https://github.com/haricot/candle.git?rev=95f9087c5210908c9ff7356bf35e914cddac178a#95f9087c5210908c9ff7356bf35e914cddac178a"
 dependencies = [
  "cudaforge",
 ]
@@ -749,7 +749,7 @@ dependencies = [
 [[package]]
 name = "candle-metal-kernels"
 version = "0.11.1"
-source = "git+https://github.com/haricot/candle.git?rev=08a36261a6b4dd695c291d37c028b16f019fae46#08a36261a6b4dd695c291d37c028b16f019fae46"
+source = "git+https://github.com/haricot/candle.git?rev=95f9087c5210908c9ff7356bf35e914cddac178a#95f9087c5210908c9ff7356bf35e914cddac178a"
 dependencies = [
  "block2",
  "half",
@@ -764,7 +764,7 @@ dependencies = [
 [[package]]
 name = "candle-nn"
 version = "0.11.1"
-source = "git+https://github.com/haricot/candle.git?rev=08a36261a6b4dd695c291d37c028b16f019fae46#08a36261a6b4dd695c291d37c028b16f019fae46"
+source = "git+https://github.com/haricot/candle.git?rev=95f9087c5210908c9ff7356bf35e914cddac178a#95f9087c5210908c9ff7356bf35e914cddac178a"
 dependencies = [
  "accelerate-src",
  "candle-core",
@@ -1874,7 +1874,7 @@ dependencies = [
 [[package]]
 name = "dkr-kernel-registry"
 version = "0.1.0"
-source = "git+https://github.com/haricot/candle.git?rev=08a36261a6b4dd695c291d37c028b16f019fae46#08a36261a6b4dd695c291d37c028b16f019fae46"
+source = "git+https://github.com/haricot/candle.git?rev=95f9087c5210908c9ff7356bf35e914cddac178a#95f9087c5210908c9ff7356bf35e914cddac178a"
 dependencies = [
  "sha2 0.10.9",
 ]

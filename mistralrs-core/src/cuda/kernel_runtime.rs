@@ -2,7 +2,7 @@ use candle_core::Result;
 #[cfg(test)]
 use candle_core::Device;
 use mistralrs_kernel_runtime::universal_cuda::KernelExecutionCache;
-use std::{path::PathBuf, sync::OnceLock};
+use std::sync::OnceLock;
 
 const PACKAGE_ROOT_ENV: &str = "DKR_KERNEL_PACKAGES";
 pub(crate) use mistralrs_kernel_runtime::launch_plan_cache::LaunchPlanCache;
@@ -12,8 +12,7 @@ static KERNEL_CACHE: OnceLock<std::result::Result<KernelExecutionCache, String>>
 pub(crate) fn kernel_cache() -> Result<&'static KernelExecutionCache> {
     KERNEL_CACHE
         .get_or_init(|| {
-            std::env::var_os(PACKAGE_ROOT_ENV)
-                .map(PathBuf::from)
+            KernelExecutionCache::package_root()
                 .ok_or_else(|| {
                     format!("{PACKAGE_ROOT_ENV} must point to trusted CUDA kernel packages")
                 })

@@ -18,7 +18,7 @@ use mistralrs_kernel_runtime::{
     universal::{Argument, ElementType, LaunchRequest},
     universal_cuda::{KernelExecutionCache, PrevalidatedLaunchPlan},
 };
-use std::{cell::RefCell, path::PathBuf, sync::{Arc, OnceLock}};
+use std::{cell::RefCell, sync::{Arc, OnceLock}};
 
 const ENV: &str = "DKR_KERNEL_PACKAGES";
 const BLOCK: u32 = 256;
@@ -46,7 +46,7 @@ fn enabled(name: &str) -> bool {
 
 fn catalog() -> Result<&'static KernelExecutionCache> {
     CATALOG.get_or_init(|| {
-        std::env::var_os(ENV).map(PathBuf::from)
+        KernelExecutionCache::package_root()
             .ok_or_else(|| format!("{ENV} missing for DKR KV cache operations"))
             .and_then(|root| {
                 KernelExecutionCache::discover(&root)

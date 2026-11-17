@@ -13,7 +13,7 @@ use mistralrs_kernel_runtime::{
     universal::{Argument, ElementType, LaunchRequest},
     universal_cuda::{KernelExecutionCache, PrevalidatedLaunchPlan},
 };
-use std::{cell::RefCell, path::PathBuf, sync::OnceLock};
+use std::{cell::RefCell, sync::OnceLock};
 
 fn enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -49,7 +49,7 @@ thread_local! {
 
 fn catalog() -> Result<&'static KernelExecutionCache> {
     CATALOG.get_or_init(|| {
-        std::env::var_os(ENV).map(PathBuf::from)
+        KernelExecutionCache::package_root()
             .ok_or_else(|| format!("{ENV} not set for external paged-decode"))
             .and_then(|root| KernelExecutionCache::discover(&root)
                 .map_err(|err| err.to_string()))

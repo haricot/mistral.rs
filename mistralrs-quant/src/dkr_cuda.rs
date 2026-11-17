@@ -5,7 +5,7 @@ use mistralrs_kernel_runtime::{
     universal::{Argument, ElementType},
     universal_cuda::KernelExecutionCache,
 };
-use std::{path::PathBuf, sync::OnceLock};
+use std::sync::OnceLock;
 
 const PACKAGE_ROOT_ENV: &str = "DKR_KERNEL_PACKAGES";
 pub(crate) use mistralrs_kernel_runtime::launch_plan_cache::LaunchPlanCache;
@@ -15,8 +15,7 @@ static CATALOG: OnceLock<std::result::Result<KernelExecutionCache, String>> = On
 pub(crate) fn catalog() -> Result<&'static KernelExecutionCache> {
     CATALOG
         .get_or_init(|| {
-            std::env::var_os(PACKAGE_ROOT_ENV)
-                .map(PathBuf::from)
+            KernelExecutionCache::package_root()
                 .ok_or_else(|| format!("{PACKAGE_ROOT_ENV} must point to trusted CUDA packages"))
                 .and_then(|root| {
                     KernelExecutionCache::discover(&root).map_err(|error| error.to_string())

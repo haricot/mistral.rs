@@ -19,7 +19,7 @@ use mistralrs_kernel_runtime::{
     universal::{Argument, ElementType, LaunchRequest},
     universal_cuda::{KernelExecutionCache, PrevalidatedLaunchPlan},
 };
-use std::{cell::RefCell, path::PathBuf, sync::OnceLock};
+use std::{cell::RefCell, sync::OnceLock};
 
 const ENV: &str = "DKR_KERNEL_PACKAGES";
 const PARTITION: usize = 256;
@@ -38,7 +38,7 @@ fn enabled() -> bool {
 fn catalog() -> Result<&'static KernelExecutionCache> {
     CATALOG
         .get_or_init(|| {
-            std::env::var_os(ENV).map(PathBuf::from)
+            KernelExecutionCache::package_root()
                 .ok_or_else(|| format!("{ENV} not set for external paged-v2"))
                 .and_then(|path| {
                     KernelExecutionCache::discover(&path)

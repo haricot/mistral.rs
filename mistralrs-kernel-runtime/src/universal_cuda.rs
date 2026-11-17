@@ -9,7 +9,7 @@ use candle_core::{
     Device,
 };
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
@@ -28,8 +28,21 @@ pub struct KernelExecutionCache {
 }
 
 impl KernelExecutionCache {
+    pub fn package_root() -> Option<PathBuf> {
+        std::env::var_os("DKR_KERNEL_PACKAGES").map(PathBuf::from)
+            .or_else(|| crate::embedded::ROOT.map(PathBuf::from))
+    }
+
     pub fn discover(root: &Path) -> Result<Self> {
-        let catalog = if std::env::var_os(SHARED_CATALOG_ENV).is_some_and(|value| value == "0") {
+        let source = std::env::var("MISTRALRS_DKR_ARTIFACT_SOURCE")
+            .unwrap_or_else(|_| if crate::embedded::ROOT.is_some() { "embedded".into() } else { "filesystem".into() });
+        let catalog = if source == "embedded" {
+            ensure!(crate::embedded::ROOT.is_some_and(|path| root == Path::new(path)),
+                    "typed directory differs from the embedded build input");
+            crate::embedded::catalog()?
+        } else if source != "filesystem" {
+            anyhow::bail!("MISTRALRS_DKR_ARTIFACT_SOURCE must be embedded or filesystem");
+        } else if std::env::var_os(SHARED_CATALOG_ENV).is_some_and(|value| value == "0") {
             Arc::new(KernelCatalog::discover(root)?)
         } else {
             KernelCatalog::discover_shared(root)?
@@ -128,8 +141,12 @@ impl PreparedKernel {
         );
         #[cfg(feature = "shared-registry")]
         let function = {
-            let artifact = dkr_kernel_registry::VerifiedArtifact::new(module.ptx.clone(),
-                module.manifest.target_cc, &module.manifest.sha256).map_err(anyhow::Error::msg)?;
+            let artifact = match &module.ptx {
+                std::borrow::Cow::Borrowed(ptx) => dkr_kernel_registry::VerifiedArtifact::from_build_verified(
+                    ptx, module.manifest.target_cc, &module.manifest.sha256, [module.manifest.entry.clone()]),
+                std::borrow::Cow::Owned(ptx) => dkr_kernel_registry::VerifiedArtifact::new(ptx.clone(),
+                    module.manifest.target_cc, &module.manifest.sha256).map_err(anyhow::Error::msg)?,
+            };
             let (func, first) = device.as_cuda_device()?
                 .get_or_load_dkr_func(&artifact, &module.manifest.entry)?;
             if first && std::env::var_os("CANDLE_DKR_TRACE").is_some() {

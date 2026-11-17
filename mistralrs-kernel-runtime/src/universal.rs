@@ -3,6 +3,7 @@ use dkr_kernel_registry::{Registry, RegistryKey};
 use anyhow::{bail, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
+    borrow::Cow,
     path::{Component, Path, PathBuf},
     sync::Arc,
 };
@@ -133,7 +134,7 @@ pub struct LaunchRequest {
 #[derive(Debug)]
 pub struct VerifiedKernel {
     pub manifest: KernelManifest,
-    pub ptx: String,
+    pub ptx: Cow<'static, str>,
     pub manifest_sha256: String,
 }
 
@@ -371,7 +372,7 @@ impl VerifiedKernel {
         );
         Ok(Self {
             manifest,
-            ptx,
+            ptx: ptx.into(),
             manifest_sha256: digest(&bytes),
         })
     }
@@ -392,6 +393,20 @@ pub struct KernelCatalog {
 }
 
 impl KernelCatalog {
+    pub fn from_build_verified(modules: Vec<VerifiedKernel>) -> Result<Self> {
+        let mut result = Self::default();
+        for module in modules {
+            let key = RegistryKey::new(TYPED_ABI, &module.manifest.operation,
+                &module.manifest.implementation_id, module.manifest.target_cc);
+            result.modules.insert(key, Arc::new(module)).map_err(anyhow::Error::msg)?;
+        }
+        Ok(result)
+    }
+
+    pub fn verified_modules(&self) -> impl Iterator<Item = &Arc<VerifiedKernel>> {
+        self.modules.values()
+    }
+
     #[cfg(any(feature = "cuda", test))]
     pub(crate) fn discover_shared(root: &Path) -> Result<Arc<Self>> {
         static CATALOGS: Mutex<BTreeMap<PathBuf, Weak<KernelCatalog>>> = Mutex::new(BTreeMap::new());

@@ -12,7 +12,7 @@ use mistralrs_kernel_runtime::{
     universal_cuda::{KernelExecutionCache, PrevalidatedLaunchPlan},
     launch_plan_cache::LaunchPlanCache,
 };
-use std::{cell::RefCell, path::PathBuf, sync::OnceLock};
+use std::{cell::RefCell, sync::OnceLock};
 
 const PACKAGE_ROOT_ENV: &str = "DKR_KERNEL_PACKAGES";
 const BLOCK: usize = 512;
@@ -34,8 +34,7 @@ thread_local! {
 fn catalog() -> Result<&'static KernelExecutionCache> {
     CATALOG
         .get_or_init(|| {
-            std::env::var_os(PACKAGE_ROOT_ENV)
-                .map(PathBuf::from)
+            KernelExecutionCache::package_root()
                 .ok_or_else(|| format!("{PACKAGE_ROOT_ENV} must point to external CUDA packages"))
                 .and_then(|root| KernelExecutionCache::discover(&root)
                     .map_err(|error| error.to_string()))
