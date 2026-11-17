@@ -278,11 +278,12 @@ def write_checkpoint(path, data):
         temp_path.rename(path)
 
 
-def prep(orig, s0_report):
+def prep(orig, s0_report, *, allowed_source_changes=()):
     root=Path(__file__).resolve().parents[1]
     rev=s0.cmd("git","-C",str(root),"rev-parse","HEAD")
     subprocess.run(["git","-C",str(root),"diff","--quiet","HEAD","--","."],check=True)
-    subprocess.run(["git","-C",str(root),"diff","--quiet",S0_REV,"HEAD","--",".",":!tools/**"],check=True)
+    excluded = [":!tools/**", *(f":!{path}" for path in allowed_source_changes)]
+    subprocess.run(["git","-C",str(root),"diff","--quiet",S0_REV,"HEAD","--",".",*excluded],check=True)
     modelrun=orig/"target/dkr-r122-s684b/556dca9fa4e3/20261116T162401"
     prior=orig/"target/dkr-r122-s684/d392cb70c155/20261115T224855-paged0"
     native=orig/"target/dkr-r122-s6/7b3b19cf8b62/native-sm61"

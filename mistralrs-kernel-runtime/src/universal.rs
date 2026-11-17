@@ -6,6 +6,11 @@ use std::{
     path::{Component, Path, PathBuf},
     sync::Arc,
 };
+#[cfg(any(feature = "cuda", test))]
+use std::{
+    collections::BTreeMap,
+    sync::{Mutex, Weak},
+};
 
 pub const TYPED_ABI: &str = "dkr.typed.v1";
 pub const MODULE_SCHEMA: &str = "DKR-KERNEL-MODULE-V1";
@@ -387,6 +392,23 @@ pub struct KernelCatalog {
 }
 
 impl KernelCatalog {
+    #[cfg(any(feature = "cuda", test))]
+    pub(crate) fn discover_shared(root: &Path) -> Result<Arc<Self>> {
+        static CATALOGS: Mutex<BTreeMap<PathBuf, Weak<KernelCatalog>>> = Mutex::new(BTreeMap::new());
+        let root = root.canonicalize()?;
+        let mut catalogs = CATALOGS
+            .lock()
+            .map_err(|_| anyhow::anyhow!("DKR catalog cache poisoned"))?;
+        if let Some(catalog) = catalogs.get(&root).and_then(Weak::upgrade) {
+            return Ok(catalog);
+        }
+        // Keep validation inside the lock so concurrent routes publish a single snapshot.
+        let catalog = Arc::new(Self::discover(&root)?);
+        catalogs.retain(|_, entry| entry.strong_count() != 0);
+        catalogs.insert(root, Arc::downgrade(&catalog));
+        Ok(catalog)
+    }
+
     pub fn discover(root: &Path) -> Result<Self> {
         let root = root.canonicalize()?;
         ensure!(root.is_dir(), "kernel package root is not a directory");
@@ -417,7 +439,11 @@ impl KernelCatalog {
             !paths.is_empty(),
             "no kernel manifests found in package root"
         );
-        Self::load(&paths)
+        let catalog = Self::load(&paths)?;
+        if std::env::var_os("CANDLE_DKR_TRACE").is_some() {
+            eprintln!("MISTRAL_DKR_CATALOG_VALIDATED manifests={}", catalog.len());
+        }
+        Ok(catalog)
     }
 
     pub fn load(paths: &[PathBuf]) -> Result<Self> {
@@ -528,6 +554,31 @@ mod tests {
             max_dynamic_shared_mem_bytes: 48 * 1024,
         };
         (dir, path, request)
+    }
+
+    #[test]
+    fn shares_one_verified_catalog_for_live_routes() {
+        let (dir, _, request) = fixture();
+        let (first, second) = std::thread::scope(|scope| {
+            let first = scope.spawn(|| KernelCatalog::discover_shared(dir.path()).unwrap());
+            let second = scope.spawn(|| KernelCatalog::discover_shared(&dir.path().join(".")).unwrap());
+            (first.join().unwrap(), second.join().unwrap())
+        });
+        assert!(Arc::ptr_eq(&first, &second));
+        let (other_dir, _, _) = fixture();
+        let other = KernelCatalog::discover_shared(other_dir.path()).unwrap();
+        assert!(!Arc::ptr_eq(&first, &other));
+
+        let artifact = dir.path().join("fused.ptx");
+        let original = std::fs::read(&artifact).unwrap();
+        std::fs::write(&artifact, b"corrupted").unwrap();
+        assert!(KernelCatalog::discover(dir.path()).is_err());
+        assert_eq!(first.resolve(&request).unwrap().manifest.entry, "fused");
+        drop(first);
+        drop(second);
+        assert!(KernelCatalog::discover_shared(dir.path()).is_err());
+        std::fs::write(artifact, original).unwrap();
+        assert_eq!(KernelCatalog::discover_shared(dir.path()).unwrap().len(), 1);
     }
 
     #[test]

@@ -14,6 +14,7 @@ use std::{
 };
 
 const MAX_PREPARED_KERNELS: usize = 128;
+const SHARED_CATALOG_ENV: &str = "MISTRALRS_DKR_SHARED_CATALOG";
 
 struct PreparedEntry {
     request: LaunchRequest,
@@ -22,14 +23,19 @@ struct PreparedEntry {
 }
 
 pub struct KernelExecutionCache {
-    catalog: KernelCatalog,
+    catalog: Arc<KernelCatalog>,
     prepared: Mutex<Vec<PreparedEntry>>,
 }
 
 impl KernelExecutionCache {
     pub fn discover(root: &Path) -> Result<Self> {
+        let catalog = if std::env::var_os(SHARED_CATALOG_ENV).is_some_and(|value| value == "0") {
+            Arc::new(KernelCatalog::discover(root)?)
+        } else {
+            KernelCatalog::discover_shared(root)?
+        };
         Ok(Self {
-            catalog: KernelCatalog::discover(root)?,
+            catalog,
             prepared: Mutex::new(Vec::new()),
         })
     }

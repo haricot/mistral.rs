@@ -120,13 +120,18 @@ def compare(trials):
     need(tuple(trial["catalogue"] for trial in trials) == ORDER, "unexpected paired trial order")
     full = [trial["phase_seconds"] for trial in trials if trial["catalogue"] == "full"]
     reduced = [trial["phase_seconds"] for trial in trials if trial["catalogue"] == "reduced"]
+    return compare_phases(full, reduced, "full", "reduced")
+
+
+def compare_phases(reference, candidate, reference_name, candidate_name):
+    need(reference and len(reference) == len(candidate), "unbalanced timing samples")
     result = {}
-    for phase in full[0]:
-        a = [leg[phase] * 1000 for leg in full]
-        b = [leg[phase] * 1000 for leg in reduced]
+    for phase in reference[0]:
+        a = [leg[phase] * 1000 for leg in reference]
+        b = [leg[phase] * 1000 for leg in candidate]
         result[phase] = {
-            "full_median_ms": statistics.median(a),
-            "reduced_median_ms": statistics.median(b),
+            f"{reference_name}_median_ms": statistics.median(a),
+            f"{candidate_name}_median_ms": statistics.median(b),
             "saved_ms": statistics.median(a) - statistics.median(b),
             "paired_saved_ms": [x - y for x, y in zip(a, b)],
         }
