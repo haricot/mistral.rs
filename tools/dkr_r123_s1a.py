@@ -5,6 +5,7 @@ It deliberately does not report streaming TTFT/TPOT or host dispatch-only
 latency: the sealed example has no streaming or per-request NVTX boundaries.
 Run --self-test, then --preflight, then DKR_APPROVE_R123_S1A=1.
 Use --trace-probe to check one archived CUDA run and --inspect-trace to read an existing export.
+Use --resume-run after an interruption during memory sampling or telemetry.
 """
 import argparse
 import csv
@@ -30,8 +31,11 @@ from dkr_r122_s683_audit import need, sha
 from dkr_r122_s5_evidence import merge
 
 S0_REV = "cc05aab02210fbfdd46660dc50036d30d258f33d"
+LEGACY_CAPTURE_REV = "bfc206e9278dbbc0bd7d55e008df13b6c77776de"
 CACHES = ("contiguous", "paged")
 MODES = ("A", "B")
+GPU_IDENTITY = ("index", "name", "compute_cap", "driver_version", "memory.total")
+OBSERVATION_FIELDS = ("gpu_before", "gpu_after", "process_wall_seconds")
 GPU_TABLES = ("CUPTI_ACTIVITY_KIND_KERNEL", "CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL",
               "CUPTI_ACTIVITY_KIND_MEMCPY", "CUPTI_ACTIVITY_KIND_MEMSET")
 API_TABLES = ("CUPTI_ACTIVITY_KIND_RUNTIME", "CUPTI_ACTIVITY_KIND_DRIVER")
@@ -214,6 +218,16 @@ def self_test():
                 need(False, "kernel-only trace accepted")
         finally:
             db.close()
+        root = Path(d)
+        checkpoint = root / "checkpoint.json"
+        write_checkpoint(checkpoint, {"completed": True})
+        need(s0.read(checkpoint) == {"completed": True}, "checkpoint write regression")
+        (root / "failed.exit").write_text("-11\n")
+        (root / "failed.log").write_text("example failure\n")
+        attempt, previous_exit = archive_failed_attempt(root, "failed")
+        need(previous_exit == "-11" and (attempt / "failed.exit").read_text() == "-11\n"
+             and (attempt / "failed.log").read_text() == "example failure\n"
+             and not (root / "failed.log").exists(), "failed attempt archival regression")
     c=cache_summary([{"abi":"test","plan_hit":9,"plan_miss":1,"plan_evicted":0,
                       "function_hit":1,"function_miss":1,"module_loaded":1}])["test"]
     need(c["plan_hit_rate"]==0.9 and c["function_hit_rate"]==0.5,"cache counter regression")
@@ -237,6 +251,32 @@ def memory_sample(stop, samples, errors):
             errors.append(str(exc))
             return
         stop.wait(0.10)
+
+
+def archive_failed_attempt(run, stem):
+    files = [run / f"{stem}.{suffix}" for suffix in ("exit", "json", "log")]
+    files = [path for path in files if path.exists()]
+    if not files:
+        return
+    archive = run / "previous-attempts"
+    archive.mkdir(exist_ok=True)
+    attempt = Path(tempfile.mkdtemp(prefix=f"{stem}-", dir=archive))
+    exit_file = run / f"{stem}.exit"
+    previous_exit = exit_file.read_text().strip() if exit_file.is_file() else "unknown"
+    for path in files:
+        shutil.copy2(path, attempt / path.name)
+    for path in files:
+        path.unlink()
+    return attempt, previous_exit
+
+
+def write_checkpoint(path, data):
+    need(not path.exists(), f"checkpoint already exists: {path}")
+    with tempfile.TemporaryDirectory(prefix=".checkpoint-", dir=path.parent) as stage:
+        temp_path = Path(stage) / path.name
+        s0.write(temp_path, data)
+        temp_path.rename(path)
+
 
 def prep(orig, s0_report):
     root=Path(__file__).resolve().parents[1]
@@ -369,6 +409,7 @@ def main():
     action.add_argument("--self-test", action="store_true")
     action.add_argument("--inspect-trace", type=Path, metavar="SQLITE")
     action.add_argument("--trace-probe", action="store_true", help="profile one archived static run")
+    action.add_argument("--resume-run", type=Path, metavar="RUN", help="reuse completed brackets and resume sampling")
     profiler = p.add_mutually_exclusive_group()
     profiler.add_argument("--nsys", metavar="PATH")
     profiler.add_argument("--cuda-129-nsys", action="store_true",
@@ -394,14 +435,107 @@ def main():
     version=s0.cmd(nsys,"--version")
     print("DKR_R123_S1A_PREFLIGHT=PASS",json.dumps({"gpu":baseline,"nsys":version,"nsys_path":nsys}),flush=True)
     if a.preflight:return
-    base=orig/"target/dkr-r123-s1a"/rev[:12];base.mkdir(parents=True,exist_ok=True)
+    base=orig/"target/dkr-r123-s1a"/rev[:12]
     lock=(orig/"target/dkr-r122-s684/.lock").open("a")
     fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-    run=Path(tempfile.mkdtemp(prefix="run-",dir=base))
+    capture_revision = rev
+    if a.resume_run is None:
+        base.mkdir(parents=True, exist_ok=True)
+        run = Path(tempfile.mkdtemp(prefix="run-", dir=base))
+    else:
+        run = a.resume_run.resolve()
+        need(run.is_dir() and run.name.startswith("run-") and run.parent.parent == base.parent.resolve(),
+             "expected an S1A run directory under the original repository")
+        need(run.parent.name in (rev[:12], LEGACY_CAPTURE_REV[:12]), "unsupported S1A capture revision")
+        need(not (run / "attribution-s1a.json").exists(), "S1A report already exists")
+        need(not (run / "trace-probe.json").exists(), "a standalone trace probe cannot be resumed as a campaign")
+        if run.parent.name == LEGACY_CAPTURE_REV[:12]:
+            capture_revision = LEGACY_CAPTURE_REV
+    context_path = run / "capture-context.json"
+    context = {"capture_revision": capture_revision, "rounds": a.rounds, "nsys_version": version,
+               "s0_report_sha256": sha(s0_report), "model_seal": seal}
+    if a.resume_run is not None:
+        if context_path.is_file():
+            need(s0.read(context_path) == context, "S1A capture context changed")
+        else:
+            need(capture_revision == LEGACY_CAPTURE_REV and a.rounds == 1
+                 and any(word.partition("-")[0] == NSYS_CUDA129_VERSION for word in version.split()),
+                 "expected a one-round legacy run with the CUDA 12.9 Nsight version")
     print("DKR_R123_S1A_RUN="+str(run),flush=True)
-    trials=[]
+    trials = []
+    reused_trials = []
+
+    def checked_trial(leg_spec, observation, samples, *, reused=False):
+        stem, cache, mode, kind = leg_spec
+        dest, log = run / f"{stem}.json", run / f"{stem}.log"
+        rc = (run / f"{stem}.exit").read_text().strip()
+        need(rc == "0", f"{stem} failed (exit={rc}); inspect {log}")
+        data=s0.read(dest);ref=refs[cache][mode]
+        need(data["mode"]==ref["mode"] and data["model"]==model
+             and data["paged_requested"]==(cache=="paged"),"provider/model mismatch")
+        need(s0.exact({**ref,"mode":"legacy"},{**data,"mode":"external"}),"numerical mismatch "+stem)
+        elapsed = observation["process_wall_seconds"]
+        need(math.isfinite(elapsed) and elapsed > 0, f"invalid process timing for {stem}")
+        trial={"stem":stem,"cache":cache,"mode":mode,"kind":kind,"parity_exact":True,
+               **observation,
+               "load_seconds":data["load_seconds"],"metrics":s0.extract(data),
+               "json_sha256":sha(dest),"log_sha256":sha(log)}
+        if kind=="profile":
+            rep=run/f"{stem}.nsys-rep";sql=run/f"{stem}.sqlite"
+            need(rep.is_file(),"Nsight report missing")
+            if not reused:
+                subprocess.run([nsys,"export","--type=sqlite","--output="+str(sql),str(rep)],check=True)
+            try:
+                trial["trace"] = analyze_sqlite(sql)
+            except ValueError as exc:
+                if reused or not sql.is_file():
+                    raise
+                diagnostic = run / f"{stem}.trace-diagnostic.json"
+                info = trace_inventory(sql)
+                info.update(error=str(exc), nsys_version=version, nsys_path=nsys, profile_log=str(log),
+                            parity_exact=True)
+                s0.write(diagnostic, info)
+                raise ValueError(f"{exc}; inspect {diagnostic}") from exc
+            trial["nsys_report_sha256"]=sha(rep);trial["sqlite_sha256"]=sha(sql)
+        if kind=="memory":
+            need(len(samples) >= 2, f"too few memory samples for {stem}")
+            peak=max(x["device_used_mib"] for x in samples)
+            before = int(observation["gpu_before"]["memory.used"])
+            trial["memory"]={"scope":"sampled device-wide VRAM; lower bound on true peak, not process allocator peak",
+                             "samples":samples,"sampled_peak_device_mib":peak,
+                             "device_used_before_mib":before,
+                             "sampled_peak_minus_before_mib":peak-before}
+        if kind=="telemetry":
+            trial["telemetry"]=trace(run,stem,typed_index(typed),native,mode=="A")
+            trial["runtime_counters"]=merge(log.read_text().splitlines())
+            trial["cache_counters_by_abi"]=cache_summary(trial["runtime_counters"]["rows"])
+        return trial
+
     def leg(stem, cache, mode, kind):
+        leg_spec = (stem, cache, mode, kind)
+        checkpoint = run / f"{stem}.metrics.json"
+        if a.resume_run is not None:
+            if checkpoint.is_file():
+                saved = s0.read(checkpoint)
+                observation = {key: saved[key] for key in OBSERVATION_FIELDS}
+                for key in ("gpu_before", "gpu_after"):
+                    need(all(observation[key][field] == baseline[field] for field in GPU_IDENTITY),
+                         f"GPU or driver differs from saved trial {stem}")
+                samples = saved["memory"]["samples"] if kind == "memory" else []
+                trial = checked_trial(leg_spec, observation, samples, reused=True)
+                need(trial == saved, f"saved S1A evidence differs for {stem}")
+                trials.append(trial)
+                reused_trials.append(stem)
+                print(stem, "exact=True reused=True", flush=True)
+                return trial
+            need(kind in ("memory", "telemetry"), f"cannot resume an incomplete profile bracket ({stem})")
+
         need(not compute_apps(),"unexpected GPU compute process before "+stem)
+        if a.resume_run is not None:
+            archived = archive_failed_attempt(run, stem)
+            if archived is not None:
+                attempt, previous_exit = archived
+                print(f"{stem} previous_exit={previous_exit} archived={attempt}", flush=True)
         dest=run/f"{stem}.json";log=run/f"{stem}.log"
         env=s0.environment(os.environ,model,prior,native,typed,cache=="paged",mode,dest)
         command=[str(binaries[mode])]
@@ -424,47 +558,14 @@ def main():
             elapsed=time.monotonic()-start
             stop.set()
             if sampler is not None:sampler.join()
-        after=s0.gpu()
-        (run/f"{stem}.exit").write_text(str(rc)+"\n")
-        need(rc==0,stem+" failed; inspect "+str(log))
-        data=s0.read(dest);ref=refs[cache][mode]
-        need(data["mode"]==ref["mode"] and data["model"]==model
-             and data["paged_requested"]==(cache=="paged"),"provider/model mismatch")
-        need(s0.exact({**ref,"mode":"legacy"},{**data,"mode":"external"}),"numerical mismatch "+stem)
-        trial={"stem":stem,"cache":cache,"mode":mode,"kind":kind,"parity_exact":True,
-               "gpu_before":before,"gpu_after":after,"process_wall_seconds":elapsed,
-               "load_seconds":data["load_seconds"],"metrics":s0.extract(data),
-               "json_sha256":sha(dest),"log_sha256":sha(log)}
-        if kind=="profile":
-            rep=run/f"{stem}.nsys-rep";sql=run/f"{stem}.sqlite"
-            need(rep.is_file(),"Nsight report missing")
-            subprocess.run([nsys,"export","--type=sqlite","--output="+str(sql),str(rep)],check=True)
-            try:
-                trial["trace"] = analyze_sqlite(sql)
-            except ValueError as exc:
-                if not sql.is_file():
-                    raise
-                diagnostic = run / f"{stem}.trace-diagnostic.json"
-                info = trace_inventory(sql)
-                info.update(error=str(exc), nsys_version=version, nsys_path=nsys, profile_log=str(log),
-                            parity_exact=True)
-                s0.write(diagnostic, info)
-                raise ValueError(f"{exc}; inspect {diagnostic}") from exc
-            trial["nsys_report_sha256"]=sha(rep);trial["sqlite_sha256"]=sha(sql)
-        if kind=="memory":
-            need(not errors and len(samples)>=2,"memory sampling failed: "+str(errors))
-            peak=max(x["device_used_mib"] for x in samples)
-            trial["memory"]={"scope":"sampled device-wide VRAM; lower bound on true peak, not process allocator peak",
-                             "samples":samples,"sampled_peak_device_mib":peak,
-                             "device_used_before_mib":int(before["memory.used"]),
-                             "sampled_peak_minus_before_mib":peak-int(before["memory.used"])}
-        if kind=="telemetry":
-            trial["telemetry"]=trace(run,stem,typed_index(typed),native,mode=="A")
-            trial["runtime_counters"]=merge(log.read_text().splitlines())
-            trial["cache_counters_by_abi"]=cache_summary(trial["runtime_counters"]["rows"])
-        s0.write(run/f"{stem}.metrics.json",trial)
+        (run / f"{stem}.exit").write_text(f"{rc}\n")
+        need(rc == 0, f"{stem} failed (exit={rc}); inspect {log}")
+        observation = {"gpu_before": before, "gpu_after": s0.gpu(), "process_wall_seconds": elapsed}
+        need(not errors, f"{stem} memory sampling failed: {errors}")
+        trial = checked_trial(leg_spec, observation, samples)
+        write_checkpoint(checkpoint, trial)
         trials.append(trial)
-        print(stem,"exact=True",flush=True)
+        print(stem, "exact=True", flush=True)
         return trial
     if a.trace_probe:
         trial = leg("00-contiguous-A-profile", "contiguous", "A", "profile")
@@ -491,12 +592,17 @@ def main():
                 brackets.append({"round":i,"cache":cache,"mode":mode,"metrics":measures,
                                  "load_seconds":observer(*(t["load_seconds"] for t in (x,y,z))),
                                  "process_wall_seconds":observer(*(t["process_wall_seconds"] for t in (x,y,z)))})
+    if not context_path.is_file():
+        write_checkpoint(context_path, context)
     for cache in CACHES:
         for mode in MODES:
             for kind in ("memory","telemetry"):
                 leg(f"{cache}-{mode}-{kind}",cache,mode,kind)
     need(s0.model_gate(modelrun,prior,native)==seal,"model seal changed during S1A")
-    report={"status":"ATTRIBUTION_CAPTURE_COMPLETE","revision":rev,"s0_report_sha256":sha(s0_report),
+    need(sha(s0_report) == context["s0_report_sha256"], "S0 evidence changed during S1A")
+    report={"status":"ATTRIBUTION_CAPTURE_COMPLETE","revision":rev,
+            "s0_report_sha256":context["s0_report_sha256"],
+            "capture_revision":capture_revision,"reused_trials":reused_trials,
             "model_seal":seal,"prerequisites":prereq,"nsys_version":version,"nsys_path":nsys,
             "numeric_exact_vs_sealed":True,"new_compilation":False,"cuda_graphs_enabled":False,
             "trials":trials,"observer_brackets":brackets,
@@ -508,7 +614,8 @@ def main():
             "launch_cache_hits_measured":any(c["plan_hit_rate"] is not None for t in trials
                 if t["kind"]=="telemetry" for c in t["cache_counters_by_abi"].values()),
             "performance_promotion_approved":False,"production_promotion_approved":False}
-    out=run/"attribution-s1a.json";s0.write(out,report)
+    out=run/"attribution-s1a.json"
+    write_checkpoint(out, report)
     for t in trials:
         if t["kind"]=="profile":
             q=t["trace"]
