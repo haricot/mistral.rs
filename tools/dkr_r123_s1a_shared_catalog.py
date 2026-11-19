@@ -56,7 +56,7 @@ def prepared_candidate(base, revision):
     return binary, report
 
 
-def build_candidate(original, base, evidence, *, embedded=False):
+def build_candidate(original, base, evidence, *, embedded=False, example=EXAMPLE):
     revision, _, _, native, typed, seal, *_ = evidence
     if (base / "build").exists():
         binary, _ = prepared_candidate(base, revision)
@@ -84,7 +84,7 @@ def build_candidate(original, base, evidence, *, embedded=False):
         native_audit(inputs / "native")
         need(tree_hashes(native) == tree_hashes(inputs / "native"), "native build input differs from archive")
         env.update(DKR_EMBED_NATIVE_DIR=str(inputs / "native"), DKR_EMBED_TYPED_DIR=str(inputs / "typed"))
-    command = ["cargo", "build", "--locked", "-p", "mistralrs", "--example", EXAMPLE, "--features", FEATURES]
+    command = ["cargo", "build", "--locked", "-p", "mistralrs", "--example", example, "--features", FEATURES]
     print(f"DKR_R123_S1A_SHARED_BUILD_LOG={log}", flush=True)
     with log.open("xb") as output:
         with subprocess.Popen(command, cwd=root, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as cargo:
@@ -95,7 +95,7 @@ def build_candidate(original, base, evidence, *, embedded=False):
             rc = cargo.wait()
     need(rc == 0, f"candidate build failed (exit={rc}); inspect {log}")
     binary = stage / "candidate-bin"
-    shutil.copy2(target / "debug/examples" / EXAMPLE, binary)
+    shutil.copy2(target / "debug/examples" / example, binary)
     s1a.write_checkpoint(stage / "build.json", {
         "revision": revision, "binary_sha256": sha(binary), "features": FEATURES,
         "command": command, "cuda_build_root": str(cache),

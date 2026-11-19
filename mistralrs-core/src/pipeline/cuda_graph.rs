@@ -41,6 +41,8 @@ const CUDA_GRAPH_INSTANTIATE_FLAGS: u64 =
     sys::CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH.0 as u64;
 // Matches the standard CUDA paged-attention V2 partition size.
 const PAGED_ATTENTION_PARTITION_SIZE: usize = 512;
+#[cfg(feature = "dkr-sm61-experimental")]
+const DKR_PAGED_ATTENTION_PARTITION_SIZE: usize = 256;
 const CAPTURE_ATTENTION_OUTPUT_BUFFERS: usize = 2;
 const TARGET_CUDA_DECODE_GRAPH_CACHE_DEFAULT_CAPACITY: usize = 64;
 const TARGET_CUDA_DECODE_GRAPH_CACHE_MAX_CAPACITY: usize = 96;
@@ -60,6 +62,23 @@ const CUDA_GRAPH_EVENTS_METRIC: &str = "mistralrs_cuda_graph_events_total";
 const CUDA_GRAPH_DISPATCH_METRIC: &str = "mistralrs_cuda_graph_dispatch_total";
 const CUDA_GRAPH_EVICTIONS_METRIC: &str = "mistralrs_cuda_graph_evictions_total";
 const CUDA_GRAPH_RESIDENT_ENTRIES_METRIC: &str = "mistralrs_cuda_graph_resident_entries";
+#[cfg(feature = "dkr-sm61-experimental")]
+pub(crate) struct DecodeHostTimer(std::time::Instant);
+
+#[cfg(feature = "dkr-sm61-experimental")]
+impl DecodeHostTimer {
+    pub(crate) fn start() -> Self {
+        Self(std::time::Instant::now())
+    }
+}
+
+#[cfg(feature = "dkr-sm61-experimental")]
+impl Drop for DecodeHostTimer {
+    fn drop(&mut self) {
+        metrics::histogram!("mistralrs_dkr_decode_host_seconds").record(self.0.elapsed().as_secs_f64());
+    }
+}
+
 static NEXT_CUDA_DECODE_GRAPH_GENERATION: AtomicU64 = AtomicU64::new(1);
 static CUDA_GRAPH_MEMORY_POOL_SCOPES: OnceLock<Mutex<HashMap<usize, MemoryPoolScopeState>>> =
     OnceLock::new();
@@ -3428,10 +3447,15 @@ fn bucket_context_len(
 }
 
 fn paged_attention_partition_context_len(actual: usize) -> usize {
-    actual
-        .div_ceil(PAGED_ATTENTION_PARTITION_SIZE)
-        .max(1)
-        .saturating_mul(PAGED_ATTENTION_PARTITION_SIZE)
+    let partition = PAGED_ATTENTION_PARTITION_SIZE;
+    #[cfg(feature = "dkr-sm61-experimental")]
+    let partition = if crate::perf_flags::dkr_lfm3_cuda_graphs_enabled() {
+        // A graph must preserve both the short DKR route and the V2 partition count.
+        DKR_PAGED_ATTENTION_PARTITION_SIZE
+    } else {
+        partition
+    };
+    actual.div_ceil(partition).max(1).saturating_mul(partition)
 }
 
 fn graph_context_len(actual: Option<usize>, capacity: Option<usize>) -> Option<usize> {

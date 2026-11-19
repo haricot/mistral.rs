@@ -24,6 +24,12 @@ pub(crate) fn cuda_graphs_enabled() -> bool {
     *CUDA_GRAPHS_ENABLED.get_or_init(|| env_flag(CUDA_GRAPHS_ENV, true))
 }
 
+#[cfg(feature = "dkr-sm61-experimental")]
+pub(crate) fn dkr_lfm3_cuda_graphs_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_flag("MISTRALRS_DKR_LFM3_CUDA_GRAPHS", false))
+}
+
 pub(crate) fn flashinfer_decode_enabled() -> bool {
     *FLASHINFER_DECODE_ENABLED.get_or_init(|| env_flag(FLASHINFER_DECODE_ENV, true))
 }

@@ -1416,6 +1416,11 @@ impl NormalModel for Model {
     fn supports_packed_prefill(&self) -> bool {
         true
     }
+
+    #[cfg(feature = "dkr-sm61-experimental")]
+    fn supports_cuda_decode_graphs(&self) -> bool {
+        crate::perf_flags::dkr_lfm3_cuda_graphs_enabled()
+    }
 }
 
 impl AnyMoeBaseModelMixin for Model {}

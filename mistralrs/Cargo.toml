@@ -313,7 +313,9 @@ ring = ["mistralrs-core/ring"]
 code-execution = ["mistralrs-core/code-execution"]
 
 [dev-dependencies]
+metrics.workspace = true
 mistralrs-kernel-runtime.workspace = true
+mistralrs-paged-attn.workspace = true
 mistralrs-quant.workspace = true
 
 [[example]]
@@ -324,3 +326,8 @@ path = "examples/advanced/provider_f32/main.rs"
 name = "dkr_s684_model"
 path = "examples/advanced/dkr_s684_model/main.rs"
 required-features = ["cuda-legacy"]
+
+[[example]]
+name = "dkr_sm61_graph"
+path = "examples/advanced/dkr_sm61_graph/main.rs"
+required-features = ["dkr-sm61-experimental"]

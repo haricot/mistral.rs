@@ -2189,6 +2189,7 @@ impl NormalPipeline {
         } = inputs;
         let graph_event =
             CudaGraphEventGuard::new(CudaGraphComponent::Target, CudaGraphEvent::Capture);
+        let capture_start = std::time::Instant::now();
         let Device::Cuda(cuda_device) = step.input_ids.device() else {
             candle_core::bail!("CUDA graph decode expected CUDA input ids");
         };
@@ -2300,6 +2301,8 @@ impl NormalPipeline {
         )?;
         if let Some(entry) = entry {
             state.insert(entry);
+            metrics::histogram!("mistralrs_cuda_decode_graph_capture_seconds")
+                .record(capture_start.elapsed().as_secs_f64());
             graph_event.success();
             Ok(Some(logits))
         } else {
@@ -2546,6 +2549,12 @@ impl Pipeline for NormalPipeline {
             recurrent_batch_kind,
             adapter_leases,
         } = *inputs.downcast().expect("Downcast failed.");
+        #[cfg(feature = "dkr-sm61-experimental")]
+        let _decode_host_timer = (crate::perf_flags::dkr_lfm3_cuda_graphs_enabled()
+            && recurrent_batch_kind == RecurrentBatchKind::Decode
+            && paged_attn_meta.is_some()
+            && !return_raw_logits)
+            .then(super::cuda_graph::DecodeHostTimer::start);
         let lora_execution = super::resolve_lora_execution(
             self.dynamic_lora.as_deref(),
             &input_ids,
