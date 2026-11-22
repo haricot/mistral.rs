@@ -40,8 +40,27 @@ for family in moe indexed-copy paged-decode; do
     fi
 done
 
-# Resolve Cargo.lock only if needed. Does not compile Rust or CUDA kernels.
-cargo metadata --format-version 1 > /dev/null
+# Resolve Cargo.lock and inspect the actual Cargo feature graph before
+# any CUDA build script. This catches the previous candle-nn missing ffi issue:
+# typed-only must NOT activate native cuda-dkr-catalog.
+cargo metadata --format-version 1 \
+    --features mistralrs-core/dkr-r125-typed-real-pilot |
+python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+ids = {p["id"]: p["name"] for p in data["packages"]}
+nodes = data["resolve"]["nodes"]
+def features_for(name):
+    matches = [set(n["features"]) for n in nodes if ids[n["id"]] == name]
+    if len(matches) != 1:
+        raise SystemExit(f"DKR_R125_CARGO_FEATURES=FAIL expected one {name}, got {len(matches)}")
+    return matches[0]
+core = features_for("candle-core")
+nn = features_for("candle-nn")
+if "cuda-dkr-typed-image" not in core or "cuda-dkr-catalog" in core or "cuda-dkr-catalog" in nn:
+    raise SystemExit("DKR_R125_CARGO_FEATURES=FAIL typed loader is still coupled to native catalog")
+print("DKR_R125_CARGO_FEATURES=PASS typed_image=true native_catalog=false standard_cuda=true")
+'
 python3 tools/dkr_r125_candle_pin_audit.py
 
 # Keep the three selected CUBIN packages and ptxas image cache persistent.
