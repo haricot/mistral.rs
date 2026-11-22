@@ -105,3 +105,38 @@ git log --oneline --left-right --cherry-pick \
 
 This report is based on current source inspection and Git compare metadata,
 not on executing a branch merge or benchmark.
+
+## 5. Deferred headless-relogin performance comparison
+
+**Do not run this benchmark until real typed operations and model logits are
+qualified.** Use the established `headless-relogin` v0.1.4 workflow with
+`--with-after-run-openlog` after closing the desktop session, and remove
+`DISPLAY` / `WAYLAND_DISPLAY` from the benchmark command.
+
+Candidate common workload: the exact same
+`LiquidAI/LFM3-1.7B-Q4_K_M.gguf` file (record its SHA256), same tokenizer,
+GGUF route, prompt tokens, prefill and decode lengths and seeds on GTX 1080
+Max-Q (SM61). Before performance analysis, compare final logits/numeric
+parity and report *actual* provider decisions, not merely enabled features.
+
+Benchmark **two different questions separately**:
+
+- Same-host **DKR CUBIN vs existing static/legacy path** under the same pinned
+  Candle revision (best isolation of loader/dispatch overhead).
+- Cross-branch **DKR vs Mistral Extended**, noting Extended's older Candle
+  version and feature history (system-level comparison, **not** a controlled
+  causal estimate of DKR overhead). Optionally include Candle Extended on
+  matching synthetic operations in an independent producer comparison.
+
+Use alternating A1/B/A2 run order and at least three paired rounds for
+stabilized results; preserve separate cold module-load and steady-state
+measurements, with warmups and synchronizations. Collect TTFT/TTFB, TPOT,
+throughput, p50/p95 latency, peak/resident VRAM, cache/plan hit and fallback
+telemetry, driver/CUDA versions, GPU P-state, clock and temperature. Exclude
+runs with thermal throttling or mismatched provider/quantization routes.
+
+Store immutable input manifests, executable/source/artefact hashes, JSON
+results, and complete logs. Keep all builds strictly `--release`, use the
+existing persistent Cudaforge cache, and do not change global
+`CUDA_COMPUTE_CAP` just to compare architectures. This is a future campaign,
+not permission to run current tests in the background.
