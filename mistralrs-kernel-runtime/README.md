@@ -44,19 +44,33 @@ CUDA C++ kernels. It then records `cubin_artifact` and `cubin_sha256` in each
 typed manifest. Compilation is deduplicated by PTX, toolchain and target;
 reusing existing PTX packages avoids the Cudaforge NVCC pass entirely.
 
-```bash
+\`\`\`bash
+# All R1.25 checks are release-only: do not create target/debug.
+export CARGO_INCREMENTAL=0
+export CARGO_PROFILE_RELEASE_DEBUG=0
+export CARGO_PROFILE_RELEASE_STRIP=debuginfo
+
 # Run the CPU-only typed-manifest / policy gates first.
-cargo nextest run -p mistralrs-kernel-runtime --lib
+cargo nextest run --release --locked -p mistralrs-kernel-runtime --lib
 
 # In an SM61 worktree with *already qualified* PTX packages:
-cargo run -p mistralrs-kernel-runtime --features builder-cudaforge \
+cargo run --release --locked -p mistralrs-kernel-runtime --features builder-cudaforge \
   --bin dkr_package_builder -- \
   --cc 61 --pair-existing --output kernel-packages/build/cuda
 
 # Or request a complete Cudaforge PTX build + paired CUBIN generation:
-# cargo run -p mistralrs-kernel-runtime --features builder-cudaforge \
+# cargo run --release --locked -p mistralrs-kernel-runtime --features builder-cudaforge \
 #   --bin dkr_package_builder -- --cc 61 --cubin
 ```
+
+The focused SM61 transport check is also release-only:
+`bash tools/dkr_r125_sm61_typed_cubin_smoke.sh`. Release builds
+reuse the existing Cargo target directory and do **not** recreate
+`target/debug`. Before reclaiming old debug artifacts, inspect the
+worktree's `target/debug` and never erase persistent
+`target/dkr-*`, `_cudaforge_cache`, model files, or qualified PTX/CUBIN
+packages. The `release-with-debug` profile is intentionally **not**
+used for this qualification.
 
 Use `DKR_KERNEL_PACKAGES=kernel-packages/build/cuda/sm61` for the filesystem
 catalogue. At build time, `DKR_EMBED_TYPED_DIR` can seal the verified CUBIN
