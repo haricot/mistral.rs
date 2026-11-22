@@ -96,7 +96,7 @@ Candle and external Mistral operations have separate cache namespaces in the
 same Candle CUDA device, so they cannot collide on identical PTX content.
 
 This branch is pinned to Candle commit
-`159b8dd695d2608c5130de0922b9ea71982676b7` (branch
+`2eae55d827069d18346f952f896eaf5d686ba935` (branch
 `feature/dkr-r125-typed-image-transport`), which is a strict descendant of
 `feature/dkr-r124-neutral-catalog` and includes the full R1.24/R1.25
 native catalogue qualification history.
