@@ -23,7 +23,7 @@ impl ImageMode {
     }
 
     pub fn current() -> Result<Self> {
-        static MODE: OnceLock<Result<ImageMode, String>> = OnceLock::new();
+        static MODE: OnceLock<std::result::Result<ImageMode, String>> = OnceLock::new();
         MODE.get_or_init(|| {
             let setting = std::env::var(IMAGE_MODE_ENV)
                 .map(Some)
