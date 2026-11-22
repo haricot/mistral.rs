@@ -123,6 +123,16 @@ dispatch2 = { workspace = true, optional = true }
 mistralrs-metal-compile = { workspace = true, optional = true, features = ["metal"] }
 
 [features]
+# R1.25 typed-only real workload pilot. No native S31/legacy feature implied:
+# MoE grouped GEMM, KV indexed row copy and short-context paged decode execute
+# their existing production adapters through Candle's common PTX/CUBIN loader.
+# This is deliberately narrower than the historical full SM61 campaign.
+dkr-r125-typed-real-pilot = [
+    "mistralrs-kernel-runtime/shared-registry",
+    "dkr-moe",
+    "dkr-indexed-copy",
+    "dkr-paged-decode",
+]
 # R1.25: deployment candidate with native Candle qualified CUBIN and typed
 # Mistral kernels sharing Candle's CUDA transport and image policy.
 # Requires a sealed native build catalogue plus the typed manifests.
