@@ -175,8 +175,9 @@ fn cubin_elf_header(bytes: &[u8], target_cc: u32) -> bool {
         && bytes[4] == 2
         && bytes[5] == 1
         && u16::from_le_bytes([bytes[18], bytes[19]]) == 190
-        // NVPTX ELF e_flags (bits 8-15) encode the physical SM version.
-        && ((u32::from_le_bytes([bytes[48], bytes[49], bytes[50], bytes[51]]) >> 8) & 0xff) == target_cc
+        // For pre-Blackwell CUDA, EF_CUDA_SM is e_flags & 0xff (LLVM ELF.h).
+        // The next byte contains independent CUDA flags, NOT the Pascal SM.
+        && (u32::from_le_bytes([bytes[48], bytes[49], bytes[50], bytes[51]]) & 0xff) == target_cc
 }
 
 fn entry_signature(ptx: &str, entry: &str) -> Result<Vec<usize>> {
@@ -687,7 +688,7 @@ mod tests {
         cubin[4] = 2; // ELF64
         cubin[5] = 1; // little endian
         cubin[18..20].copy_from_slice(&190u16.to_le_bytes()); // EM_CUDA
-        cubin[48..52].copy_from_slice(&(61u32 << 8).to_le_bytes()); // EF_CUDA_SM61
+        cubin[48..52].copy_from_slice(&(61u32 | 0x400).to_le_bytes()); // EF_CUDA_SM61
         manifest.cubin_artifact = Some("fused.cubin".into());
         manifest.cubin_sha256 = Some(digest(&cubin));
         std::fs::write(dir.path().join("fused.cubin"), &cubin).unwrap();
@@ -702,7 +703,12 @@ mod tests {
         assert!(VerifiedKernel::read(&path).unwrap_err().to_string().contains("ELF"));
 
         // A valid CUDA ELF for a different physical SM must never be selected.
-        cubin[48..52].copy_from_slice(&(75u32 << 8).to_le_bytes());
+        // CUDA control flags (e.g. EF_CUDA_64BIT_ADDRESS) do not alter SM.
+        // The old shifted mask rejected this valid Pascal e_flags shape.
+        assert!(cubin_elf_header(&cubin, 61));
+        cubin[48..52].copy_from_slice(&(61u32 | 0x700).to_le_bytes());
+        assert!(cubin_elf_header(&cubin, 61));
+        cubin[48..52].copy_from_slice(&(75u32 | 0x400).to_le_bytes());
         manifest.cubin_sha256 = Some(digest(&cubin));
         std::fs::write(dir.path().join("fused.cubin"), &cubin).unwrap();
         std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
