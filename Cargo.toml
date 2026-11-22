@@ -49,10 +49,10 @@ license = "MIT"
 rust-version = "1.95"
 
 [workspace.dependencies]
-candle-core = { version = "0.11.1", git = "https://github.com/haricot/candle.git", rev = "5777c1c75ec08a070355e11fe74db87ce4665929" }
-candle-nn = { version = "0.11.1", git = "https://github.com/haricot/candle.git", rev = "5777c1c75ec08a070355e11fe74db87ce4665929" }
-candle-flash-attn-v3 = { version = "0.11.1", git = "https://github.com/haricot/candle.git", rev = "5777c1c75ec08a070355e11fe74db87ce4665929" }
-candle-metal-kernels = { version = "0.11.1", git = "https://github.com/haricot/candle.git", rev = "5777c1c75ec08a070355e11fe74db87ce4665929" }
+candle-core = { version = "0.11.1", git = "https://github.com/haricot/candle.git", rev = "d40ac1b4d69a209d08f76c5b5bd4e267ec63b4f0" }
+candle-nn = { version = "0.11.1", git = "https://github.com/haricot/candle.git", rev = "d40ac1b4d69a209d08f76c5b5bd4e267ec63b4f0" }
+candle-flash-attn-v3 = { version = "0.11.1", git = "https://github.com/haricot/candle.git", rev = "d40ac1b4d69a209d08f76c5b5bd4e267ec63b4f0" }
+candle-metal-kernels = { version = "0.11.1", git = "https://github.com/haricot/candle.git", rev = "d40ac1b4d69a209d08f76c5b5bd4e267ec63b4f0" }
 # candle-core = { path = "../candle/candle-core", version = "0.11.0" }
 # candle-nn = { path = "../candle/candle-nn", version = "0.11.0" }
 # candle-flash-attn-v3 = { path = "../candle/candle-flash-attn-v3", version = "0.11.0" }
@@ -215,7 +215,7 @@ mistralrs-metal-compile = { path = "mistralrs-metal-compile", version = "0.10.0"
 mistralrs-flash-attn = { path = "mistralrs-flash-attn", version = "0.10.0" }
 mistralrs-quant = { path = "mistralrs-quant", version = "0.10.0" }
 mistralrs-kernel-runtime = { path = "mistralrs-kernel-runtime", version = "0.10.0" }
-dkr-kernel-registry = { git = "https://github.com/haricot/candle.git", rev = "5777c1c75ec08a070355e11fe74db87ce4665929", version = "0.1.0" }
+dkr-kernel-registry = { git = "https://github.com/haricot/candle.git", rev = "d40ac1b4d69a209d08f76c5b5bd4e267ec63b4f0", version = "0.1.0" }
 mistralrs-vision = { path = "mistralrs-vision", version = "0.10.0" }
 mistralrs-server-core = { path = "mistralrs-server-core", version = "0.10.0" }
 mistralrs = { path = "mistralrs", version = "0.10.0" }
