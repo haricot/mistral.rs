@@ -44,7 +44,7 @@ CUDA C++ kernels. It then records `cubin_artifact` and `cubin_sha256` in each
 typed manifest. Compilation is deduplicated by PTX, toolchain and target;
 reusing existing PTX packages avoids the Cudaforge NVCC pass entirely.
 
-\`\`\`bash
+```bash
 # All R1.25 checks are release-only: do not create target/debug.
 export CARGO_INCREMENTAL=0
 export CARGO_PROFILE_RELEASE_DEBUG=0
