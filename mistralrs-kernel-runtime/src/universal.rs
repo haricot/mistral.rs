@@ -169,12 +169,14 @@ fn param_bit_width(parameter: &str) -> Option<usize> {
 
 // CUDA cubins are little-endian ELF64 files with EM_CUDA (190).
 // Admission of the actual image and entry is additionally checked by the CUDA driver.
-fn cubin_elf_header(bytes: &[u8]) -> bool {
+fn cubin_elf_header(bytes: &[u8], target_cc: u32) -> bool {
     bytes.len() >= 64
         && bytes.starts_with(b"\x7fELF")
         && bytes[4] == 2
         && bytes[5] == 1
         && u16::from_le_bytes([bytes[18], bytes[19]]) == 190
+        // NVPTX ELF e_flags (bits 8-15) encode the physical SM version.
+        && (u32::from_le_bytes([bytes[48], bytes[49], bytes[50], bytes[51]]) >> 8) & 0xff == target_cc
 }
 
 fn entry_signature(ptx: &str, entry: &str) -> Result<Vec<usize>> {
@@ -415,7 +417,7 @@ impl VerifiedKernel {
                 digest(&image).eq_ignore_ascii_case(manifest.cubin_sha256.as_deref().unwrap_or("")),
                 "CUBIN digest mismatch"
             );
-            ensure!(cubin_elf_header(&image), "invalid CUBIN ELF header");
+            ensure!(cubin_elf_header(&image, manifest.target_cc), "invalid CUBIN ELF header or target SM");
             Some(Cow::Owned(image))
         } else {
             None
@@ -685,6 +687,7 @@ mod tests {
         cubin[4] = 2; // ELF64
         cubin[5] = 1; // little endian
         cubin[18..20].copy_from_slice(&190u16.to_le_bytes()); // EM_CUDA
+        cubin[48..52].copy_from_slice(&(61u32 << 8).to_le_bytes()); // EF_CUDA_SM61
         manifest.cubin_artifact = Some("fused.cubin".into());
         manifest.cubin_sha256 = Some(digest(&cubin));
         std::fs::write(dir.path().join("fused.cubin"), &cubin).unwrap();
