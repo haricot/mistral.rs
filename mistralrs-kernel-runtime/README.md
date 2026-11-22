@@ -29,6 +29,63 @@ See [DKR-R1 typed ABI and complete coverage inventory](../docs/DKR_R1_TYPED_ABI_
 for the 196 classified CUDA source units and 44 Candle backend methods, operation families, open adapter work,
 SM61 restrictions and qualification gates.
 
+
+## R1.25: paired CUBIN/PTX images (SM61 qualification candidate)
+
+The *typed* DKR catalogue now supports an optional, verified CUBIN image paired
+with each PTX module. The PTX remains the source of the typed entry signature,
+and the binary must have an independent SHA-256, a valid CUDA ELF64 header and
+the exact target architecture. Existing PTX-only manifests remain readable.
+Neither Candle nor the operation adapters contain a hardcoded Pascal dispatch.
+
+The binary builder still generates PTX via the pinned `cudaforge` 0.1.6.
+For CUBIN, `ptxas` assembles those exact PTX bytes rather than rebuilding the
+CUDA C++ kernels. It then records `cubin_artifact` and `cubin_sha256` in each
+typed manifest. Compilation is deduplicated by PTX, toolchain and target;
+reusing existing PTX packages avoids the Cudaforge NVCC pass entirely.
+
+```bash
+# Run the CPU-only typed-manifest / policy gates first.
+cargo nextest run -p mistralrs-kernel-runtime --lib
+
+# In an SM61 worktree with *already qualified* PTX packages:
+cargo run -p mistralrs-kernel-runtime --features builder-cudaforge \
+  --bin dkr_package_builder -- \
+  --cc 61 --pair-existing --output kernel-packages/build/cuda
+
+# Or request a complete Cudaforge PTX build + paired CUBIN generation:
+# cargo run -p mistralrs-kernel-runtime --features builder-cudaforge \
+#   --bin dkr_package_builder -- --cc 61 --cubin
+```
+
+Use `DKR_KERNEL_PACKAGES=kernel-packages/build/cuda/sm61` for the filesystem
+catalogue. At build time, `DKR_EMBED_TYPED_DIR` can seal the verified CUBIN
+and PTX bytes together in the executable. Set
+`MISTRALRS_DKR_ARTIFACT_SOURCE=filesystem` or `embedded` as appropriate.
+
+`CANDLE_DKR_IMAGE_MODE` is shared by Candle and Mistral DKR and is fixed
+on first use, so **restart the process** to change it:
+
+- `auto` (default): prefer an exact-target paired CUBIN. Only a *cold CUDA
+  module/entry admission failure* may revert to the already verified PTX.
+  Missing CUBIN on a PTX-only package uses PTX.
+- `cubin`: require a paired CUBIN for the exact GPU compute capability.
+  Missing or rejected images cause errors, without PTX fallback.
+- `ptx`: explicit rollback, using the verified PTX.
+
+Mistral keeps a bounded, per-CUDA-device CUBIN module cache (512 physical
+modules) and reuses the existing typed prevalidated launch plans. The PTX
+path continues through Candle's shared DKR module cache. Both image formats
+must pass the same numerical and route-selection qualification; successful
+loading does **not** establish numeric parity or performance promotion.
+
+**Release gate:** after local compilation, run a single physical SM61
+qualification comparing `auto`, `cubin` and `ptx`, checking that the
+actual module load is `format=cubin` for the selected operations, full
+logits/FP8/FP4/paged parity, launch-plan cache reuse, and no static CUDA
+fallback for the qualified routes. Until that gate passes, keep the
+experimental feature flag and do not retarget the production Candle pin.
+
 ## Historical RFC and ASD integration
 
 See **[DKR-R0 historical ASD-first RFC](../docs/DYNAMIC_KERNEL_RUNTIME_R0.md)** for:
