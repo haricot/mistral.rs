@@ -99,6 +99,11 @@ pub struct KernelManifest {
     pub implementation_id: String,
     pub artifact: PathBuf,
     pub sha256: String,
+    /// Optional CUDA machine image assembled from the paired, ABI-checked PTX.
+    #[serde(default)]
+    pub cubin_artifact: Option<PathBuf>,
+    #[serde(default)]
+    pub cubin_sha256: Option<String>,
     pub entry: String,
     pub target_cc: u32,
     pub min_cc: u32,
@@ -135,6 +140,7 @@ pub struct LaunchRequest {
 pub struct VerifiedKernel {
     pub manifest: KernelManifest,
     pub ptx: Cow<'static, str>,
+    pub cubin: Option<Cow<'static, [u8]>>,
     pub manifest_sha256: String,
 }
 
@@ -159,6 +165,16 @@ fn param_bit_width(parameter: &str) -> Option<usize> {
             _ => None,
         }
     })
+}
+
+// CUDA cubins are little-endian ELF64 files with EM_CUDA (190).
+// Admission of the actual image and entry is additionally checked by the CUDA driver.
+fn cubin_elf_header(bytes: &[u8]) -> bool {
+    bytes.len() >= 64
+        && bytes.starts_with(b"\x7fELF")
+        && bytes[4] == 2
+        && bytes[5] == 1
+        && u16::from_le_bytes([bytes[18], bytes[19]]) == 190
 }
 
 fn entry_signature(ptx: &str, entry: &str) -> Result<Vec<usize>> {
@@ -245,8 +261,23 @@ impl KernelManifest {
                 .components()
                 .all(|c| matches!(c, Component::Normal(_)))
                 && self.artifact.extension().is_some_and(|e| e == "ptx"),
-            "DKR-R1 accepts only relative PTX artifacts"
+            "DKR-R1 requires a relative PTX source artifact"
         );
+        match (&self.cubin_artifact, &self.cubin_sha256) {
+            (None, None) => {}
+            (Some(path), Some(hash)) => {
+                ensure!(
+                    path.components().all(|c| matches!(c, Component::Normal(_)))
+                        && path.extension().is_some_and(|e| e == "cubin"),
+                    "CUBIN artifact must be a relative .cubin path"
+                );
+                ensure!(
+                    hash.len() == 64 && hash.bytes().all(|c| c.is_ascii_hexdigit()),
+                    "invalid CUBIN SHA256"
+                );
+            }
+            _ => bail!("CUBIN path and digest must be declared together"),
+        }
         Ok(())
     }
 
@@ -370,9 +401,29 @@ impl VerifiedKernel {
             widths == expected,
             "PTX entry arguments differ from typed ABI"
         );
+        // Verify the complete paired image before publishing a module to the catalog.
+        // No fallback may conceal a corrupt or mismatched CUBIN package.
+        let cubin = if let Some(name) = &manifest.cubin_artifact {
+            let path = root.join(name).canonicalize()?;
+            ensure!(path.starts_with(root), "CUBIN escapes package directory");
+            ensure!(
+                std::fs::metadata(&path)?.len() <= MAX_KERNEL_BYTES,
+                "CUBIN artifact budget exceeded"
+            );
+            let image = std::fs::read(path)?;
+            ensure!(
+                digest(&image).eq_ignore_ascii_case(manifest.cubin_sha256.as_deref().unwrap_or("")),
+                "CUBIN digest mismatch"
+            );
+            ensure!(cubin_elf_header(&image), "invalid CUBIN ELF header");
+            Some(Cow::Owned(image))
+        } else {
+            None
+        };
         Ok(Self {
             manifest,
             ptx: ptx.into(),
+            cubin,
             manifest_sha256: digest(&bytes),
         })
     }
@@ -518,6 +569,8 @@ mod tests {
             implementation_id: "pascal.f32.scalar".into(),
             artifact: "fused.ptx".into(),
             sha256: digest(ptx),
+            cubin_artifact: None,
+            cubin_sha256: None,
             entry: "fused".into(),
             target_cc: 61,
             min_cc: 61,
@@ -620,6 +673,32 @@ mod tests {
         };
         assert!(catalog.select("pascal.f32.scalar", &bad).is_err());
         assert!(catalog.select("not-present", &request).is_err());
+    }
+
+    #[test]
+    fn checks_paired_cubin_bytes_and_refuses_corruption() {
+        let (dir, path, _) = fixture();
+        let mut manifest: KernelManifest =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let mut cubin = vec![0u8; 64];
+        cubin[..4].copy_from_slice(b"\x7fELF");
+        cubin[4] = 2; // ELF64
+        cubin[5] = 1; // little endian
+        cubin[18..20].copy_from_slice(&190u16.to_le_bytes()); // EM_CUDA
+        manifest.cubin_artifact = Some("fused.cubin".into());
+        manifest.cubin_sha256 = Some(digest(&cubin));
+        std::fs::write(dir.path().join("fused.cubin"), &cubin).unwrap();
+        std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        assert_eq!(VerifiedKernel::read(&path).unwrap().cubin.unwrap().as_ref(), cubin);
+        std::fs::write(dir.path().join("fused.cubin"), b"corrupted").unwrap();
+        assert!(VerifiedKernel::read(&path).unwrap_err().to_string().contains("digest"));
+
+        manifest.cubin_sha256 = Some(digest(b"corrupted"));
+        std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        assert!(VerifiedKernel::read(&path).unwrap_err().to_string().contains("ELF"));
+
+        manifest.cubin_sha256 = None;
+        assert!(manifest.validate().is_err());
     }
 
     #[test]
