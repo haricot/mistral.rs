@@ -27,6 +27,19 @@ struct CubinCacheEntry {
 }
 static CUBIN_MODULES: OnceLock<Mutex<Vec<CubinCacheEntry>>> = OnceLock::new();
 
+#[derive(Debug)]
+enum CubinLoadFailure {
+    // Never silently fall back from a host/runtime invariant failure.
+    Invariant(anyhow::Error),
+    // CUDA driver's module/function admission may fall back before a launch.
+    Admission(anyhow::Error),
+}
+impl CubinLoadFailure {
+    fn into_error(self) -> anyhow::Error {
+        match self { Self::Invariant(error) | Self::Admission(error) => error }
+    }
+}
+
 
 struct PreparedEntry {
     request: LaunchRequest,
@@ -164,13 +177,14 @@ impl PreparedKernel {
                     "strict CUBIN mode requires an exact-architecture verified image for {} sm{}",
                     module.manifest.operation, cc
                 ))?;
-                Self::load_cubin(module, device, image)?
+                Self::load_cubin(module, device, image).map_err(CubinLoadFailure::into_error)?
             }
             ImageMode::Auto => match binary {
                 Some(image) => match Self::load_cubin(module, device, image) {
                     Ok(function) => function,
-                    Err(error) => {
-                        // Only the cold module/function admission failure is recoverable.
+                    Err(CubinLoadFailure::Invariant(error)) => return Err(error),
+                    Err(CubinLoadFailure::Admission(error)) => {
+                        // Only the cold CUDA module/function admission failure is recoverable.
                         // Once launched, any CUDA execution fault must propagate unchanged.
                         eprintln!(
                             "MISTRAL_DKR_CUBIN_FALLBACK operation={} cc={} error={} selected=ptx reason=module_admission_failure",
@@ -218,21 +232,25 @@ impl PreparedKernel {
         }
     }
 
-    fn load_cubin(module: &VerifiedKernel, device: &Device, image: &[u8]) -> Result<CudaFunction> {
+    fn load_cubin(module: &VerifiedKernel, device: &Device, image: &[u8]) -> std::result::Result<CudaFunction, CubinLoadFailure> {
         let sha = module.manifest.cubin_sha256.as_deref()
-            .ok_or_else(|| anyhow!("CUBIN has no verified digest"))?;
+            .ok_or_else(|| CubinLoadFailure::Invariant(anyhow!("CUBIN has no verified digest")))?;
         let cache = CUBIN_MODULES.get_or_init(|| Mutex::new(Vec::new()));
-        let mut cache = cache.lock().map_err(|_| anyhow!("CUBIN module cache poisoned"))?;
+        let mut cache = cache.lock().map_err(|_| CubinLoadFailure::Invariant(anyhow!("CUBIN module cache poisoned")))?;
         if let Some(existing) = cache.iter().find(|row|
             row.device.same_device(device) && row.sha256 == sha
         ) {
-            return Ok(existing.module.load_function(&module.manifest.entry)?);
+            return existing.module.load_function(&module.manifest.entry)
+                .map_err(|error| CubinLoadFailure::Admission(error.into()));
         }
         // cudarc accepts a byte image through the existing Candle CUDA context;
         // module admission and entry-symbol lookup happen before any inference.
-        let stream = device.as_cuda_device()?.cuda_stream();
-        let loaded = stream.context().load_module(Ptx::from_binary(image.to_vec()))?;
-        let func = loaded.load_function(&module.manifest.entry)?;
+        let stream = device.as_cuda_device().map_err(|error|
+            CubinLoadFailure::Invariant(error.into()))?.cuda_stream();
+        let loaded = stream.context().load_module(Ptx::from_binary(image.to_vec()))
+            .map_err(|error| CubinLoadFailure::Admission(error.into()))?;
+        let func = loaded.load_function(&module.manifest.entry)
+            .map_err(|error| CubinLoadFailure::Admission(error.into()))?;
         if cache.len() >= MAX_CUBIN_MODULES {
             cache.remove(0);
         }
