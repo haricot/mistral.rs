@@ -79,6 +79,14 @@ path continues through Candle's shared DKR module cache. Both image formats
 must pass the same numerical and route-selection qualification; successful
 loading does **not** establish numeric parity or performance promotion.
 
+**Candle transport compatibility:** this change targets Mistral's *external typed*
+DKR packages. Candle's `cuda-dkr-qualified-default` currently expects its
+**native** embedded CUBIN lookup inside `get_or_load_dkr_func`; do not
+activate that native-only switch for typed PTX fallback until Candle provides
+a separate external-typed transport entrypoint (or equivalent catalogue
+namespace). The existing pinned Candle revision is intentionally unchanged.
+Both native and typed CUBIN qualification must be reconciled before promotion.
+
 **Release gate:** after local compilation, run a single physical SM61
 qualification comparing `auto`, `cubin` and `ptx`, checking that the
 actual module load is `format=cubin` for the selected operations, full
