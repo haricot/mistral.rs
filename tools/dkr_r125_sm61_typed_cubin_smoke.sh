@@ -11,6 +11,14 @@ export CARGO_PROFILE_RELEASE_DEBUG=0
 export CARGO_PROFILE_RELEASE_STRIP=debuginfo
 
 cd "$(dirname "$0")/.."
+
+# Cargo.lock's hand-pinned git source strings alone do not constitute a
+# Cargo-resolved lockfile. Reconcile the lock once, without compiling, before
+# entering strict --locked release checks. Future runs are no-ops if resolved.
+# This may update tracked Cargo.lock; preserve the generated diff for review.
+echo "DKR_R125_CARGO_LOCK_SYNC=START metadata_only=true"
+cargo metadata --format-version 1 > /dev/null
+echo "DKR_R125_CARGO_LOCK_SYNC=PASS"
 python3 tools/dkr_r125_candle_pin_audit.py
 
 tmp="$(mktemp -d)"
