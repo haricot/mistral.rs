@@ -60,12 +60,20 @@ def main() -> None:
     shared = runtime_toml["features"]["shared-registry"]
     if "candle-core/cuda-dkr-typed-image" not in shared:
         fail("typed-image transport is not enabled by shared-registry")
+    if "candle-core/cuda-dkr-s31" in shared:
+        fail("typed image transport must not force native S31 legacy compilation")
     core_toml = tomllib.loads((ROOT / "mistralrs-core/Cargo.toml").read_text())
     features = core_toml["features"]
     if "mistralrs-kernel-runtime/shared-registry" not in features["dkr-sm61-experimental"]:
         fail("SM61 DKR does not enable typed transport")
     if "candle-core/cuda-dkr-qualified-default" not in features["dkr-sm61-cubin-qualified"]:
         fail("qualified CUBIN feature does not enable Candle native default")
+    pilot = features["dkr-r125-typed-real-pilot"]
+    for name in ("dkr-moe", "dkr-indexed-copy", "dkr-paged-decode", "mistralrs-kernel-runtime/shared-registry"):
+        if name not in pilot:
+            fail(f"real typed pilot missing {name}")
+    if any("cuda-legacy" in flag or "cuda-dkr-s31" in flag for flag in pilot):
+        fail("real typed pilot must not force native legacy or S31")
 
     loader = (ROOT / "mistralrs-kernel-runtime/src/universal_cuda.rs").read_text()
     if "get_or_load_dkr_typed_image_func" not in loader:
@@ -81,7 +89,7 @@ def main() -> None:
     print(
         "DKR_R125_CANDLE_INTEGRATION_AUDIT=PASS "
         f"revision={revision} typed_transport=candle "
-        "native_cubin=opt_in asd_dispatch=unchanged gpu_qualified=false"
+        "native_cubin=opt_in typed_real_pilot=3 asd_dispatch=unchanged gpu_qualified=false"
     )
 
 
