@@ -112,6 +112,34 @@ fallback in auto mode. The additional **opt-in**
 attested native **and** typed catalogues at build time, and is not a claim of
 end-to-end Mistral model performance qualification.
 
+### R1.25 real production-adapter pilot (not yet qualified)
+
+The new `mistralrs-core/dkr-r125-typed-real-pilot` feature enables real grouped
+MoE GEMM, indexed KV row-copy, and short-context paged decode through the
+shared Candle typed-image transport. It does **not** automatically enable
+`cuda-dkr-s31`, `cuda-legacy` or the sealed native default catalogue.
+Existing typed PTX families must already have been generated and verified.
+
+Run one focused release-only GPU gate, rather than repeating the full
+25-family static build:
+
+```bash
+cd /home/np/dkr-worktrees/r125-candle-integration
+# Point these at your EXISTING cached artifacts (never a fresh directory).
+export MISTRALRS_CUDA_BUILD_ROOT=/path/to/existing/target/dkr-cuda-cache/sm61
+export DKR_R125_TYPED_PACKAGE_ROOT=/path/to/existing/kernel-packages/build/cuda/sm61
+DKR_APPROVE_R125_REAL=1 bash tools/dkr_r125_real_kernel_sm61.sh
+```
+
+It refuses to launch if the persistent Cudaforge indexes or three PTX families
+are missing. `ptxas` produces selected CUBINs under persistent
+`target/dkr-r125-real-pilot`. Tests are GPU-real, ignored by default,
+run through `cargo nextest --release --locked` once, and require strict
+`CANDLE_DKR_IMAGE_MODE=cubin` with actual Candle load evidence.
+Do not claim these three adapters pass until this physical gate succeeds.
+Detailed branch-by-branch comparison:
+[DKR R1.25 vs Candle/Mistral Extended](../docs/DKR_R125_VS_EXTENDED_20261122.md).
+
 **Release gate:** after local compilation, run a single physical SM61
 qualification comparing `auto`, `cubin` and `ptx`, checking that the
 actual module load is `format=cubin` for the selected operations, full
