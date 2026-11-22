@@ -47,15 +47,21 @@ const PACKAGES: &[Package] = &[
     Package { name: "routed-quant", source: "routed_quant.cu", fast_math: false },
 ];
 
-fn parse_args() -> Result<(usize, PathBuf, String, bool), Box<dyn std::error::Error>> {
+fn parse_args() -> Result<(usize, PathBuf, String, bool, bool), Box<dyn std::error::Error>> {
     let mut cc: Option<usize> = None;
     let mut output = PathBuf::from("kernel-packages/build/cuda");
     let mut python = String::from("python3");
     let mut cubin = false;
+    let mut pair_existing = false;
     let mut args = env::args().skip(1);
     while let Some(flag) = args.next() {
         if flag == "--cubin" {
             cubin = true;
+            continue;
+        }
+        if flag == "--pair-existing" {
+            cubin = true;
+            pair_existing = true;
             continue;
         }
         let value = args.next().ok_or_else(|| format!("missing argument for {flag}"))?;
@@ -70,7 +76,7 @@ fn parse_args() -> Result<(usize, PathBuf, String, bool), Box<dyn std::error::Er
     if !(50..=120).contains(&cc) {
         return Err(format!("unsupported compute capability {cc}").into());
     }
-    Ok((cc, output, python, cubin))
+    Ok((cc, output, python, cubin, pair_existing))
 }
 
 fn compile_ptx(
@@ -222,7 +228,7 @@ fn stage_cubins(root: &Path, cc: usize) -> Result<usize, Box<dyn std::error::Err
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let (cc, requested_output, python, cubin) = parse_args()?;
+    let (cc, requested_output, python, cubin, pair_existing) = parse_args()?;
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent().ok_or("no repository root")?;
     let output = if requested_output.is_absolute() {
@@ -240,6 +246,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         vllm.join("quantization/fp8/nvidia"),
     ];
     let work = output.join(format!("sm{cc}/_cudaforge_cache"));
+    if !pair_existing {
     for pkg in PACKAGES {
         let dir = sources.join(pkg.name);
         let source = dir.join(pkg.source);
@@ -270,11 +277,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             package(&python, &script, cc, &output, &compiled, false, root)?;
         }
     }
+    }
     if cubin {
         let images = stage_cubins(&output.join(format!("sm{cc}")), cc)?;
         println!("DKR_CUDAFORGE_CUBIN_PAIRED=STAGED target_cc={cc} images={images}");
     }
-    println!("DKR_CUDAFORGE_PACKAGES=STAGED target_cc={cc} families={}", PACKAGES.len());
+    println!("DKR_CUDAFORGE_PACKAGES=STAGED target_cc={cc} families={}", if pair_existing { 0 } else { PACKAGES.len() });
     Ok(())
 }
 
