@@ -176,7 +176,7 @@ fn cubin_elf_header(bytes: &[u8], target_cc: u32) -> bool {
         && bytes[5] == 1
         && u16::from_le_bytes([bytes[18], bytes[19]]) == 190
         // NVPTX ELF e_flags (bits 8-15) encode the physical SM version.
-        && (u32::from_le_bytes([bytes[48], bytes[49], bytes[50], bytes[51]]) >> 8) & 0xff == target_cc
+        && ((u32::from_le_bytes([bytes[48], bytes[49], bytes[50], bytes[51]]) >> 8) & 0xff) == target_cc
 }
 
 fn entry_signature(ptx: &str, entry: &str) -> Result<Vec<usize>> {
@@ -700,6 +700,13 @@ mod tests {
         manifest.cubin_sha256 = Some(digest(b"corrupted"));
         std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
         assert!(VerifiedKernel::read(&path).unwrap_err().to_string().contains("ELF"));
+
+        // A valid CUDA ELF for a different physical SM must never be selected.
+        cubin[48..52].copy_from_slice(&(75u32 << 8).to_le_bytes());
+        manifest.cubin_sha256 = Some(digest(&cubin));
+        std::fs::write(dir.path().join("fused.cubin"), &cubin).unwrap();
+        std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        assert!(VerifiedKernel::read(&path).unwrap_err().to_string().contains("target SM"));
 
         manifest.cubin_sha256 = None;
         assert!(manifest.validate().is_err());
