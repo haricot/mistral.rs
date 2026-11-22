@@ -19,6 +19,13 @@ if [[ -z "${MISTRALRS_CUDA_BUILD_ROOT:-}" || ! -d "$MISTRALRS_CUDA_BUILD_ROOT" ]
     echo "This script refuses to silently create a new static CUDA compilation tree." >&2
     exit 3
 fi
+for component in quant core paged-attn; do
+    if [[ ! -s "$MISTRALRS_CUDA_BUILD_ROOT/$component/kernels/.cudaforge_cache.json" ]]; then
+        echo "DKR_R125_REAL=BLOCKED missing persistent cudaforge cache index for $component" >&2
+        exit 3
+    fi
+done
+echo "DKR_R125_CUDA_CACHE=REUSED root=$MISTRALRS_CUDA_BUILD_ROOT"
 
 src="${DKR_R125_TYPED_PACKAGE_ROOT:-$PWD/kernel-packages/build/cuda/sm61}"
 if [[ ! -d "$src" ]]; then
@@ -37,19 +44,21 @@ done
 cargo metadata --format-version 1 > /dev/null
 python3 tools/dkr_r125_candle_pin_audit.py
 
-tmp="$(mktemp -d)"
-trap 'rm -rf -- "$tmp"' EXIT
-mkdir -p "$tmp/sm61"
+# Keep the three selected CUBIN packages and ptxas image cache persistent.
+# Never erase this directory automatically. Its contents are external artifacts,
+# not host target/release objects or native CUDA static fallback files.
+pilot="${DKR_R125_PILOT_ROOT:-$PWD/target/dkr-r125-real-pilot}"
+mkdir -p "$pilot/sm61"
 for family in moe indexed-copy paged-decode; do
-    cp -a "$src/$family" "$tmp/sm61/"
+    cp -a "$src/$family" "$pilot/sm61/"
 done
 # Reassemble only selected already-compiled PTX to real CUBIN via ptxas.
 # Cudaforge is used here only to compile the small Rust package-builder host.
 cargo run --release --locked -p mistralrs-kernel-runtime \
     --features builder-cudaforge --bin dkr_package_builder -- \
-    --cc 61 --pair-existing --output "$tmp"
+    --cc 61 --pair-existing --output "$pilot"
 
-export DKR_KERNEL_PACKAGES="$tmp/sm61"
+export DKR_KERNEL_PACKAGES="$pilot/sm61"
 export MISTRALRS_DKR_ARTIFACT_SOURCE=filesystem
 export CANDLE_DKR_IMAGE_MODE=cubin
 export CANDLE_DKR_TRACE=1
@@ -59,7 +68,7 @@ export RUST_BACKTRACE=1
 # tests in one command. Each test performs real CUDA execution and numeric
 # checks. Release-only, no new target/debug artifacts.
 echo "DKR_R125_REAL=START features=typed-real-pilot modes=cubin families=moe,indexed-copy,paged-decode"
-log="$tmp/r125-real.log"
+log="$pilot/r125-real.log"
 if ! cargo nextest run --release --locked \
       -p mistralrs-core -p mistralrs-paged-attn --lib \
       --features mistralrs-core/dkr-r125-typed-real-pilot \
@@ -75,7 +84,7 @@ cat "$log"
 # Nextest must actually have run all three tests and Candle must have loaded
 # at least one physical CUBIN for each; strict mode has no PTX rollback.
 for name in dkr_moe_gpu dkr_indexed_copy_gpu dkr_paged_decode_gpu; do
-    if ! grep -q "PASS .*\\b${name}\\b" "$log"; then
+    if ! grep -Eq "PASS .*\\b${name}\\b" "$log"; then
         echo "DKR_R125_REAL=FAIL missing successful test $name" >&2
         exit 1
     fi
