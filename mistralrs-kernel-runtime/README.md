@@ -46,6 +46,9 @@ reusing existing PTX packages avoids the Cudaforge NVCC pass entirely.
 
 ```bash
 # All R1.25 checks are release-only: do not create target/debug.
+# Reconcile the Candle git revision in Cargo.lock with Cargo itself.
+# This is dependency resolution only, with no Rust/CUDA compilation.
+cargo metadata --format-version 1 > /dev/null
 export CARGO_INCREMENTAL=0
 export CARGO_PROFILE_RELEASE_DEBUG=0
 export CARGO_PROFILE_RELEASE_STRIP=debuginfo
@@ -63,7 +66,8 @@ cargo run --release --locked -p mistralrs-kernel-runtime --features builder-cuda
 #   --bin dkr_package_builder -- --cc 61 --cubin
 ```
 
-The focused SM61 transport check is also release-only:
+The focused SM61 transport check is also release-only and performs this
+one-time Cargo.lock metadata reconciliation automatically:
 `bash tools/dkr_r125_sm61_typed_cubin_smoke.sh`. Release builds
 reuse the existing Cargo target directory and do **not** recreate
 `target/debug`. Before reclaiming old debug artifacts, inspect the
