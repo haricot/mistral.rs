@@ -1,20 +1,32 @@
 use crate::{
     cuda::compute_capability,
     universal::{KernelCatalog, KernelManifest, LaunchRequest, VerifiedKernel},
+    image_policy::ImageMode,
 };
 use anyhow::{anyhow, ensure, Result};
 use dkr_kernel_registry::{telemetry::{self,Event,Handle},TYPED_ABI};
 use candle_core::{
-    cuda_backend::cudarc::driver::{CudaFunction, LaunchConfig},
+    cuda_backend::cudarc::{driver::{CudaFunction, CudaModule, LaunchConfig}, nvrtc::Ptx},
     Device,
 };
 use std::{
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 const MAX_PREPARED_KERNELS: usize = 128;
 const SHARED_CATALOG_ENV: &str = "MISTRALRS_DKR_SHARED_CATALOG";
+const MAX_CUBIN_MODULES: usize = 512;
+
+// Physical, context-bound CUBIN cache. The PTX branch uses Candle's shared
+// artifact cache; CUDA binary images do not yet have that transport entrypoint.
+struct CubinCacheEntry {
+    device: Device,
+    sha256: String,
+    module: Arc<CudaModule>,
+}
+static CUBIN_MODULES: OnceLock<Mutex<Vec<CubinCacheEntry>>> = OnceLock::new();
+
 
 struct PreparedEntry {
     request: LaunchRequest,
@@ -139,27 +151,37 @@ impl PreparedKernel {
             (module.manifest.min_cc..=module.manifest.max_cc).contains(&cc),
             "GPU architecture outside kernel contract"
         );
-        #[cfg(feature = "shared-registry")]
-        let function = {
-            let artifact = match &module.ptx {
-                std::borrow::Cow::Borrowed(ptx) => dkr_kernel_registry::VerifiedArtifact::from_build_verified(
-                    ptx, module.manifest.target_cc, &module.manifest.sha256, [module.manifest.entry.clone()]),
-                std::borrow::Cow::Owned(ptx) => dkr_kernel_registry::VerifiedArtifact::new(ptx.clone(),
-                    module.manifest.target_cc, &module.manifest.sha256).map_err(anyhow::Error::msg)?,
-            };
-            let (func, first) = device.as_cuda_device()?
-                .get_or_load_dkr_func(&artifact, &module.manifest.entry)?;
-            if first && std::env::var_os("CANDLE_DKR_TRACE").is_some() {
-                eprintln!("MISTRAL_DKR_MODULE_LOADED operation={} target=sm{} source=external",
-                    module.manifest.operation, module.manifest.target_cc);
-            }
-            func.into_cuda_function()
+        let mode = ImageMode::current()?;
+        let binary = if cc == module.manifest.target_cc {
+            module.cubin.as_ref().map(|image| image.as_ref())
+        } else {
+            None
         };
-        #[cfg(not(feature = "shared-registry"))]
-        let function = device
-            .as_cuda_device()?
-            .get_or_load_custom_func(&module.manifest.entry, &module.module_key(), &module.ptx)?
-            .into_cuda_function();
+        let function = match mode {
+            ImageMode::Ptx => Self::load_ptx(module, device)?,
+            ImageMode::Cubin => {
+                let image = binary.ok_or_else(|| anyhow!(
+                    "strict CUBIN mode requires an exact-architecture verified image for {} sm{}",
+                    module.manifest.operation, cc
+                ))?;
+                Self::load_cubin(module, device, image)?
+            }
+            ImageMode::Auto => match binary {
+                Some(image) => match Self::load_cubin(module, device, image) {
+                    Ok(function) => function,
+                    Err(error) => {
+                        // Only the cold module/function admission failure is recoverable.
+                        // Once launched, any CUDA execution fault must propagate unchanged.
+                        eprintln!(
+                            "MISTRAL_DKR_CUBIN_FALLBACK operation={} cc={} error={} selected=ptx reason=module_admission_failure",
+                            module.manifest.operation, cc, error
+                        );
+                        Self::load_ptx(module, device)?
+                    }
+                },
+                None => Self::load_ptx(module, device)?,
+            },
+        };
         let evidence=telemetry::handle(TYPED_ABI,&module.manifest.operation,&module.manifest.entry,&module.manifest.sha256,module.manifest.target_cc);
         evidence.record(Event::Resolved);
         Ok(Self {
@@ -169,6 +191,61 @@ impl PreparedKernel {
             cc,
             evidence,
         })
+    }
+
+    fn load_ptx(module: &VerifiedKernel, device: &Device) -> Result<CudaFunction> {
+        #[cfg(feature = "shared-registry")]
+        {
+            let artifact = match &module.ptx {
+                std::borrow::Cow::Borrowed(ptx) => dkr_kernel_registry::VerifiedArtifact::from_build_verified(
+                    ptx, module.manifest.target_cc, &module.manifest.sha256, [module.manifest.entry.clone()]),
+                std::borrow::Cow::Owned(ptx) => dkr_kernel_registry::VerifiedArtifact::new(ptx.clone(),
+                    module.manifest.target_cc, &module.manifest.sha256).map_err(anyhow::Error::msg)?,
+            };
+            let (func, first) = device.as_cuda_device()?
+                .get_or_load_dkr_func(&artifact, &module.manifest.entry)?;
+            if first && std::env::var_os("CANDLE_DKR_TRACE").is_some() {
+                eprintln!("MISTRAL_DKR_IMAGE_LOADED operation={} target=sm{} format=ptx",
+                    module.manifest.operation, module.manifest.target_cc);
+            }
+            Ok(func.into_cuda_function())
+        }
+        #[cfg(not(feature = "shared-registry"))]
+        {
+            let func = device.as_cuda_device()?.get_or_load_custom_func(
+                &module.manifest.entry, &module.module_key(), &module.ptx)?;
+            Ok(func.into_cuda_function())
+        }
+    }
+
+    fn load_cubin(module: &VerifiedKernel, device: &Device, image: &[u8]) -> Result<CudaFunction> {
+        let sha = module.manifest.cubin_sha256.as_deref()
+            .ok_or_else(|| anyhow!("CUBIN has no verified digest"))?;
+        let cache = CUBIN_MODULES.get_or_init(|| Mutex::new(Vec::new()));
+        let mut cache = cache.lock().map_err(|_| anyhow!("CUBIN module cache poisoned"))?;
+        if let Some(existing) = cache.iter().find(|row|
+            row.device.same_device(device) && row.sha256 == sha
+        ) {
+            return Ok(existing.module.load_function(&module.manifest.entry)?);
+        }
+        // cudarc accepts a byte image through the existing Candle CUDA context;
+        // module admission and entry-symbol lookup happen before any inference.
+        let stream = device.as_cuda_device()?.cuda_stream();
+        let loaded = stream.context().load_module(Ptx::from_binary(image.to_vec()))?;
+        let func = loaded.load_function(&module.manifest.entry)?;
+        if cache.len() >= MAX_CUBIN_MODULES {
+            cache.remove(0);
+        }
+        cache.push(CubinCacheEntry {
+            device: device.clone(),
+            sha256: sha.to_owned(),
+            module: loaded,
+        });
+        if std::env::var_os("CANDLE_DKR_TRACE").is_some() {
+            eprintln!("MISTRAL_DKR_IMAGE_LOADED operation={} target=sm{} format=cubin cubin_sha256={} ptx_sha256={}",
+                module.manifest.operation, module.manifest.target_cc, sha, module.manifest.sha256);
+        }
+        Ok(func)
     }
 
     pub fn launch_config(&self, request: &LaunchRequest, device: &Device) -> Result<LaunchConfig> {
