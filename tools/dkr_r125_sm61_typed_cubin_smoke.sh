@@ -4,6 +4,12 @@
 # between image modes. This is a narrow transport smoke, NOT model parity.
 set -euo pipefail
 
+# Never produce target/debug artifacts for this qualification.
+# Keep CARGO_TARGET_DIR unchanged so the persistent release cache is reused.
+export CARGO_INCREMENTAL=0
+export CARGO_PROFILE_RELEASE_DEBUG=0
+export CARGO_PROFILE_RELEASE_STRIP=debuginfo
+
 cd "$(dirname "$0")/.."
 python3 tools/dkr_r125_candle_pin_audit.py
 
@@ -12,15 +18,15 @@ trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/sm61"
 cp -a kernel-packages/cuda/sm61/elementwise-scale "$tmp/sm61/"
 
-cargo nextest run -p mistralrs-kernel-runtime --lib
+cargo nextest run --release --locked -p mistralrs-kernel-runtime --lib
 
 # Assemble exactly the existing PTX without invoking the CUDA C++ compiler.
-cargo run --locked -p mistralrs-kernel-runtime \
+cargo run --release --locked -p mistralrs-kernel-runtime \
   --features builder-cudaforge --bin dkr_package_builder -- \
   --cc 61 --pair-existing --output "$tmp"
 
 # Build the executable once, with the new Candle typed-image transport.
-cargo build --locked -p mistralrs-kernel-runtime \
+cargo build --release --locked -p mistralrs-kernel-runtime \
   --features cuda,shared-registry --example dkr_scale_cuda
 
 for mode in ptx cubin auto; do
@@ -29,7 +35,7 @@ for mode in ptx cubin auto; do
     DKR_KERNEL_PACKAGES="$tmp/sm61" \
     CANDLE_DKR_IMAGE_MODE="$mode" \
     CANDLE_DKR_TRACE=1 \
-      cargo run --locked -p mistralrs-kernel-runtime \
+      cargo run --release --locked -p mistralrs-kernel-runtime \
         --features cuda,shared-registry --example dkr_scale_cuda \
         >"$logfile" 2>&1 || {
             cat "$logfile"
