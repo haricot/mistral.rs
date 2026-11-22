@@ -689,7 +689,8 @@ mod tests {
         manifest.cubin_sha256 = Some(digest(&cubin));
         std::fs::write(dir.path().join("fused.cubin"), &cubin).unwrap();
         std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
-        assert_eq!(VerifiedKernel::read(&path).unwrap().cubin.unwrap().as_ref(), cubin);
+        let verified = VerifiedKernel::read(&path).unwrap();
+        assert_eq!(verified.cubin.as_deref(), Some(cubin.as_slice()));
         std::fs::write(dir.path().join("fused.cubin"), b"corrupted").unwrap();
         assert!(VerifiedKernel::read(&path).unwrap_err().to_string().contains("digest"));
 
