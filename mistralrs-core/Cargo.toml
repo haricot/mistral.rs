@@ -123,6 +123,14 @@ dispatch2 = { workspace = true, optional = true }
 mistralrs-metal-compile = { workspace = true, optional = true, features = ["metal"] }
 
 [features]
+# R1.25: deployment candidate with native Candle qualified CUBIN and typed
+# Mistral kernels sharing Candle's CUDA transport and image policy.
+# Requires a sealed native build catalogue plus the typed manifests.
+dkr-sm61-cubin-qualified = [
+    "dkr-sm61-experimental",
+    "candle-core/cuda-dkr-qualified-default",
+    "candle-nn/cuda-dkr-qualified-default",
+]
 # Explicit opt-in: functional SM61 package set, not performance-qualified.
 # Does not enable the standalone FP4 diagnostic dequantization feature.
 dkr-sm61-experimental = [
