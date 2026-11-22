@@ -73,19 +73,26 @@ on first use, so **restart the process** to change it:
   Missing or rejected images cause errors, without PTX fallback.
 - `ptx`: explicit rollback, using the verified PTX.
 
-Mistral keeps a bounded, per-CUDA-device CUBIN module cache (512 physical
-modules) and reuses the existing typed prevalidated launch plans. The PTX
-path continues through Candle's shared DKR module cache. Both image formats
-must pass the same numerical and route-selection qualification; successful
-loading does **not** establish numeric parity or performance promotion.
+With `mistralrs-kernel-runtime/shared-registry`, the typed runtime delegates
+CUBIN/PTX image loading, image policy and physical CUDA-module caches to Candle's
+`get_or_load_dkr_typed_image_func`. It has **no private CUDA CUBIN cache or
+independent image-mode parser**. It retains Mistral's typed manifest/ABI
+validation, operation selection, and prevalidated launch-plan cache. Native
+Candle and external Mistral operations have separate cache namespaces in the
+same Candle CUDA device, so they cannot collide on identical PTX content.
 
-**Candle transport compatibility:** this change targets Mistral's *external typed*
-DKR packages. Candle's `cuda-dkr-qualified-default` currently expects its
-**native** embedded CUBIN lookup inside `get_or_load_dkr_func`; do not
-activate that native-only switch for typed PTX fallback until Candle provides
-a separate external-typed transport entrypoint (or equivalent catalogue
-namespace). The existing pinned Candle revision is intentionally unchanged.
-Both native and typed CUBIN qualification must be reconciled before promotion.
+This branch is pinned to Candle commit
+`159b8dd695d2608c5130de0922b9ea71982676b7` (branch
+`feature/dkr-r125-typed-image-transport`), which is a strict descendant of
+`feature/dkr-r124-neutral-catalog` and includes the full R1.24/R1.25
+native catalogue qualification history.
+
+`mistralrs-core/dkr-sm61-experimental` enables typed images with PTX
+fallback in auto mode. The additional **opt-in**
+`mistralrs-core/dkr-sm61-cubin-qualified` activates the Candle native
+`cuda-dkr-qualified-default` deployment as well. This requires verified,
+attested native **and** typed catalogues at build time, and is not a claim of
+end-to-end Mistral model performance qualification.
 
 **Release gate:** after local compilation, run a single physical SM61
 qualification comparing `auto`, `cubin` and `ptx`, checking that the
