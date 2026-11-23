@@ -85,7 +85,7 @@ if ! cargo nextest run --profile dkr-r125-quant --release --locked \
     -p mistralrs-core -p mistralrs-quant --lib \
     --features mistralrs-core/dkr-r125-quant-typed-pilot \
     --run-ignored=all --test-threads=1 --no-fail-fast \
-    --success-output immediate \
+    --no-capture \
     -E 'test(dkr_quantized_gemv_gpu) or test(dkr_quantized_gemm_gpu)' \
     2>&1 | tee "$log"; then
     echo "DKR_R125_QUANT=FAIL stage=GPU_TESTS log=$log" >&2
