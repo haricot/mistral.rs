@@ -367,3 +367,45 @@ The source change affects Rust model routing only. It does not modify
 Host Cargo recompilation/relinking may occur once when enabling the
 revised crate, but no new Cudaforge NVCC build is justified by this
 source-level change alone.
+
+## 10. Cargo.lock resolver mismatch before R1.25 FP8 layer-forward qualification
+
+After checking out commit `a34b677d`, the user's strict bounded
+`dkr_blockwise_fp8_layer_forward_gpu` Nextest command **did not start**.
+Preflight confirmed 54/54 quant, 15/15 paged-attn and 18/18 core
+Cudaforge cache objects, with no invalidations. Nextest's internal
+`cargo metadata --all-features --filter-platform=... --locked` returned:
+
+```text
+error: cannot update the lock file .../Cargo.lock because --locked was passed
+```
+
+This is a **Cargo lockfile dependency-resolution** failure, not a CUDA
+compile, not a kernel runtime error and not a GPU test failure. The existing
+tracked `Cargo.lock` already mentions the correct immutable Candle git rev
+`d40ac1b4...`, but that textual pin alone is not proof that the workspace
+dependency graph can be resolved unchanged under Nextest's all-features
+metadata query. Previous shell guidance also stashed Cargo.lock on branch
+switch, discarding an earlier Cargo-resolved version.
+
+### Safe correction in the current worktree (no NVCC or Rust build)
+
+```bash
+cd /home/np/dkr-worktrees/r125-candle-integration
+cargo metadata --all-features --format-version=1 > /dev/null
+cargo metadata --all-features --locked --format-version=1 > /dev/null
+python3 tools/dkr_r125_candle_pin_audit.py
+git diff --stat -- Cargo.lock
+```
+
+Do not stash or restore Cargo.lock again before the strict Nextest command.
+Keep the locally resolved lockfile diff for later review/commit, rather than
+hand-editing the git source strings. `cargo metadata` may fetch dependency
+metadata but does not compile Rust or CUDA; `CUDA_COMPUTE_CAP` is unnecessary.
+
+For future guarded script runs, `tools/dkr_r125_quant_real_sm61.sh`
+performs the same *all-features metadata-only lock reconciliation and strict
+re-check* **after explicit approval**, before it runs any Cargo command with
+`--locked`. The new production FP8 layer-forward test is **still unrun**;
+do not promote its result until real Nextest PASS and expected CUBIN admissions
+are observed.
