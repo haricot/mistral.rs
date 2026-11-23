@@ -112,7 +112,7 @@ fallback in auto mode. The additional **opt-in**
 attested native **and** typed catalogues at build time, and is not a claim of
 end-to-end Mistral model performance qualification.
 
-### R1.25 real production-adapter pilot (not yet qualified)
+### R1.25 real production-adapter pilot (SM61 functional PASS)
 
 The new `mistralrs-core/dkr-r125-typed-real-pilot` feature enables real grouped
 MoE GEMM, indexed KV row-copy, and short-context paged decode through the
@@ -142,7 +142,7 @@ are missing. `ptxas` produces selected CUBINs under persistent
 `target/dkr-r125-real-pilot`. Tests are GPU-real, ignored by default,
 run through `cargo nextest --release --locked` once, and require strict
 `CANDLE_DKR_IMAGE_MODE=cubin` with actual Candle load evidence.
-Do not claim these three adapters pass until this physical gate succeeds.
+**Physical SM61 pilot passed on 2026-11-23:** Nextest run `43d7d6aa-1e98-488c-8948-2b673ce2ebbe` reports three real GPU tests PASS, four Candle CUBIN image loads, and `DKR_R125_REAL=PASS families=3 mode=cubin loader=candle physical_loads=4`. This qualifies only these test shapes and numerical assertions, not full-model inference or performance. [Qualification report](../docs/DKR_R125_SM61_REAL_GPU_20261123.md).
 Detailed branch-by-branch comparison:
 [DKR R1.25 vs Candle/Mistral Extended](../docs/DKR_R125_VS_EXTENDED_20261122.md).
 
