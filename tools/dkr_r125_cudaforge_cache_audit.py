@@ -161,7 +161,7 @@ def compare(a, b):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cache-root", type=Path, default=os.environ.get("MISTRALRS_CUDA_BUILD_ROOT"))
+    parser.add_argument("--cache-root", type=Path, default=(os.environ.get("MISTRALRS_CUDA_BUILD_ROOT") or None))
     parser.add_argument("--source-root", type=Path, default=Path(__file__).resolve().parent.parent)
     parser.add_argument("--snapshot", type=Path,
                         help="save immutable read-only evidence to a JSON file (no builds)")
@@ -170,9 +170,13 @@ def main():
     parser.add_argument("--require-clean", action="store_true",
                         help="block if cached objects, source or watched headers differ")
     args = parser.parse_args()
-    if args.cache_root is None:
-        parser.error("supply --cache-root or MISTRALRS_CUDA_BUILD_ROOT")
+    if args.cache_root is None or str(args.cache_root) in ("", "."):
+        parser.error("supply a NONEMPTY ABSOLUTE --cache-root or MISTRALRS_CUDA_BUILD_ROOT; do not pass an unset shell variable")
+    if not args.cache_root.is_absolute():
+        parser.error("--cache-root must be an absolute path to the persistent Cudaforge cache")
     root = args.cache_root.resolve()
+    if not root.is_dir() or not any((root / name / "kernels" / ".cudaforge_cache.json").is_file() for name in COMPONENTS):
+        parser.error(f"invalid Cudaforge cache root: {root} (no component cache indexes found)")
     checkout = args.source_root.resolve()
     data = {
         "schema": "dkr.cudaforge.cache.audit.v1",
