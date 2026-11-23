@@ -256,20 +256,29 @@ mod tests {
     fn dkr_quantized_gemm_gpu() -> Result<()> {
         let _evidence = mistralrs_kernel_runtime::RuntimeEvidenceGuard;
         let dev = Device::new_cuda(0)?;
+        eprintln!("DKR_R125_QUANT_GEMM_STAGE=cuda_device_created");
         let (m, n, k) = (17usize, 19usize, 64usize);
         for dtype in [DType::F16, DType::BF16] {
+            eprintln!("DKR_R125_QUANT_GEMM_STAGE=dtype_start dtype={dtype:?}");
             let xs: Vec<f32> = (0..m*k)
                 .map(|i| (i as i32%13-6) as f32 / 8.0).collect();
             let ws: Vec<f32> = (0..n*k)
                 .map(|i| (i as i32%11-5) as f32 / 4.0).collect();
             let x = Tensor::from_vec(xs.clone(), (m,k), &dev)?.to_dtype(dtype)?;
+            eprintln!("DKR_R125_QUANT_GEMM_STAGE=input_cast_ready dtype={dtype:?}");
             let fp8w = Tensor::from_vec(ws.clone(), (n,k), &dev)?
                 .to_dtype(DType::F8E4M3)?;
+            eprintln!("DKR_R125_QUANT_GEMM_STAGE=fp8_weight_cast_ready dtype={dtype:?}");
             let scale = Tensor::from_vec(
                 vec![0.5f32; n.div_ceil(2)*(k/16)], (n.div_ceil(2), k/16), &dev)?;
+            eprintln!("DKR_R125_QUANT_GEMM_STAGE=fp8_dispatch_begin dtype={dtype:?}");
             let out = try_fp8(&x, &fp8w, &scale, &[2,16])?
-                .ok_or_else(|| candle_core::Error::msg("DKR FP8 prefill GEMM not selected"))?
-                .to_dtype(DType::F32)?.to_vec2::<f32>()?;
+                .ok_or_else(|| candle_core::Error::msg("DKR FP8 prefill GEMM not selected"))?;
+            eprintln!("DKR_R125_QUANT_GEMM_STAGE=fp8_dispatch_returned dtype={dtype:?}");
+            let out = out.to_dtype(DType::F32)?;
+            eprintln!("DKR_R125_QUANT_GEMM_STAGE=fp8_readback_begin dtype={dtype:?}");
+            let out = out.to_vec2::<f32>()?;
+            eprintln!("DKR_R125_QUANT_GEMM_STAGE=fp8_readback_done dtype={dtype:?}");
             for row in 0..m {
                 for col in 0..n {
                     let expected = (0..k).map(|j| xs[row*k+j]*ws[col*k+j]*0.5).sum::<f32>();
@@ -281,9 +290,14 @@ mod tests {
             let s = Tensor::from_vec(vec![127u8; n*k/32], (n,k/32), &dev)?;
             let bias = Tensor::from_vec(vec![0.25f32;n],n,&dev)?.to_dtype(dtype)?;
             for has_bias in [false,true] {
+                eprintln!("DKR_R125_QUANT_GEMM_STAGE=mxfp4_dispatch_begin dtype={dtype:?} bias={has_bias}");
                 let out = try_mxfp4(&x,&w,&s,has_bias.then_some(&bias))?
-                    .ok_or_else(|| candle_core::Error::msg("DKR MXFP4 prefill GEMM not selected"))?
-                    .to_dtype(DType::F32)?.to_vec2::<f32>()?;
+                    .ok_or_else(|| candle_core::Error::msg("DKR MXFP4 prefill GEMM not selected"))?;
+                eprintln!("DKR_R125_QUANT_GEMM_STAGE=mxfp4_dispatch_returned dtype={dtype:?} bias={has_bias}");
+                let out = out.to_dtype(DType::F32)?;
+                eprintln!("DKR_R125_QUANT_GEMM_STAGE=mxfp4_readback_begin dtype={dtype:?} bias={has_bias}");
+                let out = out.to_vec2::<f32>()?;
+                eprintln!("DKR_R125_QUANT_GEMM_STAGE=mxfp4_readback_done dtype={dtype:?} bias={has_bias}");
                 for row in 0..m {
                     for col in 0..n {
                         let expected = (0..k).map(|j| {
