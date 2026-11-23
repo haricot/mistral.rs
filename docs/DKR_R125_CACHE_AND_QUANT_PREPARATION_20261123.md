@@ -178,3 +178,64 @@ kernel algorithms, PTX artifacts, `CUDA_COMPUTE_CAP`, or Cudaforge caches.
 no lingering test worker, inspect GPU state, and review the existing log before
 any bounded reproduction. Avoid running the previous unbounded Nextest binary
 again. A failed/timeout quantized test must not be promoted to a DKR PASS.
+
+## 7. Follow-up (2026-11-23): GEMM numeric PASS; count-based evidence gate false negative
+
+The bounded GEMM-only Nextest run
+`b4bab107-3049-477b-84d4-40202077db45` (branch `214c0247`,
+Candle `d40ac1b4`) finished normally:
+
+- `dkr_quantized_gemm_gpu` **1/1 PASS in 0.230s**;
+- FP8 blockwise and MXFP4, F16 and BF16, plain/bias where applicable;
+- stage markers cover conversion, typed launch return and successful GPU
+  readback for all variants;
+- the device loaded one verified SM61 CUBIN image, sha256
+  `3017abe46a75675321e5ef5beb8092de3c582999cbc26ebb491025fdfee3affb`,
+  no PTX fallback;
+- the original wrapper subsequently printed
+  `DKR_R125_QUANT=FAIL insufficient CUBIN loads (1)`. **This is a
+  wrapper/evidence false negative, not a numerical CUDA failure.**
+- Native NVCC build objects: quant **0/49**, paged-attn **0/15**, core
+  **0/18**, despite host release build taking 4m11s.
+
+### Root cause verified in the code
+
+`kernel-packages/cuda/quant-gemm/build.py` emits six different typed
+manifests with different entry names **from the same quant_gemm.ptx**.
+All six variants share one CUBIN image, and Candle's
+`candle-core/src/cuda_backend/dkr_typed_image.rs` caches modules by
+verified PTX artifact key and optional CUBIN SHA. It prints
+`CANDLE_DKR_TYPED_IMAGE_LOADED` **only on module admission**, not whenever
+a different entry/function of that same module is used.
+
+The old pilot `min_loads=2` for GEMM-only (or GEMV-only) and `min_loads=4`
+for both was incorrect. It conflated the number of CUDA entry functions
+with the number of unique loaded image modules.
+
+### Permanent fix
+
+`tools/dkr_r125_quant_evidence.py` now independently checks existing
+Nextest logs against the six per-family manifest CUBIN SHA256 identities
+and hashes of the on-disk image bytes. It requires:
+
+- Nextest numerical PASS for each selected family;
+- an actual `format=cubin target=sm61` load with the **expected SHA**;
+- no PTX load or fallback;
+- the exact strict-CUBIN policy banner.
+
+Because GEMM-alone has already passed, requalifying it is unnecessary to
+correct the wrapper record. Evidence can be rehabilitated **offline**:
+
+```bash
+python3 tools/dkr_r125_quant_evidence.py \
+  --root target/dkr-r125-quant-pilot/sm61 \
+  --log target/dkr-r125-quant-pilot/r125-quant-gemm.log \
+  --scope gemm
+```
+
+`tools/dkr_r125_quant_real_sm61.sh` uses this validator after each run,
+rather than a hard-coded module-load count. Offline regression tests are
+staged in `tools/test_dkr_r125_quant_evidence.py`. GEMV remains **unqualified**;
+do not label the whole quantized pilot PASS until its numerical Nextest test
+also succeeds. The earlier multi-hour hang is **not reproduced** by the
+bounded, live-traced GEMM-only run; its original cause remains unknown.
