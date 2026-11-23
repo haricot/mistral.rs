@@ -39,7 +39,7 @@ def verify_forward(root, logfile):
     if re.search(r"CANDLE_DKR_TYPED_IMAGE_LOADED\s+target=sm\d+\s+format=ptx", log):
         raise ValueError("PTX image admitted instead of CUBIN")
     if not re.search(
-        r"(?m)^\s*PASS\s+\[[^\]]+\]\s+"
+        r"(?m)^\s*PASS\s+\[[^\]]+\]\s+(?:\(\d+/\d+\)\s+)?"
         r"mistralrs-quant\s+blockwise_fp8::tests::" + TEST + r"\s*$",
         log,
     ):
