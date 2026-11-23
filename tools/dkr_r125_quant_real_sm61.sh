@@ -79,9 +79,9 @@ export MISTRALRS_DKR_QUANT_GEMV=1
 export MISTRALRS_DKR_QUANT_GEMM=1
 export RUST_BACKTRACE=1
 
-echo "DKR_R125_QUANT=START families=quant-gemv,quant-gemm mode=cubin"
+echo "DKR_R125_QUANT=START families=quant-gemv,quant-gemm mode=cubin test_timeout_s=120"
 log="$pilot/r125-quant.log"
-if ! cargo nextest run --release --locked \
+if ! cargo nextest run --profile dkr-r125-quant --release --locked \
     -p mistralrs-core -p mistralrs-quant --lib \
     --features mistralrs-core/dkr-r125-quant-typed-pilot \
     --run-ignored=all --test-threads=1 --no-fail-fast \
