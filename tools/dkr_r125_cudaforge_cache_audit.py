@@ -30,8 +30,12 @@ def digest(path):
     return h.hexdigest()
 
 
-def watched_hash(path):
-    """Match cudaforge::hash::hash_paths([PathBuf]) for a single directory."""
+def watched_hash(path, crate_root):
+    """Match cudaforge::hash::hash_paths([PathBuf]) for a single directory.
+
+    Builder supplies relative watch paths with crate cwd, so the serialized
+    path in hash_paths is relative (not the absolute path used to read bytes).
+    """
     h = hashlib.sha256()
     if path.is_file():
         candidates = [path]
@@ -41,7 +45,7 @@ def watched_hash(path):
     else:
         candidates = []
     for candidate in candidates:
-        h.update(str(candidate).encode())
+        h.update(str(candidate.relative_to(crate_root)).encode())
         h.update(b":")
         h.update(digest(candidate).encode())
         h.update(b"\0")
@@ -77,7 +81,7 @@ def audit(root, source_checkout, component):
         result["error"] = str(error)
         return result
 
-    current_watch = watched_hash(source / watched) if (source / watched).exists() else None
+    current_watch = watched_hash(source / watched, source) if (source / watched).exists() else None
     result["watch_hash_current"] = current_watch
     if (source / watched).is_dir():
         result["watched_header_count"] = sum(
