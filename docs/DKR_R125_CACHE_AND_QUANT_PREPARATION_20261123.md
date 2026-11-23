@@ -409,3 +409,65 @@ re-check* **after explicit approval**, before it runs any Cargo command with
 `--locked`. The new production FP8 layer-forward test is **still unrun**;
 do not promote its result until real Nextest PASS and expected CUBIN admissions
 are observed.
+
+## 11. 2026-11-23: physical FP8 checkpoint-layer forward routing PASS
+
+The user executed the *production-entry* FP8 blockwise layer test on the
+Pascal GTX 1080 Max-Q after reconciling Cargo.lock. The actual command ran
+with `mistralrs-core/dkr-r125-quant-typed-pilot`,
+`CANDLE_DKR_IMAGE_MODE=cubin`, typed external packages, and Nextest's
+`dkr-r125-quant` timeout profile. It used the R1.25 branch at
+`a34b677d` and Candle at `d40ac1b4`.
+
+Real Nextest evidence:
+
+```text
+Nextest run ID 819a1ff5-b96a-4806-b359-a1ebc6e79721
+DKR_R125_TYPED_POLICY requested=cubin source=verified_external_pair
+MISTRAL_DKR_CATALOG_VALIDATED manifests=12
+CANDLE_DKR_TYPED_IMAGE_LOADED target=sm61 format=cubin cubin_sha256=f3a89fad0567164865b46b6fb971df288ce47e4b24804de6af4951d95be44288
+CANDLE_DKR_TYPED_IMAGE_LOADED target=sm61 format=cubin cubin_sha256=3017abe46a75675321e5ef5beb8092de3c582999cbc26ebb491025fdfee3affb
+PASS [0.248s] mistralrs-quant blockwise_fp8::tests::dkr_blockwise_fp8_layer_forward_gpu
+Summary: 1 test run: 1 passed
+```
+
+This exercised `BlockwiseFP8Linear::forward_raw` with F16 and BF16,
+M=1 decode GEMV, M=17 prefill GEMM, 3D `[1,17,K]` flatten/restore,
+optional layer bias and exact numerical fixtures. **Both individually
+qualified external CUBIN modules were admitted** by Candle in the same
+test process. The numeric runtime itself finished in **0.248 s**.
+
+Native Cudaforge NVCC build steps in this follow-up:
+`mistralrs-quant` **0/49**, `mistralrs-paged-attn` **0/15**,
+`mistralrs-core` **0/18**. The host Rust release build took
+**5 min 42 s**. No `CUDA_COMPUTE_CAP` was supplied.
+
+This turns the previously *staged* production FP8 route fix (Section 9)
+into a physically tested **layer-level functional PASS**. The earlier
+two isolated quant GEMV/GEMM numerical tests and the paired 12-manifest
+evidence (Section 8) remain valid.
+
+The independent read-only verifier
+`tools/dkr_r125_fp8_forward_evidence.py` now also checks the Nextest
+PASS record and both per-family manifest-backed CUBIN hashes:
+
+```bash
+cd /home/np/dkr-worktrees/r125-candle-integration
+python3 tools/dkr_r125_fp8_forward_evidence.py \
+  --root target/dkr-r125-quant-pilot/sm61 \
+  --log target/dkr-r125-audit/forward-route.log \
+  --json-out target/dkr-r125-audit/fp8-forward-evidence.json
+```
+
+The verifier runs **without Cargo, Rust, NVCC, CUDA, or GPU access** and
+its output may be archived with the previous family-set evidence. It is
+not yet separately run against the user's real files.
+
+**Not proven:** complete model inference with an actual FP8 checkpoint,
+model-level logit parity/throughput versus Extended, or the MXFP4 layer's
+full production routing. A GGUF Q4 checkpoint is *not* a substitute for a
+blockwise FP8/MXFP4 checkpoint when testing these two specific providers.
+The generic `gpu_qualified=false` integration audit remains unchanged
+until its broader acceptance criteria are met. Keep all proven CUBIN/PTX
+and persistent Cudaforge caches intact; no kernel recompilation or re-run
+of the successful GPU family tests is needed.
