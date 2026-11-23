@@ -85,18 +85,12 @@ test_scope="${DKR_R125_QUANT_TEST:-both}"
 case "$test_scope" in
     gemm)
         filter_expr='test(dkr_quantized_gemm_gpu)'
-        tests=(dkr_quantized_gemm_gpu)
-        min_loads=2
         ;;
     gemv)
         filter_expr='test(dkr_quantized_gemv_gpu)'
-        tests=(dkr_quantized_gemv_gpu)
-        min_loads=2
         ;;
     both)
         filter_expr='test(dkr_quantized_gemv_gpu) or test(dkr_quantized_gemm_gpu)'
-        tests=(dkr_quantized_gemv_gpu dkr_quantized_gemm_gpu)
-        min_loads=4
         ;;
     *)
         echo "DKR_R125_QUANT=BLOCKED DKR_R125_QUANT_TEST must be gemm, gemv or both" >&2
@@ -115,23 +109,9 @@ if ! cargo nextest run --profile dkr-r125-quant --release --locked \
     echo "DKR_R125_QUANT=FAIL stage=GPU_TESTS log=$log" >&2
     exit 1
 fi
-for name in "${tests[@]}"; do
-    if ! grep -Eq "PASS .*${name}\b" "$log"; then
-        echo "DKR_R125_QUANT=FAIL missing passed test $name" >&2
-        exit 1
-    fi
-done
-loads="$(grep -c 'CANDLE_DKR_TYPED_IMAGE_LOADED.*format=cubin' "$log" || true)"
-if (( loads < min_loads )); then
-    echo "DKR_R125_QUANT=FAIL insufficient CUBIN loads ($loads)" >&2
-    exit 1
-fi
-if grep -q 'CANDLE_DKR_TYPED_IMAGE_FALLBACK' "$log"; then
-    echo "DKR_R125_QUANT=FAIL PTX fallback in strict mode" >&2
-    exit 1
-fi
-if [[ "$test_scope" == "both" ]]; then
-    echo "DKR_R125_QUANT=PASS tests=2 formats=fp8,mxfp4 mode=cubin loads=$loads"
-else
-    echo "DKR_R125_QUANT_DIAGNOSTIC=PASS test=$test_scope formats=fp8,mxfp4 mode=cubin loads=$loads full_qualification=false"
-fi
+# Validate actual numeric Nextest PASS together with the exact CUBIN hashes
+# recorded by Candle. All F16/BF16 and FP8/MXFP4 entry functions in one
+# quant family share a single PTX/CUBIN module: module load count is NOT
+# the number of entries/functions invoked. No new GPU launch required.
+python3 tools/dkr_r125_quant_evidence.py \
+    --root "$pilot/sm61" --log "$log" --scope "$test_scope"
