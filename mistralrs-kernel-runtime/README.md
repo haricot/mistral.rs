@@ -112,6 +112,24 @@ fallback in auto mode. The additional **opt-in**
 attested native **and** typed catalogues at build time, and is not a claim of
 end-to-end Mistral model performance qualification.
 
+### R1.25 Cudaforge cache-miss audit and deferred quantized pilot
+
+The existing Cudaforge cache indices do **not** themselves prove reuse.
+`tools/dkr_r125_cudaforge_cache_audit.py` is a read-only check of cached
+object presence, per-source SHA256 and directory-wide watched-header hash,
+with optional immutable snapshots for cross-worktree comparisons.
+
+`tools/dkr_r125_quant_manifest_preflight.py` checks 12 existing SM61 typed
+FP8/MXFP4 GEMV/GEMM package manifests without compilation.
+The new `mistralrs-core/dkr-r125-quant-typed-pilot` feature and gated
+`tools/dkr_r125_quant_real_sm61.sh` remain **unqualified** and must not
+be executed without explicit `DKR_APPROVE_R125_QUANT=1`. The test gate
+will refuse missing prebuilt PTX packages and stale cache state first.
+
+See [cache failure diagnosis and quantified preparation](../docs/DKR_R125_CACHE_AND_QUANT_PREPARATION_20261123.md).
+Do not modify `CUDA_COMPUTE_CAP`, clear `target/dkr-*` or start another
+49/49+15/15 compilation before reviewing the read-only audit.
+
 ### R1.25 real production-adapter pilot (SM61 functional PASS)
 
 The new `mistralrs-core/dkr-r125-typed-real-pilot` feature enables real grouped
