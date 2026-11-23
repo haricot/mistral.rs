@@ -239,3 +239,72 @@ staged in `tools/test_dkr_r125_quant_evidence.py`. GEMV remains **unqualified**;
 do not label the whole quantized pilot PASS until its numerical Nextest test
 also succeeds. The earlier multi-hour hang is **not reproduced** by the
 bounded, live-traced GEMM-only run; its original cause remains unknown.
+
+## 8. Follow-up: independent GEMV and GEMM GPU family PASS (SM61)
+
+After the earlier GEMM 1/1 PASS had been independently attested, the user
+executed the isolated `dkr_quantized_gemv_gpu` test on the same R1.25
+worktree, with the same strict-CUBIN policy and prebuilt package root.
+
+The read-only existing-log validator reported:
+
+```text
+DKR_R125_QUANT_EVIDENCE=PASS scope=gemv numerical_tests=1 loaded_distinct_cubin_modules=1
+DKR_R125_QUANT_IMAGE=PASS family=quant-gemv profiles=6 unique_cubins=1 cubin_sha256=f3a89fad0567164865b46b6fb971df288ce47e4b24804de6af4951d95be44288
+DKR_R125_QUANT_DIAGNOSTIC=PASS scope=gemv full_qualification=false
+```
+
+The earlier isolated GEMM validator independently reported:
+
+```text
+DKR_R125_QUANT_EVIDENCE=PASS scope=gemm numerical_tests=1 loaded_distinct_cubin_modules=1
+DKR_R125_QUANT_IMAGE=PASS family=quant-gemm profiles=6 unique_cubins=1 cubin_sha256=3017abe46a75675321e5ef5beb8092de3c582999cbc26ebb491025fdfee3affb
+DKR_R125_QUANT_DIAGNOSTIC=PASS scope=gemm full_qualification=false
+```
+
+### Current status and limits
+
+**2/2 independent quantized GPU test functions PASS** on SM61, collectively
+covering 12 variant manifests (two operation families, both input types F16
+and BF16, FP8 blockwise and MXFP4 plain/bias where supported). All selected
+functions use physically loaded, SHA256-attested CUBIN images through
+Candle's typed CUDA loader. Each of the two families has **one** distinct
+image; the six typed manifest entries within it share the same binary.
+
+This is a **two-family functional/numerical qualification via two separate
+Nextest sessions**. It is NOT evidence that the default combined Nextest
+command succeeded in one session, that all model shapes/layouts are covered,
+that a full model ran successfully, or that performance parity with Extended
+was established. `gpu_qualified=false` remains valid for the broader
+DKR integration audit; the GEMV and GEMM family gates can be reported PASS
+separately.
+
+### Reconstitute the paired attestation without recompiling
+
+The following verifies both log files against the current paired CUBIN
+artifacts and requires two distinct family hashes:
+
+```bash
+cd /home/np/dkr-worktrees/r125-candle-integration
+
+python3 tools/dkr_r125_quant_pair_evidence.py \
+    --root target/dkr-r125-quant-pilot/sm61 \
+    --gemm-log target/dkr-r125-quant-pilot/r125-quant-gemm.log \
+    --gemv-log target/dkr-r125-quant-pilot/r125-quant-gemv.log \
+    --json-out target/dkr-r125-audit/quant-family-set-evidence.json
+```
+
+The validator is read-only except the optional, create-only JSON report.
+It never calls Cargo, NVCC, `ptxas`, CUDA, or the GPU. The report captures
+the SHA256 of both logs and both CUBIN hashes. Regression tests cover
+separate-log success, missing family, wrong CUBIN hash and PTX fallback:
+
+```bash
+python3 -m unittest discover -s tools -p test_dkr_r125_quant_evidence.py
+```
+
+**Next:** preserve the qualified CUBIN artifacts, keep the SM61 static
+fallback quarantined, and progress to real model weight/format and
+end-to-end logit parity before performance A/B. Do not set
+`CUDA_COMPUTE_CAP` or repeat the already passed GPU family tests merely
+to satisfy an arbitrary module-load-count check.
