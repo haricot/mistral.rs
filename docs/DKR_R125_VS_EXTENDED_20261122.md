@@ -44,7 +44,7 @@ physical numeric equivalence.
 Mistral DKR pins `0.11.1`. Compare ABI and lock resolution before porting
 inference routes; never simply copy `Cargo.lock` between branches.
 
-## 3. Real-kernel pilot now staged
+## 3. Real-kernel pilot — SM61 functional PASS (2026-11-23)
 
 `mistralrs-core/dkr-r125-typed-real-pilot` ties **three pre-existing production
 operation adapters** to Candle's typed-only PTX/CUBIN loader:
@@ -69,15 +69,20 @@ To avoid accidental large static builds, it requires an existing
 explicit `DKR_APPROVE_R125_REAL=1`. It does not alter `CUDA_COMPUTE_CAP`.
 
 **Evidence boundary:** The earlier scale-image physical SM61 test passed in PTX,
-CUBIN, AUTO, `max_error=0`. It proves the shared transport. The real-kernel
-pilot in this section has been **committed but not executed or numerically
-qualified** in the GitHub editing environment.
+CUBIN, AUTO, `max_error=0`. The three **real operation** GPU tests were then
+executed on SM61 in the user-provided Nextest run
+`43d7d6aa-1e98-488c-8948-2b673ce2ebbe`: **3 PASS, 0 FAIL**, with four
+observed Candle CUBIN loads and strict `CANDLE_DKR_IMAGE_MODE=cubin`.
+See the [physical qualification report](DKR_R125_SM61_REAL_GPU_20261123.md).
+The GitHub editing environment did not independently repeat the GPU campaign.
+This does not establish model-level numerical or performance qualification.
 
 ## 4. Integration order and acceptance gates
 
-1. **Typed real pilot:** run MoE/indexed-copy/paged-decode; require 3/3 GPU
-   tests PASS, confirmed `CANDLE_DKR_TYPED_IMAGE_LOADED ... format=cubin`,
-   no driver fallback, stable prevalidated plans.
+1. **Typed real pilot (COMPLETE for selected shapes):** MoE/indexed-copy/
+   paged-decode passed 3/3 physical GPU tests, with four Candle CUBIN loads,
+   no image-mode fallback, and cached prevalidated plans. This is a bounded
+   functional proof, not a full-model or performance certificate.
 2. **Remaining Mistral operation families:** gradually enable the already
    written adapters; pair existing compiled PTX to CUBIN without rebuilding
    all C++ kernels. Prioritize quantized GEMV/GEMM, FP8/FP4, routed MoE,
