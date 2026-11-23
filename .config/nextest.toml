@@ -1,0 +1,6 @@
+# DKR R1.25 quantized SM61 pilot only. Does not change normal test profiles.
+# Timeouts apply to individual GPU tests, NOT to Cargo --release compilation.
+# 20-second slow warnings, hard timeout at 120 seconds and bounded termination.
+[profile.dkr-r125-quant]
+inherits = "default"
+slow-timeout = { period = "20s", terminate-after = 6, grace-period = "10s" }
