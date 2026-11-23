@@ -79,6 +79,22 @@ def main() -> None:
            or "mistralrs-paged-attn/cuda-legacy" in flag for flag in pilot):
         fail("typed pilot may enable only Candle's generic BF16 compatibility, not native S31 or Mistral static legacy families")
 
+    quant_pilot = features["dkr-r125-quant-typed-pilot"]
+    for name in ("dkr-quant-gemv", "dkr-quant-gemm",
+                 "mistralrs-kernel-runtime/shared-registry",
+                 "candle-core/cuda-legacy-bf16", "candle-core/cuda-legacy-fp8"):
+        if name not in quant_pilot:
+            fail(f"quant typed pilot missing {name}")
+    if any(flag.startswith("cuda-legacy") or "cuda-dkr-s31" in flag
+           or "mistralrs-quant/cuda-legacy" in flag
+           or "mistralrs-paged-attn/cuda-legacy" in flag
+           for flag in quant_pilot):
+        fail("quant pilot must not force Mistral static legacy or native S31")
+    if not (ROOT / "tools/dkr_r125_cudaforge_cache_audit.py").exists():
+        fail("read-only Cudaforge cache audit missing")
+    if not (ROOT / "tools/dkr_r125_quant_manifest_preflight.py").exists():
+        fail("quant manifest preflight missing")
+
     loader = (ROOT / "mistralrs-kernel-runtime/src/universal_cuda.rs").read_text()
     if "get_or_load_dkr_typed_image_func" not in loader:
         fail("Mistral bypasses the Candle typed-image transport")
