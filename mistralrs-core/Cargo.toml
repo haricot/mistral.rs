@@ -123,12 +123,15 @@ dispatch2 = { workspace = true, optional = true }
 mistralrs-metal-compile = { workspace = true, optional = true, features = ["metal"] }
 
 [features]
-# R1.25 typed-only real workload pilot. No native S31/legacy feature implied:
-# MoE grouped GEMM, KV indexed row copy and short-context paged decode execute
-# their existing production adapters through Candle's common PTX/CUBIN loader.
-# This is deliberately narrower than the historical full SM61 campaign.
+# R1.25 typed-only real workload pilot. NO native S31 catalogue.
+# Candle's *generic* BF16 tensor utilities must still work on pre-Ampere:
+# fill.cu::const_set_bf16 and cast.cu::cast_bf16_f32 are guarded by the
+# CANDLE_CUDA_BF16_FALLBACK compile definition on SM61. Activate ONLY the
+# Candle-core compatibility feature, not mistralrs-quant/paged-attn legacy flags.
+# MoE / KV / paged operation kernels themselves remain external typed CUBIN.
 dkr-r125-typed-real-pilot = [
     "mistralrs-kernel-runtime/shared-registry",
+    "candle-core/cuda-legacy-bf16",
     "dkr-moe",
     "dkr-indexed-copy",
     "dkr-paged-decode",
