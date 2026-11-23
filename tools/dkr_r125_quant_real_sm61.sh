@@ -87,12 +87,10 @@ if ! cargo nextest run --release --locked \
     --run-ignored=all --test-threads=1 --no-fail-fast \
     --success-output immediate \
     -E 'test(dkr_quantized_gemv_gpu) or test(dkr_quantized_gemm_gpu)' \
-    > "$log" 2>&1; then
-    cat "$log"
-    echo "DKR_R125_QUANT=FAIL stage=GPU_TESTS" >&2
+    2>&1 | tee "$log"; then
+    echo "DKR_R125_QUANT=FAIL stage=GPU_TESTS log=$log" >&2
     exit 1
 fi
-cat "$log"
 for name in dkr_quantized_gemv_gpu dkr_quantized_gemm_gpu; do
     if ! grep -Eq "PASS .*${name}\b" "$log"; then
         echo "DKR_R125_QUANT=FAIL missing passed test $name" >&2
