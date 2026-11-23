@@ -117,7 +117,13 @@ end-to-end Mistral model performance qualification.
 The new `mistralrs-core/dkr-r125-typed-real-pilot` feature enables real grouped
 MoE GEMM, indexed KV row-copy, and short-context paged decode through the
 shared Candle typed-image transport. It does **not** automatically enable
-`cuda-dkr-s31`, `cuda-legacy` or the sealed native default catalogue.
+`cuda-dkr-s31`, the full `cuda-legacy` feature or a sealed native catalogue.
+On SM61 it **does** enable `candle-core/cuda-legacy-bf16`, narrowly for generic
+BF16 tensor fill/cast operations: `const_set_bf16` and `cast_bf16_f32` are
+not compiled for pre-Ampere devices without that compatibility definition.
+The three migrated operation kernels still execute as external typed CUBIN;
+this temporary generic BF16 compatibility is not a completed native DKR
+replacement for every standard Candle tensor utility.
 Existing typed PTX families must already have been generated and verified.
 
 Run one focused release-only GPU gate, rather than repeating the full
