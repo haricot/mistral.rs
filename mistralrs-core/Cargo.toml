@@ -136,6 +136,18 @@ dkr-r125-typed-real-pilot = [
     "dkr-indexed-copy",
     "dkr-paged-decode",
 ]
+# R1.25 quantified real-adapter PILOT: separately guarded, unqualified.
+# FP8 input fixtures need Candle generic FP8 casts on Pascal; BF16 inputs
+# need generic BF16 fill/casts. DO NOT propagate either flag into the static
+# mistralrs-quant or paged-attn CUDA producers, and do not enable native S31.
+# FP8 blockwise + MXFP4 GEMV (decode), GEMM (prefill) are external typed CUBIN.
+dkr-r125-quant-typed-pilot = [
+    "mistralrs-kernel-runtime/shared-registry",
+    "candle-core/cuda-legacy-bf16",
+    "candle-core/cuda-legacy-fp8",
+    "dkr-quant-gemv",
+    "dkr-quant-gemm",
+]
 # R1.25: deployment candidate with native Candle qualified CUBIN and typed
 # Mistral kernels sharing Candle's CUDA transport and image policy.
 # Requires a sealed native build catalogue plus the typed manifests.
