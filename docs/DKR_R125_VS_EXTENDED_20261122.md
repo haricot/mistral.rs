@@ -54,7 +54,12 @@ operation adapters** to Candle's typed-only PTX/CUBIN loader:
 3. Short-context paged-attention decode (F16, BF16, F32; repeated plan check).
 
 The source tests are already marked `#[ignore]` because they launch a physical
-GPU. New `tools/dkr_r125_real_kernel_sm61.sh` assembles **only these existing
+GPU. The pilot deliberately enables **only Candle's BF16 generic tensor
+compatibility** (`candle-core/cuda-legacy-bf16`) on SM61, not native S31 and
+not the legacy producers of `mistralrs-quant` or `mistralrs-paged-attn`.
+This is required for `Tensor::ones` / `const_set_bf16` and BF16-to-F32 result
+checks; it is not evidence that all native Candle utility operations are DKR.
+New `tools/dkr_r125_real_kernel_sm61.sh` assembles **only these existing
 PTX families** through `ptxas`, persists the selective CUBIN cache, uses
 `CANDLE_DKR_IMAGE_MODE=cubin` strictly and executes the three CUDA tests with
 one release-only `cargo nextest` invocation.
