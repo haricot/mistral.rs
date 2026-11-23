@@ -1752,7 +1752,8 @@ mod tests {
                 .to_dtype(dtype)?;
             let out = layer.forward_raw(&x)?;
             assert_eq!(out.dims(), [1, 17, n]);
-            for row in out.to_dtype(DType::F32)?.to_vec3::<f32>()?[0].iter() {
+            let values = out.to_dtype(DType::F32)?.to_vec3::<f32>()?;
+            for row in &values[0] {
                 assert!(row.iter().all(|&value| value == 4.25));
             }
         }
