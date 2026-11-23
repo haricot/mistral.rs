@@ -126,8 +126,12 @@ independent physical SM61 numerical GPU tests PASS**: one GEMM and one GEMV,
 collectively attesting twelve manifest variants to two distinct CUBIN images
 via Candle's typed loader. This is a *family-scoped functional* qualification,
 not a successful combined Nextest run, a model-level certification or a
-performance A/B result. The broader R1.25 audit remains
-`gpu_qualified=false`.
+performance A/B result. **In a subsequent independent physical test,
+`BlockwiseFP8Linear::forward_raw` also passed (1/1) using both exact
+GEMV and GEMM CUBIN modules**, covering F16/BF16, decode/prefill,
+shape restoration and optional bias. This proves the production FP8
+*layer* route, not complete checkpoint inference or MXFP4 layer routing.
+The broader R1.25 audit remains `gpu_qualified=false`.
 
 The gated `tools/dkr_r125_quant_real_sm61.sh` still refuses missing
 prebuilt PTX packages and stale cache state, and requires explicit
