@@ -102,7 +102,7 @@ log="$pilot/r125-quant-${test_scope}.log"
 if ! cargo nextest run --profile dkr-r125-quant --release --locked \
     -p mistralrs-core -p mistralrs-quant --lib \
     --features mistralrs-core/dkr-r125-quant-typed-pilot \
-    --run-ignored=all --test-threads=1 --no-fail-fast \
+    --run-ignored=all --no-fail-fast \
     --no-capture \
     -E "$filter_expr" \
     2>&1 | tee "$log"; then
