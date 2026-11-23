@@ -121,10 +121,20 @@ with optional immutable snapshots for cross-worktree comparisons.
 
 `tools/dkr_r125_quant_manifest_preflight.py` checks 12 existing SM61 typed
 FP8/MXFP4 GEMV/GEMM package manifests without compilation.
-The new `mistralrs-core/dkr-r125-quant-typed-pilot` feature and gated
-`tools/dkr_r125_quant_real_sm61.sh` remain **unqualified** and must not
-be executed without explicit `DKR_APPROVE_R125_QUANT=1`. The test gate
-will refuse missing prebuilt PTX packages and stale cache state first.
+The `mistralrs-core/dkr-r125-quant-typed-pilot` feature now has **2/2
+independent physical SM61 numerical GPU tests PASS**: one GEMM and one GEMV,
+collectively attesting twelve manifest variants to two distinct CUBIN images
+via Candle's typed loader. This is a *family-scoped functional* qualification,
+not a successful combined Nextest run, a model-level certification or a
+performance A/B result. The broader R1.25 audit remains
+`gpu_qualified=false`.
+
+The gated `tools/dkr_r125_quant_real_sm61.sh` still refuses missing
+prebuilt PTX packages and stale cache state, and requires explicit
+`DKR_APPROVE_R125_QUANT=1` to launch GPU tests. Existing logs may instead
+be re-attested without another GPU run using
+`tools/dkr_r125_quant_pair_evidence.py`, which checks the two independent
+Nextest PASS records and their two on-disk SHA256-attested CUBIN images.
 
 See [cache failure diagnosis and quantified preparation](../docs/DKR_R125_CACHE_AND_QUANT_PREPARATION_20261123.md).
 Do not modify `CUDA_COMPUTE_CAP`, clear `target/dkr-*` or start another
