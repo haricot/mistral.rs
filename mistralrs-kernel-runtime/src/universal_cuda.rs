@@ -15,7 +15,6 @@ use std::{
 
 const MAX_PREPARED_KERNELS: usize = 128;
 const SHARED_CATALOG_ENV: &str = "MISTRALRS_DKR_SHARED_CATALOG";
-
 struct PreparedEntry {
     request: LaunchRequest,
     device: Device,
@@ -143,22 +142,26 @@ impl PreparedKernel {
         let function = {
             let artifact = match &module.ptx {
                 std::borrow::Cow::Borrowed(ptx) => dkr_kernel_registry::VerifiedArtifact::from_build_verified(
-                    ptx, module.manifest.target_cc, &module.manifest.sha256, [module.manifest.entry.clone()]),
-                std::borrow::Cow::Owned(ptx) => dkr_kernel_registry::VerifiedArtifact::new(ptx.clone(),
-                    module.manifest.target_cc, &module.manifest.sha256).map_err(anyhow::Error::msg)?,
+                    ptx, module.manifest.target_cc, &module.manifest.sha256,
+                    [module.manifest.entry.clone()]),
+                std::borrow::Cow::Owned(ptx) => dkr_kernel_registry::VerifiedArtifact::new(
+                    ptx.clone(), module.manifest.target_cc, &module.manifest.sha256)
+                    .map_err(anyhow::Error::msg)?,
             };
-            let (func, first) = device.as_cuda_device()?
-                .get_or_load_dkr_func(&artifact, &module.manifest.entry)?;
-            if first && std::env::var_os("CANDLE_DKR_TRACE").is_some() {
-                eprintln!("MISTRAL_DKR_MODULE_LOADED operation={} target=sm{} source=external",
-                    module.manifest.operation, module.manifest.target_cc);
-            }
+            let image = match (&module.cubin, module.manifest.cubin_sha256.as_deref()) {
+                (Some(bytes), Some(sha)) => Some((bytes.as_ref(), sha)),
+                (None, None) => None,
+                _ => anyhow::bail!("typed manifest must attest both CUBIN bytes and digest"),
+            };
+            // Candle owns the CUDA context, image policy, verification and
+            // the physical image cache; Mistral only supplies the typed ABI.
+            let (func, _) = device.as_cuda_device()?
+                .get_or_load_dkr_typed_image_func(&artifact, &module.manifest.entry, image)?;
             func.into_cuda_function()
         };
         #[cfg(not(feature = "shared-registry"))]
-        let function = device
-            .as_cuda_device()?
-            .get_or_load_custom_func(&module.manifest.entry, &module.module_key(), &module.ptx)?
+        let function = device.as_cuda_device()?.get_or_load_custom_func(
+            &module.manifest.entry, &module.module_key(), &module.ptx)?
             .into_cuda_function();
         let evidence=telemetry::handle(TYPED_ABI,&module.manifest.operation,&module.manifest.entry,&module.manifest.sha256,module.manifest.target_cc);
         evidence.record(Event::Resolved);

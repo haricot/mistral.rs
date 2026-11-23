@@ -4,7 +4,14 @@
 //! pinned cudaforge crate. Existing Python emitters only package and fingerprint
 //! already compiled PTX; this preserves the versioned typed manifests.
 
-use std::{env, fs, path::{Path, PathBuf}, process::Command};
+use std::{
+    collections::HashMap,
+    env, fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
+use sha2::{Digest, Sha256};
+use mistralrs_kernel_runtime::universal::VerifiedKernel;
 
 struct Package {
     name: &'static str,
@@ -40,12 +47,23 @@ const PACKAGES: &[Package] = &[
     Package { name: "routed-quant", source: "routed_quant.cu", fast_math: false },
 ];
 
-fn parse_args() -> Result<(usize, PathBuf, String), Box<dyn std::error::Error>> {
+fn parse_args() -> Result<(usize, PathBuf, String, bool, bool), Box<dyn std::error::Error>> {
     let mut cc: Option<usize> = None;
     let mut output = PathBuf::from("kernel-packages/build/cuda");
     let mut python = String::from("python3");
+    let mut cubin = false;
+    let mut pair_existing = false;
     let mut args = env::args().skip(1);
     while let Some(flag) = args.next() {
+        if flag == "--cubin" {
+            cubin = true;
+            continue;
+        }
+        if flag == "--pair-existing" {
+            cubin = true;
+            pair_existing = true;
+            continue;
+        }
         let value = args.next().ok_or_else(|| format!("missing argument for {flag}"))?;
         match flag.as_str() {
             "--cc" => cc = Some(value.parse()?),
@@ -58,7 +76,7 @@ fn parse_args() -> Result<(usize, PathBuf, String), Box<dyn std::error::Error>> 
     if !(50..=120).contains(&cc) {
         return Err(format!("unsupported compute capability {cc}").into());
     }
-    Ok((cc, output, python))
+    Ok((cc, output, python, cubin, pair_existing))
 }
 
 fn compile_ptx(
@@ -129,8 +147,88 @@ fn package(
     Ok(())
 }
 
+// Assemble the exact PTX produced by cudaforge. ptxas is the CUDA toolchain's
+// PTX-to-SASS stage: no second nvcc C++ compilation or Python device build.
+fn stage_cubins(root: &Path, cc: usize) -> Result<usize, Box<dyn std::error::Error>> {
+    let ptxas = env::var("PTXAS").unwrap_or_else(|_| "ptxas".into());
+    let version = Command::new(&ptxas).arg("--version").output()?;
+    if !version.status.success() {
+        return Err(format!("ptxas --version failed: {}", version.status).into());
+    }
+    let mut paths = Vec::<PathBuf>::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
+                pending.push(entry.path());
+            } else if kind.is_file() && entry.file_name() == "manifest.json" {
+                paths.push(entry.path());
+            }
+        }
+    }
+    paths.sort();
+    if paths.is_empty() {
+        return Err("no typed manifests found for CUBIN pairing".into());
+    }
+    let image_cache = root.join("_cudaforge_cache/cubin");
+    fs::create_dir_all(&image_cache)?;
+    let mut compiled = HashMap::<String, PathBuf>::new();
+    for manifest_path in paths {
+        // Reads and validates the PTX source, including the entry parameter ABI.
+        let verified = VerifiedKernel::read(&manifest_path)?;
+        if verified.manifest.target_cc as usize != cc {
+            return Err(format!("wrong target in {}", manifest_path.display()).into());
+        }
+        let mut cache_key = Sha256::new();
+        cache_key.update(verified.ptx.as_bytes());
+        cache_key.update(&version.stdout);
+        cache_key.update(&version.stderr);
+        cache_key.update(cc.to_le_bytes());
+        let identity = format!("{:x}", cache_key.finalize());
+        let binary = if let Some(previous) = compiled.get(&identity) {
+            previous.clone()
+        } else {
+            let binary = image_cache.join(format!("{identity}.cubin"));
+            if !binary.is_file() {
+                let source = manifest_path.parent().ok_or("manifest missing directory")?
+                    .join(&verified.manifest.artifact);
+                let partial = image_cache.join(format!("{identity}.tmp.cubin"));
+                let status = Command::new(&ptxas)
+                    .arg(format!("-arch=sm_{cc}"))
+                    .arg("-o").arg(&partial).arg(&source)
+                    .status()?;
+                if !status.success() {
+                    let _ = fs::remove_file(&partial);
+                    return Err(format!("ptxas failed for {}: {status}", source.display()).into());
+                }
+                fs::rename(&partial, &binary)?;
+            }
+            compiled.insert(identity, binary.clone());
+            binary
+        };
+        let destination = verified.manifest.artifact.with_extension("cubin");
+        let dest_path = manifest_path.parent().ok_or("manifest missing directory")?
+            .join(&destination);
+        fs::copy(&binary, &dest_path)?;
+        let bytes = fs::read(&dest_path)?;
+        let sha = format!("{:x}", Sha256::digest(&bytes));
+        let mut manifest: serde_json::Value = serde_json::from_slice(&fs::read(&manifest_path)?)?;
+        manifest["cubin_artifact"] = destination.to_string_lossy().into_owned().into();
+        manifest["cubin_sha256"] = sha.into();
+        fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest)?)?;
+        // Do not publish an image that fails the same checks as runtime discovery.
+        let validated = VerifiedKernel::read(&manifest_path)?;
+        if validated.cubin.is_none() {
+            return Err("CUBIN pairing did not validate".into());
+        }
+    }
+    Ok(compiled.len())
+}
+
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let (cc, requested_output, python) = parse_args()?;
+    let (cc, requested_output, python, cubin, pair_existing) = parse_args()?;
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent().ok_or("no repository root")?;
     let output = if requested_output.is_absolute() {
@@ -148,6 +246,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         vllm.join("quantization/fp8/nvidia"),
     ];
     let work = output.join(format!("sm{cc}/_cudaforge_cache"));
+    if !pair_existing {
     for pkg in PACKAGES {
         let dir = sources.join(pkg.name);
         let source = dir.join(pkg.source);
@@ -178,7 +277,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             package(&python, &script, cc, &output, &compiled, false, root)?;
         }
     }
-    println!("DKR_CUDAFORGE_PACKAGES=STAGED target_cc={cc} families={}", PACKAGES.len());
+    }
+    if cubin {
+        let images = stage_cubins(&output.join(format!("sm{cc}")), cc)?;
+        println!("DKR_CUDAFORGE_CUBIN_PAIRED=STAGED target_cc={cc} images={images}");
+    }
+    println!("DKR_CUDAFORGE_PACKAGES=STAGED target_cc={cc} families={}", if pair_existing { 0 } else { PACKAGES.len() });
     Ok(())
 }
 

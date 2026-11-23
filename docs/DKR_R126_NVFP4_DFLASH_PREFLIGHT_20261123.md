@@ -1,0 +1,111 @@
+# DKR R1.26 candidate — NVFP4 W4A16 ModelOpt / DFlash discovery (2026-11-23)
+
+**Status: SOURCE AUDIT ONLY. No CUDA build or GPU test was started.**
+No change to the R1.25 FP8/MXFP4 GEMV/GEMM 12-manifest, 2-CUBIN numerical
+and FP8 model-layer-forward PASS evidence.
+
+## Local checkpoint candidate
+
+The user's local Hugging Face cache inventory reported:
+
+- `nvidia/NVIDIA-Nemotron-3.5-Bolt-E4B-BF16-DFlash-NVFP4`;
+- config `model_type=qwen3`, ModelOpt `quant_algo=W4A16_NVFP4`,
+  `group_size=16`;
+- NVFP4 weight format packed FP4 E2M1, group-16 FP8 E4M3 scales and an
+  additional F32 global scale per row, with F16/BF16 activations.
+
+This **is not MXFP4** (MXFP4 has group-32 E8M0 scales) and must not be
+reported as covered by the R1.25 `quant-gemv` / `quant-gemm` CUBIN family
+set. NVFP4 has its own `nvfp4-gemv` typed package: **4 manifest profiles**
+(F16/BF16 times plain/bias), `quant.nvfp4.gemv.{mode}.b128.v1`,
+with DKR runtime feature `dkr-nvfp4-gemv`.
+
+Critical architecture caveat: official model card identifies
+`architectures=["DFlashDraftModel"]`: this is a **five-layer speculative
+draft model**, *not* a standalone Qwen3 chat model. It consumes target-model
+hidden states and shares the target's embeddings. It is served as a DFlash
+draft alongside `nvidia/NVIDIA-Nemotron-3.5-Bolt-E4B-BF16`.
+HF: https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Bolt-E4B-BF16-DFlash-NVFP4
+
+Only the config has been shown from the user's cache. Do **not** assume
+`model.safetensors` is downloaded, or that the target model fits in 8 GiB.
+
+## Verified source constraints in this DKR branch
+
+- `mistralrs-quant/src/fp8_config.rs::model_opt_spec` recognizes exactly
+  `W4A16_NVFP4` with `group_size=16` and selects `Nvfp4ActivationMode::None`.
+  This covers **quantization metadata parsing**, not complete draft model
+  architecture support.
+- `mistralrs-quant/src/nvfp4/gemv_dynamic.rs::try_gemv` supplies a DKR
+  external GEMV adapter (F16/BF16, M=1..8, packed U8 E2M1 weights,
+  group-16 F8E4M3 block scales, F32 global scales, optional bias).
+  Its GPU test `dkr_nvfp4_gemv_gpu` exists but **has not been qualified
+  by the R1.25 pilot**.
+- `mistralrs-quant/src/nvfp4/mod.rs::Nvfp4Layer::from_normalized_parts`
+  calls `use_portable_kernels` when the Mistral `cuda-legacy-fp4` feature
+  is not enabled. Its `portable::supported` predicate requires BF16 MMA
+  (CC >= 80). **Thus the typed-only SM61 deployment can reject layer
+  construction BEFORE any valid DKR NVFP4 GEMV adapter has a chance to run.**
+  This is distinct from the previously fixed FP8 blockwise routing gate.
+- This DKR NVFP4 adapter is decode GEMV only (<=8 rows), not a complete
+  prefill GEMM replacement. Do not label full NVFP4 checkpoint inference
+  qualified even after a narrow GEMV PASS.
+
+## Next gates (without wasting NVCC compilations)
+
+1. **Read-only inventory** of the user's snapshot: verify actual
+   `model.safetensors`, `hf_quant_config.json`, `architectures`,
+   `dflash_config`, ModelOpt quant settings and local
+   `kernel-packages/build/cuda/sm61/nvfp4-gemv` PTX manifests. This step
+   must not download any files.
+2. Verify the four `nvfp4-gemv` manifest hashes, geometry/ABI and
+   cache identities. **Do not** copy the R1.25 MXFP4 manifests into
+   NVFP4 or edit `CUDA_COMPUTE_CAP`.
+3. Introduce a narrowly gated NVFP4 typed-only SM61 **layer construction**
+   path that does not require Ampere portable MMA nor silently activate
+   the Mistral static legacy CUDA producer. For unsupported prefill/shape,
+   fail closed or use an explicitly qualified compatible fallback.
+4. Only after staged, preflighted CUBIN, run **one bounded physical NVFP4
+   GEMV numeric + checkpoint-layer forward qualification**; retain the
+   pre-existing `target/dkr-cuda-cache/sm61` and R1.25 paired CUBINs.
+5. For a real next-token-logit comparison, use a standalone checkpoint
+   with supported model architecture and identical weights across
+   DKR/Extended. The DFlash draft must instead be evaluated with its
+   parent model and speculative protocol.
+
+## Read-only local inspection commands
+
+```bash
+cd /home/np/dkr-worktrees/r125-candle-integration
+python3 - <<'PY'
+import json
+from pathlib import Path
+
+root = Path.home() / '.cache/huggingface/hub'
+name = 'models--nvidia--NVIDIA-Nemotron-3.5-Bolt-E4B-BF16-DFlash-NVFP4'
+snapshots = sorted((root / name / 'snapshots').glob('*'))
+print('SNAPSHOTS', len(snapshots))
+for snap in snapshots:
+    cfg = snap / 'config.json'
+    if not cfg.is_file():
+        continue
+    data = json.loads(cfg.read_text())
+    quant = data.get('quantization_config', {})
+    print('REV', snap.name)
+    print('ARCHITECTURES', data.get('architectures'))
+    print('DRAFT', data.get('dflash_config', {}))
+    print('QUANT', quant.get('quant_algo'), 'GROUP', quant.get('group_size'))
+    for filename in ('model.safetensors', 'hf_quant_config.json'):
+        file = snap / filename
+        print(filename, 'present', file.is_file(),
+              'bytes', file.stat().st_size if file.is_file() else 0)
+
+pkg = Path('/home/np/tmp/mistralrs_provider/mistral.rs/kernel-packages/build/cuda/sm61/nvfp4-gemv')
+print('NVFP4_PTX_ROOT', pkg, 'exists', pkg.is_dir())
+print('NVFP4_MANIFESTS', len(list(pkg.glob('*/' + '*/manifest.json'))))
+PY
+```
+
+This preflight is diagnostic, not a license to run unsupported DFlash
+as standalone inference. Resume with actual outputs before scheduling
+another expensive release build.

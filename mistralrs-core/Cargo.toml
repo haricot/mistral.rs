@@ -123,6 +123,39 @@ dispatch2 = { workspace = true, optional = true }
 mistralrs-metal-compile = { workspace = true, optional = true, features = ["metal"] }
 
 [features]
+# R1.25 typed-only real workload pilot. NO native S31 catalogue.
+# Candle's *generic* BF16 tensor utilities must still work on pre-Ampere:
+# fill.cu::const_set_bf16 and cast.cu::cast_bf16_f32 are guarded by the
+# CANDLE_CUDA_BF16_FALLBACK compile definition on SM61. Activate ONLY the
+# Candle-core compatibility feature, not mistralrs-quant/paged-attn legacy flags.
+# MoE / KV / paged operation kernels themselves remain external typed CUBIN.
+dkr-r125-typed-real-pilot = [
+    "mistralrs-kernel-runtime/shared-registry",
+    "candle-core/cuda-legacy-bf16",
+    "dkr-moe",
+    "dkr-indexed-copy",
+    "dkr-paged-decode",
+]
+# R1.25 quantified real-adapter PILOT: separately guarded, unqualified.
+# FP8 input fixtures need Candle generic FP8 casts on Pascal; BF16 inputs
+# need generic BF16 fill/casts. DO NOT propagate either flag into the static
+# mistralrs-quant or paged-attn CUDA producers, and do not enable native S31.
+# FP8 blockwise + MXFP4 GEMV (decode), GEMM (prefill) are external typed CUBIN.
+dkr-r125-quant-typed-pilot = [
+    "mistralrs-kernel-runtime/shared-registry",
+    "candle-core/cuda-legacy-bf16",
+    "candle-core/cuda-legacy-fp8",
+    "dkr-quant-gemv",
+    "dkr-quant-gemm",
+]
+# R1.25: deployment candidate with native Candle qualified CUBIN and typed
+# Mistral kernels sharing Candle's CUDA transport and image policy.
+# Requires a sealed native build catalogue plus the typed manifests.
+dkr-sm61-cubin-qualified = [
+    "dkr-sm61-experimental",
+    "candle-core/cuda-dkr-qualified-default",
+    "candle-nn/cuda-dkr-qualified-default",
+]
 # Explicit opt-in: functional SM61 package set, not performance-qualified.
 # Does not enable the standalone FP4 diagnostic dequantization feature.
 dkr-sm61-experimental = [

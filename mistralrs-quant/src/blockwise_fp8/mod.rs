@@ -905,6 +905,56 @@ impl QuantMethod for BlockwiseFP8Linear {
             return unquant.forward(x);
         }
 
+        // DKR typed FP8 must remain reachable without the optional static FP8
+        // producer. On pre-Tensor-Core GPUs, HAVE_BLOCKWISE_GEMM_KERNELS can
+        // be false even though a valid external typed CUBIN is available.
+        // Try DKR first; on an unsupported shape/format retain the existing
+        // static (if present) or dequantized fallback below.
+        #[cfg(all(
+            feature = "cuda",
+            any(feature = "dkr-quant-gemv", feature = "dkr-quant-gemm")
+        ))]
+        if x.device().is_cuda()
+            && matches!(x.dtype(), DType::F16 | DType::BF16)
+            && x.rank() >= 2
+        {
+            let orig_dims = x.dims().to_vec();
+            let input_2d = if orig_dims.len() > 2 {
+                let k = *orig_dims.last().unwrap();
+                let rows = orig_dims[..orig_dims.len() - 1]
+                    .iter()
+                    .try_fold(1usize, |rows, dim| rows.checked_mul(*dim))
+                    .ok_or_else(|| candle_core::Error::msg("FP8 DKR input shape overflows usize"))?;
+                x.contiguous()?.reshape((rows, k))?
+            } else {
+                x.clone()
+            };
+            let mut selected = None;
+            #[cfg(feature = "dkr-quant-gemv")]
+            if selected.is_none() {
+                selected = crate::quantized_gemv_dynamic::try_fp8(
+                    &input_2d, &self.weight, &self.weight_scale_inv, &self.weight_block_size,
+                )?;
+            }
+            #[cfg(feature = "dkr-quant-gemm")]
+            if selected.is_none() {
+                selected = crate::quantized_gemm_dynamic::try_fp8(
+                    &input_2d, &self.weight, &self.weight_scale_inv, &self.weight_block_size,
+                )?;
+            }
+            if let Some(mut output) = selected {
+                if orig_dims.len() > 2 {
+                    let mut shape = orig_dims[..orig_dims.len() - 1].to_vec();
+                    shape.push(output.dim(1)?);
+                    output = output.reshape(shape)?;
+                }
+                return match &self.bias {
+                    Some(bias) => output.broadcast_add(bias),
+                    None => Ok(output),
+                };
+            }
+        }
+
         // Try to use native FP8 GEMM kernel on CUDA
         #[cfg(feature = "cuda")]
         {
@@ -1655,6 +1705,60 @@ mod tests {
 
     use super::*;
     use crate::{QuantizedConfig, ShardedSafeTensors};
+
+    // Exercises the real checkpoint-layer forward route rather than calling
+    // quantized_gemv_dynamic/quantized_gemm_dynamic directly. On SM61 with
+    // only Candle generic FP8 compatibility, the static FP8 producer is
+    // disabled: both outputs must therefore use the external DKR CUBIN.
+    #[cfg(all(
+        feature = "cuda",
+        feature = "dkr-quant-gemv",
+        feature = "dkr-quant-gemm"
+    ))]
+    #[test]
+    #[ignore = "requires physical SM61 GPU and prebuilt DKR quant CUBIN"]
+    fn dkr_blockwise_fp8_layer_forward_gpu() -> Result<()> {
+        let _evidence = mistralrs_kernel_runtime::RuntimeEvidenceGuard;
+        let device = Device::new_cuda(0)?;
+        let (n, k) = (128usize, 128usize);
+        let weight = Tensor::from_vec(vec![0.5f32; n * k], (n, k), &device)?
+            .to_dtype(DType::F8E4M3)?;
+        let scales = Tensor::from_vec(vec![0.5f32], (1, 1), &device)?;
+        for dtype in [DType::F16, DType::BF16] {
+            let bias = Tensor::from_vec(vec![0.25f32; n], n, &device)?
+                .to_dtype(dtype)?;
+            let layer = BlockwiseFP8Linear::new(QuantMethodConfig::BlockwiseFP8 {
+                weight: weight.clone(),
+                weight_scale_inv: scales.clone(),
+                bias: Some(bias),
+                dequant_dtype: dtype,
+                weight_block_size: vec![128, 128],
+                activation_scheme: None,
+            })?;
+            for m in [1usize, 17] {
+                let x = Tensor::from_vec(vec![0.125f32; m * k], (m, k), &device)?
+                    .to_dtype(dtype)?;
+                let output = layer.forward_raw(&x)?;
+                assert_eq!(output.dims(), [m, n]);
+                for row in output.to_dtype(DType::F32)?.to_vec2::<f32>()? {
+                    for value in row {
+                        assert_eq!(value, 4.25, "dtype={dtype:?} rows={m}");
+                    }
+                }
+            }
+            // Production prefill is often [batch, sequence, features];
+            // verify the adapter's flatten/restore shape contract too.
+            let x = Tensor::from_vec(vec![0.125f32; 17 * k], (1, 17, k), &device)?
+                .to_dtype(dtype)?;
+            let out = layer.forward_raw(&x)?;
+            assert_eq!(out.dims(), [1, 17, n]);
+            let values = out.to_dtype(DType::F32)?.to_vec3::<f32>()?;
+            for row in &values[0] {
+                assert!(row.iter().all(|&value| value == 4.25));
+            }
+        }
+        Ok(())
+    }
 
     fn routed_biases(device: &Device, dtype: DType) -> Result<()> {
         const FEATURES: usize = 128;

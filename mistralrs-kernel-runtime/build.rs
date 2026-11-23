@@ -38,9 +38,16 @@ fn manifest_source(m: &KernelManifest) -> String {
         })
         .collect::<Vec<_>>()
         .join(",");
+    let cubin_artifact = m.cubin_artifact.as_ref()
+        .map(|path| format!("Some(std::path::PathBuf::from({:?}))", path.to_str().unwrap()))
+        .unwrap_or_else(|| "None".into());
+    let cubin_sha256 = m.cubin_sha256.as_ref()
+        .map(|sha| format!("Some({sha:?}.into())"))
+        .unwrap_or_else(|| "None".into());
     format!(
         "KernelManifest {{ schema:{:?}.into(), abi:{:?}.into(), operation:{:?}.into(), \
-         implementation_id:{:?}.into(), artifact:{:?}.into(), sha256:{:?}.into(), entry:{:?}.into(), \
+         implementation_id:{:?}.into(), artifact:{:?}.into(), sha256:{:?}.into(), \
+         cubin_artifact:{cubin_artifact}, cubin_sha256:{cubin_sha256}, entry:{:?}.into(), \
          target_cc:{}, min_cc:{}, max_cc:{}, block:{:?}, shared_mem_bytes:{}, arguments:vec![{arguments}] }}",
         m.schema, m.abi, m.operation, m.implementation_id, m.artifact, m.sha256, m.entry,
         m.target_cc, m.min_cc, m.max_cc, m.block, m.shared_mem_bytes
@@ -80,8 +87,16 @@ fn main() -> Result<()> {
             let m = &module.manifest;
             let copy = out.join(format!("dkr-typed-{}.ptx", m.sha256));
             fs::write(&copy, module.ptx.as_bytes())?;
+            let cubin = if let Some(image) = &module.cubin {
+                let hash = m.cubin_sha256.as_ref().expect("validated paired CUBIN hash");
+                let image_copy = out.join(format!("dkr-typed-{hash}.cubin"));
+                fs::write(&image_copy, image.as_ref())?;
+                format!("Some(Cow::Borrowed(&include_bytes!({image_copy:?})[..]))")
+            } else {
+                "None".into()
+            };
             rows.push(format!(
-                "VerifiedKernel {{ manifest:{}, ptx:Cow::Borrowed(include_str!({copy:?})), \
+                "VerifiedKernel {{ manifest:{}, ptx:Cow::Borrowed(include_str!({copy:?})), cubin:{cubin}, \
                  manifest_sha256:{:?}.into() }}",
                 manifest_source(m),
                 module.manifest_sha256

@@ -17,7 +17,7 @@ cudaforge = { workspace = true, optional = true }
 [features]
 default = []
 cuda = ["candle-core/cuda"]
-shared-registry = ["cuda", "candle-core/cuda-dkr-s31"]
+shared-registry = ["cuda", "candle-core/cuda-dkr-typed-image"]
 builder-cudaforge = ["dep:cudaforge"]
 
 [dev-dependencies]
