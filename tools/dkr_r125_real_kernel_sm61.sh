@@ -57,9 +57,16 @@ def features_for(name):
     return matches[0]
 core = features_for("candle-core")
 nn = features_for("candle-nn")
+kernels = features_for("candle-kernels")
+quant = features_for("mistralrs-quant")
+paged = features_for("mistralrs-paged-attn")
 if "cuda-dkr-typed-image" not in core or "cuda-dkr-catalog" in core or "cuda-dkr-catalog" in nn:
     raise SystemExit("DKR_R125_CARGO_FEATURES=FAIL typed loader is still coupled to native catalog")
-print("DKR_R125_CARGO_FEATURES=PASS typed_image=true native_catalog=false standard_cuda=true")
+if "cuda-legacy-bf16" not in core or "cuda-legacy-bf16" not in kernels:
+    raise SystemExit("DKR_R125_CARGO_FEATURES=FAIL Candle BF16 fill/cast are absent on SM61")
+if "cuda-legacy-bf16" in quant or "cuda-legacy-bf16" in paged:
+    raise SystemExit("DKR_R125_CARGO_FEATURES=FAIL generic Candle BF16 fallback must not enable Mistral legacy producer flags")
+print("DKR_R125_CARGO_FEATURES=PASS typed_image=true native_catalog=false candle_bf16_compat=true mistral_legacy_bf16=false")
 '
 python3 tools/dkr_r125_candle_pin_audit.py
 
