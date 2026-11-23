@@ -299,8 +299,20 @@ mod tests {
         let _dkr_runtime_evidence = mistralrs_kernel_runtime::RuntimeEvidenceGuard;
         let device = Device::new_cuda(0)?;
         for dtype in [DType::F16, DType::BF16] {
-            let input = Tensor::ones((2, 16), dtype, &device)?;
-            let weights = Tensor::ones((2, 3, 16), dtype, &device)?;
+            // Isolate a missing Candle generic BF16 fill/cast kernel from an
+            // actual MoE CUBIN / typed ABI failure. On SM61, const_set_bf16
+            // requires Candle's explicitly enabled BF16 compatibility.
+            eprintln!("DKR_R125_MOE_PREPARE dtype={dtype:?}");
+            let input = Tensor::ones((2, 16), dtype, &device).map_err(|error| {
+                candle_core::Error::Msg(format!(
+                    "DKR_R125_MOE_PREPARE input Tensor::ones dtype={dtype:?}: {error}"
+                ))
+            })?;
+            let weights = Tensor::ones((2, 3, 16), dtype, &device).map_err(|error| {
+                candle_core::Error::Msg(format!(
+                    "DKR_R125_MOE_PREPARE weights Tensor::ones dtype={dtype:?}: {error}"
+                ))
+            })?;
             let sorted = Tensor::new(&[1u32, 0], &device)?;
             let experts = Tensor::new(&[1u32, 0], &device)?;
             let gating = Some(Tensor::new(&[2.0f32, 0.5], &device)?);
