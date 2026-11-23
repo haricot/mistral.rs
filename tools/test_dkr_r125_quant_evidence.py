@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 
 from dkr_r125_quant_pair_evidence import verify_pair
+from dkr_r125_fp8_forward_evidence import verify_forward
 
 SCRIPT = Path(__file__).with_name("dkr_r125_quant_evidence.py")
 SPEC = importlib.util.spec_from_file_location("quant_evidence", SCRIPT)
@@ -117,6 +118,42 @@ class QuantEvidenceTests(unittest.TestCase):
         gemv.write_text(gemv.read_text().replace(self.hashes["gemv"], "f" * 64))
         with self.assertRaisesRegex(ValueError, "not loaded"):
             verify_pair(self.root, gemm, gemv)
+
+
+    def make_forward_log(self):
+        self.log.write_text(
+            "DKR_R125_TYPED_POLICY requested=cubin source=verified_external_pair\n"
+            + "".join(
+                "CANDLE_DKR_TYPED_IMAGE_LOADED target=sm61 format=cubin "
+                f"cubin_sha256={self.hashes[scope]} ptx_sha256=" + "0" * 64 + "\n"
+                for scope in ("gemv", "gemm")
+            )
+            + "        PASS [   0.248s] (1/1) mistralrs-quant "
+            "blockwise_fp8::tests::dkr_blockwise_fp8_layer_forward_gpu\n"
+        )
+
+    def test_layer_forward_verifies_exact_two_images(self):
+        self.make_forward_log()
+        report = verify_forward(self.root, self.log)
+        self.assertEqual(report["verified_cubin_sha256"]["quant-gemm"], self.hashes["gemm"])
+        self.assertEqual(report["verified_cubin_sha256"]["quant-gemv"], self.hashes["gemv"])
+        self.assertFalse(report["model_inference_qualified"])
+
+    def test_layer_forward_rejects_missing_gemv_admission(self):
+        self.make_forward_log()
+        self.log.write_text(
+            self.log.read_text().replace(self.hashes["gemv"], "0" * 64)
+        )
+        with self.assertRaisesRegex(ValueError, "quant-gemv exact CUBIN admission missing"):
+            verify_forward(self.root, self.log)
+
+    def test_layer_forward_rejects_ptx_fallback(self):
+        self.make_forward_log()
+        self.log.write_text(
+            self.log.read_text() + "CANDLE_DKR_TYPED_IMAGE_FALLBACK target=sm61\n"
+        )
+        with self.assertRaisesRegex(ValueError, "PTX fallback"):
+            verify_forward(self.root, self.log)
 
 
 if __name__ == "__main__":
