@@ -905,6 +905,56 @@ impl QuantMethod for BlockwiseFP8Linear {
             return unquant.forward(x);
         }
 
+        // DKR typed FP8 must remain reachable without the optional static FP8
+        // producer. On pre-Tensor-Core GPUs, HAVE_BLOCKWISE_GEMM_KERNELS can
+        // be false even though a valid external typed CUBIN is available.
+        // Try DKR first; on an unsupported shape/format retain the existing
+        // static (if present) or dequantized fallback below.
+        #[cfg(all(
+            feature = "cuda",
+            any(feature = "dkr-quant-gemv", feature = "dkr-quant-gemm")
+        ))]
+        if x.device().is_cuda()
+            && matches!(x.dtype(), DType::F16 | DType::BF16)
+            && x.rank() >= 2
+        {
+            let orig_dims = x.dims().to_vec();
+            let input_2d = if orig_dims.len() > 2 {
+                let k = *orig_dims.last().unwrap();
+                let rows = orig_dims[..orig_dims.len() - 1]
+                    .iter()
+                    .try_fold(1usize, |rows, dim| rows.checked_mul(*dim))
+                    .ok_or_else(|| candle_core::Error::msg("FP8 DKR input shape overflows usize"))?;
+                x.contiguous()?.reshape((rows, k))?
+            } else {
+                x.clone()
+            };
+            let mut selected = None;
+            #[cfg(feature = "dkr-quant-gemv")]
+            if selected.is_none() {
+                selected = crate::quantized_gemv_dynamic::try_fp8(
+                    &input_2d, &self.weight, &self.weight_scale_inv, &self.weight_block_size,
+                )?;
+            }
+            #[cfg(feature = "dkr-quant-gemm")]
+            if selected.is_none() {
+                selected = crate::quantized_gemm_dynamic::try_fp8(
+                    &input_2d, &self.weight, &self.weight_scale_inv, &self.weight_block_size,
+                )?;
+            }
+            if let Some(mut output) = selected {
+                if orig_dims.len() > 2 {
+                    let mut shape = orig_dims[..orig_dims.len() - 1].to_vec();
+                    shape.push(output.dim(1)?);
+                    output = output.reshape(shape)?;
+                }
+                return match &self.bias {
+                    Some(bias) => output.broadcast_add(bias),
+                    None => Ok(output),
+                };
+            }
+        }
+
         // Try to use native FP8 GEMM kernel on CUDA
         #[cfg(feature = "cuda")]
         {
