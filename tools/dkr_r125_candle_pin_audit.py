@@ -72,8 +72,12 @@ def main() -> None:
     for name in ("dkr-moe", "dkr-indexed-copy", "dkr-paged-decode", "mistralrs-kernel-runtime/shared-registry"):
         if name not in pilot:
             fail(f"real typed pilot missing {name}")
-    if any("cuda-legacy" in flag or "cuda-dkr-s31" in flag for flag in pilot):
-        fail("real typed pilot must not force native legacy or S31")
+    if "candle-core/cuda-legacy-bf16" not in pilot:
+        fail("SM61 typed pilot requires Candle BF16 tensor fill/cast compatibility")
+    if any(flag.startswith("cuda-legacy") or "cuda-dkr-s31" in flag
+           or "mistralrs-quant/cuda-legacy" in flag
+           or "mistralrs-paged-attn/cuda-legacy" in flag for flag in pilot):
+        fail("typed pilot may enable only Candle's generic BF16 compatibility, not native S31 or Mistral static legacy families")
 
     loader = (ROOT / "mistralrs-kernel-runtime/src/universal_cuda.rs").read_text()
     if "get_or_load_dkr_typed_image_func" not in loader:
