@@ -139,3 +139,42 @@ and headless-relogin A1/B/A2 for the comparison to Extended.
 - Then integrate other S1–S8 production families under separate gates,
   without conflating selected numerical fixture proof with model inference
   or end-to-end performance certification.
+
+## 6. Incident 2026-11-23: quantized GEMM test did not terminate
+
+On user's SM61 GTX 1080 Max-Q, the 12-manifest read-only preflight and
+Cudaforge cache preflight passed. The subsequent Cargo release build completed
+in 7m25s. **Actual CUDA recompilation counts** were:
+
+- `mistralrs-quant`: **0 / 49**;
+- `mistralrs-paged-attn`: **0 / 15**;
+- `mistralrs-core`: **3 / 18**.
+
+The Nextest worker `quantized_gemm_dynamic::tests::dkr_quantized_gemm_gpu`
+reported repeated `SLOW` at 11,520 seconds (over three hours). No numerical
+success/failure proof exists for the quantized pilot. This is an
+**execution-time stall**, not a slow NVCC compile, and a prolonged test must
+be stopped rather than awaited. Pending a process-level diagnostic, the stage
+is unknown (input conversion, CUBIN loader/dispatch, GPU readback, etc.).
+No claim is made that GEMV passed: a serial Nextest run may not have reached
+that worker before GEMM stalled.
+
+**Additional audit pitfall:** a cache comparison later reported 0/0 entries
+across all crates because `MISTRALRS_CUDA_BUILD_ROOT` had not been re-exported
+in that terminal. This was a false comparison against the wrong root, not
+evidence of deleted cached objects. The audit tool now rejects empty and
+relative paths.
+
+**Recovery / safeguards committed:** `.config/nextest.toml` now defines
+`dkr-r125-quant` as an isolated Nextest profile with
+`slow-timeout = { period = "20s", terminate-after = 6, grace-period = "10s" }`.
+The quant pilot uses `--profile dkr-r125-quant` and `tee` to stream build and
+test output live. GEMM test diagnostics mark the precise stage (dtype, input
+cast, FP8 cast, dispatch return, GPU readback, MXFP4 dispatch and readback).
+These mitigations are **source-only**, not yet GPU-executed. They do not change
+kernel algorithms, PTX artifacts, `CUDA_COMPUTE_CAP`, or Cudaforge caches.
+
+**Next action:** safely terminate the outstanding Nextest/test process, verify
+no lingering test worker, inspect GPU state, and review the existing log before
+any bounded reproduction. Avoid running the previous unbounded Nextest binary
+again. A failed/timeout quantized test must not be promoted to a DKR PASS.
