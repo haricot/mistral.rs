@@ -7,6 +7,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from dkr_r125_quant_pair_evidence import verify_pair
+
 SCRIPT = Path(__file__).with_name("dkr_r125_quant_evidence.py")
 SPEC = importlib.util.spec_from_file_location("quant_evidence", SCRIPT)
 quant_evidence = importlib.util.module_from_spec(SPEC)
@@ -86,6 +88,35 @@ class QuantEvidenceTests(unittest.TestCase):
             f.write("CANDLE_DKR_TYPED_IMAGE_FALLBACK target=sm61\n")
         with self.assertRaisesRegex(ValueError, "PTX fallback"):
             quant_evidence.verify(self.root, self.log, "gemm")
+
+    def separate_logs(self):
+        self.make_log(("gemm",))
+        gemm = Path(self.temp.name) / "gemm.log"
+        gemm.write_bytes(self.log.read_bytes())
+        self.make_log(("gemv",))
+        gemv = Path(self.temp.name) / "gemv.log"
+        gemv.write_bytes(self.log.read_bytes())
+        return gemm, gemv
+
+    def test_separate_passed_logs_attest_family_set_offline(self):
+        gemm, gemv = self.separate_logs()
+        result = verify_pair(self.root, gemm, gemv)
+        self.assertEqual(result["numerical_tests_passed"], 2)
+        self.assertEqual(result["manifest_profiles_verified"], 12)
+        self.assertEqual(result["distinct_cubin_images_verified"], 2)
+        self.assertFalse(result["combined_nextest_run"])
+        self.assertFalse(result["model_inference_qualified"])
+
+    def test_cannot_reuse_gemm_log_for_gemv(self):
+        gemm, _ = self.separate_logs()
+        with self.assertRaisesRegex(ValueError, "Nextest PASS not found"):
+            verify_pair(self.root, gemm, gemm)
+
+    def test_mismatched_gemv_image_cannot_attest_family_set(self):
+        gemm, gemv = self.separate_logs()
+        gemv.write_text(gemv.read_text().replace(self.hashes["gemv"], "f" * 64))
+        with self.assertRaisesRegex(ValueError, "not loaded"):
+            verify_pair(self.root, gemm, gemv)
 
 
 if __name__ == "__main__":
