@@ -79,26 +79,50 @@ export MISTRALRS_DKR_QUANT_GEMV=1
 export MISTRALRS_DKR_QUANT_GEMM=1
 export RUST_BACKTRACE=1
 
-echo "DKR_R125_QUANT=START families=quant-gemv,quant-gemm mode=cubin test_timeout_s=120"
-log="$pilot/r125-quant.log"
+# Diagnose GEMM independently after the previous multi-hour stall. Default
+# still qualifies BOTH operations. Single-test mode is NOT a full family PASS.
+test_scope="${DKR_R125_QUANT_TEST:-both}"
+case "$test_scope" in
+    gemm)
+        filter_expr='test(dkr_quantized_gemm_gpu)'
+        tests=(dkr_quantized_gemm_gpu)
+        min_loads=2
+        ;;
+    gemv)
+        filter_expr='test(dkr_quantized_gemv_gpu)'
+        tests=(dkr_quantized_gemv_gpu)
+        min_loads=2
+        ;;
+    both)
+        filter_expr='test(dkr_quantized_gemv_gpu) or test(dkr_quantized_gemm_gpu)'
+        tests=(dkr_quantized_gemv_gpu dkr_quantized_gemm_gpu)
+        min_loads=4
+        ;;
+    *)
+        echo "DKR_R125_QUANT=BLOCKED DKR_R125_QUANT_TEST must be gemm, gemv or both" >&2
+        exit 2
+        ;;
+esac
+echo "DKR_R125_QUANT=START scope=$test_scope families=quant-gemv,quant-gemm mode=cubin test_timeout_s=120"
+log="$pilot/r125-quant-${test_scope}.log"
 if ! cargo nextest run --profile dkr-r125-quant --release --locked \
     -p mistralrs-core -p mistralrs-quant --lib \
     --features mistralrs-core/dkr-r125-quant-typed-pilot \
     --run-ignored=all --test-threads=1 --no-fail-fast \
     --no-capture \
-    -E 'test(dkr_quantized_gemv_gpu) or test(dkr_quantized_gemm_gpu)' \
+    -E "$filter_expr" \
     2>&1 | tee "$log"; then
     echo "DKR_R125_QUANT=FAIL stage=GPU_TESTS log=$log" >&2
     exit 1
 fi
-for name in dkr_quantized_gemv_gpu dkr_quantized_gemm_gpu; do
+for name in "${tests[@]}"; do
     if ! grep -Eq "PASS .*${name}\b" "$log"; then
         echo "DKR_R125_QUANT=FAIL missing passed test $name" >&2
         exit 1
     fi
 done
 loads="$(grep -c 'CANDLE_DKR_TYPED_IMAGE_LOADED.*format=cubin' "$log" || true)"
-if (( loads < 4 )); then
+if (( loads < min_loads )); then
     echo "DKR_R125_QUANT=FAIL insufficient CUBIN loads ($loads)" >&2
     exit 1
 fi
@@ -106,4 +130,8 @@ if grep -q 'CANDLE_DKR_TYPED_IMAGE_FALLBACK' "$log"; then
     echo "DKR_R125_QUANT=FAIL PTX fallback in strict mode" >&2
     exit 1
 fi
-echo "DKR_R125_QUANT=PASS tests=2 formats=fp8,mxfp4 mode=cubin loads=$loads"
+if [[ "$test_scope" == "both" ]]; then
+    echo "DKR_R125_QUANT=PASS tests=2 formats=fp8,mxfp4 mode=cubin loads=$loads"
+else
+    echo "DKR_R125_QUANT_DIAGNOSTIC=PASS test=$test_scope formats=fp8,mxfp4 mode=cubin loads=$loads full_qualification=false"
+fi
