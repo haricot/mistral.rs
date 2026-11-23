@@ -308,3 +308,62 @@ fallback quarantined, and progress to real model weight/format and
 end-to-end logit parity before performance A/B. Do not set
 `CUDA_COMPUTE_CAP` or repeat the already passed GPU family tests merely
 to satisfy an arbitrary module-load-count check.
+
+## 9. Model-forward routing audit after 2/2 quantitative family PASS
+
+Source inspection of the **production** model layer routing found an important
+missing link between the successful direct-adapter numerical tests and model
+inference:
+
+- `mistralrs-quant/src/blockwise_fp8/ops.rs::fp8_blockwise_matmul` already
+  calls the typed DKR GEMV/GEMM adapters before the static FFI fallback.
+- However `BlockwiseFP8Linear::forward_raw` in
+  `mistralrs-quant/src/blockwise_fp8/mod.rs` previously called
+  `ops::fp8_blockwise_matmul` **only if**
+  `ffi::HAVE_BLOCKWISE_GEMM_KERNELS` was true.
+- That constant is `cfg!(has_blockwise_fp8_kernels)`, and
+  `mistralrs-quant/build.rs` sets this cfg on SM61 only if the optional
+  `mistralrs-quant/cuda-legacy-fp8` feature is enabled. **Our correct DKR
+  pilot deliberately does not enable that static CUDA legacy feature.**
+- Consequently a real SM61 FP8 blockwise checkpoint could bypass the proven
+  DKR adapter entirely and enter a dequantized fallback or error, despite the
+  isolated GEMM/GEMV tests passing. This is a production-route gate defect,
+  **not a PTX/CUBIN defect**.
+- MXFP4 production forward instead checks `HAVE_MXFP4_GEMM_KERNELS`;
+  its `has_mxfp4_kernels` cfg is currently emitted for all CUDA targets
+  by the quant build script. The MXFP4 ops implementation already calls
+  DKR GEMV/GEMM first. Hence the specific bypass defect is confirmed for
+  FP8 blockwise on the pilot feature set, not for MXFP4.
+
+### Source fix staged, physical qualification pending
+
+`BlockwiseFP8Linear::forward_raw` now has a **feature-gated, architecture
+neutral** typed DKR fast path before the native-CUDA availability check.
+It flattens batch/sequence activations as necessary, tries GEMV then GEMM,
+restores the output shape and applies the existing optional bias. If neither
+DKR adapter accepts the signature, **the unchanged static/dequantized
+fallback remains reachable**. No SM61-specific compile-time switch is
+introduced into Candle. No `CUDA_COMPUTE_CAP` override is needed.
+
+An ignored production-entry GPU test was added:
+`blockwise_fp8::tests::dkr_blockwise_fp8_layer_forward_gpu`.
+It exercises the real quantized layer forward with an FP8 checkpoint-like
+weight/scale layout (128x128), F16/BF16 activations, M=1 decode and
+M=17 prefill, rank-3 batch/sequence restoration and bias, checking an
+exact, deterministic result (4.25). It is **NOT YET GPU-EXECUTED** and
+must not be called PASS before running.
+
+For a future **single bounded qualification** only after cache preflight,
+reuse the existing Cargo release setup and paired package root, then run
+that one ignored test under the existing `dkr-r125-quant` Nextest profile.
+With `--no-capture`, expect one CUBIN module admission for GEMV and one
+for GEMM; do not use module counts as a proxy for kernel entry count.
+A successful model-layer test still does not imply that a full model
+actually uses FP8 blockwise or MXFP4 weights; that requires inspecting
+checkpoint quantization metadata and an end-to-end routing/accuracy run.
+
+The source change affects Rust model routing only. It does not modify
+`mistralrs-quant/kernels` headers or CUDA sources or any paired CUBIN.
+Host Cargo recompilation/relinking may occur once when enabling the
+revised crate, but no new Cudaforge NVCC build is justified by this
+source-level change alone.
