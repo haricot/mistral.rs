@@ -30,9 +30,21 @@ if [[ "${DKR_APPROVE_R125_QUANT:-0}" != "1" ]]; then
     echo "Explicit approval required: DKR_APPROVE_R125_QUANT=1" >&2
     exit 2
 fi
+# Nextest first resolves the workspace with --all-features (even when
+# executing only the requested pilot feature subset). The tracked Cargo.lock
+# may have the correct immutable Candle revision and still lack Cargo's fully
+# resolved all-features dependency graph after a branch switch / lock stash.
+# This step ONLY resolves dependencies; it does not invoke rustc, NVCC or GPU.
+# It may update Cargo.lock, so keep the diff; do not stash/revert it before
+# the strict Nextest run.
+echo "DKR_R125_CARGO_LOCK_SYNC=START metadata_only=true nextest_all_features=true"
+cargo metadata --all-features --format-version 1 > /dev/null
+cargo metadata --all-features --locked --format-version 1 > /dev/null
+echo "DKR_R125_CARGO_LOCK_SYNC=PASS"
+
 # The checked source/headers/objects are ready. The Cargo feature set can
 # nevertheless change native NVCC args; do not claim a guaranteed cache hit.
-cargo metadata --format-version 1 \
+cargo metadata --locked --format-version 1 \
     --features mistralrs-core/dkr-r125-quant-typed-pilot |
 python3 -c '
 import json,sys
