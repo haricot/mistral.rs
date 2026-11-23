@@ -1706,6 +1706,59 @@ mod tests {
     use super::*;
     use crate::{QuantizedConfig, ShardedSafeTensors};
 
+    // Exercises the real checkpoint-layer forward route rather than calling
+    // quantized_gemv_dynamic/quantized_gemm_dynamic directly. On SM61 with
+    // only Candle generic FP8 compatibility, the static FP8 producer is
+    // disabled: both outputs must therefore use the external DKR CUBIN.
+    #[cfg(all(
+        feature = "cuda",
+        feature = "dkr-quant-gemv",
+        feature = "dkr-quant-gemm"
+    ))]
+    #[test]
+    #[ignore = "requires physical SM61 GPU and prebuilt DKR quant CUBIN"]
+    fn dkr_blockwise_fp8_layer_forward_gpu() -> Result<()> {
+        let _evidence = mistralrs_kernel_runtime::RuntimeEvidenceGuard;
+        let device = Device::new_cuda(0)?;
+        let (n, k) = (128usize, 128usize);
+        let weight = Tensor::from_vec(vec![0.5f32; n * k], (n, k), &device)?
+            .to_dtype(DType::F8E4M3)?;
+        let scales = Tensor::from_vec(vec![0.5f32], (1, 1), &device)?;
+        for dtype in [DType::F16, DType::BF16] {
+            let bias = Tensor::from_vec(vec![0.25f32; n], n, &device)?
+                .to_dtype(dtype)?;
+            let layer = BlockwiseFP8Linear::new(QuantMethodConfig::BlockwiseFP8 {
+                weight: weight.clone(),
+                weight_scale_inv: scales.clone(),
+                bias: Some(bias),
+                dequant_dtype: dtype,
+                weight_block_size: vec![128, 128],
+                activation_scheme: None,
+            })?;
+            for m in [1usize, 17] {
+                let x = Tensor::from_vec(vec![0.125f32; m * k], (m, k), &device)?
+                    .to_dtype(dtype)?;
+                let output = layer.forward_raw(&x)?;
+                assert_eq!(output.dims(), [m, n]);
+                for row in output.to_dtype(DType::F32)?.to_vec2::<f32>()? {
+                    for value in row {
+                        assert_eq!(value, 4.25, "dtype={dtype:?} rows={m}");
+                    }
+                }
+            }
+            // Production prefill is often [batch, sequence, features];
+            // verify the adapter's flatten/restore shape contract too.
+            let x = Tensor::from_vec(vec![0.125f32; 17 * k], (1, 17, k), &device)?
+                .to_dtype(dtype)?;
+            let out = layer.forward_raw(&x)?;
+            assert_eq!(out.dims(), [1, 17, n]);
+            for row in out.to_dtype(DType::F32)?.to_vec3::<f32>()?[0].iter() {
+                assert!(row.iter().all(|&value| value == 4.25));
+            }
+        }
+        Ok(())
+    }
+
     fn routed_biases(device: &Device, dtype: DType) -> Result<()> {
         const FEATURES: usize = 128;
         const TOPK: usize = 2;
