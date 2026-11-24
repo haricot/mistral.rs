@@ -68,8 +68,11 @@ def plan(cc, base=411):
         else:
             eligible.append(row)
     images = []
-    max_groups = audit["profiles_per_shard_limit"] // 8
-    if not 1 <= max_groups <= 8:
+    # The full typed signatures are larger than the synthetic S9B4d2 rows.
+    # Six groups (48 entries) leave headroom in the 256 KiB manifest,
+    # including the later pretty-printed CUBIN pairing fields.
+    max_groups = min(6, audit["profiles_per_shard_limit"] // 8)
+    if not 1 <= max_groups <= 6:
         raise ValueError("unsupported image grouping policy")
     for dt, cache, hd in itertools.product(DTYPES, ("plain", "fp8"), HEADS):
         rows = [r for r in eligible if (r["dtype"], r["cache"], r["head"]) == (dt, cache, hd)]
@@ -161,10 +164,11 @@ def self_test(cc):
     assert len({i["image"] for i in images}) == len(images)
     ids = [p["implementation_id"] for i in images for p in i["profiles"]]
     assert len(set(ids)) == len(ids) == result["decode_profiles"]
-    assert all(0 < len(i["profiles"]) <= 64 for i in images)
+    assert all(0 < len(i["profiles"]) <= 48 for i in images)
     if cc == 61:
         assert result["eligible_geometries"] == 139 and len(result["quarantined_geometries"]) == 77
-        assert len(images) == 30 and len(ids) == 1112
+        assert len(images) == 37 and len(ids) == 1112
+        assert result["physical_manifest_upper"] == 460
     with tempfile.TemporaryDirectory() as tmp:
         for i in images:
             src = f".version 8.0\n.target sm_{cc}\n.address_size 64\n"
@@ -173,7 +177,16 @@ def self_test(cc):
                 src += f".visible .entry {p['entry']}({params}) {{ ret; }}\n"
             data = src.encode()
             package(Path(tmp), cc, i, data)
+            manifest = Path(tmp) / f"sm{cc}" / "flashinfer-decode" / f"image-{i['image']:05d}" / "manifest.json"
+            paired = json.loads(manifest.read_text())
+            for row in paired["profiles"]:
+                row["cubin_artifact"] = "flashinfer_decode.cubin"
+                row["cubin_sha256"] = "0" * 64
+            encoded = (json.dumps(paired, indent=2) + "\n").encode()
+            assert len(encoded) <= MAX_MANIFEST
+            manifest.write_bytes(encoded)
             package(Path(tmp), cc, i, data)
+            assert manifest.read_bytes() == encoded
             try:
                 verify_ptx(data.replace(b".param .b64", b".param .b32", 1), i, cc)
             except ValueError:

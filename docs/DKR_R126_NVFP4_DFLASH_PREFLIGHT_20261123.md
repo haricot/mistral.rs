@@ -1141,8 +1141,10 @@ to the 2 shared-limit and 39 partial-warp flags, quarantine geometries with
 bdz>1 and 2*stages*tile*sizeof(KV)<4 (57 flags, overlapping other flags).
 A larger allocation alone would not fix the overlap. For SM61 the union
 quarantines 77 of 216 geometries, leaving 139 staged geometries, 1112
-logical profiles and 30 bounded image shards (maximum 64 entries each).
-The conservative physical count is 453 = 411 + 12 + 30, logical count 1535.
+logical profiles and 37 bounded image shards (maximum 48 entries each).
+The lower per-image entry bound leaves room for complete ABI metadata and
+CUBIN pairing within the 256 KiB manifest limit. The conservative physical
+count is 460 = 411 + 12 + 37, logical count 1535.
 These are source candidates, not a support matrix. No fallback or change
 to the historical kernel was introduced. Other CCs use the same conservative
 48 KiB staging limit; no other architecture is qualified.
