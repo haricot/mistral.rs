@@ -92,6 +92,8 @@ pub struct Nvfp4Layer {
     // Value equality is safe only for private calibration allocations.
     input_scale_immutable: bool,
     portable: bool,
+    // Opt-in external typed GEMV only; never construct a native/legacy provider.
+    dkr_gemv_only: bool,
     #[cfg(all(feature = "cuda", feature = "cuda-legacy-fp4"))]
     legacy: Option<candle_core::quantized::nvfp4_arch_e7::Nvfp4E7Linear>,
     #[cfg(all(feature = "cuda", feature = "cutile", has_nvfp4_cutlass_kernels))]
@@ -231,9 +233,22 @@ impl Nvfp4Layer {
         if parts.weight.device().is_cuda() && parts.dtype == DType::F32 {
             candle_core::bail!("NVFP4 CUDA inference requires BF16 or F16 output dtype");
         }
+        #[cfg(feature = "dkr-nvfp4-gemv")]
+        let dkr_gemv_only = parts.weight.device().is_cuda()
+            && std::env::var("MISTRALRS_DKR_NVFP4_TYPED_ONLY").as_deref() == Ok("1");
+        #[cfg(not(feature = "dkr-nvfp4-gemv"))]
+        let dkr_gemv_only = false;
+        if dkr_gemv_only {
+            if dims.len() != 2 || parts.activation != Nvfp4ActivationMode::None {
+                candle_core::bail!("DKR NVFP4 typed-only requires dense rank-2 W4A16 weights");
+            }
+            if std::env::var("MISTRALRS_DKR_NVFP4_GEMV").as_deref() == Ok("0") {
+                candle_core::bail!("DKR NVFP4 typed-only cannot disable the external GEMV");
+            }
+        }
         #[cfg(all(feature = "cuda", feature = "cuda-legacy-fp4"))]
         let legacy_selected = match parts.weight.device() {
-            Device::Cuda(device) => {
+            Device::Cuda(device) if !dkr_gemv_only => {
                 let cc = device
                     .cuda_stream()
                     .context()
@@ -247,7 +262,7 @@ impl Nvfp4Layer {
         let legacy_selected = false;
         #[cfg(feature = "cuda")]
         let portable = match parts.weight.device() {
-            Device::Cuda(device) if !legacy_selected => use_portable_kernels(device)?,
+            Device::Cuda(device) if !legacy_selected && !dkr_gemv_only => use_portable_kernels(device)?,
             _ => false,
         };
         #[cfg(not(feature = "cuda"))]
@@ -339,7 +354,7 @@ impl Nvfp4Layer {
             None
         };
         #[cfg(all(feature = "cuda", feature = "cutile", has_nvfp4_cutlass_kernels))]
-        let native = if portable || legacy_selected {
+        let native = if portable || legacy_selected || dkr_gemv_only {
             None
         } else {
             cutlass::State::new(&parts)?
@@ -355,13 +370,16 @@ impl Nvfp4Layer {
             input_global_scale,
             input_scale_immutable,
             portable,
+            dkr_gemv_only,
             #[cfg(all(feature = "cuda", feature = "cuda-legacy-fp4"))]
             legacy,
             #[cfg(all(feature = "cuda", feature = "cutile", has_nvfp4_cutlass_kernels))]
             native,
         };
         #[cfg(all(feature = "cuda", feature = "cutile"))]
-        if layer.parts.weight.device().is_cuda() && !layer.portable && !legacy_selected {
+        if layer.parts.weight.device().is_cuda()
+            && !layer.portable && !legacy_selected && !layer.dkr_gemv_only
+        {
             crate::cutile::register_nvfp4_shape(layer.gemm_args(), layer.parts.dtype)?;
         }
         Ok(layer)
@@ -1005,6 +1023,10 @@ impl QuantMethod for Nvfp4Layer {
                     return output.reshape(shape);
                 }
             }
+        }
+
+        if self.dkr_gemv_only {
+            candle_core::bail!("DKR NVFP4 typed-only GEMV did not accept this signature; dense W4A16 with 1..=8 rows and matching dtype required (no static fallback)");
         }
 
         #[cfg(all(feature = "cuda", feature = "cuda-legacy-fp4"))]
