@@ -1,6 +1,6 @@
 use candle_core::{Result, Tensor};
 
-use super::mla::gather_mla_cache;
+use super::gather_mla_cache;
 
 /// Softmax over the last dimension (no candle-nn dependency).
 fn softmax_last_dim(t: &Tensor) -> Result<Tensor> {

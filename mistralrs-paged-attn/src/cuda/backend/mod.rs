@@ -1,7 +1,7 @@
 mod cache;
 #[cfg(feature = "dkr-paged-catalog-only")]
 mod catalog_only_unsupported;
-#[cfg(feature = "dkr-paged-catalog-only")]
+#[cfg(all(feature = "dkr-paged-catalog-only", not(feature = "dkr-mla-cache-io")))]
 use catalog_only_unsupported as context_attention_mla;
 #[cfg(all(feature = "dkr-paged-catalog-only", not(feature = "dkr-prefill-sinks")))]
 use catalog_only_unsupported as flash_attn_sinks;
@@ -9,8 +9,10 @@ use catalog_only_unsupported as flash_attn_sinks;
 use catalog_only_unsupported as flashinfer;
 #[cfg(feature = "dkr-paged-catalog-only")]
 use catalog_only_unsupported as mla;
-#[cfg(not(feature = "dkr-paged-catalog-only"))]
+#[cfg(any(not(feature = "dkr-paged-catalog-only"), feature = "dkr-mla-cache-io"))]
 mod context_attention_mla;
+#[cfg(feature = "dkr-mla-cache-io")]
+mod mla_cache_io_dynamic;
 mod fa3;
 #[cfg(all(not(feature = "dkr-paged-catalog-only"), not(feature = "dkr-prefill-sinks")))]
 mod flash_attn_sinks;
@@ -71,7 +73,11 @@ pub use flashinfer::{
     reshape_and_cache_flashinfer, FlashInferDecodeScratch,
 };
 pub use gather_kv::gather_kv_cache;
-pub use mla::{concat_and_cache_mla, flashinfer_mla_decode, gather_mla_cache};
+pub use mla::flashinfer_mla_decode;
+#[cfg(not(feature = "dkr-mla-cache-io"))]
+pub use mla::{concat_and_cache_mla, gather_mla_cache};
+#[cfg(feature = "dkr-mla-cache-io")]
+pub use mla_cache_io_dynamic::{concat_and_cache_mla, gather_mla_cache};
 pub use paged_attention::{paged_attention, paged_attention_with_window, reshape_and_cache};
 pub use scale_update::kv_scale_update;
 

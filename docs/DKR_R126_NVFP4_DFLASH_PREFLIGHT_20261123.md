@@ -907,3 +907,36 @@ sizes and embedded build limits must be checked at staging. No
 changes to the 27 baseline images, Candle pin or static producer
 policy. MLA/FlashInfer, noncanonical layouts and stream/graph
 qualification remain open.
+
+## R1.26/S9B3b resolved graph PASS — 2026-11-24
+
+User executed a4193da0; S9B2, S9B3 and strict features passed.
+Static producer elimination still NOT_QUALIFIED. No physical test.
+
+## R1.26/S9B4a staged — MLA cache IO
+
+Independent dkr-mla-cache-io feature forwards through core. Six typed
+profiles (store/gather, F16/BF16/F32), one Cudaforge source. Preserve
+separate CKV and KPE paged cache representations. Store takes checked
+physical input row spans and U64 strides, supporting nonzero offsets
+and independent dense-row padding without copies. Fixed 256-thread
+block, a deliberate choice differing from the legacy variable store
+block; performance not qualified. Gather retains I32 table/offset/map,
+zero-initialized output and metadata materialization if needed. Both
+kernels bound local indices defensively; malformed global metadata and
+duplicate nonnegative write slots remain outside the caller contract.
+No FP8 MLA support claimed. No CPU readback added by these IO kernels.
+
+Existing context_attention_mla tensor orchestration now imports
+the public routed gather and is enabled in catalogue-only with the
+new feature. It still performs the historical host metadata reads,
+causal mask construction and dense per-sequence tensor attention.
+No fused MLA prefill or performance claim. MLA decode and FlashInfer
+HND IO/decode remain to migrate. Legacy profile unchanged by default.
+
+CPU span test and ignored physical IO test added: independent raw
+cache and gather references, three dtypes, permuted pages, unequal
+CKV/KPE widths/strides, offset and padding. Not compiled or executed.
+Prospective extended catalogue: 31 families, 378 profiles, 32 images
+(five new sources relative to S7). Baseline 216 profiles/27 images
+remain immutable. Actual image sizes and extended staging pending.

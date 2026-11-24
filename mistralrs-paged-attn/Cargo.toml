@@ -30,6 +30,7 @@ anyhow.workspace = true
 mistralrs-metal-compile = { workspace = true, optional = true }
 
 [features]
+dkr-mla-cache-io = ["cuda", "dep:mistralrs-kernel-runtime", "mistralrs-kernel-runtime/cuda"]
 dkr-prefill-sinks = ["cuda", "dep:mistralrs-kernel-runtime", "mistralrs-kernel-runtime/cuda"]
 dkr-paged-options = ["dkr-paged-v2"]
 # Independent pilot; requires the kv-fp8-io typed package.
