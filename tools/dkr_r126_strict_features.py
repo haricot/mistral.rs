@@ -36,6 +36,12 @@ try:
             if missing:
                 raise ValueError(f"{name} lacks {sorted(missing)}")
         print("DKR_R126_S9B2_FEATURES=PASS paged_catalog_only=true fp8_io=true")
+    if "--prefill-sinks" in sys.argv[1:]:
+        for name in ("mistralrs-core", "mistralrs-paged-attn"):
+            missing = {"dkr-paged-catalog-only", "dkr-paged-options", "dkr-prefill-sinks"} - graph[name]
+            if missing:
+                raise ValueError(f"{name} lacks {sorted(missing)}")
+        print("DKR_R126_S9B3_FEATURES=PASS paged_options=true prefill_sinks=true")
     print("DKR_R126_STRICT_FEATURES=PASS candle_embedded=true typed=true legacy_flags=false")
     print("DKR_R126_STATIC_PRODUCER_ELIMINATION=NOT_QUALIFIED mistral_build_scripts=remain")
 except (OSError, ValueError, KeyError, TypeError) as exc:

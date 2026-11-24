@@ -3,7 +3,7 @@ mod cache;
 mod catalog_only_unsupported;
 #[cfg(feature = "dkr-paged-catalog-only")]
 use catalog_only_unsupported as context_attention_mla;
-#[cfg(feature = "dkr-paged-catalog-only")]
+#[cfg(all(feature = "dkr-paged-catalog-only", not(feature = "dkr-prefill-sinks")))]
 use catalog_only_unsupported as flash_attn_sinks;
 #[cfg(feature = "dkr-paged-catalog-only")]
 use catalog_only_unsupported as flashinfer;
@@ -12,8 +12,12 @@ use catalog_only_unsupported as mla;
 #[cfg(not(feature = "dkr-paged-catalog-only"))]
 mod context_attention_mla;
 mod fa3;
-#[cfg(not(feature = "dkr-paged-catalog-only"))]
+#[cfg(all(not(feature = "dkr-paged-catalog-only"), not(feature = "dkr-prefill-sinks")))]
 mod flash_attn_sinks;
+#[cfg(feature = "dkr-prefill-sinks")]
+mod prefill_sinks_dynamic;
+#[cfg(feature = "dkr-prefill-sinks")]
+use prefill_sinks_dynamic as flash_attn_sinks;
 #[cfg(not(feature = "dkr-paged-catalog-only"))]
 mod flashinfer;
 mod gather_kv;
