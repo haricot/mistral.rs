@@ -229,3 +229,24 @@ DKR_APPROVE_R126_NVFP4=1 bash tools/dkr_r126_nvfp4_sm61.sh
 ```
 Retain the locally reconciled lockfile; do not stash or reset it merely
 to switch revisions. If Git reports a conflict, stop before running.
+
+## R1.26/S1 physical PASS — 2026-11-24
+
+User tested commit b0ce4cc7 on physical SM61, Nextest run
+008d3438-bd0b-4ed0-899e-d3e18a76a990. Both tests passed in 0.363 s.
+The paired CUBIN SHA256 is
+`38fd99ef14140818b0485d5a70569e6402532c628ec18d4a1dfe272f7a709165`;
+PTX SHA256 remains `e44c78486c280abc942dc8dad79c41adb9090b5a5f99eb537fe4ba570b7157ca`.
+Both processes independently admitted that exact image in strict CUBIN
+mode. All four profiles validated. Real projection:
+layers.0.self_attn.k_proj, source N=1024, sampled N=32, K=2560.
+F16/BF16, M=1,3,8: relative L2 and maximum absolute error were zero
+at eight displayed decimal places against CPU F32 rounded to output dtype.
+M=9 rejection also passed. Nextest PASS and offline evidence PASS.
+The uploaded report's Nextest log SHA256 is
+`19c4d3c6304987c87e830edd33a6a57f755541f49e6ce987f2e7ac80e38cf727`.
+CUDA source recompiles: quant 0/49, paged-attn 0/15, core 0/18.
+Host Rust build: 7m05s. The new isolated CUBIN was assembled from
+existing PTX. No repeat of S1 is required to advance the GEMM family.
+Scope remains dense W4A16 GEMV, not full projection coverage, prefill,
+DFlash protocol, or full-model inference/performance qualification.
