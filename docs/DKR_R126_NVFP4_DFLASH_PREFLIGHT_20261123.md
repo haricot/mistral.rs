@@ -631,3 +631,63 @@ not absence of static archives. Next physical gate should use strict
 native and typed embedded profiles together, check BF16/FP8 conversions
 and operation dispatch, and reuse the 27 typed images. Do not regenerate
 native recipes merely to combine the two catalogues.
+
+## R1.26/S8 preflight PASS — 2026-11-24
+
+User executed 1543df00. Both Candle R1.25 P1/P2 receipts verified
+and point to the same native inputs. S8 evidence SHA256:
+`c82777c8461cbff105f92e991e9ec1fbf343f112819d089b61878feefed581cc`.
+Native Cudaforge catalogue SHA256:
+`91ac006b963a89362c6aaaee052252b4465880c079b0c86f399c4891a5003295`.
+Exact pinned Candle d40ac1b4d69a209d08f76c5b5bd4e267ec63b4f0.
+All six input paths verified, 25 native families, four recipes,
+10 MMQ codecs, 26 typed families, 216 profiles, 27 typed CUBINs.
+No compile/GPU execution. The native integration and static fallback
+elimination flags remain false. Preserve both catalogs and receipts.
+
+## R1.26/S9A staged — static producer / FFI source inventory
+
+Source inspection at S8 identifies three distinct producer problems:
+- core/build.rs excludes selected DKR sources and defines partial
+  exclusion macros for mixed translation units, but still builds
+  mistralrscuda. Remaining FFI includes attention preparation,
+  top-k/sampling, graph copy, DFlash context/selector, GDN recurrence
+  and speculative state transitions. These are not closed by S7.
+- paged-attn/build.rs still compiles src/cuda/*.cu and links
+  mistralrspagedattention. backend/paged_attention.rs tries typed
+  paged FP8/decode/v2 and reshape routes; residual static FFI is
+  present. cache.rs, gather_kv.rs and scale_update.rs also retain
+  static entrypoints. MLA, FlashInfer and sinks must be covered
+  or explicitly unsupported by a strict runtime configuration.
+- quant/build.rs excludes weighted_reduce.cu under dkr-reduce-norm
+  but still builds mistralrsquant. GGUF fast_mmvq.rs/fast_mmq.rs
+  select Mistral-owned FFI (including compact and fused paths);
+  the native Candle catalog's MMQ/MMVQ coverage is not evidence
+  that these paths use it. Preserve their ABI, numerical behavior
+  and performance before migration. Other quant formats, LoRA,
+  utility ops and fused kernels need independent closure.
+
+New tools/dkr_r126_static_ffi_inventory.py records all tracked CUDA
+translation units, producer/link sites, explicit extern C symbol
+declarations, literal identifier references, qualified ffi references
+and macro extern blocks. Optional nm of existing cached objects maps
+literal declared symbols to historical definitions without compiling.
+The scan is lexical, does not evaluate Rust cfgs or expand macros,
+and neither a cached definition nor a lexical reference proves an
+active linked symbol. Future S9B must classify each active route,
+gate unsupported signatures explicitly, and verify strict link and
+runtime evidence. Do not skip build.rs producers or link empty stubs
+to obtain a misleading PASS. No source/CUDA/feature change here.
+
+```bash
+cd /home/np/dkr-worktrees/r125-candle-integration
+git fetch origin feature/dkr-r126-nvfp4-typed-sm61
+git switch --detach origin/feature/dkr-r126-nvfp4-typed-sm61
+python3 tools/dkr_r126_static_ffi_inventory.py \
+  --s8-evidence target/dkr-r126-native-preflight/evidence.json \
+  --cache-root /home/np/tmp/mistralrs_provider/mistral.rs/target/dkr-cuda-cache/sm61 \
+  --json-out target/dkr-r126-static-closure/inventory.json
+```
+
+This read-only inventory has not been executed against the local tree.
+No new CUDA or Rust compilation is requested. Keep the reconciled lock.
