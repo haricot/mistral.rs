@@ -12,6 +12,21 @@ def tensor(name, dtype, rank, access, representation=None):
     return a
 
 def parameters(op, dt):
+    if op in ("store_strided", "fp8_store_strided"):
+        scaled = op.startswith("fp8")
+        cache_dt = "fp8_e4m3" if scaled else dt
+        args = [
+            tensor("key_span", dt, 1, "read", "kv_cache.row_span.v1"),
+            tensor("value_span", dt, 1, "read", "kv_cache.row_span.v1"),
+            tensor("key_cache", cache_dt, 5, "read_write", "vllm_k_blocked_x.v1"),
+            tensor("value_cache", cache_dt, 4, "read_write", "vllm_v_token_strided.v1"),
+            tensor("slots", "i64", 1, "read"),
+        ]
+        if scaled:
+            args += [tensor("k_scale", "f32", 1, "read"), tensor("v_scale", "f32", 1, "read")]
+        args += [dict(kind="scalar", name=n, dtype="u32") for n in
+                 ("tokens", "heads", "head_size", "blocks", "block_size", "x")]
+        return args + [dict(kind="scalar", name=n, dtype="u64") for n in ("k_stride", "v_stride")]
     ks = tensor("k_scale", "f32", 1, "read")
     vs = tensor("v_scale", "f32", 1, "read")
     access = "read_write" if op == "store" else "read"
@@ -40,18 +55,19 @@ def main():
     data = a.ptx_file.read_bytes()
     sha = hashlib.sha256(data).hexdigest()
     root = a.output / f"sm{a.cc}" / "kv-fp8-io"
-    for op in ("store", "gather"):
+    for op in ("store", "gather", "store_strided", "fp8_store_strided"):
         for dt in ("f16", "bf16", "f32"):
             folder = root / op / dt
             folder.mkdir(parents=True, exist_ok=True)
             artifact = folder / "kv_fp8_io.ptx"
             manifest = folder / "manifest.json"
             # Preserve an already paired, identical profile on an idempotent build.
+            identity = op if op.endswith("_strided") else f"fp8_{op}"
             m = dict(schema="DKR-KERNEL-MODULE-V1", abi="dkr.typed.v1",
-                     operation=f"kv_cache.fp8_{op}.vllm.b256.v1",
+                     operation=f"kv_cache.{identity}.vllm.b256.v1",
                      implementation_id=f"cuda.kv_fp8_io.{op}.{dt}.b256.v1",
                      artifact=artifact.name, sha256=sha,
-                     entry=f"dkr_kv_fp8_{op}_{dt}", target_cc=a.cc,
+                     entry=f"dkr_kv_{identity}_{dt}", target_cc=a.cc,
                      min_cc=a.cc, max_cc=120, block=[256,1,1], shared_mem_bytes=0,
                      arguments=parameters(op, dt))
             if manifest.is_file() and artifact.is_file():
@@ -61,7 +77,7 @@ def main():
                     continue
             artifact.write_bytes(data)
             manifest.write_text(json.dumps(m, indent=2) + "\n")
-    print(f"DKR_KV_FP8_IO_PACKAGES=STAGED profiles=6 cc={a.cc}")
+    print(f"DKR_KV_FP8_IO_PACKAGES=STAGED profiles=12 cc={a.cc}")
 
 if __name__ == "__main__":
     main()

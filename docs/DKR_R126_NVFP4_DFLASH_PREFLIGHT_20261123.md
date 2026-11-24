@@ -781,3 +781,38 @@ cargo metadata --offline --locked --format-version 1 \
   --features mistralrs-core/dkr-sm61-cubin-qualified,mistralrs-core/dkr-paged-catalog-only,mistralrs-core/dkr-kv-fp8-io \
   | python3 tools/dkr_r126_strict_features.py --paged-fp8-io
 ```
+
+## R1.26/S9B2a resolved graph PASS — 2026-11-24
+
+User executed 310dc4b8. S9B2 feature audit passed with the paged-only
+and FP8-IO features enabled, no legacy flags. No compilation or GPU
+execution; static producer elimination remains NOT_QUALIFIED.
+
+## R1.26/S9B2b staged — uniform strided VLLM input writes
+
+Extend the as-yet-unbuilt kv-fp8-io image by six additional entries,
+plain and scaled E4M3 strided writes for F16/BF16/F32. No change to the
+existing 216 S7 profiles or 27 image identities. The new family now
+has 12 profiles, hence the prospective extended catalogue contains
+228 profiles, 27 families, 28 CUBINs. This is a target, not an observed
+artifact count. No additional CUDA translation unit is needed.
+
+The ABI deliberately retains the runtime's contiguous argument contract:
+each input is a rank-one physical span (including padding) with
+kv_cache.row_span.v1 representation, plus separate U64 K/V element
+strides. The adapter verifies dense heads, uniform token stride for
+rank 3 or 4, checked span arithmetic, bounds against the underlying
+CudaSlice, same device and canonical contiguous cache storage. The
+logical tensor itself is not described as contiguous. Nonzero offsets
+are folded into pointers. No contiguous materialization or CPU
+transfer of activation data. Contiguous writes still use their
+previous paths. Strided cache destinations, arbitrary head strides,
+and irregular batch/sequence strides remain unsupported. Valid
+metadata, nonoverlapping writes and positive finite scales remain
+caller contracts.
+
+The added CPU test exercises span arithmetic; the ignored GPU test
+checks independent K/V strides, nonzero offsets, rank 3 and 4, padding,
+and raw cache values for all three activation dtypes with/without FP8.
+Neither test has been executed or compiled in this session. Full FP8
+capability remains disabled. No native Candle or legacy backend change.

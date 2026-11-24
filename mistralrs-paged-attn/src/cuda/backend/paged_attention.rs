@@ -630,6 +630,12 @@ fn update_cache<
             return Ok(());
         }
     }
+    #[cfg(feature = "dkr-kv-fp8-io")]
+    if super::kv_strided_store_dynamic::try_reshape(
+        key, value, key_cache, value_cache, slot_mapping, k_scale, v_scale,
+    )? {
+        return Ok(());
+    }
     // Optional DKR contiguous VLLM store. FP8 scaled writes, alternate
     // layouts and unsupported dtypes retain the original FFI kernel.
     #[cfg(feature = "dkr-kv-cache-ops")]

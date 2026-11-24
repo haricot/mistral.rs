@@ -117,3 +117,53 @@ extern "C" __global__ void dkr_kv_fp8_gather_##NAME( \
 DKR_KV_FP8(__half, f16)
 DKR_KV_FP8(__nv_bfloat16, bf16)
 DKR_KV_FP8(float, f32)
+
+// Rank-1 physical input spans (including row padding), with element strides.
+// The Rust adapter bounds each span against its backing CUDA allocation.
+template<typename T, typename Cache, bool Scaled>
+__device__ __forceinline__ void kv_store_strided(
+    const T* key, const T* value, Cache* kc, Cache* vc,
+    const int64_t* slots, const float* ks, const float* vs,
+    uint32_t tokens, uint32_t heads, uint32_t hd, uint32_t blocks,
+    uint32_t page_size, uint32_t x, uint64_t k_stride, uint64_t v_stride) {
+  const uint32_t token = blockIdx.x;
+  if (token >= tokens) return;
+  const int64_t slot = slots[token];
+  if (slot < 0 || static_cast<uint64_t>(slot) >=
+      static_cast<uint64_t>(blocks)*page_size) return;
+  const uint64_t page = static_cast<uint64_t>(slot)/page_size;
+  const uint64_t pos = static_cast<uint64_t>(slot)%page_size;
+  const uint64_t width = static_cast<uint64_t>(heads)*hd;
+  for (uint64_t i=threadIdx.x; i<width; i+=blockDim.x) {
+    const uint64_t h=i/hd, d=i%hd;
+    const uint64_t base=(page*heads+h)*hd*page_size;
+    const uint64_t ki=base+(d/x)*page_size*x+pos*x+d%x;
+    const uint64_t vi=base+d*page_size+pos;
+    const T k=key[static_cast<uint64_t>(token)*k_stride+i];
+    const T v=value[static_cast<uint64_t>(token)*v_stride+i];
+    if constexpr (Scaled) {
+      kc[ki]=__nv_cvt_float_to_fp8(static_cast<float>(k)/ *ks, __NV_SATFINITE, __NV_E4M3);
+      vc[vi]=__nv_cvt_float_to_fp8(static_cast<float>(v)/ *vs, __NV_SATFINITE, __NV_E4M3);
+    } else {
+      kc[ki]=k;
+      vc[vi]=v;
+    }
+  }
+}
+#define DKR_KV_STRIDED(T, NAME) \
+extern "C" __global__ void dkr_kv_store_strided_##NAME( \
+    const T* k, const T* v, T* kc, T* vc, const int64_t* slots, \
+    uint32_t tokens, uint32_t heads, uint32_t hd, uint32_t blocks, \
+    uint32_t page, uint32_t x, uint64_t k_stride, uint64_t v_stride) { \
+  kv_store_strided<T,T,false>(k,v,kc,vc,slots,nullptr,nullptr,tokens,heads,hd,blocks,page,x,k_stride,v_stride); \
+} \
+extern "C" __global__ void dkr_kv_fp8_store_strided_##NAME( \
+    const T* k, const T* v, uint8_t* kc, uint8_t* vc, const int64_t* slots, \
+    const float* ks, const float* vs, uint32_t tokens, uint32_t heads, \
+    uint32_t hd, uint32_t blocks, uint32_t page, uint32_t x, \
+    uint64_t k_stride, uint64_t v_stride) { \
+  kv_store_strided<T,uint8_t,true>(k,v,kc,vc,slots,ks,vs,tokens,heads,hd,blocks,page,x,k_stride,v_stride); \
+}
+DKR_KV_STRIDED(__half, f16)
+DKR_KV_STRIDED(__nv_bfloat16, bf16)
+DKR_KV_STRIDED(float, f32)

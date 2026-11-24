@@ -20,6 +20,8 @@ mod gather_kv;
 #[cfg(feature = "dkr-kv-fp8-io")]
 mod kv_fp8_write_dynamic;
 #[cfg(feature = "dkr-kv-fp8-io")]
+mod kv_strided_store_dynamic;
+#[cfg(feature = "dkr-kv-fp8-io")]
 mod kv_fp8_gather_dynamic;
 #[cfg(feature = "dkr-kv-fp8-io")]
 fn kv_fp8_scales_valid(k: &candle_core::Tensor, v: &candle_core::Tensor, device: &candle_core::Device) -> bool {
