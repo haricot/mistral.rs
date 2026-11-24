@@ -3,6 +3,7 @@ use std::{collections::HashMap, iter::zip, mem::size_of, sync::Arc};
 use std::collections::HashSet;
 
 use crate::cuda::backend::{slice_ptr, slice_ptr_on_stream};
+#[cfg(not(feature = "dkr-paged-catalog-only"))]
 use crate::cuda::ffi::{copy_blocks_bf16, copy_blocks_f16, copy_blocks_f32, copy_blocks_u8};
 use candle_core::backend::BackendDevice;
 use candle_core::cuda_backend::cudarc::driver::sys::CUstreamCaptureStatus;
@@ -237,6 +238,12 @@ pub fn copy_blocks(
         return Ok(());
     }
 
+    #[cfg(feature = "dkr-paged-catalog-only")]
+    {
+        candle_core::bail!("DKR_PAGED_CATALOG_ONLY: copy_blocks signature or dependency mapping not admitted by typed catalogue");
+    }
+    #[cfg(not(feature = "dkr-paged-catalog-only"))]
+    {
     match dtype {
         candle_core::DType::BF16 => unsafe {
             copy_blocks_bf16(
@@ -290,7 +297,8 @@ pub fn copy_blocks(
     }
     drop(cache_guards);
 
-    Ok(())
+    Ok(())    }
+
 }
 
 // `dst` REALLY should be &mut. That's the only reason this is unsafe.

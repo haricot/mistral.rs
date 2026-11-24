@@ -1,5 +1,6 @@
 use crate::cuda::backend::flashinfer::{gather_kv_cache_flashinfer, is_flashinfer_cache};
 use crate::cuda::backend::slice_ptr;
+#[cfg(not(feature = "dkr-paged-catalog-only"))]
 use crate::cuda::ffi::gather_kv_cache as ffi_gather_kv_cache;
 use candle_core::backend::BackendStorage;
 use candle_core::{DType, Result, Storage, Tensor};
@@ -164,6 +165,12 @@ pub fn gather_kv_cache(
         return Ok((k_out, v_out));
     }
 
+    #[cfg(feature = "dkr-paged-catalog-only")]
+    {
+        candle_core::bail!("DKR_PAGED_CATALOG_ONLY: gather_kv_cache signature not admitted by typed catalogue");
+    }
+    #[cfg(not(feature = "dkr-paged-catalog-only"))]
+    {
     // Scope all storage borrows so k_out/v_out can be moved in the return.
     {
         let (kc_s, kc_l) = key_cache.storage_and_layout();
@@ -294,5 +301,6 @@ pub fn gather_kv_cache(
         }
     }
 
-    Ok((k_out, v_out))
+    Ok((k_out, v_out))    }
+
 }

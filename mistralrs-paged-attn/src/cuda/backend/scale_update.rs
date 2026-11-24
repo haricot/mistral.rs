@@ -1,5 +1,5 @@
 use crate::cuda::backend::slice_ptr;
-#[cfg(feature = "cuda")]
+#[cfg(all(feature = "cuda", not(feature = "dkr-paged-catalog-only")))]
 use crate::cuda::ffi;
 use candle_core as candle;
 use candle_core::{DType, Result, Tensor};
@@ -39,6 +39,12 @@ impl candle::InplaceOp2 for KvScaleUpdate {
         )? {
             return Ok(());
         }
+        #[cfg(feature = "dkr-paged-catalog-only")]
+        {
+            candle_core::bail!("DKR_PAGED_CATALOG_ONLY: kv_scale_update signature not admitted by typed catalogue");
+        }
+        #[cfg(not(feature = "dkr-paged-catalog-only"))]
+        {
         use candle::backend::BackendStorage;
         use candle::cuda_backend::cudarc::driver::DevicePtr;
         use candle::cuda_backend::CudaStorageSlice;
@@ -113,7 +119,8 @@ impl candle::InplaceOp2 for KvScaleUpdate {
                 }
             }
         }
-        Ok(())
+        Ok(())        }
+
     }
 }
 

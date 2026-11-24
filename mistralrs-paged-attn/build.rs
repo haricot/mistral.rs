@@ -100,6 +100,13 @@ fn main() -> Result<()> {
     println!("cargo::rustc-check-cfg=cfg(has_fa3_fp8_paged)");
 
     println!("cargo:rerun-if-changed=build.rs");
+    // No device producer, CUDA toolkit probe, or static archive in this pilot.
+    // FP8 decode is available through DKR but scaled writes/gather are not;
+    // deliberately do not emit has_fp8 (full FP8 cache capability).
+    if cfg!(feature = "dkr-paged-catalog-only") {
+        println!("cargo:warning=DKR_PAGED_STATIC_PRODUCER=DISABLED scope=vllm_catalog_only");
+        return Ok(());
+    }
     println!("cargo:rerun-if-env-changed=CUDA_NVCC_FLAGS");
     println!("cargo:rerun-if-changed=src/cuda/pagedattention.cuh");
     println!("cargo:rerun-if-changed=src/cuda/copy_blocks_kernel.cu");

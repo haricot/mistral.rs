@@ -1,5 +1,7 @@
 use crate::cuda::backend::{cache_input_layout, slice_ptr};
+#[cfg(not(feature = "dkr-paged-catalog-only"))]
 use crate::cuda::ffi;
+#[cfg(not(feature = "dkr-paged-catalog-only"))]
 use crate::cuda::ffi::{
     paged_attention_v1_bf16, paged_attention_v1_f16, paged_attention_v1_f32,
     paged_attention_v2_bf16, paged_attention_v2_f16, paged_attention_v2_f32,
@@ -169,6 +171,12 @@ impl PagedAttention {
             return Ok(result);
         }
 
+        #[cfg(feature = "dkr-paged-catalog-only")]
+        {
+            candle_core::bail!("DKR_PAGED_CATALOG_ONLY: paged_attention signature not admitted by typed catalogue");
+        }
+        #[cfg(not(feature = "dkr-paged-catalog-only"))]
+        {
         let cache_dtype = match self.key_cache.dtype() {
             DType::F16 => 0,
             DType::BF16 => 1,
@@ -470,7 +478,8 @@ impl PagedAttention {
         drop(out_guard);
 
         let out = CudaStorage::wrap_cuda_slice(out, dev.clone());
-        Ok((out, out_shape))
+        Ok((out, out_shape))        }
+
     }
 }
 
@@ -622,6 +631,12 @@ fn update_cache<
     }
 
 
+    #[cfg(feature = "dkr-paged-catalog-only")]
+    {
+        candle_core::bail!("DKR_PAGED_CATALOG_ONLY: reshape_and_cache signature not admitted by typed catalogue");
+    }
+    #[cfg(not(feature = "dkr-paged-catalog-only"))]
+    {
     let (k, k_l) = key.storage_and_layout();
     let k = match &*k {
         Storage::Cuda(k) => k,
@@ -793,7 +808,8 @@ fn update_cache<
             v_scale_ptr,
         )
     }
-    Ok(())
+    Ok(())    }
+
 }
 
 /// Insert key and values at the provided slot mapping inside the key value paged cache

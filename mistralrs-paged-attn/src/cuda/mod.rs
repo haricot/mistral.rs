@@ -2,6 +2,7 @@ pub const USE_FP8: bool = cfg!(has_fp8);
 pub const USE_FP8_LEGACY_SM61: bool = cfg!(has_fp8_legacy_sm61);
 
 mod backend;
+#[cfg(not(feature = "dkr-paged-catalog-only"))]
 mod ffi;
 
 pub use backend::{
