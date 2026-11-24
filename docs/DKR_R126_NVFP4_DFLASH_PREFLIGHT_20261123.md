@@ -1025,3 +1025,58 @@ Legacy device wrapper refactor also needs regression validation
 at the grouped gate. No new CUDA build requested.
 Next: ordinary FlashInfer Decode with its actual optional scratch
 and partition merge semantics, then closure and grouped GPU tests.
+
+## R1.26/S9B4c resolved graph PASS — 2026-11-24
+
+User fetched b4a113c3; S9B2, S9B3, S9B4A/B/C and strict features
+passed. Static producer elimination still NOT_QUALIFIED. Preserve
+the locally reconciled Cargo.lock. No compilation/physical test.
+
+## R1.26/S9B4d1 staged — FlashInfer split-KV merge and capacity audit
+
+Unlike MLA, ordinary FlashInfer decode really uses split-KV when
+padded_batch_size > batch_size. It honors request_indices,
+kv_tile_indices, o_indptr, kv_chunk_size and block_valid_mask.
+Scratch partial vectors have output dtype and LSE is F32 **base 2**.
+Do not feed these into the existing natural-log/F32 paged-v2 merge.
+The legacy caller accepts optional scratch capacity; the new adapter
+must validate dense physical spans, same device, sufficient capacity
+and non-aliasing, including graph-padded rows. The merge uses only
+the row intervals defined by o_indptr, not the padded batch itself.
+
+New flashinfer-merge package shares the historical persistent
+VariableLengthMergeStates device body with the unchanged historical
+global signature. Three dtypes x four head dimensions = 12 profiles.
+Typed ABI distinguishes partial vectors and base-2 logsumexp.
+The Cudaforge builder watches the same vendored headers as MLA and
+retains fast math and extended lambdas. No new runtime dispatch,
+feature, or admission changes here. The host occupancy-derived
+persistent grid policy still needs a device-aware DKR equivalent;
+do not claim performance parity from sharing the CUDA body alone.
+No CUDA or Rust compilation performed. This is a staged package,
+not a usable replacement of flashinfer_decode yet.
+
+The source-level tool tools/dkr_r126_flashinfer_decode_plan.py reads
+the actual historical group/head dispatch and verifies the geometry
+formula. It records 216 base geometries (3 activation dtypes,
+plain/FP8, 4 head dimensions, 9 GQA groups). A naive full typed
+Cartesian product with four window/softcap combinations and two
+direct/partition signatures gives 1728 decode profiles, plus 12
+merge profiles. With the planned 411-profile catalogue this would
+be 2151, exceeding the runtime's current 512-manifest bound.
+On SM61 with a 48 KiB dynamic-shared-memory budget, two geometries
+(F32 plain D512 GQA1/16) exceed that budget (69632 bytes).
+39 base geometries have non-warp-multiple actual block size because
+the historical dispatcher truncates bdz. These are audit flags,
+not independently demonstrated failures or proof of support.
+Do not raise the bound blindly, duplicate identical artifacts,
+or promise historical unsupported geometries will execute.
+Next S9B4d2 should address catalogue indexing/limits and choose
+a compact variant representation or bounded shards, then expose
+the existing BatchDecodeWithPagedKVCacheDevice body with typed
+direct and partition output signatures, preserve optional
+window/softcap semantics, and bind the merge to the planner.
+Preserve the 216-profile S7 catalogue and all acquired hashes.
+Prospective merge-only catalogue 34 families, 423 profiles,
+35 images, eight new CUDA sources relative to S7. Actual artifacts
+remain unbuilt. Full paged producer closure remains false.
