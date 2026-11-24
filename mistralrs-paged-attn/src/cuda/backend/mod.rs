@@ -17,6 +17,16 @@ mod flash_attn_sinks;
 #[cfg(not(feature = "dkr-paged-catalog-only"))]
 mod flashinfer;
 mod gather_kv;
+#[cfg(feature = "dkr-kv-fp8-io")]
+mod kv_fp8_write_dynamic;
+#[cfg(feature = "dkr-kv-fp8-io")]
+mod kv_fp8_gather_dynamic;
+#[cfg(feature = "dkr-kv-fp8-io")]
+fn kv_fp8_scales_valid(k: &candle_core::Tensor, v: &candle_core::Tensor, device: &candle_core::Device) -> bool {
+    [k, v].iter().all(|t| t.dtype() == candle_core::DType::F32 && t.elem_count() == 1
+        && t.is_contiguous() && device.same_device(t.device()))
+}
+
 #[cfg(feature = "dkr-kv-gather")]
 mod kv_gather_dynamic;
 #[cfg(feature = "dkr-kv-cache-ops")]

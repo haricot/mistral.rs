@@ -30,6 +30,8 @@ anyhow.workspace = true
 mistralrs-metal-compile = { workspace = true, optional = true }
 
 [features]
+# Independent pilot; requires the kv-fp8-io typed package.
+dkr-kv-fp8-io = ["cuda", "dep:mistralrs-kernel-runtime", "mistralrs-kernel-runtime/cuda"]
 # Scoped catalogue-only VLLM paging; unsupported signatures fail closed.
 dkr-paged-catalog-only = ["dkr-kv-scales", "dkr-kv-gather", "dkr-kv-cache-ops", "dkr-paged-decode", "dkr-paged-fp8", "dkr-paged-v2"]
 dkr-kv-scales = ["cuda", "dep:mistralrs-kernel-runtime", "mistralrs-kernel-runtime/cuda"]

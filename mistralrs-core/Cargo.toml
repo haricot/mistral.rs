@@ -237,6 +237,7 @@ dkr-routed-quant = ["cuda", "mistralrs-quant/dkr-routed-quant"]
 dkr-paged-fp8 = ["cuda", "mistralrs-paged-attn/dkr-paged-fp8"]
 dkr-paged-v2 = ["cuda", "mistralrs-paged-attn/dkr-paged-v2"]
 # Independent pilot; not enabled by the broad strict candidate until qualified.
+dkr-kv-fp8-io = ["cuda", "mistralrs-paged-attn/dkr-kv-fp8-io"]
 dkr-paged-catalog-only = ["cuda", "mistralrs-paged-attn/dkr-paged-catalog-only"]
 dkr-paged-decode = ["cuda", "mistralrs-paged-attn/dkr-paged-decode"]
 dkr-nvfp4-gemv = ["cuda", "mistralrs-quant/dkr-nvfp4-gemv"]

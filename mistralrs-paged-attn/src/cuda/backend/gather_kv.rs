@@ -151,6 +151,15 @@ pub fn gather_kv_cache(
         ),
     };
 
+    #[cfg(feature = "dkr-kv-fp8-io")]
+    if let (Some(ks), Some(vs)) = (k_scale, v_scale) {
+        if super::kv_fp8_gather_dynamic::try_gather(
+            key_cache, value_cache, &block_table, &cu_seq_lens,
+            &k_out, &v_out, num_tokens, ks, vs,
+        )? {
+            return Ok((k_out, v_out));
+        }
+    }
     // The external typed DKR route handles only contiguous non-FP8 caches.
     // Keep the original static kernel for all scaled/strided/indirect variants.
     #[cfg(feature = "dkr-kv-gather")]
