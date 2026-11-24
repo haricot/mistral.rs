@@ -540,3 +540,51 @@ python3 tools/dkr_r126_full_catalog_inventory.py \
 
 S6 is not yet run on the local files. No change to CUDA or Rust
 sources, feature flags or Candle pin for this audit.
+
+## R1.26/S6 observed inventory and correction — 2026-11-24
+
+User inventory at fbe535f2 reports 26 registered families, 7 paired
+(28 profiles, 8 unique CUBIN images), 18 PTX-only (185 profiles,
+18 unique PTX images), 1 apparently missing logits, 0 invalid.
+Total 213 present profiles. Source audit found the logits package
+builder writes to sparse-logits, not logits. The corrected inventory
+maps the builder's family name to the actual package directory.
+Do not compile logits before checking this alias; if present, expect
+three more profiles and one PTX image, subject to actual verification.
+
+## R1.26/S7 staged — isolated pairing and strict feature separation
+
+tools/dkr_r126_full_catalog_stage.py checks a refreshed S6 inventory,
+copies only unpaired families into a separate assembly root and
+preserves the seven already paired families byte-for-byte. Run the
+existing Cudaforge package builder with --pair-existing only on that
+assembly root. The finalizer requires all 26 families, rechecks
+exact PTX/profile identities, unchanged metadata except CUBIN pairing,
+and rejects duplicate operation/implementation/target identities.
+Original source and qualified directories are never modified. The
+full staged root and its evidence are separate; no numerical or
+embedded full-catalogue qualification is claimed. If logits truly is
+missing, a separate --family logits --cubin build can supply
+--logits-root; do not compile other families. S7 has not been run.
+
+The pinned Candle build scripts explicitly reject CUDA_DKR_EMBEDDED
+together with CUDA_DKR_S31, CUDA_LEGACY_BF16/FP8/FP4 or CUTILE.
+The previous Mistral dkr-sm61-cubin-qualified feature inherited
+dkr-sm61-experimental, hence enabled incompatible features.
+The corrected candidate inherits a generic dkr-typed-operations
+feature (including explicit FP4 dequant adapter) and qualified
+native Candle catalogue features, not experimental or legacy.
+Old experimental and pilot feature behaviour is unchanged.
+tools/dkr_r126_strict_features.py audits actual resolved Cargo
+metadata; metadata-only PASS is not a build or a GPU result.
+
+Candle native build requires separate sealed inputs:
+DKR_EMBED_NATIVE_DIR, DKR_EMBED_CUBIN_DIR, DKR_EMBED_S55_MMQ_DIR,
+DKR_EMBED_S55B_RECIPES_DIR and DKR_EMBED_S55C_CUDAFORGE_DIR.
+The Mistral typed catalogue does not replace these inputs.
+Verify their identity/coverage, including BF16/FP8 generic conversions,
+before any strict native build. No Candle source or pin changes.
+Mistral core/quant/paged-attn build.rs still produce static CUDA
+archives even when legacy features are off; audit source-level
+dispatch and FFI closure before attempting to disable those
+producers. No claim of complete elimination of static kernels.
