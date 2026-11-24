@@ -48,6 +48,12 @@ try:
             if missing:
                 raise ValueError(f"{name} lacks {sorted(missing)}")
         print("DKR_R126_S9B4A_FEATURES=PASS mla_cache_io=true")
+    if "--flashinfer-hnd-io" in sys.argv[1:]:
+        for name in ("mistralrs-core", "mistralrs-paged-attn"):
+            missing = {"dkr-paged-catalog-only", "dkr-flashinfer-hnd-io"} - graph[name]
+            if missing:
+                raise ValueError(f"{name} lacks {sorted(missing)}")
+        print("DKR_R126_S9B4B_FEATURES=PASS flashinfer_hnd_io=true")
     print("DKR_R126_STRICT_FEATURES=PASS candle_embedded=true typed=true legacy_flags=false")
     print("DKR_R126_STATIC_PRODUCER_ELIMINATION=NOT_QUALIFIED mistral_build_scripts=remain")
 except (OSError, ValueError, KeyError, TypeError) as exc:
