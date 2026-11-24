@@ -106,7 +106,7 @@ log="$run/embedded.log"
         --cargo-metadata "$run/cargo-metadata.json" \
         --binaries-metadata "$run/binaries-metadata.json" \
         --run-ignored=all --no-capture --no-fail-fast \
-        -E 'test(dkr_quantized_gemv_gpu) or test(dkr_quantized_gemm_gpu) or test(dkr_blockwise_fp8_layer_forward_gpu) or test(dkr_nvfp4_gemv_gpu) or test(dkr_nvfp4_checkpoint_gemm_gpu) or test(dkr_nvfp4_checkpoint_combined_gpu)'
+        -E 'test(dkr_quantized_gemv_gpu) or test(dkr_quantized_gemm_gpu) or test(dkr_blockwise_fp8_layer_forward_gpu) or test(dkr_nvfp4_gemv_gpu) or test(dkr_nvfp4_checkpoint_gemm_gpu) or test(dkr_nvfp4_checkpoint_combined_gpu)' || exit $?
     test ! -e "$input" && test ! -L "$input" || exit 3
     echo "DKR_R126_EMBED_INPUT_STILL_ABSENT=PASS"
 } 2>&1 | tee "$log"
