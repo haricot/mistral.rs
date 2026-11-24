@@ -1012,21 +1012,27 @@ impl QuantMethod for Nvfp4Layer {
         {
             let k = x.dim(D::Minus1)?;
             let rows = x.elem_count() / k;
-            if rows <= 8 {
-                let input = x.contiguous()?.reshape((rows, k))?;
-                if let Some(output) = gemv_dynamic::try_gemv(
+            let input = x.contiguous()?.reshape((rows, k))?;
+            let selected = if rows <= 8 {
+                gemv_dynamic::try_gemv(
                     &input, &self.parts.weight, &self.parts.scales,
                     &self.parts.global_scales, self.parts.bias.as_ref(),
-                )? {
-                    let mut shape = x.dims().to_vec();
-                    *shape.last_mut().unwrap() = self.parts.weight.dim(0)?;
-                    return output.reshape(shape);
-                }
+                )?
+            } else {
+                gemv_dynamic::try_gemm(
+                    &input, &self.parts.weight, &self.parts.scales,
+                    &self.parts.global_scales, self.parts.bias.as_ref(),
+                )?
+            };
+            if let Some(output) = selected {
+                let mut shape = x.dims().to_vec();
+                *shape.last_mut().unwrap() = self.parts.weight.dim(0)?;
+                return output.reshape(shape);
             }
         }
 
         if self.dkr_gemv_only {
-            candle_core::bail!("DKR NVFP4 typed-only GEMV did not accept this signature; dense W4A16 with 1..=8 rows and matching dtype required (no static fallback)");
+            candle_core::bail!("DKR NVFP4 typed-only GEMV did not accept this signature or GEMM is unavailable; dense W4A16 and matching dtype required (no static fallback)");
         }
 
         #[cfg(all(feature = "cuda", feature = "cuda-legacy-fp4"))]
@@ -1421,6 +1427,21 @@ mod tests {
     #[test]
     #[ignore = "requires local NVFP4 checkpoint, physical GPU, and paired typed CUBIN"]
     fn dkr_nvfp4_checkpoint_layer_gpu() -> Result<()> {
+        assert_ne!(std::env::var("MISTRALRS_DKR_NVFP4_GEMM").as_deref(), Ok("1"),
+                   "S1 decode-only evidence requires GEMM disabled");
+        dkr_nvfp4_checkpoint_projection(false)
+    }
+
+    #[cfg(feature = "dkr-nvfp4-gemv")]
+    #[test]
+    #[ignore = "requires physical GPU, real NVFP4 checkpoint, and new paired GEMM image"]
+    fn dkr_nvfp4_checkpoint_gemm_gpu() -> Result<()> {
+        assert_eq!(std::env::var("MISTRALRS_DKR_NVFP4_GEMM").as_deref(), Ok("1"));
+        dkr_nvfp4_checkpoint_projection(true)
+    }
+
+    #[cfg(feature = "dkr-nvfp4-gemv")]
+    fn dkr_nvfp4_checkpoint_projection(gemm: bool) -> Result<()> {
         let _evidence = mistralrs_kernel_runtime::RuntimeEvidenceGuard;
         if std::env::var("MISTRALRS_DKR_NVFP4_TYPED_ONLY").as_deref() != Ok("1") {
             candle_core::bail!("enable MISTRALRS_DKR_NVFP4_TYPED_ONLY=1 for this probe");
@@ -1451,7 +1472,7 @@ mod tests {
         let shape = view.shape();
         assert_eq!(shape.len(), 2);
         let (n, k) = (shape[0], shape[1] * VALUES_PER_BYTE);
-        let sample_n = n.min(32);
+        let sample_n = n.min(if gemm { 37 } else { 32 });
         assert!(sample_n > 0 && k > 0);
         let shard = Shard::Offset { dim: 0, offset: 0, len: sample_n };
         let load = |dtype: DType, device: &Device| -> Result<Nvfp4Layer> {
@@ -1472,7 +1493,7 @@ mod tests {
             assert!(layer.dkr_gemv_only && !layer.portable);
             assert!(layer.parts.input_scale.is_none());
             assert_eq!(layer.parts.weight.dims(), [sample_n, k / 2]);
-            for rows in [1usize, 3, 8] {
+            for rows in if gemm { [9usize, 17, 33] } else { [1usize, 3, 8] } {
                 let values = (0..rows*k)
                     .map(|i| ((i.wrapping_mul(13) % 31) as i32 - 15) as f32 / 64.0)
                     .collect::<Vec<_>>();
@@ -1501,11 +1522,13 @@ mod tests {
                 assert!(rel_l2 <= tol && max_err <= 2.0 * tol * max_ref + 1e-5,
                         "NVFP4 checkpoint parity failed: dtype={dtype:?}, rows={rows}");
             }
-            let unsupported = Tensor::zeros((9, k), dtype, &device)?;
-            let err = layer.forward_raw(&unsupported).unwrap_err();
-            assert!(err.to_string().contains("typed-only GEMV did not accept"));
+            if !gemm {
+                let unsupported = Tensor::zeros((9, k), dtype, &device)?;
+                let err = layer.forward_raw(&unsupported).unwrap_err();
+                assert!(err.to_string().contains("typed-only GEMV did not accept"));
+            }
         }
-        eprintln!("DKR_R126_NVFP4_LAYER=PASS real_projection=true prefill_gemm=false");
+        eprintln!("DKR_R126_NVFP4_LAYER=PASS real_projection=true prefill_gemm={gemm}");
         Ok(())
     }
 
