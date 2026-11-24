@@ -411,3 +411,61 @@ The next physical gate should test the embedded source in a process
 with filesystem package access disabled, selecting actual operations
 from all four families. No full model or Extended performance
 certification, and no new Candle SM61-specific logic, is implied.
+
+## R1.26/S4 offline PASS — 2026-11-24
+
+The user's S4 report at commit 650ad6b9 confirms 20 profiles, four
+unique CUBIN/PTX pairs, 60 manifest/image file entries, and reverified
+prior numerical logs. No new compilation or GPU execution occurred.
+The report retains combined_four_family_gpu_run=false,
+embedded_runtime_qualified=false, full_model_qualified=false and
+performance_qualified=false. Preserve this catalogue and its evidence.
+
+## R1.26/S5 staged — embedded quant catalogue qualification
+
+The existing runtime build.rs embeds verified PTX/CUBIN payloads
+by hash. KernelExecutionCache::package_root() can use embedded::ROOT
+when DKR_KERNEL_PACKAGES is absent; discover() in explicit embedded
+mode selects embedded::catalog() and does not read external packages.
+Its runtime trace is MISTRAL_DKR_CATALOG_EMBEDDED manifests=20.
+
+The new runner revalidates S4 evidence against exact file digests,
+stages a dedicated build-input copy, and builds once using
+DKR_EMBED_TYPED_DIR. Nextest list emits binaries-only JSON metadata;
+Cargo metadata is also saved before running. The runner then renames
+only that dedicated copy to sm61.hidden, clears DKR_EMBED_TYPED_DIR
+and DKR_KERNEL_PACKAGES, and invokes Nextest in reuse-build mode via
+--binaries-metadata and --cargo-metadata. It checks that the original
+build-input path is absent before and after the run and restores the
+copy with an EXIT trap. Original qualified catalogues are not moved.
+This tests independence of the embedded input path and explicit
+embedded source selection; it is not a global filesystem sandbox.
+
+Six existing GPU tests run in one Nextest campaign, in separate
+test processes: direct quant GEMV/GEMM, FP8 production layer forward,
+NVFP4 synthetic GEMV, NVFP4 checkpoint GEMM (both bias ABIs), and full
+NVFP4 combined projection. Each must emit embedded catalogue admission,
+strict CUBIN policy and the exact expected family image pair(s).
+The verifier rejects filesystem admission and PTX fallback. One
+campaign across separate processes does not mean all four families
+were exercised inside a single process/model.
+
+No new kernel source changes, external package builds, NVCC or ptxas
+commands are requested. Embedding requires one Rust build and normal
+build-script cache verification; native CUDA cache hits are expected
+but not guaranteed. S5 has not yet been built or run.
+
+```bash
+cd /home/np/dkr-worktrees/r125-candle-integration
+git fetch origin feature/dkr-r126-nvfp4-typed-sm61
+git switch --detach origin/feature/dkr-r126-nvfp4-typed-sm61
+export MISTRALRS_CUDA_BUILD_ROOT=/home/np/tmp/mistralrs_provider/mistral.rs/target/dkr-cuda-cache/sm61
+bash -n tools/dkr_r126_quant_embedded_sm61.sh
+DKR_APPROVE_R126_QUANT_EMBEDDED=1 bash tools/dkr_r126_quant_embedded_sm61.sh
+```
+
+Keep Cargo.lock reconciled. If an uncatchable interruption leaves
+sm61.hidden, restore only the dedicated copy after verifying that
+no test is running and its original path is absent. Full-model
+inference and performance remain separate gates. No Candle source
+change is required for this S5 experiment.
