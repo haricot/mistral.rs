@@ -42,6 +42,15 @@ def verify(root, logfile):
         if set(loaded) != {expected}:
             raise ValueError(f"exact NVFP4 CUBIN admission missing for {name}: {loaded}")
         if name == TESTS[1]:
+            geometry = re.search(
+                r"DKR_R126_NVFP4_CHECKPOINT_LAYER prefix=layers\.0\.self_attn\.k_proj "
+                r"source_n=(\d+) sampled_n=(\d+) k=(\d+)", section
+            )
+            if not geometry:
+                raise ValueError("real checkpoint projection geometry missing")
+            n, sampled_n, k = map(int, geometry.groups())
+            if n <= 0 or sampled_n != min(n, 32) or k <= 0 or k % 16:
+                raise ValueError("unexpected checkpoint projection geometry")
             for dtype in ("F16", "BF16"):
                 for rows in (1, 3, 8):
                     if not re.search(r"DKR_R126_NVFP4_LAYER_NUMERIC dtype="
@@ -53,7 +62,8 @@ def verify(root, logfile):
             "target_cc": 61, "tests": list(TESTS), "profiles": 4,
             "cubin_sha256": expected, "ptx_sha256": package["ptx_sha256"][0],
             "nextest_log_sha256": digest(logfile),
-            "real_checkpoint_projection": True, "sampled_output_rows": 32,
+            "real_checkpoint_projection": True, "sampled_output_rows": sampled_n,
+            "source_output_rows": n, "input_width": k,
             "activation_rows": [1, 3, 8], "activation_dtypes": ["f16", "bf16"],
             "nvfp4_prefill_gemm_qualified": False,
             "full_model_qualified": False, "dflash_qualified": False}
