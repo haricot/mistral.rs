@@ -1426,6 +1426,7 @@ mod tests {
     #[test]
     #[ignore = "requires local NVFP4 checkpoint, physical GPU, and paired typed CUBIN"]
     fn dkr_nvfp4_checkpoint_layer_gpu() -> Result<()> {
+        let _evidence = mistralrs_kernel_runtime::RuntimeEvidenceGuard;
         assert_ne!(std::env::var("MISTRALRS_DKR_NVFP4_GEMM").as_deref(), Ok("1"),
                    "S1 decode-only evidence requires GEMM disabled");
         dkr_nvfp4_checkpoint_projection(false)
@@ -1435,6 +1436,7 @@ mod tests {
     #[test]
     #[ignore = "requires physical GPU, real NVFP4 checkpoint, and new paired GEMM image"]
     fn dkr_nvfp4_checkpoint_gemm_gpu() -> Result<()> {
+        let _evidence = mistralrs_kernel_runtime::RuntimeEvidenceGuard;
         assert_eq!(std::env::var("MISTRALRS_DKR_NVFP4_GEMM").as_deref(), Ok("1"));
         dkr_nvfp4_checkpoint_projection(true)?;
         let device = Device::new_cuda(0)?;
@@ -1484,7 +1486,6 @@ mod tests {
 
     #[cfg(feature = "dkr-nvfp4-gemv")]
     fn dkr_nvfp4_checkpoint_projection(gemm: bool) -> Result<()> {
-        let _evidence = mistralrs_kernel_runtime::RuntimeEvidenceGuard;
         if std::env::var("MISTRALRS_DKR_NVFP4_TYPED_ONLY").as_deref() != Ok("1") {
             candle_core::bail!("enable MISTRALRS_DKR_NVFP4_TYPED_ONLY=1 for this probe");
         }
