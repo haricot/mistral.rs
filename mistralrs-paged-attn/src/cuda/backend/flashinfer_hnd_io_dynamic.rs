@@ -187,3 +187,91 @@ pub fn gather_kv_cache_flashinfer(kc:&Tensor,vc:&Tensor,table:&Tensor,offsets:&T
     }
     Ok((ko,vo))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dkr_hnd_row_span_checked()->Result<()> {
+        assert_eq!(span(4,32,48)?,176);
+        assert!(span(4,32,31).is_err());
+        assert!(span(usize::MAX,32,48).is_err());
+        assert!(span(0,32,48).is_err());
+        Ok(())
+    }
+
+    #[test]
+    #[ignore="requires staged HND IO CUBIN and physical CUDA"]
+    fn dkr_flashinfer_hnd_io_gpu()->Result<()> {
+        let _evidence=mistralrs_kernel_runtime::RuntimeEvidenceGuard;
+        let dev=Device::new_cuda(0)?;
+        let (tokens,heads,hd,page,blocks)=(4usize,2usize,16usize,2usize,2usize);
+        let slots=Tensor::from_vec(vec![2i64,-1,0,3],tokens,&dev)?;
+        let input=[0.0f32,1.0,-1.0,1.0625,1.1875,500.0,-500.0,0.001953125];
+        let rounded=[0.0f32,1.0,-1.0,1.0,1.25,448.0,-448.0,0.001953125];
+        for dtype in [DType::F16,DType::BF16,DType::F32] {
+            for scaled in [false,true] {
+                let scales=if scaled {KvCacheScales{k:0.5,v:2.0}}else{DEFAULT_FP8_KV_CACHE_SCALES};
+                let cd=if scaled{DType::F8E4M3}else{dtype};
+                for rank4 in [false,true] {
+                    let make=|padding:usize,shift:usize,scale:f32|->Result<Tensor>{
+                        let nheads=heads+padding;
+                        let vals=(0..tokens*nheads*hd).map(|i|{
+                            let t=i/(nheads*hd);let h=(i/hd)%nheads;let d=i%hd;
+                            if h==0 || h>heads {123.0}
+                            else{input[(t+h+d+shift)%input.len()]*scale}
+                        }).collect::<Vec<_>>();
+                        let a=Tensor::from_vec(vals,(tokens,nheads,hd),&dev)?.to_dtype(dtype)?;
+                        if rank4{a.reshape((2,2,nheads,hd))?.narrow(2,1,heads)}
+                        else{a.narrow(1,1,heads)}
+                    };
+                    let k=make(1,0,scales.k)?;let v=make(2,3,scales.v)?;
+                    assert!(!k.is_contiguous() && !v.is_contiguous());
+                    let kb=Tensor::zeros((blocks+1,heads,page,hd),DType::F32,&dev)?.to_dtype(cd)?;
+                    let vb=Tensor::zeros((blocks+1,heads,page,hd),DType::F32,&dev)?.to_dtype(cd)?;
+                    let kc=kb.narrow(0,1,blocks)?;let vc=vb.narrow(0,1,blocks)?;
+                    super::super::reshape_and_cache_flashinfer(&k,&v,&kc,&vc,&slots,scales)?;
+                    dev.synchronize()?;
+                    let vals=if scaled{rounded}else{input};
+                    let mut ek=vec![0f32;blocks*heads*page*hd];let mut ev=ek.clone();
+                    let mut gk=vec![0f32;tokens*heads*hd];let mut gv=gk.clone();
+                    for (t,s,out) in [(0usize,2usize,0usize),(2,0,2),(3,3,1)] {
+                        for h in 0..heads{
+                            for d in 0..hd{
+                                let a=vals[(t+h+1+d)%vals.len()];
+                                let b=vals[(t+h+1+d+3)%vals.len()];
+                                let i=((s/page*heads+h)*page+s%page)*hd+d;
+                                ek[i]=a;ev[i]=b;
+                                let j=(out*heads+h)*hd+d;
+                                gk[j]=a*scales.k;gv[j]=b*scales.v;
+                            }
+                        }
+                    }
+                    let f32vec=|t:&Tensor|->Result<Vec<f32>>{t.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()};
+                    assert_eq!(f32vec(&kc)?,ek);
+                    assert_eq!(f32vec(&vc)?,ev);
+                    assert!(f32vec(&kb.narrow(0,0,1)?)?.iter().all(|&x|x==0.0));
+                    assert!(f32vec(&vb.narrow(0,0,1)?)?.iter().all(|&x|x==0.0));
+                    for bt in [DType::I32,DType::U32]{
+                        for ot in [DType::I32,DType::U32]{
+                            // Sequence 1 is empty; physical pages reversed.
+                            let table=Tensor::from_vec(vec![1i32,0,0],(3,1),&dev)?.to_dtype(bt)?;
+                            let offs=Tensor::from_vec(vec![0i32,2,2,4],4,&dev)?.to_dtype(ot)?;
+                            let run=||super::super::gather_kv_cache_flashinfer(&kc,&vc,&table,&offs,tokens,dtype,scales);
+                            let (ko,vo)=run()?;
+                            assert_eq!(f32vec(&ko)?,gk);assert_eq!(f32vec(&vo)?,gv);
+                            let count=PLANS.with(|p|p.borrow().len());
+                            assert!(count>0);
+                            let (ko,vo)=run()?;
+                            assert_eq!(f32vec(&ko)?,gk);assert_eq!(f32vec(&vo)?,gv);
+                            assert_eq!(PLANS.with(|p|p.borrow().len()),count);
+                            eprintln!("DKR_R126_FLASHINFER_HND_IO=PASS dtype={dtype:?} fp8={scaled} rank4={rank4} table={bt:?} offsets={ot:?}");
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}

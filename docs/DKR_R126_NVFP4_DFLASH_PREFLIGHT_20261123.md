@@ -940,3 +940,45 @@ CKV/KPE widths/strides, offset and padding. Not compiled or executed.
 Prospective extended catalogue: 31 families, 378 profiles, 32 images
 (five new sources relative to S7). Baseline 216 profiles/27 images
 remain immutable. Actual image sizes and extended staging pending.
+
+## R1.26/S9B4a resolved graph PASS — 2026-11-24
+
+User reports S9B2, S9B3, S9B4A and strict features PASS.
+Static producer elimination still NOT_QUALIFIED. No build or GPU run.
+
+## R1.26/S9B4b staged — FlashInfer HND cache IO
+
+Independent opt-in dkr-flashinfer-hnd-io forwards through core.
+New flashinfer-hnd-io family: six store profiles and 24 gather profiles
+(three activation dtypes, plain or E4M3 cache, independent I32/U32
+page-table and cumulative-offset dtypes for gather). One source;
+30 entries, prospective one PTX/CUBIN pair. Canonical HND layout
+[blocks,heads,page,head_dim] distinct from VLLM, no repack. Store
+uses bounded physical row spans with U64 strides, dense inner heads,
+rank 3 or uniformly flattenable rank 4, nonzero offsets. FP8 uses
+historical direct float conversion to/from CUDA E4M3 and positive finite
+host scalar K/V scales; plain requires unit scales and omits them
+from the typed ABI. No new host readback or activation copies.
+Gather binary-searches monotone cumulative offsets, handles empty
+sequences, keeps metadata dtype without conversion and bounds local
+table/offset/page accesses. Malformed global metadata, duplicate
+write slots and overlapping writable allocations remain outside
+the caller contract. Gather output is zero-initialized, unlike
+historical uninitialized allocation; extra zeroing and binary-search
+cost must be measured, as must fixed 256-thread store geometry.
+Canonical contiguous caches only. Public HND IO reexports routed
+with feature; historical default unchanged. No global USE_FP8
+capability promotion. FlashInfer decode, MLA decode and scratch/
+scheduler semantics untouched and still unavailable in catalogue-only.
+
+Tests: checked span CPU test and ignored dkr_flashinfer_hnd_io_gpu,
+12 store configurations and 48 gather configurations (3 dtypes,
+plain/FP8, rank 3/4, four metadata pairs), repeat dispatch, independent
+raw storage and gather references, nonzero cache/input offsets,
+sentinel prefix, permuted pages, empty sequence, negative slot,
+E4M3 saturation and midpoint rounding. No build/run performed.
+Prospective extended catalogue 32 families, 408 profiles, 33 images
+(six new sources relative to immutable S7 baseline); within current
+512-profile limit, subject to actual artifact sizes and validation.
+No new compilation requested. Next: MLA decode, then FlashInfer
+decode with split-KV scheduler/scratch contract preserved.
