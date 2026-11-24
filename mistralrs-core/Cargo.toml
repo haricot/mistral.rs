@@ -239,6 +239,7 @@ dkr-paged-v2 = ["cuda", "mistralrs-paged-attn/dkr-paged-v2"]
 # Independent pilot; not enabled by the broad strict candidate until qualified.
 dkr-kv-fp8-io = ["cuda", "mistralrs-paged-attn/dkr-kv-fp8-io"]
 dkr-flashinfer-hnd-io = ["cuda", "mistralrs-paged-attn/dkr-flashinfer-hnd-io"]
+dkr-mla-decode = ["cuda", "mistralrs-paged-attn/dkr-mla-decode"]
 dkr-mla-cache-io = ["cuda", "mistralrs-paged-attn/dkr-mla-cache-io"]
 dkr-prefill-sinks = ["cuda", "mistralrs-paged-attn/dkr-prefill-sinks"]
 dkr-paged-options = ["cuda", "mistralrs-paged-attn/dkr-paged-options"]

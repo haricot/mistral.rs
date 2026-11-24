@@ -30,6 +30,7 @@ anyhow.workspace = true
 mistralrs-metal-compile = { workspace = true, optional = true }
 
 [features]
+dkr-mla-decode = ["cuda", "dep:mistralrs-kernel-runtime", "mistralrs-kernel-runtime/cuda"]
 dkr-flashinfer-hnd-io = ["cuda", "dep:mistralrs-kernel-runtime", "mistralrs-kernel-runtime/cuda"]
 dkr-mla-cache-io = ["cuda", "dep:mistralrs-kernel-runtime", "mistralrs-kernel-runtime/cuda"]
 dkr-prefill-sinks = ["cuda", "dep:mistralrs-kernel-runtime", "mistralrs-kernel-runtime/cuda"]

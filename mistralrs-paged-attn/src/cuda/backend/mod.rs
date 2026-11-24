@@ -76,7 +76,12 @@ mod flashinfer_hnd_io_dynamic;
 #[cfg(feature = "dkr-flashinfer-hnd-io")]
 pub use flashinfer_hnd_io_dynamic::{gather_kv_cache_flashinfer, reshape_and_cache_flashinfer};
 pub use gather_kv::gather_kv_cache;
+#[cfg(not(feature = "dkr-mla-decode"))]
 pub use mla::flashinfer_mla_decode;
+#[cfg(feature = "dkr-mla-decode")]
+mod mla_decode_dynamic;
+#[cfg(feature = "dkr-mla-decode")]
+pub use mla_decode_dynamic::flashinfer_mla_decode;
 #[cfg(not(feature = "dkr-mla-cache-io"))]
 pub use mla::{concat_and_cache_mla, gather_mla_cache};
 #[cfg(feature = "dkr-mla-cache-io")]
