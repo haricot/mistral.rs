@@ -69,6 +69,8 @@ struct ImageCache {
 
 fn bounded_read(path: &Path, limit: u64, label: &str) -> Result<Vec<u8>> {
     use std::io::Read;
+    let metadata = std::fs::metadata(path)?;
+    ensure!(metadata.is_file() && metadata.len() <= limit, "{label} budget exceeded");
     let file = std::fs::File::open(path)?;
     ensure!(file.metadata()?.is_file() && file.metadata()?.len() <= limit, "{label} budget exceeded");
     let mut bytes = Vec::new();
@@ -410,7 +412,39 @@ impl KernelManifest {
     }
 }
 
+fn parse_profiles(bytes: &[u8]) -> Result<Vec<(KernelManifest, String)>> {
+    // Preserve byte-exact V1 identity. Hash each shard profile
+    // independently of its neighbours and of shard ordering.
+    let value: serde_json::Value = serde_json::from_slice(bytes)?;
+    let profiles = if value.get("schema").and_then(|v| v.as_str()) == Some(SHARD_SCHEMA) {
+        let shard: KernelShard = serde_json::from_slice(bytes)?;
+        ensure!(shard.schema == SHARD_SCHEMA && !shard.profiles.is_empty()
+            && shard.profiles.len() <= MAX_PROFILES_PER_SHARD,
+            "kernel shard profile count exceeded or empty");
+        shard.profiles.into_iter().map(|manifest| {
+            let hash = digest(&serde_json::to_vec(&manifest)?);
+            Ok((manifest, hash))
+        }).collect::<Result<Vec<_>>>()?
+    } else {
+        vec![(serde_json::from_slice::<KernelManifest>(bytes)?, digest(bytes))]
+    };
+    Ok(profiles)
+}
+
 impl VerifiedKernel {
+    /// Validate every profile in one physical package (V1 or a shard).
+    pub fn read_package(path: &Path) -> Result<Vec<Self>> {
+        let path = path.canonicalize()?;
+        let bytes = bounded_read(&path, MAX_MANIFEST_BYTES, "manifest")?;
+        let mut cache = ImageCache::default();
+        let mut ids = std::collections::BTreeSet::new();
+        parse_profiles(&bytes)?.into_iter().map(|(manifest, hash)| {
+            ensure!(ids.insert((manifest.operation.clone(), manifest.implementation_id.clone(), manifest.target_cc)),
+                "duplicate operation/implementation/architecture identity");
+            Self::read_profile(&path, manifest, hash, &mut cache)
+        }).collect()
+    }
+
     pub fn read(path: &Path) -> Result<Self> {
         let path = path.canonicalize()?;
         let bytes = bounded_read(&path, MAX_MANIFEST_BYTES, "manifest")?;
@@ -577,21 +611,7 @@ impl KernelCatalog {
         for path in paths {
             let path = path.canonicalize()?;
             let bytes = bounded_read(&path, MAX_MANIFEST_BYTES, "manifest")?;
-            // Preserve byte-exact V1 identity. Hash each shard profile
-            // independently of its neighbours and of shard ordering.
-            let value: serde_json::Value = serde_json::from_slice(&bytes)?;
-            let profiles = if value.get("schema").and_then(|v| v.as_str()) == Some(SHARD_SCHEMA) {
-                let shard: KernelShard = serde_json::from_slice(&bytes)?;
-                ensure!(shard.schema == SHARD_SCHEMA && !shard.profiles.is_empty()
-                    && shard.profiles.len() <= MAX_PROFILES_PER_SHARD,
-                    "kernel shard profile count exceeded or empty");
-                shard.profiles.into_iter().map(|manifest| {
-                    let hash = digest(&serde_json::to_vec(&manifest)?);
-                    Ok((manifest, hash))
-                }).collect::<Result<Vec<_>>>()?
-            } else {
-                vec![(serde_json::from_slice::<KernelManifest>(&bytes)?, digest(&bytes))]
-            };
+            let profiles = parse_profiles(&bytes)?;
             ensure!(profiles.len() <= MAX_CATALOG_PROFILES - result.len(),
                 "logical kernel profile count exceeded");
             for (manifest, hash) in profiles {
@@ -732,12 +752,22 @@ mod tests {
         assert_eq!(other.manifest.entry, second);
         assert!(std::ptr::eq(first.ptx.as_ref(), other.ptx.as_ref()));
         assert_ne!(first.manifest_sha256, other.manifest_sha256);
+        assert_eq!(VerifiedKernel::read_package(&path).unwrap().len(), 2);
+        let first_hash = first.manifest_sha256.clone();
+        write_shard(&path, vec![b.clone(), a.clone()]);
+        assert_eq!(KernelCatalog::discover(dir.path()).unwrap()
+            .select(&a.implementation_id, &request).unwrap().manifest_sha256, first_hash);
+        b.entry = "absent".into();
+        write_shard(&path, vec![a.clone(), b.clone()]);
+        assert!(KernelCatalog::discover(dir.path()).is_err());
+        b.entry = second.into();
         assert!(catalog.resolve(&request).is_err());
         b.sha256 = "0".repeat(64);
         write_shard(&path, vec![a.clone(), b]);
         assert!(KernelCatalog::discover(dir.path()).is_err());
         write_shard(&path, vec![a.clone(), a]);
         assert!(KernelCatalog::discover(dir.path()).is_err());
+        assert!(VerifiedKernel::read_package(&path).is_err());
     }
 
     #[test]
@@ -759,6 +789,27 @@ mod tests {
         let catalog = KernelCatalog::discover(dir.path()).unwrap();
         assert_eq!(catalog.len(), 2151);
         assert_eq!(MAX_DISCOVERED_PACKAGES, 512);
+        assert!(KernelCatalog::load(&vec![path.clone(); MAX_DISCOVERED_PACKAGES + 1]).is_err());
+        for start in (2151..MAX_CATALOG_PROFILES+1).step_by(MAX_PROFILES_PER_SHARD) {
+            let sub = dir.path().join(format!("extra-{start}"));
+            std::fs::create_dir(&sub).unwrap();
+            std::fs::copy(dir.path().join("fused.ptx"), sub.join("fused.ptx")).unwrap();
+            write_shard(&sub.join(MANIFEST_FILENAME),
+                (start..(start+MAX_PROFILES_PER_SHARD).min(MAX_CATALOG_PROFILES+1)).map(|i| {
+                    let mut row = m.clone();
+                    row.implementation_id = format!("variant.{i}");
+                    row
+                }).collect());
+        }
+        let err = KernelCatalog::discover(dir.path()).err().unwrap();
+        assert!(err.to_string().contains("logical kernel profile count exceeded"));
+        // Remove the extra shards before testing malformed single shards.
+        for entry in std::fs::read_dir(dir.path()).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_name().to_string_lossy().starts_with("extra-") {
+                std::fs::remove_dir_all(entry.path()).unwrap();
+            }
+        }
         write_shard(&path, vec![m.clone(); MAX_PROFILES_PER_SHARD + 1]);
         assert!(KernelCatalog::discover(dir.path()).is_err());
         write_shard(&path, vec![]);

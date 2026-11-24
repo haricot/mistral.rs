@@ -1080,3 +1080,39 @@ Preserve the 216-profile S7 catalogue and all acquired hashes.
 Prospective merge-only catalogue 34 families, 423 profiles,
 35 images, eight new CUDA sources relative to S7. Actual artifacts
 remain unbuilt. Full paged producer closure remains false.
+
+
+## R1.26/S9B4d2 — bounded catalogue shards (staged source)
+
+The runtime now accepts legacy DKR-KERNEL-MODULE-V1 manifests unchanged
+and DKR-KERNEL-SHARD-V1 objects containing a profiles array of complete
+typed V1 contracts. The discovery cap stays at 512 physical manifest
+files, each capped at 256 KiB; a shard has at most 64 profiles and
+the logical catalogue at most 4096. This is a distinct logical budget
+for the projected 2151 profiles, not a relaxation of discovery.
+No source geometry, target policy or S7 artifact is changed.
+
+External profiles that refer to the same canonical artifact path share
+immutable Arc-backed bytes after digest verification; each profile still
+checks its own target, entry and typed ABI. Embedded images use static
+references and the build script writes each content-addressed image once.
+Legacy manifest byte hashes are unchanged; shard profile identities use
+the canonical serialized typed contract, independent of shard order.
+Variant selection continues to use explicit operation/implementation/SM
+identity; ambiguous automatic selection is rejected. No new ASD policy.
+
+The Cudaforge CUBIN pairing stage can consume a shard and preserves
+per-entry validation. Existing package generators are unchanged;
+FlashInfer Decode generation and actual shard packing belong to S9B4d3.
+The source planner reports logical fit separately from unverified
+physical packing. The full Cartesian geometry audit still reports
+2 over-budget and 39 partial-warp geometries on SM61.
+
+Added CPU-only regression tests for 2151 synthetic profiles, separate
+discovery and logical bounds, shared PTX bytes, stable profile identity,
+explicit selection, missing symbol, wrong digest and duplicate identity.
+No local Rust/CUDA compilation, physical package build, GPU test or
+closure qualification was performed in this staging step. Do not interpret
+logical capacity as admission of the FlashInfer variants. The non-shared
+CUDA loader's physical module reuse and external registry handoff costs
+remain to be measured; no performance claim is made.

@@ -83,14 +83,15 @@ fn main() -> Result<()> {
                 }
             }
         }
+        let mut written = std::collections::BTreeSet::new();
         for module in modules {
             let m = &module.manifest;
-            let copy = out.join(format!("dkr-typed-{}.ptx", m.sha256));
-            fs::write(&copy, module.ptx.as_bytes())?;
+            let copy = out.join(format!("dkr-typed-{}.ptx", m.sha256.to_ascii_lowercase()));
+            if written.insert(copy.clone()) { fs::write(&copy, module.ptx.as_bytes())?; }
             let cubin = if let Some(image) = &module.cubin {
                 let hash = m.cubin_sha256.as_ref().expect("validated paired CUBIN hash");
-                let image_copy = out.join(format!("dkr-typed-{hash}.cubin"));
-                fs::write(&image_copy, image.as_ref())?;
+                let image_copy = out.join(format!("dkr-typed-{}.cubin", hash.to_ascii_lowercase()));
+                if written.insert(image_copy.clone()) { fs::write(&image_copy, image.as_ref())?; }
                 format!("Some(SharedImage::Embedded(&include_bytes!({image_copy:?})[..]))")
             } else {
                 "None".into()

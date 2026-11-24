@@ -196,8 +196,12 @@ fn stage_cubins(root: &Path, cc: usize) -> Result<usize, Box<dyn std::error::Err
     fs::create_dir_all(&image_cache)?;
     let mut compiled = HashMap::<String, PathBuf>::new();
     for manifest_path in paths {
-        // Reads and validates the PTX source, including the entry parameter ABI.
-        let verified = VerifiedKernel::read(&manifest_path)?;
+        // Validate every entry before assembling any physical image in this package.
+        let verified_profiles = VerifiedKernel::read_package(&manifest_path)?;
+        let mut manifest: serde_json::Value = serde_json::from_slice(&fs::read(&manifest_path)?)?;
+        let is_shard = manifest["schema"].as_str() == Some(mistralrs_kernel_runtime::universal::SHARD_SCHEMA);
+        let mut destinations = HashMap::<PathBuf, (String, String)>::new();
+        for (index, verified) in verified_profiles.iter().enumerate() {
         if verified.manifest.target_cc as usize != cc {
             return Err(format!("wrong target in {}", manifest_path.display()).into());
         }
@@ -225,22 +229,35 @@ fn stage_cubins(root: &Path, cc: usize) -> Result<usize, Box<dyn std::error::Err
                 }
                 fs::rename(&partial, &binary)?;
             }
-            compiled.insert(identity, binary.clone());
+            compiled.insert(identity.clone(), binary.clone());
             binary
         };
         let destination = verified.manifest.artifact.with_extension("cubin");
         let dest_path = manifest_path.parent().ok_or("manifest missing directory")?
             .join(&destination);
-        fs::copy(&binary, &dest_path)?;
-        let bytes = fs::read(&dest_path)?;
-        let sha = format!("{:x}", Sha256::digest(&bytes));
-        let mut manifest: serde_json::Value = serde_json::from_slice(&fs::read(&manifest_path)?)?;
-        manifest["cubin_artifact"] = destination.to_string_lossy().into_owned().into();
-        manifest["cubin_sha256"] = sha.into();
-        fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest)?)?;
-        // Do not publish an image that fails the same checks as runtime discovery.
-        let validated = VerifiedKernel::read(&manifest_path)?;
-        if validated.cubin.is_none() {
+        let sha = if let Some((previous_identity, sha)) = destinations.get(&dest_path) {
+            if previous_identity != &identity {
+                return Err(format!("CUBIN destination collision: {}", dest_path.display()).into());
+            }
+            sha.clone()
+        } else {
+            fs::copy(&binary, &dest_path)?;
+            let sha = format!("{:x}", Sha256::digest(&fs::read(&dest_path)?));
+            destinations.insert(dest_path, (identity, sha.clone()));
+            sha
+        };
+        let row = if is_shard { &mut manifest["profiles"][index] } else { &mut manifest };
+        row["cubin_artifact"] = destination.to_string_lossy().into_owned().into();
+        row["cubin_sha256"] = sha.into();
+        }
+        let encoded = serde_json::to_vec_pretty(&manifest)?;
+        if encoded.len() as u64 > mistralrs_kernel_runtime::universal::MAX_MANIFEST_BYTES {
+            return Err("paired manifest budget exceeded".into());
+        }
+        fs::write(&manifest_path, encoded)?;
+        // Validate all paired entries, not only the first one.
+        let validated = VerifiedKernel::read_package(&manifest_path)?;
+        if validated.iter().any(|profile| profile.cubin.is_none()) {
             return Err("CUBIN pairing did not validate".into());
         }
     }
