@@ -17,8 +17,15 @@ REAL = {"moe": "dkr_moe_gpu", "indexed-copy": "dkr_indexed_copy_gpu",
         "paged-decode": "dkr_paged_decode_gpu"}
 
 
+PACKAGE_DIRS = {"logits": "sparse-logits"}
+
+
+def package_dir(family):
+    return PACKAGE_DIRS.get(family, family)
+
+
 def inspect(root, family):
-    paths = sorted((root / family).rglob("manifest.json"))
+    paths = sorted((root / package_dir(family)).rglob("manifest.json"))
     ptxs, cubins, pairs, keys = set(), set(), set(), set()
     paired = 0
     for path in paths:
@@ -111,7 +118,7 @@ def main():
                     r"(?m)^\s*PASS\s+\[[^\]]+\]\s+.*\b" + re.escape(REAL[family]) + r"\s*$", log
                 ) and set(info["image_pairs"]) & loaded:
                     evidence = "R125_FILESYSTEM_TARGETED_PASS"
-                rows[family] = dict(root=str(root), status=status, evidence=evidence, **info)
+                rows[family] = dict(root=str(root), package_dir=package_dir(family), status=status, evidence=evidence, **info)
             except (ValueError, OSError, KeyError, TypeError) as exc:
                 rows[family] = dict(root=str(root), status="INVALID", evidence="NONE", reason=str(exc))
             r = rows[family]
