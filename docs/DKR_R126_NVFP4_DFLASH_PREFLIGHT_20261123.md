@@ -691,3 +691,44 @@ python3 tools/dkr_r126_static_ffi_inventory.py \
 
 This read-only inventory has not been executed against the local tree.
 No new CUDA or Rust compilation is requested. Keep the reconciled lock.
+
+## R1.26/S9A observed COMPLETE — 2026-11-24
+
+User executed f205f586. Inventory SHA256
+`c214e2e3c9e239c9aaf713a7ef496b4736015323835bd96579d3e7d66b1614e1`.
+Core: 20 CUDA sources, 128 explicit FFI names, 122 matched cached definitions.
+Quant: 69 sources, 317 names, 273 matched definitions, four macro extern blocks.
+Paged-attn: 16 sources, 31 names, 27 matched definitions.
+Total 87 cached objects, no nm errors. Not a compiled or linked call graph.
+The four missing paged symbols are cfg-gated FA3 functions.
+
+## R1.26/S9B1 staged — scoped Paged Attention catalogue-only producer
+
+New opt-in feature `mistralrs-core/dkr-paged-catalog-only` forwards
+to `mistralrs-paged-attn/dkr-paged-catalog-only`, independently of
+the broad native+typed candidate. The latter is deliberately not
+changed yet. The paged feature enables all six existing typed adapters
+(paged decode, v2, FP8 decode, KV copy/reshape, gather, scales).
+In this profile the paged build script returns before toolkit detection,
+Cudaforge build and archive linkage, and the Rust FFI module is excluded.
+Legacy tails of the five migrated operation paths are cfg-excluded.
+Unsupported signatures return DKR_PAGED_CATALOG_ONLY errors; the
+FlashInfer, MLA and sinks APIs return explicit capability errors.
+No fake success or C ABI stub is used. FA3 remains disabled via its
+existing build cfg. Full FP8 cache capability remains false because
+scaled writes and gather are not externalized. Direct FP8 decode still
+has its typed adapter. The historical CUDA feature set is unchanged
+by default. Existing swap_blocks remains available.
+
+This is a restricted pilot, NOT a drop-in full backend. It does not
+establish early model capability admission or compile/link/numerical
+qualification. A CPU negative-route test has been added; not executed.
+S10 must verify actual build-script output, no paged static archive
+linkage, existing typed numerical tests and negative admission tests
+with native+typed embedded inputs. Do not promote the feature or delete
+original CUDA sources yet. Core and quant producers remain.
+
+No new device images or Rust build requested at this stage.
+The next source steps should externalize missing paged signatures
+or explicitly scope model capability admission, then tackle core and
+quant producers while preserving Extended kernels and ASD semantics.

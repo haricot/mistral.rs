@@ -244,60 +244,61 @@ pub fn copy_blocks(
     }
     #[cfg(not(feature = "dkr-paged-catalog-only"))]
     {
-    match dtype {
-        candle_core::DType::BF16 => unsafe {
-            copy_blocks_bf16(
-                key_cache_ptr,
-                value_cache_ptr,
-                block_mapping_ptr,
-                num_layers,
-                num_pairs,
-                numel_per_block_key,
-                numel_per_block_value,
-                stream.cu_stream() as i64,
-            );
-        },
-        candle_core::DType::F16 => unsafe {
-            copy_blocks_f16(
-                key_cache_ptr,
-                value_cache_ptr,
-                block_mapping_ptr,
-                num_layers,
-                num_pairs,
-                numel_per_block_key,
-                numel_per_block_value,
-                stream.cu_stream() as i64,
-            );
-        },
-        candle_core::DType::F32 => unsafe {
-            copy_blocks_f32(
-                key_cache_ptr,
-                value_cache_ptr,
-                block_mapping_ptr,
-                num_layers,
-                num_pairs,
-                numel_per_block_key,
-                numel_per_block_value,
-                stream.cu_stream() as i64,
-            );
-        },
-        candle_core::DType::F8E4M3 => unsafe {
-            copy_blocks_u8(
-                key_cache_ptr,
-                value_cache_ptr,
-                block_mapping_ptr,
-                num_layers,
-                num_pairs,
-                numel_per_block_key,
-                numel_per_block_value,
-                stream.cu_stream() as i64,
-            );
-        },
-        _ => unreachable!(),
-    }
-    drop(cache_guards);
+        match dtype {
+            candle_core::DType::BF16 => unsafe {
+                copy_blocks_bf16(
+                    key_cache_ptr,
+                    value_cache_ptr,
+                    block_mapping_ptr,
+                    num_layers,
+                    num_pairs,
+                    numel_per_block_key,
+                    numel_per_block_value,
+                    stream.cu_stream() as i64,
+                );
+            },
+            candle_core::DType::F16 => unsafe {
+                copy_blocks_f16(
+                    key_cache_ptr,
+                    value_cache_ptr,
+                    block_mapping_ptr,
+                    num_layers,
+                    num_pairs,
+                    numel_per_block_key,
+                    numel_per_block_value,
+                    stream.cu_stream() as i64,
+                );
+            },
+            candle_core::DType::F32 => unsafe {
+                copy_blocks_f32(
+                    key_cache_ptr,
+                    value_cache_ptr,
+                    block_mapping_ptr,
+                    num_layers,
+                    num_pairs,
+                    numel_per_block_key,
+                    numel_per_block_value,
+                    stream.cu_stream() as i64,
+                );
+            },
+            candle_core::DType::F8E4M3 => unsafe {
+                copy_blocks_u8(
+                    key_cache_ptr,
+                    value_cache_ptr,
+                    block_mapping_ptr,
+                    num_layers,
+                    num_pairs,
+                    numel_per_block_key,
+                    numel_per_block_value,
+                    stream.cu_stream() as i64,
+                );
+            },
+            _ => unreachable!(),
+        }
+        drop(cache_guards);
 
-    Ok(())    }
+        Ok(())
+    }
 
 }
 

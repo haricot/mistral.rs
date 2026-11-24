@@ -177,308 +177,309 @@ impl PagedAttention {
         }
         #[cfg(not(feature = "dkr-paged-catalog-only"))]
         {
-        let cache_dtype = match self.key_cache.dtype() {
-            DType::F16 => 0,
-            DType::BF16 => 1,
-            DType::F32 => 2,
-            DType::F8E4M3 => 3,
-            dtype => candle::bail!("cache dtype {dtype:?} is not supported"),
-        };
+            let cache_dtype = match self.key_cache.dtype() {
+                DType::F16 => 0,
+                DType::BF16 => 1,
+                DType::F32 => 2,
+                DType::F8E4M3 => 3,
+                dtype => candle::bail!("cache dtype {dtype:?} is not supported"),
+            };
 
-        let dev = q.device();
-        let out_shape = q_l.shape().clone();
+            let dev = q.device();
+            let out_shape = q_l.shape().clone();
 
-        let (kc, kc_l) = self.key_cache.storage_and_layout();
-        let kc = match &*kc {
-            Storage::Cuda(kc) => kc,
-            _ => candle::bail!("key_cache must be a cuda tensor"),
-        };
+            let (kc, kc_l) = self.key_cache.storage_and_layout();
+            let kc = match &*kc {
+                Storage::Cuda(kc) => kc,
+                _ => candle::bail!("key_cache must be a cuda tensor"),
+            };
 
-        let (vc, vc_l) = self.value_cache.storage_and_layout();
-        let vc = match &*vc {
-            Storage::Cuda(vc) => vc,
-            _ => candle::bail!("value_cache must be a cuda tensor"),
-        };
+            let (vc, vc_l) = self.value_cache.storage_and_layout();
+            let vc = match &*vc {
+                Storage::Cuda(vc) => vc,
+                _ => candle::bail!("value_cache must be a cuda tensor"),
+            };
 
-        let (bt, bt_l) = self.block_tables.storage_and_layout();
-        let bt = match &*bt {
-            Storage::Cuda(bt) => bt,
-            _ => candle::bail!("block_tables must be a cuda tensor"),
-        };
+            let (bt, bt_l) = self.block_tables.storage_and_layout();
+            let bt = match &*bt {
+                Storage::Cuda(bt) => bt,
+                _ => candle::bail!("block_tables must be a cuda tensor"),
+            };
 
-        let (cl, cl_l) = self.context_lens.storage_and_layout();
-        let cl = match &*cl {
-            Storage::Cuda(cl) => cl,
-            _ => candle::bail!("context_lens must be a cuda tensor"),
-        };
-
-        let q_rank = q_l.stride().len();
-        let kc_rank = kc_l.stride().len();
-        let vc_rank = vc_l.stride().len();
-
-        if q_rank != 3 {
-            candle::bail!(
-                "paged-attention expects `q` tensor to be of rank 3 \
-                (q: {q_l:?})"
-            )
-        }
-
-        if kc_rank != 5 {
-            candle::bail!(
-                "paged-attention expects `key_cache` tensor to be of rank 5 \
-                (key_cache: {kc_l:?})"
-            )
-        }
-
-        if vc_rank != 4 {
-            candle::bail!(
-                "paged-attention expects `value_cache` tensor to be of rank 4 \
-                (value_cache: {vc_l:?})"
-            )
-        }
-
-        // Get cuda slices for all tensors
-        let q = q.as_cuda_slice::<T>()?;
-        let (kc_ptr, _kc_guard) = if cache_dtype == 3 {
-            slice_ptr(kc.as_cuda_slice::<F8E4M3>()?, kc_l.start_offset())
-        } else {
-            slice_ptr(kc.as_cuda_slice::<T>()?, kc_l.start_offset())
-        };
-        let (vc_ptr, _vc_guard) = if cache_dtype == 3 {
-            slice_ptr(vc.as_cuda_slice::<F8E4M3>()?, vc_l.start_offset())
-        } else {
-            slice_ptr(vc.as_cuda_slice::<T>()?, vc_l.start_offset())
-        };
-        let cl = cl.as_cuda_slice::<u32>()?; // Should be i32!
-        let bt = bt.as_cuda_slice::<u32>()?; // Should be i32!
-
-        // Get cuda views for all tensors
-        let q = q.slice(q_l.start_offset()..);
-        let cl = cl.slice(cl_l.start_offset()..);
-        let bt = bt.slice(bt_l.start_offset()..);
-
-        let alibi_s_ptr = if let Some(alibi_slopes) = self.alibi_slopes.as_ref() {
-            let (alibi_s, alibi_s_l) = alibi_slopes.storage_and_layout();
-            let alibi_s = match &*alibi_s {
-                Storage::Cuda(alibi_s) => alibi_s,
+            let (cl, cl_l) = self.context_lens.storage_and_layout();
+            let cl = match &*cl {
+                Storage::Cuda(cl) => cl,
                 _ => candle::bail!("context_lens must be a cuda tensor"),
             };
-            let alibi_s = alibi_s.as_cuda_slice::<f32>()?;
-            let (alibi_s_ptr, _alibi_s_guard) = slice_ptr(alibi_s, alibi_s_l.start_offset());
-            alibi_s_ptr as *const std::ffi::c_void
-        } else {
-            std::ptr::null()
-        };
 
-        let (k_scale_ptr, v_scale_ptr) = if cache_dtype == 3 {
-            if let (Some(k_scale), Some(v_scale)) = (&self.k_scale, &self.v_scale) {
-                if !crate::cuda::USE_FP8 {
-                    candle::bail!("FP8 is not supported on this system.");
+            let q_rank = q_l.stride().len();
+            let kc_rank = kc_l.stride().len();
+            let vc_rank = vc_l.stride().len();
+
+            if q_rank != 3 {
+                candle::bail!(
+                    "paged-attention expects `q` tensor to be of rank 3 \
+                    (q: {q_l:?})"
+                )
+            }
+
+            if kc_rank != 5 {
+                candle::bail!(
+                    "paged-attention expects `key_cache` tensor to be of rank 5 \
+                    (key_cache: {kc_l:?})"
+                )
+            }
+
+            if vc_rank != 4 {
+                candle::bail!(
+                    "paged-attention expects `value_cache` tensor to be of rank 4 \
+                    (value_cache: {vc_l:?})"
+                )
+            }
+
+            // Get cuda slices for all tensors
+            let q = q.as_cuda_slice::<T>()?;
+            let (kc_ptr, _kc_guard) = if cache_dtype == 3 {
+                slice_ptr(kc.as_cuda_slice::<F8E4M3>()?, kc_l.start_offset())
+            } else {
+                slice_ptr(kc.as_cuda_slice::<T>()?, kc_l.start_offset())
+            };
+            let (vc_ptr, _vc_guard) = if cache_dtype == 3 {
+                slice_ptr(vc.as_cuda_slice::<F8E4M3>()?, vc_l.start_offset())
+            } else {
+                slice_ptr(vc.as_cuda_slice::<T>()?, vc_l.start_offset())
+            };
+            let cl = cl.as_cuda_slice::<u32>()?; // Should be i32!
+            let bt = bt.as_cuda_slice::<u32>()?; // Should be i32!
+
+            // Get cuda views for all tensors
+            let q = q.slice(q_l.start_offset()..);
+            let cl = cl.slice(cl_l.start_offset()..);
+            let bt = bt.slice(bt_l.start_offset()..);
+
+            let alibi_s_ptr = if let Some(alibi_slopes) = self.alibi_slopes.as_ref() {
+                let (alibi_s, alibi_s_l) = alibi_slopes.storage_and_layout();
+                let alibi_s = match &*alibi_s {
+                    Storage::Cuda(alibi_s) => alibi_s,
+                    _ => candle::bail!("context_lens must be a cuda tensor"),
+                };
+                let alibi_s = alibi_s.as_cuda_slice::<f32>()?;
+                let (alibi_s_ptr, _alibi_s_guard) = slice_ptr(alibi_s, alibi_s_l.start_offset());
+                alibi_s_ptr as *const std::ffi::c_void
+            } else {
+                std::ptr::null()
+            };
+
+            let (k_scale_ptr, v_scale_ptr) = if cache_dtype == 3 {
+                if let (Some(k_scale), Some(v_scale)) = (&self.k_scale, &self.v_scale) {
+                    if !crate::cuda::USE_FP8 {
+                        candle::bail!("FP8 is not supported on this system.");
+                    }
+
+                    let (ks, ks_l) = k_scale.storage_and_layout();
+                    let ks = match &*ks {
+                        Storage::Cuda(ks) => ks,
+                        _ => candle::bail!("k_scale must be a cuda tensor"),
+                    };
+                    let ks = ks.as_cuda_slice::<f32>()?;
+                    let (ks, _ks_guard) = slice_ptr(ks, ks_l.start_offset());
+
+                    let (vs, vs_l) = v_scale.storage_and_layout();
+                    let vs = match &*vs {
+                        Storage::Cuda(vs) => vs,
+                        _ => candle::bail!("v_scale must be a cuda tensor"),
+                    };
+                    let vs = vs.as_cuda_slice::<f32>()?;
+                    let (vs, _vs_guard) = slice_ptr(vs, vs_l.start_offset());
+
+                    (ks as *const f32, vs as *const f32)
+                } else {
+                    (std::ptr::null(), std::ptr::null())
                 }
-
-                let (ks, ks_l) = k_scale.storage_and_layout();
-                let ks = match &*ks {
-                    Storage::Cuda(ks) => ks,
-                    _ => candle::bail!("k_scale must be a cuda tensor"),
-                };
-                let ks = ks.as_cuda_slice::<f32>()?;
-                let (ks, _ks_guard) = slice_ptr(ks, ks_l.start_offset());
-
-                let (vs, vs_l) = v_scale.storage_and_layout();
-                let vs = match &*vs {
-                    Storage::Cuda(vs) => vs,
-                    _ => candle::bail!("v_scale must be a cuda tensor"),
-                };
-                let vs = vs.as_cuda_slice::<f32>()?;
-                let (vs, _vs_guard) = slice_ptr(vs, vs_l.start_offset());
-
-                (ks as *const f32, vs as *const f32)
             } else {
                 (std::ptr::null(), std::ptr::null())
+            };
+
+            let sinks_ptr = if let Some(sinks) = self.sinks.as_ref() {
+                let (s, s_l) = sinks.storage_and_layout();
+                let s = match &*s {
+                    Storage::Cuda(s) => s,
+                    _ => candle::bail!("sinks must be a cuda tensor"),
+                };
+                let s = s.as_cuda_slice::<f32>()?;
+                let (s_ptr, _s_guard) = slice_ptr(s, s_l.start_offset());
+                s_ptr as *const f32
+            } else {
+                std::ptr::null()
+            };
+
+            let (num_seqs, num_heads, head_size) = q_l.shape().dims3()?;
+            if !(head_size == 64
+                || head_size == 80
+                || head_size == 96
+                || head_size == 112
+                || head_size == 128
+                || head_size == 192
+                || head_size == 256
+                || head_size == 512)
+            {
+                candle_core::bail!("`head_size` must be one of 64, 80, 96, 112, 128, 192, 256 or 512");
             }
-        } else {
-            (std::ptr::null(), std::ptr::null())
-        };
 
-        let sinks_ptr = if let Some(sinks) = self.sinks.as_ref() {
-            let (s, s_l) = sinks.storage_and_layout();
-            let s = match &*s {
-                Storage::Cuda(s) => s,
-                _ => candle::bail!("sinks must be a cuda tensor"),
-            };
-            let s = s.as_cuda_slice::<f32>()?;
-            let (s_ptr, _s_guard) = slice_ptr(s, s_l.start_offset());
-            s_ptr as *const f32
-        } else {
-            std::ptr::null()
-        };
+            let (num_seqs_bt, max_num_blocks_per_seq) = bt_l.shape().dims2()?;
 
-        let (num_seqs, num_heads, head_size) = q_l.shape().dims3()?;
-        if !(head_size == 64
-            || head_size == 80
-            || head_size == 96
-            || head_size == 112
-            || head_size == 128
-            || head_size == 192
-            || head_size == 256
-            || head_size == 512)
-        {
-            candle_core::bail!("`head_size` must be one of 64, 80, 96, 112, 128, 192, 256 or 512");
-        }
-
-        let (num_seqs_bt, max_num_blocks_per_seq) = bt_l.shape().dims2()?;
-
-        if num_seqs_bt != num_seqs {
-            candle::bail!(
-                "shape mismatch block_tables {:?}, expected {:?}",
-                bt_l.shape(),
-                (num_seqs, max_num_blocks_per_seq)
-            )
-        }
-
-        let (num_blocks, num_kv_heads, head_size_kc, block_size, x) = kc_l.shape().dims5()?;
-        if head_size_kc != head_size / x {
-            candle::bail!(
-                "shape mismatch value_cache {:?}, expected {:?}",
-                vc_l.shape(),
-                (num_blocks, num_kv_heads, head_size / x, block_size, x)
-            )
-        }
-
-        if (num_blocks, num_kv_heads, head_size, block_size) != vc_l.shape().dims4()? {
-            candle::bail!(
-                "shape mismatch key_cache {:?} and value_cache {:?}",
-                kc_l.shape(),
-                vc_l.shape()
-            )
-        }
-
-        if (num_seqs) != cl_l.shape().dims1()? {
-            candle::bail!(
-                "shape mismatch context_lens {:?}, expected {:?}",
-                cl_l.shape(),
-                (num_seqs)
-            )
-        }
-
-        let q_stride = q_l.stride()[0];
-        let kv_block_stride = kc_l.stride()[0];
-        let kv_head_stride = kc_l.stride()[1];
-
-        let partition_size = 512;
-        let mut effective_max_context_len =
-            (max_num_blocks_per_seq * block_size).min(self.max_context_len);
-        if let Some(window) = self.sliding_window {
-            effective_max_context_len =
-                effective_max_context_len.min(window.saturating_add(block_size - 1));
-        }
-        let max_num_partitions = effective_max_context_len.div_ceil(partition_size);
-        let use_v1 = (max_num_partitions == 1 || num_seqs * num_heads > 512)
-            && partition_size % block_size == 0;
-
-        let elem_count = out_shape.elem_count();
-        let out = unsafe { dev.alloc::<T>(elem_count) }?;
-
-        let (out_ptr, out_guard) = out.device_ptr(out.stream());
-        let (q_ptr, _q_guard) = q.device_ptr(q.stream());
-        let (bt_ptr, _bt_guard) = bt.device_ptr(bt.stream());
-        let (cl_ptr, _cl_guard) = cl.device_ptr(cl.stream());
-
-        if use_v1 {
-            let paged_attention_v1_func = match dtype {
-                DType::F16 => paged_attention_v1_f16,
-                DType::BF16 => paged_attention_v1_bf16,
-                DType::F32 => paged_attention_v1_f32,
-                dtype => candle::bail!("dtype {dtype:?} is not supported"),
-            };
-            unsafe {
-                paged_attention_v1_func(
-                    out_ptr as *const std::ffi::c_void,
-                    q_ptr as *const std::ffi::c_void,
-                    kc_ptr as *const std::ffi::c_void,
-                    vc_ptr as *const std::ffi::c_void,
-                    alibi_s_ptr,
-                    num_kv_heads as c_int,
-                    self.softmax_scale,
-                    self.softcapping,
-                    bt_ptr as *const i32,
-                    cl_ptr as *const i32,
-                    block_size as c_int,
-                    effective_max_context_len as c_int,
-                    num_seqs as c_int,
-                    num_heads as c_int,
-                    head_size as c_int,
-                    max_num_blocks_per_seq as c_int,
-                    q_stride as c_int,
-                    kv_block_stride as c_int,
-                    kv_head_stride as c_int,
-                    dev.cuda_stream().cu_stream(),
-                    cache_dtype,
-                    k_scale_ptr,
-                    v_scale_ptr,
-                    sinks_ptr,
-                    self.sliding_window.unwrap_or(FULL_ATTENTION_WINDOW) as c_int,
+            if num_seqs_bt != num_seqs {
+                candle::bail!(
+                    "shape mismatch block_tables {:?}, expected {:?}",
+                    bt_l.shape(),
+                    (num_seqs, max_num_blocks_per_seq)
                 )
             }
-        } else {
-            let tmp_out_shape = Shape::from((num_seqs, num_heads, max_num_partitions, head_size));
-            let exp_sums_shape = Shape::from((num_seqs, num_heads, max_num_partitions));
-            let tmp_out_bytes = tmp_out_shape.elem_count() * std::mem::size_of::<T>();
-            let exp_sums_bytes = exp_sums_shape.elem_count() * std::mem::size_of::<f32>();
-            let tmp_out_offset = 0;
-            let exp_sums_offset = align_up(tmp_out_offset + tmp_out_bytes, 16);
-            let max_logits_offset = align_up(exp_sums_offset + exp_sums_bytes, 16);
-            let workspace_bytes = max_logits_offset + exp_sums_bytes;
-            let (workspace_ptr, _workspace_guard) = workspace_ensure(dev, workspace_bytes)?;
 
-            let tmp_out_ptr = (workspace_ptr + tmp_out_offset as u64) as *mut std::ffi::c_void;
-            let exp_sums_ptr = (workspace_ptr + exp_sums_offset as u64) as *mut f32;
-            let max_logits_ptr = (workspace_ptr + max_logits_offset as u64) as *mut f32;
-
-            let paged_attention_v2_func = match dtype {
-                DType::F16 => paged_attention_v2_f16,
-                DType::BF16 => paged_attention_v2_bf16,
-                DType::F32 => paged_attention_v2_f32,
-                dtype => candle::bail!("dtype {dtype:?} is not supported"),
-            };
-            unsafe {
-                paged_attention_v2_func(
-                    out_ptr as *const std::ffi::c_void,
-                    exp_sums_ptr as *const f32,
-                    max_logits_ptr as *const f32,
-                    tmp_out_ptr as *const std::ffi::c_void,
-                    q_ptr as *const std::ffi::c_void,
-                    kc_ptr as *const std::ffi::c_void,
-                    vc_ptr as *const std::ffi::c_void,
-                    alibi_s_ptr,
-                    num_kv_heads as c_int,
-                    self.softmax_scale,
-                    self.softcapping,
-                    bt_ptr as *const i32,
-                    cl_ptr as *const i32,
-                    block_size as c_int,
-                    effective_max_context_len as c_int,
-                    num_seqs as c_int,
-                    num_heads as c_int,
-                    head_size as c_int,
-                    max_num_blocks_per_seq as c_int,
-                    q_stride as c_int,
-                    kv_block_stride as c_int,
-                    kv_head_stride as c_int,
-                    dev.cuda_stream().cu_stream(),
-                    cache_dtype,
-                    k_scale_ptr,
-                    v_scale_ptr,
-                    sinks_ptr,
-                    self.sliding_window.unwrap_or(FULL_ATTENTION_WINDOW) as c_int,
+            let (num_blocks, num_kv_heads, head_size_kc, block_size, x) = kc_l.shape().dims5()?;
+            if head_size_kc != head_size / x {
+                candle::bail!(
+                    "shape mismatch value_cache {:?}, expected {:?}",
+                    vc_l.shape(),
+                    (num_blocks, num_kv_heads, head_size / x, block_size, x)
                 )
             }
+
+            if (num_blocks, num_kv_heads, head_size, block_size) != vc_l.shape().dims4()? {
+                candle::bail!(
+                    "shape mismatch key_cache {:?} and value_cache {:?}",
+                    kc_l.shape(),
+                    vc_l.shape()
+                )
+            }
+
+            if (num_seqs) != cl_l.shape().dims1()? {
+                candle::bail!(
+                    "shape mismatch context_lens {:?}, expected {:?}",
+                    cl_l.shape(),
+                    (num_seqs)
+                )
+            }
+
+            let q_stride = q_l.stride()[0];
+            let kv_block_stride = kc_l.stride()[0];
+            let kv_head_stride = kc_l.stride()[1];
+
+            let partition_size = 512;
+            let mut effective_max_context_len =
+                (max_num_blocks_per_seq * block_size).min(self.max_context_len);
+            if let Some(window) = self.sliding_window {
+                effective_max_context_len =
+                    effective_max_context_len.min(window.saturating_add(block_size - 1));
+            }
+            let max_num_partitions = effective_max_context_len.div_ceil(partition_size);
+            let use_v1 = (max_num_partitions == 1 || num_seqs * num_heads > 512)
+                && partition_size % block_size == 0;
+
+            let elem_count = out_shape.elem_count();
+            let out = unsafe { dev.alloc::<T>(elem_count) }?;
+
+            let (out_ptr, out_guard) = out.device_ptr(out.stream());
+            let (q_ptr, _q_guard) = q.device_ptr(q.stream());
+            let (bt_ptr, _bt_guard) = bt.device_ptr(bt.stream());
+            let (cl_ptr, _cl_guard) = cl.device_ptr(cl.stream());
+
+            if use_v1 {
+                let paged_attention_v1_func = match dtype {
+                    DType::F16 => paged_attention_v1_f16,
+                    DType::BF16 => paged_attention_v1_bf16,
+                    DType::F32 => paged_attention_v1_f32,
+                    dtype => candle::bail!("dtype {dtype:?} is not supported"),
+                };
+                unsafe {
+                    paged_attention_v1_func(
+                        out_ptr as *const std::ffi::c_void,
+                        q_ptr as *const std::ffi::c_void,
+                        kc_ptr as *const std::ffi::c_void,
+                        vc_ptr as *const std::ffi::c_void,
+                        alibi_s_ptr,
+                        num_kv_heads as c_int,
+                        self.softmax_scale,
+                        self.softcapping,
+                        bt_ptr as *const i32,
+                        cl_ptr as *const i32,
+                        block_size as c_int,
+                        effective_max_context_len as c_int,
+                        num_seqs as c_int,
+                        num_heads as c_int,
+                        head_size as c_int,
+                        max_num_blocks_per_seq as c_int,
+                        q_stride as c_int,
+                        kv_block_stride as c_int,
+                        kv_head_stride as c_int,
+                        dev.cuda_stream().cu_stream(),
+                        cache_dtype,
+                        k_scale_ptr,
+                        v_scale_ptr,
+                        sinks_ptr,
+                        self.sliding_window.unwrap_or(FULL_ATTENTION_WINDOW) as c_int,
+                    )
+                }
+            } else {
+                let tmp_out_shape = Shape::from((num_seqs, num_heads, max_num_partitions, head_size));
+                let exp_sums_shape = Shape::from((num_seqs, num_heads, max_num_partitions));
+                let tmp_out_bytes = tmp_out_shape.elem_count() * std::mem::size_of::<T>();
+                let exp_sums_bytes = exp_sums_shape.elem_count() * std::mem::size_of::<f32>();
+                let tmp_out_offset = 0;
+                let exp_sums_offset = align_up(tmp_out_offset + tmp_out_bytes, 16);
+                let max_logits_offset = align_up(exp_sums_offset + exp_sums_bytes, 16);
+                let workspace_bytes = max_logits_offset + exp_sums_bytes;
+                let (workspace_ptr, _workspace_guard) = workspace_ensure(dev, workspace_bytes)?;
+
+                let tmp_out_ptr = (workspace_ptr + tmp_out_offset as u64) as *mut std::ffi::c_void;
+                let exp_sums_ptr = (workspace_ptr + exp_sums_offset as u64) as *mut f32;
+                let max_logits_ptr = (workspace_ptr + max_logits_offset as u64) as *mut f32;
+
+                let paged_attention_v2_func = match dtype {
+                    DType::F16 => paged_attention_v2_f16,
+                    DType::BF16 => paged_attention_v2_bf16,
+                    DType::F32 => paged_attention_v2_f32,
+                    dtype => candle::bail!("dtype {dtype:?} is not supported"),
+                };
+                unsafe {
+                    paged_attention_v2_func(
+                        out_ptr as *const std::ffi::c_void,
+                        exp_sums_ptr as *const f32,
+                        max_logits_ptr as *const f32,
+                        tmp_out_ptr as *const std::ffi::c_void,
+                        q_ptr as *const std::ffi::c_void,
+                        kc_ptr as *const std::ffi::c_void,
+                        vc_ptr as *const std::ffi::c_void,
+                        alibi_s_ptr,
+                        num_kv_heads as c_int,
+                        self.softmax_scale,
+                        self.softcapping,
+                        bt_ptr as *const i32,
+                        cl_ptr as *const i32,
+                        block_size as c_int,
+                        effective_max_context_len as c_int,
+                        num_seqs as c_int,
+                        num_heads as c_int,
+                        head_size as c_int,
+                        max_num_blocks_per_seq as c_int,
+                        q_stride as c_int,
+                        kv_block_stride as c_int,
+                        kv_head_stride as c_int,
+                        dev.cuda_stream().cu_stream(),
+                        cache_dtype,
+                        k_scale_ptr,
+                        v_scale_ptr,
+                        sinks_ptr,
+                        self.sliding_window.unwrap_or(FULL_ATTENTION_WINDOW) as c_int,
+                    )
+                }
+            }
+
+            drop(out_guard);
+
+            let out = CudaStorage::wrap_cuda_slice(out, dev.clone());
+            Ok((out, out_shape))
         }
-
-        drop(out_guard);
-
-        let out = CudaStorage::wrap_cuda_slice(out, dev.clone());
-        Ok((out, out_shape))        }
 
     }
 }
@@ -637,178 +638,179 @@ fn update_cache<
     }
     #[cfg(not(feature = "dkr-paged-catalog-only"))]
     {
-    let (k, k_l) = key.storage_and_layout();
-    let k = match &*k {
-        Storage::Cuda(k) => k,
-        _ => candle::bail!("key must be a cuda tensor"),
-    };
+        let (k, k_l) = key.storage_and_layout();
+        let k = match &*k {
+            Storage::Cuda(k) => k,
+            _ => candle::bail!("key must be a cuda tensor"),
+        };
 
-    let (v, v_l) = value.storage_and_layout();
-    let v = match &*v {
-        Storage::Cuda(v) => v,
-        _ => candle::bail!("value must be a cuda tensor"),
-    };
+        let (v, v_l) = value.storage_and_layout();
+        let v = match &*v {
+            Storage::Cuda(v) => v,
+            _ => candle::bail!("value must be a cuda tensor"),
+        };
 
-    let (kc, kc_l) = key_cache.storage_and_layout();
-    let kc = match &*kc {
-        Storage::Cuda(kc) => kc,
-        _ => candle::bail!("key_cache must be a cuda tensor"),
-    };
+        let (kc, kc_l) = key_cache.storage_and_layout();
+        let kc = match &*kc {
+            Storage::Cuda(kc) => kc,
+            _ => candle::bail!("key_cache must be a cuda tensor"),
+        };
 
-    let (vc, vc_l) = value_cache.storage_and_layout();
-    let vc = match &*vc {
-        Storage::Cuda(vc) => vc,
-        _ => candle::bail!("value_cache must be a cuda tensor"),
-    };
+        let (vc, vc_l) = value_cache.storage_and_layout();
+        let vc = match &*vc {
+            Storage::Cuda(vc) => vc,
+            _ => candle::bail!("value_cache must be a cuda tensor"),
+        };
 
-    let (s, s_l) = slot_mapping.storage_and_layout();
-    let s = match &*s {
-        Storage::Cuda(s) => s,
-        _ => candle::bail!("slot_mapping must be a cuda tensor"),
-    };
+        let (s, s_l) = slot_mapping.storage_and_layout();
+        let s = match &*s {
+            Storage::Cuda(s) => s,
+            _ => candle::bail!("slot_mapping must be a cuda tensor"),
+        };
 
-    let kc_rank = kc_l.stride().len();
-    let vc_rank = vc_l.stride().len();
+        let kc_rank = kc_l.stride().len();
+        let vc_rank = vc_l.stride().len();
 
-    if kc_rank != 5 {
-        candle::bail!(
-            "paged-attention expects `key_cache` tensor to be of rank 5 \
-                (key_cache: {kc_l:?})"
-        )
-    }
-
-    if vc_rank != 4 {
-        candle::bail!(
-            "paged-attention expects `value_cache` tensor to be of rank 4 \
-                (value_cache: {vc_l:?})"
-        )
-    }
-
-    let dev = k.device();
-
-    // Get cuda slices for all tensors
-    let k = k.as_cuda_slice::<T>()?;
-    let v = v.as_cuda_slice::<T>()?;
-    let s = s.as_cuda_slice::<i64>()?;
-
-    // For FP8 cache, we need to get as u8 slices instead
-    let ((kc_ptr, _kc_guard), (vc_ptr, _vc_guard)) = if cache_dtype == 3 {
-        if !crate::cuda::USE_FP8 {
-            candle::bail!("FP8 is not supported on this system.");
+        if kc_rank != 5 {
+            candle::bail!(
+                "paged-attention expects `key_cache` tensor to be of rank 5 \
+                    (key_cache: {kc_l:?})"
+            )
         }
 
-        let kc = kc.as_cuda_slice::<F8E4M3>()?;
-        let vc = vc.as_cuda_slice::<F8E4M3>()?;
-        (
-            slice_ptr(kc, kc_l.start_offset()),
-            slice_ptr(vc, vc_l.start_offset()),
-        )
-    } else {
-        let kc = kc.as_cuda_slice::<T>()?;
-        let vc = vc.as_cuda_slice::<T>()?;
-        (
-            slice_ptr(kc, kc_l.start_offset()),
-            slice_ptr(vc, vc_l.start_offset()),
-        )
-    };
+        if vc_rank != 4 {
+            candle::bail!(
+                "paged-attention expects `value_cache` tensor to be of rank 4 \
+                    (value_cache: {vc_l:?})"
+            )
+        }
 
-    // Get cuda views for all tensors
-    let k = k.slice(k_l.start_offset()..);
-    let v = v.slice(v_l.start_offset()..);
-    let s = s.slice(s_l.start_offset()..);
+        let dev = k.device();
 
-    let (k_scale_ptr, v_scale_ptr) = if cache_dtype == 3 {
-        if let (Some(k_scale), Some(v_scale)) = (k_scale, v_scale) {
+        // Get cuda slices for all tensors
+        let k = k.as_cuda_slice::<T>()?;
+        let v = v.as_cuda_slice::<T>()?;
+        let s = s.as_cuda_slice::<i64>()?;
+
+        // For FP8 cache, we need to get as u8 slices instead
+        let ((kc_ptr, _kc_guard), (vc_ptr, _vc_guard)) = if cache_dtype == 3 {
             if !crate::cuda::USE_FP8 {
                 candle::bail!("FP8 is not supported on this system.");
             }
 
-            let (ks, ks_l) = k_scale.storage_and_layout();
-            let ks = match &*ks {
-                Storage::Cuda(ks) => ks,
-                _ => candle::bail!("k_scale must be a cuda tensor"),
-            };
-            let ks = ks.as_cuda_slice::<f32>()?;
-            let (ks, _ks_guard) = slice_ptr(ks, ks_l.start_offset());
+            let kc = kc.as_cuda_slice::<F8E4M3>()?;
+            let vc = vc.as_cuda_slice::<F8E4M3>()?;
+            (
+                slice_ptr(kc, kc_l.start_offset()),
+                slice_ptr(vc, vc_l.start_offset()),
+            )
+        } else {
+            let kc = kc.as_cuda_slice::<T>()?;
+            let vc = vc.as_cuda_slice::<T>()?;
+            (
+                slice_ptr(kc, kc_l.start_offset()),
+                slice_ptr(vc, vc_l.start_offset()),
+            )
+        };
 
-            let (vs, vs_l) = v_scale.storage_and_layout();
-            let vs = match &*vs {
-                Storage::Cuda(vs) => vs,
-                _ => candle::bail!("v_scale must be a cuda tensor"),
-            };
-            let vs = vs.as_cuda_slice::<f32>()?;
-            let (vs, _vs_guard) = slice_ptr(vs, vs_l.start_offset());
+        // Get cuda views for all tensors
+        let k = k.slice(k_l.start_offset()..);
+        let v = v.slice(v_l.start_offset()..);
+        let s = s.slice(s_l.start_offset()..);
 
-            (ks as *const f32, vs as *const f32)
+        let (k_scale_ptr, v_scale_ptr) = if cache_dtype == 3 {
+            if let (Some(k_scale), Some(v_scale)) = (k_scale, v_scale) {
+                if !crate::cuda::USE_FP8 {
+                    candle::bail!("FP8 is not supported on this system.");
+                }
+
+                let (ks, ks_l) = k_scale.storage_and_layout();
+                let ks = match &*ks {
+                    Storage::Cuda(ks) => ks,
+                    _ => candle::bail!("k_scale must be a cuda tensor"),
+                };
+                let ks = ks.as_cuda_slice::<f32>()?;
+                let (ks, _ks_guard) = slice_ptr(ks, ks_l.start_offset());
+
+                let (vs, vs_l) = v_scale.storage_and_layout();
+                let vs = match &*vs {
+                    Storage::Cuda(vs) => vs,
+                    _ => candle::bail!("v_scale must be a cuda tensor"),
+                };
+                let vs = vs.as_cuda_slice::<f32>()?;
+                let (vs, _vs_guard) = slice_ptr(vs, vs_l.start_offset());
+
+                (ks as *const f32, vs as *const f32)
+            } else {
+                (std::ptr::null(), std::ptr::null())
+            }
         } else {
             (std::ptr::null(), std::ptr::null())
+        };
+
+        let (num_tokens, num_heads, head_size, key_stride) =
+            cache_input_layout(k_l, "key", "paged-attention")?;
+        let (value_tokens, value_heads, value_head_size, value_stride) =
+            cache_input_layout(v_l, "value", "paged-attention")?;
+        if (num_tokens, num_heads, head_size) != (value_tokens, value_heads, value_head_size) {
+            candle::bail!("shape mismatch k {:?} and v {:?}", k_l.shape(), v_l.shape())
         }
-    } else {
-        (std::ptr::null(), std::ptr::null())
-    };
 
-    let (num_tokens, num_heads, head_size, key_stride) =
-        cache_input_layout(k_l, "key", "paged-attention")?;
-    let (value_tokens, value_heads, value_head_size, value_stride) =
-        cache_input_layout(v_l, "value", "paged-attention")?;
-    if (num_tokens, num_heads, head_size) != (value_tokens, value_heads, value_head_size) {
-        candle::bail!("shape mismatch k {:?} and v {:?}", k_l.shape(), v_l.shape())
+        let (num_blocks, num_heads_kc, head_size_kc, block_size, x) = kc_l.shape().dims5()?;
+        if num_heads_kc != num_heads || head_size_kc != head_size / x {
+            candle::bail!(
+                "shape mismatch value_cache {:?}, expected {:?}",
+                vc_l.shape(),
+                (num_blocks, num_heads, head_size / x, block_size, x)
+            )
+        }
+
+        if (num_blocks, num_heads, head_size, block_size) != vc_l.shape().dims4()? {
+            candle::bail!(
+                "shape mismatch key_cache {:?} and value_cache {:?}",
+                kc_l.shape(),
+                vc_l.shape()
+            )
+        }
+
+        if (num_tokens) != s_l.shape().dims1()? {
+            candle::bail!(
+                "shape mismatch slot_mapping {:?}, expected {:?}",
+                s_l.shape(),
+                (num_tokens)
+            )
+        }
+
+        let key_stride = c_int::try_from(key_stride).map_err(candle::Error::wrap)?;
+        let value_stride = c_int::try_from(value_stride).map_err(candle::Error::wrap)?;
+
+        let (k_ptr, _k_guard) = k.device_ptr(k.stream());
+        let (v_ptr, _v_guard) = v.device_ptr(v.stream());
+        let (s_ptr, _s_guard) = s.device_ptr(s.stream());
+
+        unsafe {
+            ffi::reshape_and_cache(
+                k_ptr as *const core::ffi::c_void,
+                v_ptr as *const core::ffi::c_void,
+                kc_ptr as *const core::ffi::c_void,
+                vc_ptr as *const core::ffi::c_void,
+                s_ptr as *const core::ffi::c_long,
+                num_tokens as c_int,
+                num_heads as c_int,
+                head_size as c_int,
+                block_size as c_int,
+                x as c_int,
+                key_stride,
+                value_stride,
+                dev.cuda_stream().cu_stream(),
+                internal_type,
+                cache_dtype,
+                k_scale_ptr,
+                v_scale_ptr,
+            )
+        }
+        Ok(())
     }
-
-    let (num_blocks, num_heads_kc, head_size_kc, block_size, x) = kc_l.shape().dims5()?;
-    if num_heads_kc != num_heads || head_size_kc != head_size / x {
-        candle::bail!(
-            "shape mismatch value_cache {:?}, expected {:?}",
-            vc_l.shape(),
-            (num_blocks, num_heads, head_size / x, block_size, x)
-        )
-    }
-
-    if (num_blocks, num_heads, head_size, block_size) != vc_l.shape().dims4()? {
-        candle::bail!(
-            "shape mismatch key_cache {:?} and value_cache {:?}",
-            kc_l.shape(),
-            vc_l.shape()
-        )
-    }
-
-    if (num_tokens) != s_l.shape().dims1()? {
-        candle::bail!(
-            "shape mismatch slot_mapping {:?}, expected {:?}",
-            s_l.shape(),
-            (num_tokens)
-        )
-    }
-
-    let key_stride = c_int::try_from(key_stride).map_err(candle::Error::wrap)?;
-    let value_stride = c_int::try_from(value_stride).map_err(candle::Error::wrap)?;
-
-    let (k_ptr, _k_guard) = k.device_ptr(k.stream());
-    let (v_ptr, _v_guard) = v.device_ptr(v.stream());
-    let (s_ptr, _s_guard) = s.device_ptr(s.stream());
-
-    unsafe {
-        ffi::reshape_and_cache(
-            k_ptr as *const core::ffi::c_void,
-            v_ptr as *const core::ffi::c_void,
-            kc_ptr as *const core::ffi::c_void,
-            vc_ptr as *const core::ffi::c_void,
-            s_ptr as *const core::ffi::c_long,
-            num_tokens as c_int,
-            num_heads as c_int,
-            head_size as c_int,
-            block_size as c_int,
-            x as c_int,
-            key_stride,
-            value_stride,
-            dev.cuda_stream().cu_stream(),
-            internal_type,
-            cache_dtype,
-            k_scale_ptr,
-            v_scale_ptr,
-        )
-    }
-    Ok(())    }
 
 }
 
