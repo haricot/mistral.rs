@@ -2,7 +2,7 @@ use crate::{
     cuda::compute_capability,
     universal::{KernelCatalog, KernelManifest, LaunchRequest, VerifiedKernel},
 };
-use anyhow::{anyhow, ensure, Result};
+use anyhow::{anyhow, ensure, Context, Result};
 use dkr_kernel_registry::{telemetry::{self,Event,Handle},TYPED_ABI};
 use candle_core::{
     cuda_backend::cudarc::driver::{CudaFunction, LaunchConfig},
@@ -193,6 +193,26 @@ impl PreparedKernel {
             ),
             shared_mem_bytes: self.manifest.shared_mem_bytes,
         })
+    }
+
+    /// Device-aware persistent grid, computed on plan miss only.
+    /// Matches the historical FlashInfer occupancy policy without a CUDA host shim.
+    pub fn persistent_grid_x(&self, work_items: u32, device: &Device) -> Result<u32> {
+        use candle_core::cuda_backend::cudarc::driver::sys::CUdevice_attribute;
+        ensure!(device.same_device(&self.device) && work_items > 0,
+            "invalid persistent launch device or work count");
+        let stream = device.as_cuda_device()?.cuda_stream();
+        let context = stream.context();
+        context.bind_to_thread()?;
+        let sms = u32::try_from(context.attribute(
+            CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)?)?;
+        ensure!(sms > 0, "CUDA device has no multiprocessors");
+        let threads = self.manifest.block.iter().product::<u32>();
+        let resident = self.function.occupancy_max_active_blocks_per_multiprocessor(
+            threads, self.manifest.shared_mem_bytes as usize, None)?;
+        ensure!(resident > 0, "persistent kernel has zero occupancy");
+        sms.checked_mul(resident.min(work_items.div_ceil(sms)))
+            .context("persistent grid overflow")
     }
 
     pub fn prevalidate_launch(

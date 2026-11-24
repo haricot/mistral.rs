@@ -1156,3 +1156,34 @@ with persistent per-image cache and the same vendored headers and flags.
 Existing S7 manifests and Cargo.lock are untouched. Actual CUDA compilation,
 real image sizes, driver loading, numeric qualification and producer closure
 remain pending. S9B4d4 must integrate the typed host adapter and merge.
+
+
+## R1.26/S9B4d3 source gate PASS — user evidence
+
+Plan 139 eligible, 77 quarantined, 1112 profiles, 37 images, physical
+upper 460, logical total 1535; synthetic PTX self-test exit 0; builder
+cargo check finished. No real PTX/CUBIN admission or GPU execution.
+
+## R1.26/S9B4d4 — typed adapter and split-KV merge (source staged)
+
+Independent dkr-flashinfer-decode feature routes the public paged-attention
+decode function through typed DKR, including under dkr-paged-catalog-only.
+No static fallback. Both direct and partitioned contracts preserve the
+historical padded_batch > batch split decision. Partition writes packed
+partial vectors and base-2 LSE, followed by the persistent merge on the same
+stream; caller scratch is reused, legacy allocation only if absent.
+Both launch plans must resolve before either is enqueued. Merge grid follows
+the historical multiprocessor count and function occupancy policy on plan miss.
+No architecture-specific implementation is added to Candle.
+
+The adapter validates dtype, geometry, scales, contiguous metadata and HND
+cache, query stride span, alignment, device, physical capacity, writable
+span nonaliasing and exact typed profile geometry. It trusts the existing
+planner's device-resident index values (valid page IDs, monotone offsets,
+active mask, chunk ranges, nonempty direct contexts, initialized merge rows);
+shape checks are not proof of these value invariants. No per-token metadata
+readback is introduced. Planner provenance and numerical GPU validation
+remain S9B4d5 gates; no claim of safe admission for arbitrary untrusted
+metadata. The 77 quarantined geometries remain unsupported.
+The static CUDA producer is unchanged outside catalog-only; feature audit
+does not establish closure. No local Rust/CUDA compilation or GPU test.

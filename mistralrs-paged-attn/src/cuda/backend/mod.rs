@@ -68,7 +68,13 @@ pub use fa3::{
 pub use flash_attn_sinks::{
     flash_attn_sinks, flash_attn_sinks_varlen, flash_attn_sinks_varlen_packed,
 };
-pub use flashinfer::{flashinfer_decode, is_flashinfer_cache, FlashInferDecodeScratch};
+pub use flashinfer::{is_flashinfer_cache, FlashInferDecodeScratch};
+#[cfg(not(feature = "dkr-flashinfer-decode"))]
+pub use flashinfer::flashinfer_decode;
+#[cfg(feature = "dkr-flashinfer-decode")]
+mod flashinfer_decode_dynamic;
+#[cfg(feature = "dkr-flashinfer-decode")]
+pub use flashinfer_decode_dynamic::flashinfer_decode;
 #[cfg(not(feature = "dkr-flashinfer-hnd-io"))]
 pub use flashinfer::{gather_kv_cache_flashinfer, reshape_and_cache_flashinfer};
 #[cfg(feature = "dkr-flashinfer-hnd-io")]
@@ -78,6 +84,8 @@ pub use flashinfer_hnd_io_dynamic::{gather_kv_cache_flashinfer, reshape_and_cach
 pub use gather_kv::gather_kv_cache;
 #[cfg(not(feature = "dkr-mla-decode"))]
 pub use mla::flashinfer_mla_decode;
+#[cfg(any(feature = "dkr-mla-decode", feature = "dkr-flashinfer-decode"))]
+mod flashinfer_fastdiv;
 #[cfg(feature = "dkr-mla-decode")]
 mod mla_decode_dynamic;
 #[cfg(feature = "dkr-mla-decode")]
