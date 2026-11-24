@@ -1429,7 +1429,7 @@ mod tests {
         let _evidence = mistralrs_kernel_runtime::RuntimeEvidenceGuard;
         assert_ne!(std::env::var("MISTRALRS_DKR_NVFP4_GEMM").as_deref(), Ok("1"),
                    "S1 decode-only evidence requires GEMM disabled");
-        dkr_nvfp4_checkpoint_projection(false)
+        dkr_nvfp4_checkpoint_projection(false, false)
     }
 
     #[cfg(feature = "dkr-nvfp4-gemv")]
@@ -1438,7 +1438,7 @@ mod tests {
     fn dkr_nvfp4_checkpoint_gemm_gpu() -> Result<()> {
         let _evidence = mistralrs_kernel_runtime::RuntimeEvidenceGuard;
         assert_eq!(std::env::var("MISTRALRS_DKR_NVFP4_GEMM").as_deref(), Ok("1"));
-        dkr_nvfp4_checkpoint_projection(true)?;
+        dkr_nvfp4_checkpoint_projection(true, false)?;
         let device = Device::new_cuda(0)?;
         let (m, n, k) = (17usize, 19usize, 48usize);
         // All nibble codes (including negative values), different scales and
@@ -1485,7 +1485,17 @@ mod tests {
     }
 
     #[cfg(feature = "dkr-nvfp4-gemv")]
-    fn dkr_nvfp4_checkpoint_projection(gemm: bool) -> Result<()> {
+    #[test]
+    #[ignore = "requires physical GPU, local NVFP4 checkpoint and both qualified CUBIN images"]
+    fn dkr_nvfp4_checkpoint_combined_gpu() -> Result<()> {
+        let _evidence = mistralrs_kernel_runtime::RuntimeEvidenceGuard;
+        assert_eq!(std::env::var("MISTRALRS_DKR_NVFP4_GEMV").as_deref(), Ok("1"));
+        assert_eq!(std::env::var("MISTRALRS_DKR_NVFP4_GEMM").as_deref(), Ok("1"));
+        dkr_nvfp4_checkpoint_projection(true, true)
+    }
+
+    #[cfg(feature = "dkr-nvfp4-gemv")]
+    fn dkr_nvfp4_checkpoint_projection(gemm: bool, combined: bool) -> Result<()> {
         if std::env::var("MISTRALRS_DKR_NVFP4_TYPED_ONLY").as_deref() != Ok("1") {
             candle_core::bail!("enable MISTRALRS_DKR_NVFP4_TYPED_ONLY=1 for this probe");
         }
@@ -1515,9 +1525,9 @@ mod tests {
         let shape = view.shape();
         assert_eq!(shape.len(), 2);
         let (n, k) = (shape[0], shape[1] * VALUES_PER_BYTE);
-        let sample_n = n.min(if gemm { 37 } else { 32 });
+        let sample_n = if combined { n } else { n.min(if gemm { 37 } else { 32 }) };
         assert!(sample_n > 0 && k > 0);
-        let shard = Shard::Offset { dim: 0, offset: 0, len: sample_n };
+        let shard = if combined { Shard::default() } else { Shard::Offset { dim: 0, offset: 0, len: sample_n } };
         let load = |dtype: DType, device: &Device| -> Result<Nvfp4Layer> {
             let vb = unsafe {
                 crate::ShardedSafeTensors::sharded(
@@ -1536,7 +1546,11 @@ mod tests {
             assert!(layer.dkr_typed_only && !layer.portable);
             assert!(layer.parts.input_scale.is_none());
             assert_eq!(layer.parts.weight.dims(), [sample_n, k / 2]);
-            for rows in if gemm { [9usize, 17, 33] } else { [1usize, 3, 8] } {
+            let cases: &[usize] = if combined {
+                &[17, 8, 9, 1, 17]
+            } else if gemm { &[9, 17, 33] } else { &[1, 3, 8] };
+            let mut first_prefill: Option<Vec<f32>> = None;
+            for (step, &rows) in cases.iter().enumerate() {
                 let values = (0..rows*k)
                     .map(|i| ((i.wrapping_mul(13) % 31) as i32 - 15) as f32 / 64.0)
                     .collect::<Vec<_>>();
@@ -1558,12 +1572,35 @@ mod tests {
                     max_err = max_err.max(d);
                     max_ref = max_ref.max((b as f64).abs());
                 }
+                assert_eq!(actual.len(), expected.len());
                 assert!(ref2 > 0.0, "degenerate CPU reference");
                 let rel_l2 = (err2 / ref2).sqrt();
                 let tol = if dtype == DType::BF16 { 0.008 } else { 0.0015 };
                 eprintln!("DKR_R126_NVFP4_LAYER_NUMERIC dtype={dtype:?} rows={rows} relative_l2={rel_l2:.8} max_abs={max_err:.8} max_ref={max_ref:.8}");
                 assert!(rel_l2 <= tol && max_err <= 2.0 * tol * max_ref + 1e-5,
                         "NVFP4 checkpoint parity failed: dtype={dtype:?}, rows={rows}");
+                if combined {
+                    if let Some(prefill) = &first_prefill {
+                        let mut cross_err2 = 0f64;
+                        let mut cross_ref2 = 0f64;
+                        let mut cross_max = 0f64;
+                        for (&a, &b) in actual.iter().zip(prefill) {
+                            let d = (a as f64 - b as f64).abs();
+                            cross_err2 += d*d;
+                            cross_ref2 += (b as f64)*(b as f64);
+                            cross_max = cross_max.max(d);
+                        }
+                        assert!(cross_ref2 > 0.0);
+                        let cross = (cross_err2/cross_ref2).sqrt();
+                        assert!(cross <= 2.0*tol && cross_max <= 4.0*tol*max_ref + 2e-5,
+                                "NVFP4 cross-route parity failed");
+                        eprintln!("DKR_R126_NVFP4_CROSS dtype={dtype:?} step={step} rows={rows} relative_l2={cross:.8} max_abs={cross_max:.8}");
+                    } else {
+                        first_prefill = Some(actual);
+                    }
+                    let route = if rows <= 8 { "gemv" } else { "gemm" };
+                    eprintln!("DKR_R126_NVFP4_COMBINED_STEP=PASS dtype={dtype:?} step={step} rows={rows} route={route}");
+                }
             }
             if !gemm {
                 let unsupported = Tensor::zeros((9, k), dtype, &device)?;
@@ -1571,7 +1608,11 @@ mod tests {
                 assert!(err.to_string().contains("typed-only GEMV did not accept"));
             }
         }
-        eprintln!("DKR_R126_NVFP4_LAYER=PASS real_projection=true prefill_gemm={gemm}");
+        if combined {
+            eprintln!("DKR_R126_NVFP4_COMBINED=PASS full_projection=true same_layer=true");
+        } else {
+            eprintln!("DKR_R126_NVFP4_LAYER=PASS real_projection=true prefill_gemm={gemm}");
+        }
         Ok(())
     }
 
