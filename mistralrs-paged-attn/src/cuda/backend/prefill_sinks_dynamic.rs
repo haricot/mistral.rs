@@ -110,7 +110,7 @@ impl candle_core::CustomOp1 for Op {
                 let (qp,_qg)=slice_ptr_on_stream(q.as_cuda_slice::<$ty>()?,ql.start_offset(),&stream);
                 let (kp,_kg)=slice_ptr_on_stream(ks.as_cuda_slice::<$ty>()?,kl.start_offset(),&stream);
                 let (vp,_vg)=slice_ptr_on_stream(vs.as_cuda_slice::<$ty>()?,vl.start_offset(),&stream);
-                // Padded and malformed-metadata rows stay zero, as in the legacy varlen path.
+                // Zero-initialize varlen output so padded rows stay zero. Valid cumulative metadata is a caller contract.
                 let mut out=if key.mode==Mode::Dense {unsafe{cuda.alloc::<$ty>(ql.shape().elem_count())?}}
                     else {cuda.alloc_zeros::<$ty>(ql.shape().elem_count())?};
                 {
@@ -196,4 +196,140 @@ pub fn flash_attn_sinks_varlen(q:&Tensor,k:&Tensor,v:&Tensor,sinks:Option<&Tenso
 #[allow(clippy::too_many_arguments)]
 pub fn flash_attn_sinks_varlen_packed(q:&Tensor,k:&Tensor,v:&Tensor,sinks:Option<&Tensor>,cu_seqlens_q:&Tensor,cu_seqlens_k:&Tensor,max_q_len:usize,softmax_scale:f32,window_size:usize)->Result<Tensor>{
     forward(q,k,v,sinks,Some((cu_seqlens_q,cu_seqlens_k)),Some(max_q_len),softmax_scale,window_size)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Binary-exact inputs so the independent F64 oracle does not depend
+    // on a particular GPU conversion or reduction implementation.
+    fn query(h: usize, row: usize, d: usize) -> f32 {
+        if d==0 { (if h%2==0 {1.0} else {-1.0}) * (1.0 + (row%3) as f32*0.25) }
+        else if d==1 {0.5} else {0.0}
+    }
+    fn key(seq: usize, token: usize, d: usize) -> f32 {
+        (((seq+token+d)%5) as f32-2.0)*0.5
+    }
+    fn value(seq: usize, token: usize, d: usize) -> f32 {
+        (((seq+3*token+d)%13) as f32-6.0)*0.125
+    }
+    fn oracle(seq:usize,h:usize,row:usize,d:usize,ql:usize,kl:usize,window:usize,sink:bool) -> f64 {
+        let end=(kl as i64-ql as i64+row as i64+1).clamp(0,kl as i64) as usize;
+        let start=if window==0 {0} else {end.saturating_sub(window)};
+        let logit=|t:usize| 0.5*(query(h,row,0) as f64*key(seq,t,0) as f64+
+                                      query(h,row,1) as f64*key(seq,t,1) as f64);
+        let sl=if h==0 {1.0f64} else {-0.5};
+        let m=(start..end).map(logit).fold(if sink {sl}else {f64::NEG_INFINITY},f64::max);
+        if m==f64::NEG_INFINITY {return 0.0;}
+        let mut den=if sink {(sl-m).exp()}else{0.0};
+        let mut num=0.0;
+        for t in start..end {
+            let w=(logit(t)-m).exp();
+            den+=w;
+            num+=w*value(seq,t,d) as f64;
+        }
+        if den>0.0 {num/den}else{0.0}
+    }
+
+    #[test]
+    #[ignore = "requires physical CUDA and staged prefill-sinks catalogue"]
+    fn dkr_prefill_sinks_gpu() -> Result<()> {
+        let _evidence=mistralrs_kernel_runtime::RuntimeEvidenceGuard;
+        let dev=Device::new_cuda(0)?;
+        let (b,h,kh,qmax,kmax)=(3usize,2usize,1usize,9usize,17usize);
+        let qlens=[9usize,3,0];
+        let klens=[17usize,2,1];
+        let cuq=Tensor::from_vec(vec![0u32,9,12,12],4,&dev)?;
+        let cuk=Tensor::from_vec(vec![0u32,17,19,20],4,&dev)?;
+        let sinks=Tensor::from_vec(vec![1.0f32,-0.5],h,&dev)?;
+        for dtype in [DType::F16,DType::BF16,DType::F32] {
+            for hd in [64usize,80,96,112,128,192,256] {
+                let mut q=vec![0f32;b*h*qmax*hd];
+                let mut k=vec![0f32;b*kh*kmax*hd];
+                let mut v=k.clone();
+                let mut qp=Vec::new();
+                let mut kp=Vec::new();
+                let mut vp=Vec::new();
+                for seq in 0..b {
+                    for row in 0..qmax {
+                        for head in 0..h {
+                            for d in 0..hd {
+                                let a=query(head,row,d);
+                                q[((seq*h+head)*qmax+row)*hd+d]=a;
+                                if row<qlens[seq] {qp.push(a);}
+                            }
+                        }
+                    }
+                    for t in 0..kmax {
+                        for d in 0..hd {
+                            let a=key(seq,t,d);
+                            let z=value(seq,t,d);
+                            k[(seq*kmax+t)*hd+d]=a;
+                            v[(seq*kmax+t)*hd+d]=z;
+                            if t<klens[seq] {kp.push(a);vp.push(z);}
+                        }
+                    }
+                }
+                let q=Tensor::from_vec(q,(b,h,qmax,hd),&dev)?.to_dtype(dtype)?;
+                let k=Tensor::from_vec(k,(b,kh,kmax,hd),&dev)?.to_dtype(dtype)?;
+                let v=Tensor::from_vec(v,(b,kh,kmax,hd),&dev)?.to_dtype(dtype)?;
+                let qp=Tensor::from_vec(qp,(12,h,hd),&dev)?.to_dtype(dtype)?;
+                let kp=Tensor::from_vec(kp,(20,kh,hd),&dev)?.to_dtype(dtype)?;
+                let vp=Tensor::from_vec(vp,(20,kh,hd),&dev)?.to_dtype(dtype)?;
+                for sink in [false,true] {
+                    let st=sink.then_some(&sinks);
+                    for window in [0usize,3] {
+                        for mode in [Mode::Dense,Mode::Varlen,Mode::Packed] {
+                            let run=||match mode {
+                                Mode::Dense=>super::super::flash_attn_sinks(&q,&k,&v,st,0.5,window),
+                                Mode::Varlen=>super::super::flash_attn_sinks_varlen(&q,&kp,&vp,st,&cuq,&cuk,0.5,window),
+                                Mode::Packed=>super::super::flash_attn_sinks_varlen_packed(&qp,&kp,&vp,st,&cuq,&cuk,qmax,0.5,window),
+                            };
+                            let out=run()?;
+                            assert_eq!(out.dtype(),dtype);
+                            assert_eq!(out.dims(),if mode==Mode::Packed {qp.dims()}else{q.dims()});
+                            let actual=out.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+                            let mut err=0f64;
+                            let mut base=0usize;
+                            for seq in 0..b {
+                                let (ql,kl)=if mode==Mode::Dense {(qmax,kmax)}else{(qlens[seq],klens[seq])};
+                                let rows=if mode==Mode::Packed {ql}else{qmax};
+                                for row in 0..rows {
+                                    for head in 0..h {
+                                        for d in 0..hd {
+                                            let idx=if mode==Mode::Packed {((base+row)*h+head)*hd+d}
+                                                else {((seq*h+head)*qmax+row)*hd+d};
+                                            let got=actual[idx] as f64;
+                                            assert!(got.is_finite());
+                                            let expected=if row<ql {oracle(seq,head,row,d,ql,kl,window,sink)}else{0.0};
+                                            if row>=ql {assert_eq!(got,0.0);}
+                                            err=err.max((got-expected).abs());
+                                        }
+                                    }
+                                }
+                                base+=ql;
+                            }
+                            let tol=match dtype {DType::F32=>3e-5,DType::F16=>0.001,_=>0.006};
+                            assert!(err<=tol,"prefill sinks mode={} dtype={dtype:?} hd={hd} sink={sink} window={window} err={err}",mode.name());
+                            let count=PLANS.with(|p|p.borrow().len());
+                            assert!(count>0);
+                            let again=run()?.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+                            assert_eq!(actual,again);
+                            assert_eq!(count,PLANS.with(|p|p.borrow().len()));
+                            eprintln!("DKR_R126_PREFILL_SINKS=PASS mode={} dtype={dtype:?} hd={hd} sink={sink} window={window} max_abs={err:.8}",mode.name());
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn dkr_prefill_sinks_cpu_rejected() -> Result<()> {
+        let t=Tensor::zeros((1,1,1,64),DType::F32,&Device::Cpu)?;
+        assert!(flash_attn_sinks(&t,&t,&t,None,1.0,0).is_err());
+        Ok(())
+    }
 }

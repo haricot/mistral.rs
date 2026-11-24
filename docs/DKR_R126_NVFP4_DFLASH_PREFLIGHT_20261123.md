@@ -865,3 +865,45 @@ independent CPU F64 reference, repeat dispatch. Not compiled or run.
 Dense and varlen FlashAttnSinks APIs (prefill) are separate from paged
 decode and still reject in catalog-only profile. MLA/FlashInfer and
 other layout signatures remain open. No full backend closure claimed.
+
+## R1.26/S9B3a observed feature audit — 2026-11-24
+
+User fetched f08f90f6 and obtained strict feature PASS, with static
+producer elimination still NOT_QUALIFIED. The earlier audit option
+--paged-fp8-io checks the B2 flags, not specifically paged-options.
+The new --prefill-sinks audit checks both paged-options and prefill-sinks.
+
+## R1.26/S9B3b staged — dense/padded/packed prefill sinks
+
+Externalize the historical tiled flash_attn_sinks.cu device algorithm,
+retaining BR=8, the original head-specific BC, cooperative K/V tiling,
+warp reduction, F32 online softmax and one sink per query. The new
+prefill-sinks package uses device functions and typed global entry
+points, no host FFI launch. 3 dtypes x 7 head dimensions x 3 layouts
+x 2 sink signatures = 126 profiles, expected one PTX/CUBIN image.
+No-sink profiles omit the tensor argument entirely. Separate mode and
+head size operation identities prevent cross-layout plan reuse.
+The opt-in dkr-prefill-sinks feature replaces the three public CUDA
+APIs without affecting the default legacy profile; catalogue-only
+without this feature still rejects. Same contiguous materialization as
+historical APIs. No new N*N attention matrix or per-token CPU readback.
+Padded output zero initialized; varlen metadata stays on GPU, with
+local bounds checks for endpoints and max Q length. Well-formed
+monotone cumulative metadata covering the packed inputs is a caller
+contract, not fully validated on host. Entirely empty input tensors
+are not admitted. Max Q length 32768, dense KV length 32768;
+other geometry and allocation limits enforced by adapter/runtime.
+No throughput equivalence claimed before measurements.
+
+The ignored GPU test exercises 252 configurations (all 126 ABI
+profiles with two window settings), bottom-right causal offset,
+unequal Q/KV lengths including Q>KV, empty query sequence within
+a batch, partial query tiles, GQA, exact padding zero, CPU F64
+oracle and repeat launches. CPU negative admission test added.
+Not built or run. Prospective extended total 30 families, 372
+profiles, 31 images; four new translation units relative to S7.
+The total remains below MAX_DISCOVERED_PACKAGES=512; actual module
+sizes and embedded build limits must be checked at staging. No
+changes to the 27 baseline images, Candle pin or static producer
+policy. MLA/FlashInfer, noncanonical layouts and stream/graph
+qualification remain open.
