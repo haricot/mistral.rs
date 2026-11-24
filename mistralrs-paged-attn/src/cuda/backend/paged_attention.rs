@@ -156,6 +156,20 @@ impl PagedAttention {
             return Ok(result);
         }
 
+        // Opt-in scaled FP8 partition; shares the existing V2 merge and plan pool.
+        #[cfg(all(feature = "dkr-kv-fp8-io", feature = "dkr-paged-v2"))]
+        if let (Some(ks), Some(vs)) = (self.k_scale.as_ref(), self.v_scale.as_ref()) {
+            if let Some(result) = super::paged_v2_dynamic::try_decode(
+                q, q_l, &self.key_cache, &self.value_cache,
+                &self.block_tables, &self.context_lens,
+                self.softmax_scale, self.softcapping, self.max_context_len,
+                self.alibi_slopes.is_some() || self.sinks.is_some() || self.sliding_window.is_some(),
+                Some((ks, vs)),
+            )? {
+                return Ok(result);
+            }
+        }
+
         // Long-context v2: two external typed launches, sharing the
         // existing persistent scratch pool. No FP8, ALiBi, sinks or windows.
         // All unqualified layouts retain the static v1/v2 implementation.
@@ -167,6 +181,7 @@ impl PagedAttention {
             self.alibi_slopes.is_some() || self.sinks.is_some()
                 || self.sliding_window.is_some()
                 || self.k_scale.is_some() || self.v_scale.is_some(),
+            None,
         )? {
             return Ok(result);
         }

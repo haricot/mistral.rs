@@ -816,3 +816,25 @@ checks independent K/V strides, nonzero offsets, rank 3 and 4, padding,
 and raw cache values for all three activation dtypes with/without FP8.
 Neither test has been executed or compiled in this session. Full FP8
 capability remains disabled. No native Candle or legacy backend change.
+
+## R1.26/S9B2c staged — partitioned FP8 decode
+
+S9B2b source fetch and git diff --check succeeded on 6b39a8a7.
+New family paged-fp8-v2 adds only three FP8 partition entries
+(F16/BF16/F32 query). The existing paged-v2 merge consumes normalized
+F32 partials and partition logsumexp unchanged, so its CUBIN is reused.
+The shared Rust V2 adapter distinguishes scaled and plain launch keys;
+FP8 partition is admitted only with dkr-kv-fp8-io + dkr-paged-v2,
+explicit F32 K/V scales, contiguous VLLM tensors, no sinks/window/
+ALiBi/softcap and context 257..32768. Short FP8 decode remains
+unchanged. Existing workspace pool reused; no new graph/concurrent
+stream safety claim. Valid block table and finite positive scales
+remain caller contracts. No performance claim.
+The ignored test covers context 256,257,513,4097, empty and partial
+partitions, permuted pages, GQA, distinct K/V scales, three dtypes,
+independent CPU F64 reference and repeated dispatch. Maximum 32768
+is an admission bound, not a tested length yet. No code compiled/run.
+S7 baseline unchanged: prospective extension 28 families, 231
+profiles, 29 CUBINs (two new translation units including kv-fp8-io).
+The original S7/S8 scripts still describe the original baseline;
+extended staging must be supplied before physical tests.

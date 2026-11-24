@@ -3,7 +3,7 @@
 //! Stage 1: online softmax on 256-token partitions, writing F32 normalized
 //! partial vectors and partition log-normalizers.
 //! Stage 2: stable log-sum-exp merge, writing the original Q dtype.
-//! This experimental route is only for contiguous, non-FP8 K/V without
+//! Routes for contiguous native or explicitly scaled FP8 K/V without
 //! ALiBi, sinks, softcapping or windows; all other cases use static v1/v2.
 //! The long-lived static-v2 workspace pool is reused, not reallocated per
 //! token. No static NVCC flags or CUDA_COMPUTE_CAP changes are introduced.
@@ -66,6 +66,7 @@ impl Stage {
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 struct Key {
+    scaled: bool,
     dtype: DType,
     seqs: usize,
     heads: usize,
@@ -110,22 +111,25 @@ fn prepare(
     let lse_shape = vec![key.seqs, key.heads, key.parts];
     let (args, grid) = match stage {
         Stage::Partition => {
+            let cache_dt = if key.scaled { ElementType::Fp8E4m3 } else { dt };
             let mut args = vec![
                 tensor(dt, vec![key.seqs, key.heads, key.head_size], None),
-                tensor(dt, vec![
+                tensor(cache_dt, vec![
                     key.blocks, key.kv_heads, key.head_size / key.x,
                     key.block_size, key.x,
                 ], Some("vllm_k_blocked_x.v1")),
-                tensor(dt, vec![
+                tensor(cache_dt, vec![
                     key.blocks, key.kv_heads, key.head_size, key.block_size,
                 ], Some("vllm_v_token_strided.v1")),
                 tensor(ElementType::U32, vec![key.seqs, key.table_stride], None),
                 tensor(ElementType::U32, vec![key.seqs], None),
-                tensor(ElementType::F32, partial_shape, None),
-                tensor(ElementType::F32, lse_shape, None),
             ];
+            if key.scaled {
+                args.extend([tensor(ElementType::F32, vec![1], None), tensor(ElementType::F32, vec![1], None)]);
+            }
+            args.extend([tensor(ElementType::F32, partial_shape, None), tensor(ElementType::F32, lse_shape, None)]);
             args.extend(
-                (0..8).map(|_| Argument::Scalar { dtype: ElementType::U32 }),
+                (0..if key.scaled { 9 } else { 8 }).map(|_| Argument::Scalar { dtype: ElementType::U32 }),
             );
             args.push(Argument::Scalar { dtype: ElementType::F32 });
             (
@@ -157,7 +161,9 @@ fn prepare(
         }
     };
     let mut request = LaunchRequest {
-        operation: format!("attention.paged.v2.{}.p256.v1", stage.name()),
+        operation: if key.scaled && stage == Stage::Partition {
+            "attention.paged.fp8_v2.partition.p256.v1".to_owned()
+        } else { format!("attention.paged.v2.{}.p256.v1", stage.name()) },
         cc: 0,
         args,
         grid,
@@ -206,17 +212,20 @@ pub(super) fn try_decode(
     softcapping: f32,
     max_context_len: usize,
     complex_options: bool,
+    scales: Option<(&Tensor, &Tensor)>,
 ) -> Result<Option<(CudaStorage, Shape)>> {
     if !enabled() {
         return Ok(None);
     }
     let dtype = q.dtype();
+    let scaled = scales.is_some();
+    let cache_dtype = if scaled { DType::F8E4M3 } else { dtype };
     if complex_options
         || softcapping != 1.0
         || !softmax_scale.is_finite()
         || max_context_len <= PARTITION || max_context_len > MAX_CONTEXT
         || !matches!(dtype, DType::F16 | DType::BF16 | DType::F32)
-        || key_cache.dtype() != dtype || value_cache.dtype() != dtype
+        || key_cache.dtype() != cache_dtype || value_cache.dtype() != cache_dtype
         || block_table.dtype() != DType::U32
         || context_lens.dtype() != DType::U32
         || !q_layout.is_contiguous()
@@ -243,7 +252,7 @@ pub(super) fn try_decode(
         || table_seqs != seqs || context_lens.dims() != [seqs]
         || max_context_len > table_stride.saturating_mul(block_size)
         || !matches!(head_size, 64 | 80 | 96 | 112 | 128 | 192 | 256 | 512)
-        || [heads, kv_heads, head_size, block_size, x, table_stride, parts]
+        || [blocks, heads, kv_heads, head_size, block_size, x, table_stride, parts]
             .iter().any(|&v| v > u32::MAX as usize)
     {
         return Ok(None);
@@ -255,11 +264,16 @@ pub(super) fn try_decode(
     {
         return Ok(None);
     }
+    if let Some((k, v)) = scales {
+        if ![k,v].iter().all(|t| t.dtype() == DType::F32 && t.elem_count() == 1 && t.is_contiguous() && device.same_device(t.device())) {
+            return Ok(None);
+        }
+    }
     let output_elements = seqs.checked_mul(heads)
         .and_then(|v| v.checked_mul(head_size))
         .ok_or_else(|| candle_core::Error::msg("DKR paged-v2 output overflow"))?;
     let key = Key {
-        dtype, seqs, heads, kv_heads, head_size,
+        scaled, dtype, seqs, heads, kv_heads, head_size,
         blocks, block_size, x, table_stride,
         max_context: max_context_len, parts,
         scale_bits: softmax_scale.to_bits(),
@@ -276,6 +290,13 @@ pub(super) fn try_decode(
         candle_core::bail!("DKR paged-v2 requires CUDA page and metadata tensors");
     };
     let stream = cuda.cuda_stream();
+    let scale_storage = scales.map(|(k,v)| (k.storage_and_layout(), v.storage_and_layout()));
+    let scale_ptrs = if let Some(((ks,kl),(vs,vl))) = &scale_storage {
+        let (Storage::Cuda(ks), Storage::Cuda(vs)) = (&**ks,&**vs) else { candle_core::bail!("FP8 V2 scales require CUDA storage"); };
+        let (kp,kg) = slice_ptr_on_stream(ks.as_cuda_slice::<f32>()?, kl.start_offset(), &stream);
+        let (vp,vg) = slice_ptr_on_stream(vs.as_cuda_slice::<f32>()?, vl.start_offset(), &stream);
+        Some((kp,vp,kg,vg))
+    } else { None };
     // Shared with the historical v2 backend. Its guard serializes host
     // dispatches on a device while both kernels enqueue; capacity grows
     // geometrically, and old buffers survive for graph capture.
@@ -284,6 +305,7 @@ pub(super) fn try_decode(
     let lse_ptr = workspace_ptr
         .checked_add(u64::try_from(lse_offset).map_err(candle_core::Error::wrap)?)
         .ok_or_else(|| candle_core::Error::msg("DKR paged-v2 GPU offset overflow"))?;
+    let num_blocks = u32::try_from(blocks).map_err(candle_core::Error::wrap)?;
     let num_seqs = u32::try_from(seqs).map_err(candle_core::Error::wrap)?;
     let num_heads = u32::try_from(heads).map_err(candle_core::Error::wrap)?;
     let num_kv_heads = u32::try_from(kv_heads).map_err(candle_core::Error::wrap)?;
@@ -297,15 +319,15 @@ pub(super) fn try_decode(
     let out_shape = q_layout.shape().clone();
 
     macro_rules! launch_stages {
-        ($ty:ty) => {{
+        ($ty:ty, $cache_ty:ty) => {{
             let (qp, _qg) = slice_ptr_on_stream(
                 q.as_cuda_slice::<$ty>()?, q_layout.start_offset(), &stream,
             );
             let (kp, _kg) = slice_ptr_on_stream(
-                ks.as_cuda_slice::<$ty>()?, kl.start_offset(), &stream,
+                ks.as_cuda_slice::<$cache_ty>()?, kl.start_offset(), &stream,
             );
             let (vp, _vg) = slice_ptr_on_stream(
-                vs.as_cuda_slice::<$ty>()?, vl.start_offset(), &stream,
+                vs.as_cuda_slice::<$cache_ty>()?, vl.start_offset(), &stream,
             );
             let (tp, _tg) = slice_ptr_on_stream(
                 ts.as_cuda_slice::<u32>()?, tl.start_offset(), &stream,
@@ -326,12 +348,14 @@ pub(super) fn try_decode(
                                 plan.with_prevalidated_launch(|function, config| {
                                     let mut launch = stream.launch_builder(function);
                                     launch.arg(&qp).arg(&kp).arg(&vp)
-                                        .arg(&tp).arg(&lp)
-                                        .arg(&partial_ptr).arg(&lse_ptr)
+                                        .arg(&tp).arg(&lp);
+                                    if let Some((kp,vp,_,_)) = &scale_ptrs { launch.arg(kp).arg(vp); }
+                                    launch.arg(&partial_ptr).arg(&lse_ptr)
                                         .arg(&num_seqs).arg(&num_heads).arg(&num_kv_heads)
                                         .arg(&head_size_u32).arg(&block_size_u32).arg(&x_u32)
-                                        .arg(&table_stride_u32).arg(&max_context_u32)
-                                        .arg(&softmax_scale);
+                                        .arg(&table_stride_u32).arg(&max_context_u32);
+                                    if scaled { launch.arg(&num_blocks); }
+                                    launch.arg(&softmax_scale);
                                     launch.launch(config)?;
                                     Ok(())
                                 })
@@ -359,10 +383,13 @@ pub(super) fn try_decode(
             output = Some(CudaStorage::wrap_cuda_slice(result, cuda.clone()));
         }};
     }
-    match dtype {
-        DType::F16 => launch_stages!(half::f16),
-        DType::BF16 => launch_stages!(half::bf16),
-        DType::F32 => launch_stages!(f32),
+    match (dtype, scaled) {
+        (DType::F16, false) => launch_stages!(half::f16, half::f16),
+        (DType::BF16, false) => launch_stages!(half::bf16, half::bf16),
+        (DType::F32, false) => launch_stages!(f32, f32),
+        (DType::F16, true) => launch_stages!(half::f16, float8::F8E4M3),
+        (DType::BF16, true) => launch_stages!(half::bf16, float8::F8E4M3),
+        (DType::F32, true) => launch_stages!(f32, float8::F8E4M3),
         _ => unreachable!(),
     }
     Ok(output.map(|storage| (storage, out_shape)))
@@ -471,4 +498,73 @@ mod tests {
         }
         Ok(())
     }
+    #[cfg(feature = "dkr-kv-fp8-io")]
+    #[test]
+    #[ignore = "requires physical CUDA and both FP8 V2 partition and existing V2 merge images"]
+    fn dkr_paged_fp8_v2_gpu() -> Result<()> {
+        let _evidence = mistralrs_kernel_runtime::RuntimeEvidenceGuard;
+        let dev = Device::new_cuda(0)?;
+        let (seqs, heads, hd, page, x) = (3usize, 2usize, 64usize, 16usize, 16usize);
+        let max_context = 4097usize;
+        let stride = max_context.div_ceil(page);
+        let blocks = seqs * stride;
+        let table_values: Vec<u32> = (0..blocks).map(|i| (blocks-1-i) as u32).collect();
+        let mut keys = vec![0f32; blocks*hd*page];
+        let mut values = keys.clone();
+        for seq in 0..seqs {
+            for t in 0..stride*page {
+                let p = table_values[seq*stride+t/page] as usize;
+                let slot = t%page;
+                keys[p*hd*page+slot*x] = token_key(t);
+                for d in 0..hd {
+                    values[p*hd*page+d*page+slot] = token_value(t+d+seq);
+                }
+            }
+        }
+        let kc = Tensor::from_vec(keys, (blocks,1,hd/x,page,x), &dev)?.to_dtype(DType::F8E4M3)?;
+        let vc = Tensor::from_vec(values, (blocks,1,hd,page), &dev)?.to_dtype(DType::F8E4M3)?;
+        let ks = Tensor::from_vec(vec![0.5f32], 1, &dev)?;
+        let vs = Tensor::from_vec(vec![2f32], 1, &dev)?;
+        let table = Tensor::from_vec(table_values, (seqs,stride), &dev)?;
+        for dtype in [DType::F16,DType::BF16,DType::F32] {
+            let mut q = vec![0f32;seqs*heads*hd];
+            for row in 0..seqs*heads { q[row*hd] = if row%2==0 {2.0} else {-2.0}; }
+            let q = Tensor::from_vec(q,(seqs,heads,hd),&dev)?.to_dtype(dtype)?;
+            for max in [256usize,257,513,4097] {
+                let contexts = [max, max/2, 0];
+                let lens = Tensor::from_vec(contexts.map(|v| v as u32).to_vec(),seqs,&dev)?;
+                let run = || super::super::paged_attention::paged_attention(
+                    &q,Some(&ks),Some(&vs),&kc,&vc,&table,&lens,None,max,1.0,1.0,None);
+                let output = run()?;
+                let actual = output.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+                let mut max_err = 0f32;
+                for seq in 0..seqs {
+                    for h in 0..heads {
+                        let sign = if h==0 {1.0} else {-1.0};
+                        for d in 0..hd {
+                            let (mut sum, mut norm) = (0f64,0f64);
+                            for t in 0..contexts[seq] {
+                                let w = (sign*token_key(t) as f64).exp();
+                                sum += w*token_value(t+d+seq) as f64*2.0;
+                                norm += w;
+                            }
+                            let expected = if norm > 0.0 {(sum/norm) as f32} else {0.0};
+                            let got = actual[(seq*heads+h)*hd+d];
+                            assert!(got.is_finite());
+                            max_err = max_err.max((got-expected).abs());
+                        }
+                    }
+                }
+                let tol = match dtype { DType::F32 => 2e-5, DType::F16 => 0.001, _ => 0.004 };
+                assert!(max_err <= tol, "FP8 V2 {dtype:?} context={max} err={max_err}");
+                let cached = PLANS.with(|c| c.borrow().len());
+                let again = run()?.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+                assert_eq!(actual,again);
+                assert_eq!(cached, PLANS.with(|c| c.borrow().len()));
+                eprintln!("DKR_R126_PAGED_FP8_V2=PASS dtype={dtype:?} context={max} max_abs={max_err:.8}");
+            }
+        }
+        Ok(())
+    }
+
 }
