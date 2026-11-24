@@ -302,3 +302,61 @@ occur. A clean cache audit does not guarantee a hit under changed build
 arguments. Full-model inference, combined decode/prefill route in a
 single model, DFlash speculation, routed experts and performance
 remain outside this gate.
+
+## R1.26/S2 physical PASS — 2026-11-24
+
+User tested 259836f3, Nextest 12c661f8-2f19-4acc-b58c-046273706300.
+One test passed in 0.224 s overall. Real k_proj N=1024 sampled N=37
+K=2560, F16/BF16 M=9,17,33; all six cases displayed zero relative
+L2 and maximum absolute error at eight decimals against CPU F32
+rounded to the output dtype. Four synthetic cases passed with both
+dtypes and both bias ABIs. The uploaded attestation reports
+`qualification_scope=sampled_dense_w4a16_layer_functional`,
+`nvfp4_prefill_gemm_qualified=true`, full model/DFlash/performance=false.
+Exact GEMM image:
+- PTX: `5b71508ffcb5fe7f07ad0802bdebc0d6393dc86d1137eda34be545df494b9fde`
+- CUBIN: `cefd5eb2aecfb8262eb82ed71cf0a364e4857ebad5d3d3659124917e3aeec1ef`
+- Nextest log: `435802cc82a3500d7ac03d8e254036f6327c30240d8df3ae87728310e89d1102`
+
+S1 image preserved PASS. The selective Cudaforge builder compiled
+one of one new PTX source, staged one new family and paired one image.
+Static CUDA rebuilds were quant 0/49, paged-attn 0/15, core 0/18.
+Host Rust test compilation was 5m10s. The two individual NVFP4 family
+gates are now PASS with eight manifests and two distinct CUBINs.
+
+## R1.26/S3 staged — full projection combined catalogue and routing
+
+The next gate copies the two exact S1/S2 families into a separate
+eight-manifest catalogue and verifies the original PTX/CUBIN identities.
+No external compiler, package builder or ptxas is invoked by staging.
+The original S1/S2 roots and R1.25 artifacts are untouched.
+
+A single ignored test dkr_nvfp4_checkpoint_combined_gpu uses the full
+actual k_proj N=1024 K=2560, not a 32- or 37-row shard. For each
+dtype F16/BF16, it creates one CPU reference and one GPU layer (CPU
+reference shared across dtypes) and runs the same layer in sequence
+M=17,8,9,1,17. Each result is checked against CPU F32 rounded to the
+activation dtype, with the same S1/S2 tolerances. Later outputs are
+also compared against the matching prefix of the initial M=17
+output. Thus both boundary sides and a repeat of the first GEMM
+plan are exercised. This is still a layer-level functional gate,
+not actual model prefill/decode, not a performance measurement.
+The verifier requires exact CUBIN/PTX admissions for both families
+in one test process, full geometry, eight-manifest catalogue,
+ten transition markers and eight cross-route metric records.
+
+Run after preserving the existing resolved Cargo.lock:
+```bash
+cd /home/np/dkr-worktrees/r125-candle-integration
+git fetch origin feature/dkr-r126-nvfp4-typed-sm61
+git switch --detach origin/feature/dkr-r126-nvfp4-typed-sm61
+export MISTRALRS_CUDA_BUILD_ROOT=/home/np/tmp/mistralrs_provider/mistral.rs/target/dkr-cuda-cache/sm61
+export DKR_R125_TYPED_PACKAGE_ROOT=/home/np/tmp/mistralrs_provider/mistral.rs/kernel-packages/build/cuda/sm61
+bash -n tools/dkr_r126_nvfp4_combined_sm61.sh
+DKR_APPROVE_R126_NVFP4_COMBINED=1 bash tools/dkr_r126_nvfp4_combined_sm61.sh
+```
+
+S3 has not been compiled or executed yet. Only host test changes and
+offline tooling are new; CUDA object cache reuse is expected but not
+guaranteed under changed build arguments. Do not rerun S1/S2 merely to
+complete S3. No changes to Candle or existing CUDA kernel sources.
