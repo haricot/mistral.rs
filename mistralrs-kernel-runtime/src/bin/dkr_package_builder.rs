@@ -48,6 +48,7 @@ const PACKAGES: &[Package] = &[
     Package { name: "paged-options", source: "paged_options.cu", fast_math: false },
     Package { name: "prefill-sinks", source: "prefill_sinks.cu", fast_math: false },
     Package { name: "mla-cache-io", source: "mla_cache_io.cu", fast_math: false },
+    Package { name: "mla-decode", source: "mla_decode.cu", fast_math: true },
     Package { name: "flashinfer-hnd-io", source: "flashinfer_hnd_io.cu", fast_math: false },
     Package { name: "kv-cache-ops", source: "kv_cache_ops.cu", fast_math: false },
     Package { name: "kv-fp8-io", source: "kv_fp8_io.cu", fast_math: false },
@@ -120,6 +121,9 @@ fn compile_ptx(
     }
     if !header_dependencies.is_empty() {
         builder = builder.arg("-DALLOW_LEGACY_BF16");
+    }
+    if source.file_stem().is_some_and(|s| s == "mla_decode") {
+        builder = builder.arg("--expt-extended-lambda");
     }
     if let Some(mode) = mode {
         builder = builder.arg(mode);
@@ -260,6 +264,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         vllm.join("attention"),
         vllm.join("quantization/fp8/nvidia"),
     ];
+    // Track every vendored FlashInfer header explicitly for cache invalidation.
+    let mut flashinfer_headers = Vec::new();
+    let mut dirs = vec![vllm.join("flashinfer")];
+    while let Some(dir) = dirs.pop() {
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() { dirs.push(entry.path()); }
+            else if entry.file_type()?.is_file() { flashinfer_headers.push(entry.path()); }
+        }
+    }
+    flashinfer_headers.sort();
     let work = output.join(format!("sm{cc}/_cudaforge_cache"));
     if !pair_existing {
     for pkg in PACKAGES.iter().filter(|p| family.as_ref().is_none_or(|name| p.name == name.as_str())) {
@@ -281,7 +296,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             package(&python, &script, cc, &output, &moe_dir, true, root)?;
         } else {
-            let watched = if cc == 61 && matches!(pkg.name, "paged-decode" | "paged-v2") {
+            let watched = if pkg.name == "mla-decode" {
+                flashinfer_headers.as_slice()
+            } else if cc == 61 && matches!(pkg.name, "paged-decode" | "paged-v2") {
                 paged_headers.as_slice()
             } else {
                 &[]

@@ -886,7 +886,7 @@ __device__ __forceinline__ void compute_qk_and_update_local_stat_mla(
 template <uint32_t num_stages_smem, uint32_t vec_size_ckv, uint32_t vec_size_kpe, uint32_t bdx,
           uint32_t bdy, uint32_t bdz, uint32_t tile_size_qo_heads, typename AttentionVariant,
           typename Params>
-__global__ void BatchDecodeWithPagedKVCacheKernelMLA(Params params) {
+__device__ __forceinline__ void BatchDecodeWithPagedKVCacheDeviceMLA(Params params) {
   auto block = cg::this_thread_block();
   using DTypeQ = typename Params::DTypeQ;
   using DTypeKV = typename Params::DTypeKV;
@@ -1089,6 +1089,15 @@ __global__ void BatchDecodeWithPagedKVCacheKernelMLA(Params params) {
 #if (__CUDACC_VER_MAJOR__ >= 12 && defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
   asm volatile("griddepcontrol.launch_dependents;");
 #endif
+}
+
+// Keep the historical launch ABI and DKR entry points on the same device body.
+template <uint32_t num_stages_smem, uint32_t vec_size_ckv, uint32_t vec_size_kpe, uint32_t bdx,
+          uint32_t bdy, uint32_t bdz, uint32_t tile_size_qo_heads, typename AttentionVariant,
+          typename Params>
+__global__ void BatchDecodeWithPagedKVCacheKernelMLA(Params params) {
+  BatchDecodeWithPagedKVCacheDeviceMLA<num_stages_smem,vec_size_ckv,vec_size_kpe,bdx,bdy,bdz,
+      tile_size_qo_heads,AttentionVariant,Params>(params);
 }
 
 template <uint32_t HEAD_DIM_CKV, uint32_t HEAD_DIM_KPE, typename AttentionVariant, typename Params>
