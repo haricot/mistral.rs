@@ -173,3 +173,59 @@ Only if `DKR_R126_NVFP4_PREFLIGHT=PASS` may work advance to guarded
 typed-only SM61 layer construction and a separately approved bounded
 NVFP4 GPU test. A `PTX_ONLY` result is expected when CUBIN has not yet
 been paired and is not a numeric CUDA qualification.
+
+## R1.26/S0 PASS — 2026-11-24
+
+User executed all six offline regressions (6/6 PASS, 0.016 s) and
+the actual preflight (PASS). The local checkpoint header contains 170
+tensors: U8=37, F8_E4M3=37, F32=74, BF16=22. The verified PTX
+SHA256 is `e44c78486c280abc942dc8dad79c41adb9090b5a5f99eb537fe4ba570b7157ca`.
+All four profiles share this one PTX; CUBIN status is PTX_ONLY.
+The checkpoint contains extra input_scale tensors, but W4A16 metadata
+selects activation=None, and the loader intentionally ignores these
+calibration tensors. This is a metadata/header/PTX preflight, not
+physical GPU evidence or a hash of the entire weight file.
+
+## R1.26/S1 staged — physical qualification pending
+
+The opt-in Mistral.rs host-side `MISTRALRS_DKR_NVFP4_TYPED_ONLY=1`
+mode constructs dense rank-2 W4A16 layers without portable MMA or
+legacy FP4 provider allocation. Selection is architecture-neutral;
+the existing runtime resolves the device and package. A signature not
+accepted by the external GEMV fails explicitly, never falls through
+to static or dequantized execution. M>8, W4A4 and stacked weights
+are not supported by this pilot. No Candle change and no CUDA
+source/PTX modification were made.
+
+New physical test `dkr_nvfp4_checkpoint_layer_gpu` loads a shard of
+the actual `layers.0.self_attn.k_proj` via the existing ModelOpt loader
+(up to 32 output rows, full K). It compares F16/BF16 CUDA output for
+M=1,3,8 to CPU F32 computation rounded to the output dtype and verifies
+3D shape restoration and rejection at M=9. Existing synthetic
+`dkr_nvfp4_gemv_gpu` covers plain/bias F16/BF16.
+These tests have NOT yet been built or executed.
+
+The guarded runner `tools/dkr_r126_nvfp4_sm61.sh` keeps the original PTX
+and existing R1.25 packages untouched. It stages a separate NVFP4-only
+package tree, reuses the already-built Rust package builder with
+`--pair-existing` (one PTX-to-CUBIN assembly if not cached), verifies
+strict CUBIN, preserves the reconciled Cargo.lock, checks selected
+features, and runs the two focused tests in a single bounded Nextest
+campaign. The new log verifier requires both test passes and the
+expected exact CUBIN in each test process, plus checkpoint geometry
+and six numerical cases. It does not attest full-model inference or
+a prefill GEMM. No fresh CUDA C++ compilation is requested; the host
+Rust feature change may trigger rebuilds, and cache hits cannot be
+guaranteed until the actual build. Offline Cargo metadata must
+succeed before any GPU execution.
+
+```bash
+cd /home/np/dkr-worktrees/r125-candle-integration
+git fetch origin feature/dkr-r126-nvfp4-typed-sm61
+git switch --detach origin/feature/dkr-r126-nvfp4-typed-sm61
+export MISTRALRS_CUDA_BUILD_ROOT=/home/np/tmp/mistralrs_provider/mistral.rs/target/dkr-cuda-cache/sm61
+export DKR_R125_TYPED_PACKAGE_ROOT=/home/np/tmp/mistralrs_provider/mistral.rs/kernel-packages/build/cuda/sm61
+DKR_APPROVE_R126_NVFP4=1 bash tools/dkr_r126_nvfp4_sm61.sh
+```
+Retain the locally reconciled lockfile; do not stash or reset it merely
+to switch revisions. If Git reports a conflict, stop before running.
