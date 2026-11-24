@@ -92,8 +92,8 @@ pub struct Nvfp4Layer {
     // Value equality is safe only for private calibration allocations.
     input_scale_immutable: bool,
     portable: bool,
-    // Opt-in external typed GEMV only; never construct a native/legacy provider.
-    dkr_gemv_only: bool,
+    // Opt-in external typed NVFP4 only; never construct a native/legacy provider.
+    dkr_typed_only: bool,
     #[cfg(all(feature = "cuda", feature = "cuda-legacy-fp4"))]
     legacy: Option<candle_core::quantized::nvfp4_arch_e7::Nvfp4E7Linear>,
     #[cfg(all(feature = "cuda", feature = "cutile", has_nvfp4_cutlass_kernels))]
@@ -234,11 +234,11 @@ impl Nvfp4Layer {
             candle_core::bail!("NVFP4 CUDA inference requires BF16 or F16 output dtype");
         }
         #[cfg(feature = "dkr-nvfp4-gemv")]
-        let dkr_gemv_only = parts.weight.device().is_cuda()
+        let dkr_typed_only = parts.weight.device().is_cuda()
             && std::env::var("MISTRALRS_DKR_NVFP4_TYPED_ONLY").as_deref() == Ok("1");
         #[cfg(not(feature = "dkr-nvfp4-gemv"))]
-        let dkr_gemv_only = false;
-        if dkr_gemv_only {
+        let dkr_typed_only = false;
+        if dkr_typed_only {
             if dims.len() != 2 || parts.activation != Nvfp4ActivationMode::None {
                 candle_core::bail!("DKR NVFP4 typed-only requires dense rank-2 W4A16 weights");
             }
@@ -248,7 +248,7 @@ impl Nvfp4Layer {
         }
         #[cfg(all(feature = "cuda", feature = "cuda-legacy-fp4"))]
         let legacy_selected = match parts.weight.device() {
-            Device::Cuda(device) if !dkr_gemv_only => {
+            Device::Cuda(device) if !dkr_typed_only => {
                 let cc = device
                     .cuda_stream()
                     .context()
@@ -262,7 +262,7 @@ impl Nvfp4Layer {
         let legacy_selected = false;
         #[cfg(feature = "cuda")]
         let portable = match parts.weight.device() {
-            Device::Cuda(device) if !legacy_selected && !dkr_gemv_only => use_portable_kernels(device)?,
+            Device::Cuda(device) if !legacy_selected && !dkr_typed_only => use_portable_kernels(device)?,
             _ => false,
         };
         #[cfg(not(feature = "cuda"))]
@@ -354,7 +354,7 @@ impl Nvfp4Layer {
             None
         };
         #[cfg(all(feature = "cuda", feature = "cutile", has_nvfp4_cutlass_kernels))]
-        let native = if portable || legacy_selected || dkr_gemv_only {
+        let native = if portable || legacy_selected || dkr_typed_only {
             None
         } else {
             cutlass::State::new(&parts)?
@@ -370,7 +370,7 @@ impl Nvfp4Layer {
             input_global_scale,
             input_scale_immutable,
             portable,
-            dkr_gemv_only,
+            dkr_typed_only,
             #[cfg(all(feature = "cuda", feature = "cuda-legacy-fp4"))]
             legacy,
             #[cfg(all(feature = "cuda", feature = "cutile", has_nvfp4_cutlass_kernels))]
@@ -378,7 +378,7 @@ impl Nvfp4Layer {
         };
         #[cfg(all(feature = "cuda", feature = "cutile"))]
         if layer.parts.weight.device().is_cuda()
-            && !layer.portable && !legacy_selected && !layer.dkr_gemv_only
+            && !layer.portable && !legacy_selected && !layer.dkr_typed_only
         {
             crate::cutile::register_nvfp4_shape(layer.gemm_args(), layer.parts.dtype)?;
         }
@@ -1002,9 +1002,8 @@ impl QuantMethod for Nvfp4Layer {
             *shape.last_mut().unwrap() = self.parts.weight.dim(0)?;
             return Tensor::zeros(shape, x.dtype(), x.device());
         }
-        // Experimental fused NVFP4 W4A16 decode. Restrict to rank-2
-        // weights, <=8 rows, and the checkpoint's exact output dtype.
-        // Pascal E7 stays resident as the fallback for other inputs.
+        // External dense W4A16: GEMV for M<=8, opt-in GEMM for M>8.
+        // Typed-only mode never enters the legacy/native fallback.
         #[cfg(feature = "dkr-nvfp4-gemv")]
         if x.device().is_cuda()
             && self.parts.activation == Nvfp4ActivationMode::None
@@ -1031,7 +1030,7 @@ impl QuantMethod for Nvfp4Layer {
             }
         }
 
-        if self.dkr_gemv_only {
+        if self.dkr_typed_only {
             candle_core::bail!("DKR NVFP4 typed-only GEMV did not accept this signature or GEMM is unavailable; dense W4A16 and matching dtype required (no static fallback)");
         }
 
@@ -1437,7 +1436,50 @@ mod tests {
     #[ignore = "requires physical GPU, real NVFP4 checkpoint, and new paired GEMM image"]
     fn dkr_nvfp4_checkpoint_gemm_gpu() -> Result<()> {
         assert_eq!(std::env::var("MISTRALRS_DKR_NVFP4_GEMM").as_deref(), Ok("1"));
-        dkr_nvfp4_checkpoint_projection(true)
+        dkr_nvfp4_checkpoint_projection(true)?;
+        let device = Device::new_cuda(0)?;
+        let (m, n, k) = (17usize, 19usize, 48usize);
+        // All nibble codes (including negative values), different scales and
+        // global multipliers; both M and N cross tile boundaries.
+        let weights = (0..n*k/2).map(|i| ((i*17+3)%256) as u8).collect::<Vec<_>>();
+        let scales = (0..n*k/16)
+            .map(|i| F8E4M3::from_f32([0.25, 0.5, 1.0, 2.0][i%4]))
+            .collect::<Vec<_>>();
+        let globals = (0..n).map(|i| (1+i%4) as f32/4.0).collect::<Vec<_>>();
+        let biases = (0..n).map(|i| (i as i32%7-3) as f32/8.0).collect::<Vec<_>>();
+        let values = (0..m*k).map(|i| (i as i32%13-6) as f32/16.0).collect::<Vec<_>>();
+        let source = Tensor::from_vec(values, (m,k), &Device::Cpu)?;
+        for dtype in [DType::F16, DType::BF16] {
+            for has_bias in [false, true] {
+                let layer = |dev: &Device, dt: DType| -> Result<Nvfp4Layer> {
+                    Nvfp4Layer::from_parts(Nvfp4LayerParts {
+                        weight: Tensor::from_vec(weights.clone(), (n,k/2), dev)?,
+                        scales: Tensor::from_vec(scales.clone(), (n,k/16), dev)?,
+                        global_scales: Tensor::from_vec(globals.clone(), n, dev)?,
+                        input_scale: None,
+                        activation: Nvfp4ActivationMode::None,
+                        bias: if has_bias {
+                            Some(Tensor::from_vec(biases.clone(), n, dev)?.to_dtype(dt)?)
+                        } else { None },
+                        dtype: dt,
+                    })
+                };
+                let reference = layer(&Device::Cpu, DType::F32)?.forward_raw(&source)?
+                    .to_dtype(dtype)?.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+                let gpu = layer(&device, dtype)?;
+                assert!(gpu.dkr_typed_only);
+                let output = gpu.forward_raw(&source.to_device(&device)?.to_dtype(dtype)?)?;
+                assert_eq!(output.dims(), [m,n]);
+                assert_eq!(output.dtype(), dtype);
+                let actual = output.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+                for (&a,&b) in actual.iter().zip(&reference) {
+                    assert!(a.is_finite() && b.is_finite() && (a-b).abs() <= 0.001*b.abs()+1e-5,
+                            "NVFP4 GEMM synthetic mismatch {dtype:?} bias={has_bias} actual={a} reference={b}");
+                }
+                eprintln!("DKR_R126_NVFP4_GEMM_SYNTHETIC=PASS dtype={dtype:?} bias={has_bias} m={m} n={n} k={k}");
+            }
+        }
+        Ok(())
     }
 
     #[cfg(feature = "dkr-nvfp4-gemv")]
@@ -1490,7 +1532,7 @@ mod tests {
         eprintln!("DKR_R126_NVFP4_CHECKPOINT_LAYER prefix={PREFIX} source_n={n} sampled_n={sample_n} k={k}");
         for dtype in [DType::F16, DType::BF16] {
             let layer = load(dtype, &device)?;
-            assert!(layer.dkr_gemv_only && !layer.portable);
+            assert!(layer.dkr_typed_only && !layer.portable);
             assert!(layer.parts.input_scale.is_none());
             assert_eq!(layer.parts.weight.dims(), [sample_n, k / 2]);
             for rows in if gemm { [9usize, 17, 33] } else { [1usize, 3, 8] } {
