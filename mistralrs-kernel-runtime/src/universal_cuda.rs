@@ -141,11 +141,11 @@ impl PreparedKernel {
         #[cfg(feature = "shared-registry")]
         let function = {
             let artifact = match &module.ptx {
-                std::borrow::Cow::Borrowed(ptx) => dkr_kernel_registry::VerifiedArtifact::from_build_verified(
+                crate::universal::SharedImage::Embedded(ptx) => dkr_kernel_registry::VerifiedArtifact::from_build_verified(
                     ptx, module.manifest.target_cc, &module.manifest.sha256,
                     [module.manifest.entry.clone()]),
-                std::borrow::Cow::Owned(ptx) => dkr_kernel_registry::VerifiedArtifact::new(
-                    ptx.clone(), module.manifest.target_cc, &module.manifest.sha256)
+                crate::universal::SharedImage::External(ptx) => dkr_kernel_registry::VerifiedArtifact::new(
+                    ptx.to_string(), module.manifest.target_cc, &module.manifest.sha256)
                     .map_err(anyhow::Error::msg)?,
             };
             let image = match (&module.cubin, module.manifest.cubin_sha256.as_deref()) {

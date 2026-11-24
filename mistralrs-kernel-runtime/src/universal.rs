@@ -3,13 +3,13 @@ use dkr_kernel_registry::{Registry, RegistryKey};
 use anyhow::{bail, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
-    borrow::Cow,
+    collections::BTreeMap,
+    ops::Deref,
     path::{Component, Path, PathBuf},
     sync::Arc,
 };
 #[cfg(any(feature = "cuda", test))]
 use std::{
-    collections::BTreeMap,
     sync::{Mutex, Weak},
 };
 
@@ -22,6 +22,60 @@ pub const MAX_TENSOR_BYTES: usize = 1024 * 1024 * 1024;
 pub const MAX_DISCOVERY_DEPTH: usize = 8;
 pub const MAX_DISCOVERED_PACKAGES: usize = 512;
 pub const MANIFEST_FILENAME: &str = "manifest.json";
+/// Independent physical discovery and logical dispatch bounds.
+pub const MAX_PROFILES_PER_SHARD: usize = 64;
+pub const MAX_CATALOG_PROFILES: usize = 4096;
+pub const SHARD_SCHEMA: &str = "DKR-KERNEL-SHARD-V1";
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct KernelShard {
+    schema: String,
+    profiles: Vec<KernelManifest>,
+}
+
+/// Embedded images remain zero-copy; external profiles share verified storage.
+#[derive(Debug)]
+pub enum SharedImage<T: ?Sized + 'static> {
+    Embedded(&'static T),
+    External(Arc<T>),
+}
+impl<T: ?Sized + 'static> Clone for SharedImage<T> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Embedded(bytes) => Self::Embedded(*bytes),
+            Self::External(bytes) => Self::External(Arc::clone(bytes)),
+        }
+    }
+}
+impl<T: ?Sized + 'static> Deref for SharedImage<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        match self {
+            Self::Embedded(bytes) => *bytes,
+            Self::External(bytes) => bytes.as_ref(),
+        }
+    }
+}
+impl<T: ?Sized + 'static> AsRef<T> for SharedImage<T> {
+    fn as_ref(&self) -> &T { self.deref() }
+}
+
+#[derive(Default)]
+struct ImageCache {
+    ptx: BTreeMap<PathBuf, (String, SharedImage<str>)>,
+    cubin: BTreeMap<PathBuf, (String, SharedImage<[u8]>)>,
+}
+
+fn bounded_read(path: &Path, limit: u64, label: &str) -> Result<Vec<u8>> {
+    use std::io::Read;
+    let file = std::fs::File::open(path)?;
+    ensure!(file.metadata()?.is_file() && file.metadata()?.len() <= limit, "{label} budget exceeded");
+    let mut bytes = Vec::new();
+    file.take(limit + 1).read_to_end(&mut bytes)?;
+    ensure!(bytes.len() as u64 <= limit, "{label} budget exceeded");
+    Ok(bytes)
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -139,8 +193,8 @@ pub struct LaunchRequest {
 #[derive(Debug)]
 pub struct VerifiedKernel {
     pub manifest: KernelManifest,
-    pub ptx: Cow<'static, str>,
-    pub cubin: Option<Cow<'static, [u8]>>,
+    pub ptx: SharedImage<str>,
+    pub cubin: Option<SharedImage<[u8]>>,
     pub manifest_sha256: String,
 }
 
@@ -359,29 +413,27 @@ impl KernelManifest {
 impl VerifiedKernel {
     pub fn read(path: &Path) -> Result<Self> {
         let path = path.canonicalize()?;
-        ensure!(
-            std::fs::metadata(&path)?.len() <= MAX_MANIFEST_BYTES,
-            "manifest budget exceeded"
-        );
-        let bytes = std::fs::read(&path)?;
-        let manifest: KernelManifest = serde_json::from_slice(&bytes)?;
+        let bytes = bounded_read(&path, MAX_MANIFEST_BYTES, "manifest")?;
+        let manifest = serde_json::from_slice(&bytes)?;
+        Self::read_profile(&path, manifest, digest(&bytes), &mut ImageCache::default())
+    }
+
+    fn read_profile(path: &Path, manifest: KernelManifest, manifest_sha256: String,
+                    cache: &mut ImageCache) -> Result<Self> {
         manifest.validate()?;
         let root = path.parent().context("manifest directory missing")?;
         let artifact_path = root.join(&manifest.artifact).canonicalize()?;
-        ensure!(
-            artifact_path.starts_with(root),
-            "kernel artifact escapes package directory"
-        );
-        ensure!(
-            std::fs::metadata(&artifact_path)?.len() <= MAX_KERNEL_BYTES,
-            "kernel artifact budget exceeded"
-        );
-        let artifact = std::fs::read(artifact_path)?;
-        ensure!(
-            digest(&artifact).eq_ignore_ascii_case(&manifest.sha256),
-            "kernel artifact digest mismatch"
-        );
-        let ptx = String::from_utf8(artifact)?;
+        ensure!(artifact_path.starts_with(root), "kernel artifact escapes package directory");
+        if !cache.ptx.contains_key(&artifact_path) {
+            let bytes = bounded_read(&artifact_path, MAX_KERNEL_BYTES, "kernel artifact")?;
+            let hash = digest(&bytes);
+            ensure!(hash.eq_ignore_ascii_case(&manifest.sha256), "kernel artifact digest mismatch");
+            let ptx = SharedImage::External(Arc::<str>::from(String::from_utf8(bytes)?));
+            cache.ptx.insert(artifact_path.clone(), (hash, ptx));
+        }
+        let (hash, ptx) = &cache.ptx[&artifact_path];
+        ensure!(hash.eq_ignore_ascii_case(&manifest.sha256), "kernel artifact digest mismatch");
+        let ptx = ptx.clone();
         let tokens: Vec<_> = ptx.split_whitespace().collect();
         ensure!(
             tokens.windows(2).any(|t| t == [".address_size", "64"]),
@@ -409,25 +461,27 @@ impl VerifiedKernel {
         let cubin = if let Some(name) = &manifest.cubin_artifact {
             let path = root.join(name).canonicalize()?;
             ensure!(path.starts_with(root), "CUBIN escapes package directory");
-            ensure!(
-                std::fs::metadata(&path)?.len() <= MAX_KERNEL_BYTES,
-                "CUBIN artifact budget exceeded"
-            );
-            let image = std::fs::read(path)?;
-            ensure!(
-                digest(&image).eq_ignore_ascii_case(manifest.cubin_sha256.as_deref().unwrap_or("")),
-                "CUBIN digest mismatch"
-            );
-            ensure!(cubin_elf_header(&image, manifest.target_cc), "invalid CUBIN ELF header or target SM");
-            Some(Cow::Owned(image))
+            if !cache.cubin.contains_key(&path) {
+                let bytes = bounded_read(&path, MAX_KERNEL_BYTES, "CUBIN artifact")?;
+                let hash = digest(&bytes);
+                ensure!(hash.eq_ignore_ascii_case(manifest.cubin_sha256.as_deref().unwrap_or("")),
+                    "CUBIN digest mismatch");
+                let image = SharedImage::External(Arc::<[u8]>::from(bytes));
+                cache.cubin.insert(path.clone(), (hash, image));
+            }
+            let (hash, image) = &cache.cubin[&path];
+            ensure!(hash.eq_ignore_ascii_case(manifest.cubin_sha256.as_deref().unwrap_or("")),
+                "CUBIN digest mismatch");
+            ensure!(cubin_elf_header(image, manifest.target_cc), "invalid CUBIN ELF header or target SM");
+            Some(image.clone())
         } else {
             None
         };
         Ok(Self {
             manifest,
-            ptx: ptx.into(),
+            ptx,
             cubin,
-            manifest_sha256: digest(&bytes),
+            manifest_sha256,
         })
     }
 
@@ -448,6 +502,7 @@ pub struct KernelCatalog {
 
 impl KernelCatalog {
     pub fn from_build_verified(modules: Vec<VerifiedKernel>) -> Result<Self> {
+        ensure!(modules.len() <= MAX_CATALOG_PROFILES, "logical kernel profile count exceeded");
         let mut result = Self::default();
         for module in modules {
             let key = RegistryKey::new(TYPED_ABI, &module.manifest.operation,
@@ -510,18 +565,41 @@ impl KernelCatalog {
         );
         let catalog = Self::load(&paths)?;
         if std::env::var_os("CANDLE_DKR_TRACE").is_some() {
-            eprintln!("MISTRAL_DKR_CATALOG_VALIDATED manifests={}", catalog.len());
+            eprintln!("MISTRAL_DKR_CATALOG_VALIDATED manifests={} profiles={}", paths.len(), catalog.len());
         }
         Ok(catalog)
     }
 
     pub fn load(paths: &[PathBuf]) -> Result<Self> {
+        ensure!(paths.len() <= MAX_DISCOVERED_PACKAGES, "kernel package count exceeded");
         let mut result = Self::default();
+        let mut cache = ImageCache::default();
         for path in paths {
-            let module = Arc::new(VerifiedKernel::read(path)?);
-            let key = RegistryKey::new(TYPED_ABI, &module.manifest.operation,
-                &module.manifest.implementation_id, module.manifest.target_cc);
-            result.modules.insert(key, module).map_err(|e| anyhow::anyhow!("duplicate operation/implementation/architecture identity: {e}"))?;
+            let path = path.canonicalize()?;
+            let bytes = bounded_read(&path, MAX_MANIFEST_BYTES, "manifest")?;
+            // Preserve byte-exact V1 identity. Hash each shard profile
+            // independently of its neighbours and of shard ordering.
+            let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+            let profiles = if value.get("schema").and_then(|v| v.as_str()) == Some(SHARD_SCHEMA) {
+                let shard: KernelShard = serde_json::from_slice(&bytes)?;
+                ensure!(shard.schema == SHARD_SCHEMA && !shard.profiles.is_empty()
+                    && shard.profiles.len() <= MAX_PROFILES_PER_SHARD,
+                    "kernel shard profile count exceeded or empty");
+                shard.profiles.into_iter().map(|manifest| {
+                    let hash = digest(&serde_json::to_vec(&manifest)?);
+                    Ok((manifest, hash))
+                }).collect::<Result<Vec<_>>>()?
+            } else {
+                vec![(serde_json::from_slice::<KernelManifest>(&bytes)?, digest(&bytes))]
+            };
+            ensure!(profiles.len() <= MAX_CATALOG_PROFILES - result.len(),
+                "logical kernel profile count exceeded");
+            for (manifest, hash) in profiles {
+                let module = Arc::new(VerifiedKernel::read_profile(&path, manifest, hash, &mut cache)?);
+                let key = RegistryKey::new(TYPED_ABI, &module.manifest.operation,
+                    &module.manifest.implementation_id, module.manifest.target_cc);
+                result.modules.insert(key, module).map_err(|e| anyhow::anyhow!("duplicate operation/implementation/architecture identity: {e}"))?;
+            }
         }
         Ok(result)
     }
@@ -625,6 +703,66 @@ mod tests {
             max_dynamic_shared_mem_bytes: 48 * 1024,
         };
         (dir, path, request)
+    }
+
+
+    fn write_shard(path: &Path, profiles: Vec<KernelManifest>) {
+        std::fs::write(path, serde_json::to_vec(&KernelShard {
+            schema: SHARD_SCHEMA.into(), profiles,
+        }).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn scalable_shards_share_images_and_preserve_explicit_variant_selection() {
+        let (dir, path, request) = fixture();
+        let manifest: KernelManifest = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let second = "fused_variant";
+        let original = std::fs::read_to_string(dir.path().join("fused.ptx")).unwrap();
+        let combined = format!("{original}\n{}", original[original.find(".visible").unwrap()..].replace("fused", second));
+        std::fs::write(dir.path().join("fused.ptx"), &combined).unwrap();
+        let mut a = manifest;
+        a.sha256 = digest(combined.as_bytes());
+        let mut b = a.clone();
+        b.implementation_id = "variant.b".into();
+        b.entry = second.into();
+        write_shard(&path, vec![a.clone(), b.clone()]);
+        let catalog = KernelCatalog::discover(dir.path()).unwrap();
+        let first = catalog.select(&a.implementation_id, &request).unwrap();
+        let other = catalog.select(&b.implementation_id, &request).unwrap();
+        assert_eq!(other.manifest.entry, second);
+        assert!(std::ptr::eq(first.ptx.as_ref(), other.ptx.as_ref()));
+        assert_ne!(first.manifest_sha256, other.manifest_sha256);
+        assert!(catalog.resolve(&request).is_err());
+        b.sha256 = "0".repeat(64);
+        write_shard(&path, vec![a.clone(), b]);
+        assert!(KernelCatalog::discover(dir.path()).is_err());
+        write_shard(&path, vec![a.clone(), a]);
+        assert!(KernelCatalog::discover(dir.path()).is_err());
+    }
+
+    #[test]
+    fn scalable_shards_fit_projected_profile_count_without_raising_discovery_limit() {
+        let (dir, path, _) = fixture();
+        let m: KernelManifest = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        for start in (0..2151).step_by(MAX_PROFILES_PER_SHARD) {
+            let sub = dir.path().join(format!("shard-{start}"));
+            std::fs::create_dir(&sub).unwrap();
+            std::fs::copy(dir.path().join("fused.ptx"), sub.join("fused.ptx")).unwrap();
+            let rows = (start..(start + MAX_PROFILES_PER_SHARD).min(2151)).map(|i| {
+                let mut row = m.clone();
+                row.implementation_id = format!("variant.{i}");
+                row
+            }).collect();
+            write_shard(&sub.join(MANIFEST_FILENAME), rows);
+        }
+        std::fs::remove_file(&path).unwrap();
+        let catalog = KernelCatalog::discover(dir.path()).unwrap();
+        assert_eq!(catalog.len(), 2151);
+        assert_eq!(MAX_DISCOVERED_PACKAGES, 512);
+        write_shard(&path, vec![m.clone(); MAX_PROFILES_PER_SHARD + 1]);
+        assert!(KernelCatalog::discover(dir.path()).is_err());
+        write_shard(&path, vec![]);
+        assert!(KernelCatalog::discover(dir.path()).is_err());
     }
 
     #[test]

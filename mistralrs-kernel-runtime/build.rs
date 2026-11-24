@@ -91,12 +91,12 @@ fn main() -> Result<()> {
                 let hash = m.cubin_sha256.as_ref().expect("validated paired CUBIN hash");
                 let image_copy = out.join(format!("dkr-typed-{hash}.cubin"));
                 fs::write(&image_copy, image.as_ref())?;
-                format!("Some(Cow::Borrowed(&include_bytes!({image_copy:?})[..]))")
+                format!("Some(SharedImage::Embedded(&include_bytes!({image_copy:?})[..]))")
             } else {
                 "None".into()
             };
             rows.push(format!(
-                "VerifiedKernel {{ manifest:{}, ptx:Cow::Borrowed(include_str!({copy:?})), cubin:{cubin}, \
+                "VerifiedKernel {{ manifest:{}, ptx:SharedImage::Embedded(include_str!({copy:?})), cubin:{cubin}, \
                  manifest_sha256:{:?}.into() }}",
                 manifest_source(m),
                 module.manifest_sha256
@@ -106,8 +106,8 @@ fn main() -> Result<()> {
     let source = if rows.is_empty() {
         "Err(anyhow!(\"typed artifacts were not embedded\"))".into()
     } else {
-        format!("use crate::universal::{{Access,ElementType,KernelManifest,Parameter,VerifiedKernel}}; \
-                 use std::borrow::Cow; KernelCatalog::from_build_verified(vec![{}])", rows.join(",\n"))
+        format!("use crate::universal::{{Access,ElementType,KernelManifest,Parameter,VerifiedKernel,SharedImage}}; \
+                 KernelCatalog::from_build_verified(vec![{}])", rows.join(",\n"))
     };
     fs::write(out.join("dkr_typed_embedded.rs"), format!(
         "pub const ROOT: Option<&str> = {root_literal};\nfn load() -> Result<KernelCatalog> {{ {source} }}\n"

@@ -38,7 +38,11 @@ def source_contract():
     cap = re.search(r"pub const MAX_DISCOVERED_PACKAGES: usize = (\d+);", runtime)
     if cap is None:
         raise ValueError("cannot establish runtime catalogue bound")
-    return groups, heads, int(cap.group(1))
+    logical = re.search(r"pub const MAX_CATALOG_PROFILES: usize = (\d+);", runtime)
+    shard = re.search(r"pub const MAX_PROFILES_PER_SHARD: usize = (\d+);", runtime)
+    if logical is None or shard is None:
+        raise ValueError("cannot establish logical catalogue/shard bounds")
+    return groups, heads, int(cap.group(1)), int(logical.group(1)), int(shard.group(1))
 
 def geometry(cc, cache_width, head, group):
     stages = 2 if cc >= 80 else 1
@@ -55,7 +59,7 @@ def geometry(cc, cache_width, head, group):
                 dynamic_shared_bytes=shared)
 
 def report(cc, base_profiles, shared_limit):
-    groups, heads, limit = source_contract()
+    groups, heads, limit, logical_limit, shard_limit = source_contract()
     rows = []
     for (dt, width), cache, head, group in itertools.product(DTYPES, ("plain","fp8"), heads, groups):
         g = geometry(cc, 1 if cache == "fp8" else width, head, group)
@@ -71,6 +75,8 @@ def report(cc, base_profiles, shared_limit):
     partial_warp = sum(r["partial_warp"] for r in rows)
     return dict(schema="dkr.r126.flashinfer.decode.source-plan.v1",target_cc=cc,
                 base_profiles=base_profiles,catalogue_limit=limit,
+                logical_profile_limit=logical_limit, profiles_per_shard_limit=shard_limit,
+                prospective_logical_profiles_fit=base_profiles+decode_profiles+merge_profiles<=logical_limit,
                 geometry_count=len(rows),profiles_per_geometry=per_geometry,
                 decode_profiles_full_cartesian=decode_profiles,merge_profiles=merge_profiles,
                 prospective_profiles=base_profiles+decode_profiles+merge_profiles,
@@ -104,6 +110,9 @@ def main():
           f"decode_cartesian={result['decode_profiles_full_cartesian']} "
           f"total={result['prospective_profiles']} limit={result['catalogue_limit']} "
           f"fits={str(result['catalogue_full_cartesian_fits']).lower()}")
+    print(f"DKR_R126_S9B4D2_LOGICAL_LIMIT profiles={result['prospective_profiles']} "
+          f"limit={result['logical_profile_limit']} fits={str(result['prospective_logical_profiles_fit']).lower()} "
+          f"shard_limit={result['profiles_per_shard_limit']} physical_fit=unverified")
     print("DKR_R126_S9B4D_SOURCE_PLAN=COMPLETE compilation=false closure_qualified=false "
           f"report={a.json_out}")
 
