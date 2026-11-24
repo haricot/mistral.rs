@@ -250,3 +250,55 @@ Host Rust build: 7m05s. The new isolated CUBIN was assembled from
 existing PTX. No repeat of S1 is required to advance the GEMM family.
 Scope remains dense W4A16 GEMV, not full projection coverage, prefill,
 DFlash protocol, or full-model inference/performance qualification.
+
+## R1.26/S2 staged — independent tiled NVFP4 GEMM reference
+
+S1 physical evidence is preserved (no new run is required). S2 adds
+a separate `nvfp4-gemm` package, four F16/BF16 plain/bias entries,
+`quant.nvfp4.gemm.{mode}.t16.v1`, tile 16x16, F32 accumulation,
+group16 E2M1/E4M3 decoding in shared memory, and final per-row F32
+global multiplication plus optional bias. No globally materialized
+dequantized weights. Tails in M and N are masked without skipping
+block barriers. This is a reference SIMT GEMM, **not performance qualified**.
+
+The Rust adapter shares NVFP4 tensor validation, pointer ABI and launch
+plan cache with the existing GEMV, with a distinct route in the cache
+key. GEMV remains M<=8; GEMM handles M>8 when explicitly enabled by
+`MISTRALRS_DKR_NVFP4_GEMM=1`. Existing typed-only construction stays
+architecture-neutral and fails closed if neither accepts a signature.
+The S1 test retains its decode-only semantics when GEMM is disabled.
+No Candle source changes or modifications to the existing GEMV CUDA
+source or S1/R1.25 image files.
+
+The Cudaforge builder now accepts `--family nvfp4-gemm` to compile just
+the new CUDA translation unit. Its output is a fresh isolated package
+root; no existing family is included or reassembled. The S2 runner
+revalidates the previously qualified S1 CUBIN hash before the build,
+checks cached static source objects and the exact typed feature set,
+and launches a **single** bounded Nextest test (not the S1 tests).
+Real sampled projection N=37 (or min(source N,37)), K=2560 on the
+current checkpoint, M=9,17,33 for F16/BF16, compared with CPU F32
+rounded to the output dtype. Four synthetic cases cover plain/bias,
+signed E2M1 values, variable scale/global and nonmultiple M/N tiles
+(M=17,N=19,K=48). The offline verifier checks six real numerical
+cases, four synthetic markers, Nextest PASS, and exact strict GEMM
+PTX/CUBIN admission. The new Rust/CUDA source and tests have **not**
+been built or executed in this session.
+
+```bash
+cd /home/np/dkr-worktrees/r125-candle-integration
+git fetch origin feature/dkr-r126-nvfp4-typed-sm61
+git switch --detach origin/feature/dkr-r126-nvfp4-typed-sm61
+export MISTRALRS_CUDA_BUILD_ROOT=/home/np/tmp/mistralrs_provider/mistral.rs/target/dkr-cuda-cache/sm61
+export DKR_R125_TYPED_PACKAGE_ROOT=/home/np/tmp/mistralrs_provider/mistral.rs/kernel-packages/build/cuda/sm61
+bash -n tools/dkr_r126_nvfp4_gemm_sm61.sh
+DKR_APPROVE_R126_NVFP4_GEMM=1 bash tools/dkr_r126_nvfp4_gemm_sm61.sh
+```
+
+Retain the reconciled Cargo.lock. This requires one new external
+PTX/CUBIN module, not a rebuild of the other external CUDA families.
+Host Rust recompilation and ordinary build-script cache validation may
+occur. A clean cache audit does not guarantee a hit under changed build
+arguments. Full-model inference, combined decode/prefill route in a
+single model, DFlash speculation, routed experts and performance
+remain outside this gate.
