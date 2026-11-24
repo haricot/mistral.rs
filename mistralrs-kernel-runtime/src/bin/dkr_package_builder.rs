@@ -40,6 +40,7 @@ const PACKAGES: &[Package] = &[
     Package { name: "quant-gemv", source: "quant_gemv.cu", fast_math: false },
     Package { name: "paged-decode", source: "paged_decode.cu", fast_math: false },
     Package { name: "nvfp4-gemv", source: "nvfp4_gemv.cu", fast_math: false },
+    Package { name: "nvfp4-gemm", source: "nvfp4_gemm.cu", fast_math: false },
     Package { name: "quant-gemm", source: "quant_gemm.cu", fast_math: false },
     Package { name: "paged-fp8", source: "paged_fp8.cu", fast_math: false },
     Package { name: "paged-v2", source: "paged_v2.cu", fast_math: false },
@@ -47,12 +48,13 @@ const PACKAGES: &[Package] = &[
     Package { name: "routed-quant", source: "routed_quant.cu", fast_math: false },
 ];
 
-fn parse_args() -> Result<(usize, PathBuf, String, bool, bool), Box<dyn std::error::Error>> {
+fn parse_args() -> Result<(usize, PathBuf, String, bool, bool, Option<String>), Box<dyn std::error::Error>> {
     let mut cc: Option<usize> = None;
     let mut output = PathBuf::from("kernel-packages/build/cuda");
     let mut python = String::from("python3");
     let mut cubin = false;
     let mut pair_existing = false;
+    let mut family: Option<String> = None;
     let mut args = env::args().skip(1);
     while let Some(flag) = args.next() {
         if flag == "--cubin" {
@@ -69,6 +71,7 @@ fn parse_args() -> Result<(usize, PathBuf, String, bool, bool), Box<dyn std::err
             "--cc" => cc = Some(value.parse()?),
             "--output" => output = PathBuf::from(value),
             "--python" => python = value,
+            "--family" => family = Some(value),
             other => return Err(format!("unknown option {other}").into()),
         }
     }
@@ -76,7 +79,13 @@ fn parse_args() -> Result<(usize, PathBuf, String, bool, bool), Box<dyn std::err
     if !(50..=120).contains(&cc) {
         return Err(format!("unsupported compute capability {cc}").into());
     }
-    Ok((cc, output, python, cubin, pair_existing))
+    if family.as_ref().is_some_and(|name| !PACKAGES.iter().any(|p| p.name == name.as_str())) {
+        return Err("unknown DKR package family".into());
+    }
+    if pair_existing && family.is_some() {
+        return Err("--family cannot be combined with --pair-existing; use an isolated output root".into());
+    }
+    Ok((cc, output, python, cubin, pair_existing, family))
 }
 
 fn compile_ptx(
@@ -228,7 +237,7 @@ fn stage_cubins(root: &Path, cc: usize) -> Result<usize, Box<dyn std::error::Err
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let (cc, requested_output, python, cubin, pair_existing) = parse_args()?;
+    let (cc, requested_output, python, cubin, pair_existing, family) = parse_args()?;
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent().ok_or("no repository root")?;
     let output = if requested_output.is_absolute() {
@@ -247,7 +256,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     ];
     let work = output.join(format!("sm{cc}/_cudaforge_cache"));
     if !pair_existing {
-    for pkg in PACKAGES {
+    for pkg in PACKAGES.iter().filter(|p| family.as_ref().is_none_or(|name| p.name == name.as_str())) {
         let dir = sources.join(pkg.name);
         let source = dir.join(pkg.source);
         if !source.is_file() {
@@ -282,7 +291,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         let images = stage_cubins(&output.join(format!("sm{cc}")), cc)?;
         println!("DKR_CUDAFORGE_CUBIN_PAIRED=STAGED target_cc={cc} images={images}");
     }
-    println!("DKR_CUDAFORGE_PACKAGES=STAGED target_cc={cc} families={}", if pair_existing { 0 } else { PACKAGES.len() });
+    println!("DKR_CUDAFORGE_PACKAGES=STAGED target_cc={cc} families={}", if pair_existing { 0 } else if family.is_some() { 1 } else { PACKAGES.len() });
     Ok(())
 }
 
