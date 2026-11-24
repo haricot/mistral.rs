@@ -109,3 +109,67 @@ PY
 This preflight is diagnostic, not a license to run unsupported DFlash
 as standalone inference. Resume with actual outputs before scheduling
 another expensive release build.
+
+## 2026-11-24 follow-up — locally present weights and 4 NVFP4 manifests
+
+The user's **read-only local inventory** returned:
+
+```text
+REVISION: 913d13c49fbbb2b477dce78552a31ab650d5b693
+ARCHITECTURES: ['DFlashDraftModel']
+QUANT: W4A16_NVFP4
+GROUP_SIZE: 16
+model.safetensors present= True bytes= 580320464
+hf_quant_config.json present= False bytes= 0
+NVFP4_PACKAGE_EXISTS: True
+NVFP4_MANIFESTS: 4
+```
+
+This confirms the downloaded 580,320,464-byte weight artifact and four
+`nvfp4-gemv` manifests, **not** their hash validity, executable CUBIN
+pairing, full-model architecture support, or GPU numerical correctness.
+The absent `hf_quant_config.json` is not automatically a blocker:
+the embedded `config.json` already declares W4A16_NVFP4/group16, and
+`mistralrs-core` supports embedded ModelOpt quantization metadata.
+
+NVIDIA's official model card identifies this artifact as a DFlash speculative
+draft (five Qwen3-style layers); the target model supplies shared embeddings
+and verifies proposed tokens. The draft is **not** autonomous and must not
+be run as an ordinary Qwen3 causal LM just because `model_type=qwen3`.
+
+### Read-only validation before new architecture-specific work
+
+The new branch `feature/dkr-r126-nvfp4-typed-sm61` forks the already
+qualified R1.25 branch. Run its preflight via `git show`, without
+switching the user's local R1.25 worktree or modifying Cargo.lock:
+
+```bash
+cd /home/np/dkr-worktrees/r125-candle-integration
+
+git fetch origin feature/dkr-r126-nvfp4-typed-sm61
+mkdir -p target/dkr-r126-audit
+
+git show origin/feature/dkr-r126-nvfp4-typed-sm61:tools/dkr_r126_nvfp4_preflight.py \
+  > target/dkr-r126-audit/dkr_r126_nvfp4_preflight.py
+git show origin/feature/dkr-r126-nvfp4-typed-sm61:tools/test_dkr_r126_nvfp4_preflight.py \
+  > target/dkr-r126-audit/test_dkr_r126_nvfp4_preflight.py
+
+python3 -m unittest discover -s target/dkr-r126-audit \
+  -p test_dkr_r126_nvfp4_preflight.py -v
+
+python3 target/dkr-r126-audit/dkr_r126_nvfp4_preflight.py \
+  --packages /home/np/tmp/mistralrs_provider/mistral.rs/kernel-packages/build/cuda/sm61 \
+  --json-out target/dkr-r126-audit/nvfp4-preflight.json
+```
+
+The Python implementation reads the `config.json`, Safetensors *header
+only*, and the four existing manifest/PTX image pairs, checking operation
+ABI/entry names, SM61 PTX target, SHA256 and optional CUBIN hashes and ELF
+architecture. It never loads the GPU, calls Rust, downloads weights or
+recompiles anything. CPU fixture regression tests are provided, but have
+**not yet been run in the user's environment**.
+
+Only if `DKR_R126_NVFP4_PREFLIGHT=PASS` may work advance to guarded
+typed-only SM61 layer construction and a separately approved bounded
+NVFP4 GPU test. A `PTX_ONLY` result is expected when CUBIN has not yet
+been paired and is not a numeric CUDA qualification.
