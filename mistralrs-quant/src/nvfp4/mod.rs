@@ -1414,6 +1414,101 @@ impl QuantizedSerde for Nvfp4Layer {
 mod tests {
     use super::*;
 
+    // The draft is not a standalone LM. Load a real checkpoint projection
+    // via the ordinary ModelOpt loader and compare external GEMV to CPU F32
+    // with the same packed codes, E4M3 scales and global scale convention.
+    #[cfg(feature = "dkr-nvfp4-gemv")]
+    #[test]
+    #[ignore = "requires local NVFP4 checkpoint, physical GPU, and paired typed CUBIN"]
+    fn dkr_nvfp4_checkpoint_layer_gpu() -> Result<()> {
+        let _evidence = mistralrs_kernel_runtime::RuntimeEvidenceGuard;
+        if std::env::var("MISTRALRS_DKR_NVFP4_TYPED_ONLY").as_deref() != Ok("1") {
+            candle_core::bail!("enable MISTRALRS_DKR_NVFP4_TYPED_ONLY=1 for this probe");
+        }
+        let snapshot = std::path::PathBuf::from(
+            std::env::var_os("DKR_R126_NVFP4_SNAPSHOT")
+                .ok_or_else(|| candle_core::Error::msg("missing DKR_R126_NVFP4_SNAPSHOT"))?,
+        );
+        let config: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(snapshot.join("config.json"))
+                .map_err(candle_core::Error::wrap)?,
+        ).map_err(candle_core::Error::wrap)?;
+        let quant = crate::QuantizedConfig::from_modelopt_config(
+            &config["quantization_config"],
+        ).map_err(candle_core::Error::msg)?;
+        const PREFIX: &str = "layers.0.self_attn.k_proj";
+        let Some(crate::CheckpointLinearSpec::Nvfp4(spec)) =
+            quant.resolve_checkpoint(PREFIX)?
+        else {
+            candle_core::bail!("checkpoint projection is not NVFP4: {PREFIX}");
+        };
+        assert_eq!(spec.activation, Nvfp4ActivationMode::None);
+        assert!(spec.scale_names.activation_scale.is_none());
+        let path = snapshot.join("model.safetensors");
+        let archive = unsafe { candle_core::safetensors::MmapedSafetensors::new(&path)? };
+        let packed_name = format!("{PREFIX}.{}", spec.scale_names.weight);
+        let view = archive.get(&packed_name)?;
+        let shape = view.shape();
+        assert_eq!(shape.len(), 2);
+        let (n, k) = (shape[0], shape[1] * VALUES_PER_BYTE);
+        let sample_n = n.min(32);
+        assert!(sample_n > 0 && k > 0);
+        let shard = Shard::Offset { dim: 0, offset: 0, len: sample_n };
+        let load = |dtype: DType, device: &Device| -> Result<Nvfp4Layer> {
+            let vb = unsafe {
+                crate::ShardedSafeTensors::sharded(
+                    std::slice::from_ref(&path), dtype, device, None,
+                    Arc::new(|name: String| name.starts_with("layers.0.self_attn.k_proj.")),
+                )?
+            };
+            Nvfp4Layer::load(k, n, spec, false, shard, vb.pp(PREFIX))
+        };
+        // CPU reference is kept in F32, independent of the CUDA launch path.
+        let cpu = load(DType::F32, &Device::Cpu)?;
+        let device = Device::new_cuda(0)?;
+        eprintln!("DKR_R126_NVFP4_CHECKPOINT_LAYER prefix={PREFIX} source_n={n} sampled_n={sample_n} k={k}");
+        for dtype in [DType::F16, DType::BF16] {
+            let layer = load(dtype, &device)?;
+            assert!(layer.dkr_gemv_only && !layer.portable);
+            assert!(layer.parts.input_scale.is_none());
+            assert_eq!(layer.parts.weight.dims(), [sample_n, k / 2]);
+            for rows in [1usize, 3, 8] {
+                let values = (0..rows*k)
+                    .map(|i| ((i.wrapping_mul(13) % 31) as i32 - 15) as f32 / 64.0)
+                    .collect::<Vec<_>>();
+                let source = Tensor::from_vec(values, (1, rows, k), &Device::Cpu)?;
+                let expected = cpu.forward_raw(&source)?
+                    .to_dtype(dtype)?.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+                let x = source.to_device(&device)?.to_dtype(dtype)?;
+                let output = layer.forward_raw(&x)?;
+                assert_eq!(output.dims(), [1, rows, sample_n]);
+                assert_eq!(output.dtype(), dtype);
+                let actual = output.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+                let (mut err2, mut ref2, mut max_err, mut max_ref) =
+                    (0f64, 0f64, 0f64, 0f64);
+                for (&a, &b) in actual.iter().zip(&expected) {
+                    assert!(a.is_finite() && b.is_finite());
+                    let d = (a as f64 - b as f64).abs();
+                    err2 += d*d;
+                    ref2 += (b as f64)*(b as f64);
+                    max_err = max_err.max(d);
+                    max_ref = max_ref.max((b as f64).abs());
+                }
+                assert!(ref2 > 0.0, "degenerate CPU reference");
+                let rel_l2 = (err2 / ref2).sqrt();
+                let tol = if dtype == DType::BF16 { 0.008 } else { 0.0015 };
+                eprintln!("DKR_R126_NVFP4_LAYER_NUMERIC dtype={dtype:?} rows={rows} relative_l2={rel_l2:.8} max_abs={max_err:.8} max_ref={max_ref:.8}");
+                assert!(rel_l2 <= tol && max_err <= 2.0 * tol * max_ref + 1e-5,
+                        "NVFP4 checkpoint parity failed: dtype={dtype:?}, rows={rows}");
+            }
+            let unsupported = Tensor::zeros((9, k), dtype, &device)?;
+            let err = layer.forward_raw(&unsupported).unwrap_err();
+            assert!(err.to_string().contains("typed-only GEMV did not accept"));
+        }
+        eprintln!("DKR_R126_NVFP4_LAYER=PASS real_projection=true prefill_gemm=false");
+        Ok(())
+    }
+
     #[test]
     fn strided_checkpoint_views_are_materialized_at_construction() -> Result<()> {
         const ROWS: usize = 4;
