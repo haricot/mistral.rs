@@ -111,13 +111,17 @@ def inspect_checkpoint(snapshot):
             "safetensors": safetensors}
 
 
-def inspect_packages(root):
+def inspect_packages(root, family="nvfp4-gemv"):
+    check(family in ("nvfp4-gemv", "nvfp4-gemm"), "unsupported NVFP4 package family")
+    op = family.split("-")[1]
+    geometry = "t16" if op == "gemm" else "b128"
+    block = [16, 16, 1] if op == "gemm" else [128, 1, 1]
     fingerprints = set()
     paired = set()
     items = {}
     any_paired = False
     for dtype, mode in PROFILES:
-        path = root / "nvfp4-gemv" / dtype / mode / "manifest.json"
+        path = root / family / dtype / mode / "manifest.json"
         check(path.is_file(), f"missing NVFP4 typed manifest: {path}")
         try:
             data = json.loads(path.read_text())
@@ -128,9 +132,9 @@ def inspect_packages(root):
             "schema": "DKR-KERNEL-MODULE-V1",
             "abi": "dkr.typed.v1",
             "target_cc": TARGET_CC,
-            "entry": f"dkr_nvfp4_gemv_{dtype}_{mode}",
-            "operation": f"quant.nvfp4.gemv.{mode}.b128.v1",
-            "block": [128, 1, 1],
+            "entry": f"dkr_nvfp4_{op}_{dtype}_{mode}",
+            "operation": f"quant.nvfp4.{op}.{mode}.{geometry}.v1",
+            "block": block,
         }
         for key, value in expected.items():
             check(data.get(key) == value,
@@ -179,7 +183,7 @@ def inspect_packages(root):
           "partial CUBIN pairing across profiles")
     check(not any_paired or len(paired) == 1,
           "four NVFP4 entries must share one paired CUBIN image")
-    return {"profiles": len(items), "target_cc": TARGET_CC,
+    return {"family": family, "profiles": len(items), "target_cc": TARGET_CC,
             "ptx_images": len(fingerprints), "ptx_sha256": sorted(fingerprints),
             "cubin_status": "PAIRED" if any_paired else "PTX_ONLY",
             "cubin_images": len(paired), "cubin_sha256": sorted(paired),
@@ -192,12 +196,13 @@ def main():
         Path.home() / ".cache/huggingface/hub" / DEFAULT_MODEL
         / "snapshots" / DEFAULT_REVISION))
     ap.add_argument("--packages", type=Path, required=True,
-                    help="existing /sm61 root containing nvfp4-gemv")
+                    help="existing /sm61 root containing selected NVFP4 family")
+    ap.add_argument("--family", choices=("nvfp4-gemv", "nvfp4-gemm"), default="nvfp4-gemv")
     ap.add_argument("--json-out", type=Path, help="optional CREATE-ONLY JSON report")
     args = ap.parse_args()
     try:
         checkpoint = inspect_checkpoint(args.snapshot)
-        packages = inspect_packages(args.packages)
+        packages = inspect_packages(args.packages, args.family)
         report = {"schema": "dkr.r126.nvfp4.read-only-preflight.v1",
                   "checkpoint": checkpoint, "packages": packages,
                   "gpu_qualified": False, "standalone_model_qualified": False,
@@ -221,7 +226,7 @@ def main():
         print(f"DKR_R126_NVFP4_TENSOR_SAMPLE={sample['name']} "
               f"dtype={sample['dtype']} shape={sample['shape']}")
     print(f"DKR_R126_NVFP4_PTX=PASS profiles=4 unique_images=1 target=sm61 "
-          f"sha256={packages['ptx_sha256'][0]}")
+          f"sha256={packages['ptx_sha256'][0]} family={args.family}")
     print(f"DKR_R126_NVFP4_CUBIN={packages['cubin_status']} "
           f"unique_images={packages['cubin_images']}")
     print("DKR_R126_NVFP4_PREFLIGHT=PASS scope=metadata,weights_header,ptx "
