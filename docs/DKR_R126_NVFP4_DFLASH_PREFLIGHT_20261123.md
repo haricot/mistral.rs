@@ -360,3 +360,54 @@ S3 has not been compiled or executed yet. Only host test changes and
 offline tooling are new; CUDA object cache reuse is expected but not
 guaranteed under changed build arguments. Do not rerun S1/S2 merely to
 complete S3. No changes to Candle or existing CUDA kernel sources.
+
+## R1.26/S3 physical PASS — 2026-11-24
+
+User tested dbc2efef, Nextest ab15bb85-48fb-4e40-8029-f7bcc3151ff4.
+Full k_proj N=1024 K=2560; F16/BF16 with M=17,8,9,1,17 on the
+same layer per dtype. All ten CPU-reference comparisons and eight
+cross-route comparisons displayed zero errors at eight decimals.
+Both exact S1/S2 CUBIN/PTX pairs admitted in one process, eight
+manifests validated. Nextest 1/1 PASS (0.450s overall); offline
+combined evidence PASS. Log SHA256:
+`8982c25c2586551a5177c99f63c6867b26c97131b6bd0861cffdf9cd6075d061`.
+Host Rust build 5m19s; native CUDA recompilation 0/49 quant, 0/15
+paged-attn, 0/18 core; no new external CUDA build. Full projection
+qualified in these cases, not full model, DFlash or performance.
+
+## R1.26/S4 staged — offline consolidation of all four quant families
+
+The new `tools/dkr_r126_quant_catalog.py` validates the 20 expected
+profile paths, operations, entries, block geometry and exact four
+historically qualified PTX/CUBIN pairs. It checks actual file digests,
+PTX entries and SM61 ELF64 CUDA architecture, replays the existing
+R1.25 individual GEMV/GEMM and FP8 layer-forward evidence verifiers
+and the S3 combined NVFP4 verifier against existing logs. Copies only
+manifest and image files into a separate staging directory; rechecks
+their byte identities and rejects differing existing output rather than
+overwriting it. It does not call Cargo, NVCC, ptxas or the GPU.
+
+```bash
+cd /home/np/dkr-worktrees/r125-candle-integration
+git fetch origin feature/dkr-r126-nvfp4-typed-sm61
+git switch --detach origin/feature/dkr-r126-nvfp4-typed-sm61
+python3 tools/dkr_r126_quant_catalog.py \
+  --quant-root target/dkr-r125-quant-pilot/sm61 \
+  --nvfp4-root target/dkr-r126-nvfp4-combined-pilot/sm61 \
+  --quant-gemv-log target/dkr-r125-quant-pilot/r125-quant-gemv.log \
+  --quant-gemm-log target/dkr-r125-quant-pilot/r125-quant-gemm.log \
+  --fp8-forward-log target/dkr-r125-audit/forward-route.log \
+  --nvfp4-combined-log target/dkr-r126-nvfp4-combined-pilot/nvfp4-combined-20261124T085058-112347.log \
+  --output target/dkr-r126-quant-catalog/sm61 \
+  --json-out target/dkr-r126-quant-catalog/evidence.json
+```
+
+Keep reconciled Cargo.lock and original catalogs unchanged. S4 has not
+yet been executed on the user's files. The resulting quant-only root
+is a candidate input to the existing `DKR_EMBED_TYPED_DIR` runtime
+build contract (build.rs deduplicates blobs by hash); it is NOT the
+entire DKR operation catalogue or an embedded-runtime qualification.
+The next physical gate should test the embedded source in a process
+with filesystem package access disabled, selecting actual operations
+from all four families. No full model or Extended performance
+certification, and no new Candle SM61-specific logic, is implied.
