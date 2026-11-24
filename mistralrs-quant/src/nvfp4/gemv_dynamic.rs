@@ -24,10 +24,17 @@ fn enabled() -> bool {
 }
 
 const BLOCK: usize = 128;
+const TILE: usize = 16;
 const MAX_BATCH: usize = 8;
+
+fn gemm_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("MISTRALRS_DKR_NVFP4_GEMM").as_deref() == Ok("1"))
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Key {
+    gemm: bool,
     dtype: DType,
     rows: usize,
     cols: usize,
@@ -67,12 +74,19 @@ fn prepare(key: Key, device: &candle_core::Device) -> Result<PrevalidatedLaunchP
     }
     args.push(tensor(dtype, vec![key.rows, key.cols], None));
     args.extend((0..3).map(|_| Argument::Scalar { dtype: ElementType::U32 }));
+    let (operation, grid_x, grid_y, block) = if key.gemm {
+        (format!("quant.nvfp4.gemm.{mode}.t16.v1"), key.cols.div_ceil(TILE),
+         key.rows.div_ceil(TILE), [TILE as u32, TILE as u32, 1])
+    } else {
+        (format!("quant.nvfp4.gemv.{mode}.b128.v1"), key.cols, key.rows,
+         [BLOCK as u32, 1, 1])
+    };
     let mut req = LaunchRequest {
-        operation: format!("quant.nvfp4.gemv.{mode}.b128.v1"),
+        operation,
         cc: 0, args,
         grid: [
-            u32::try_from(key.cols).map_err(candle_core::Error::wrap)?,
-            u32::try_from(key.rows).map_err(candle_core::Error::wrap)?,
+            u32::try_from(grid_x).map_err(candle_core::Error::wrap)?,
+            u32::try_from(grid_y).map_err(candle_core::Error::wrap)?,
             1,
         ],
         max_dynamic_shared_mem_bytes: 0,
@@ -80,21 +94,22 @@ fn prepare(key: Key, device: &candle_core::Device) -> Result<PrevalidatedLaunchP
     let prepared = crate::dkr_cuda::catalog()?
         .prepare_for_device(&mut req, device)
         .map_err(|err| candle_core::Error::msg(err.to_string()))?;
-    if prepared.manifest.block != [BLOCK as u32, 1, 1] {
-        candle_core::bail!("DKR NVFP4 GEMV: invalid block configuration");
+    if prepared.manifest.block != block {
+        candle_core::bail!("DKR NVFP4: invalid block configuration");
     }
     prepared.prevalidate_launch(&req, device)
         .map_err(|err| candle_core::Error::msg(err.to_string()))
 }
 
-pub(super) fn try_gemv(
+fn try_matmul(
+    gemm: bool,
     x: &Tensor,
     weight: &Tensor,
     scales: &Tensor,
     global: &Tensor,
     bias: Option<&Tensor>,
 ) -> Result<Option<Tensor>> {
-    if !enabled() {
+    if !(if gemm { gemm_enabled() } else { enabled() }) {
         return Ok(None);
     }
     if !matches!(x.dtype(), DType::F16 | DType::BF16)
@@ -116,7 +131,8 @@ pub(super) fn try_gemv(
     }
     let (rows, k) = x.dims2()?;
     let (cols, packed) = weight.dims2()?;
-    if rows == 0 || rows > MAX_BATCH || cols == 0 || k == 0
+    if rows == 0 || (if gemm { rows <= MAX_BATCH || rows.div_ceil(TILE) > 65535 } else { rows > MAX_BATCH })
+        || cols == 0 || k == 0
         || k % 16 != 0 || packed != k/2
         || scales.dims() != [cols, k/16] || global.dims() != [cols]
         || bias.is_some_and(|b| b.dims() != [cols])
@@ -126,7 +142,7 @@ pub(super) fn try_gemv(
     }
     let count = rows.checked_mul(cols)
         .ok_or_else(|| candle_core::Error::msg("DKR NVFP4 output overflow"))?;
-    let key = Key { dtype: x.dtype(), rows, cols, k, has_bias: bias.is_some() };
+    let key = Key { gemm, dtype: x.dtype(), rows, cols, k, has_bias: bias.is_some() };
     let cuda = x.device().as_cuda_device()?;
     let stream = cuda.cuda_stream();
     let (xs, xl) = x.storage_and_layout();
@@ -196,6 +212,20 @@ pub(super) fn try_gemv(
             },
         )
     })
+}
+
+pub(super) fn try_gemv(
+    x: &Tensor, weight: &Tensor, scales: &Tensor, global: &Tensor,
+    bias: Option<&Tensor>,
+) -> Result<Option<Tensor>> {
+    try_matmul(false, x, weight, scales, global, bias)
+}
+
+pub(super) fn try_gemm(
+    x: &Tensor, weight: &Tensor, scales: &Tensor, global: &Tensor,
+    bias: Option<&Tensor>,
+) -> Result<Option<Tensor>> {
+    try_matmul(true, x, weight, scales, global, bias)
 }
 
 #[cfg(test)]
