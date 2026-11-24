@@ -732,3 +732,52 @@ No new device images or Rust build requested at this stage.
 The next source steps should externalize missing paged signatures
 or explicitly scope model capability admission, then tackle core and
 quant producers while preserving Extended kernels and ASD semantics.
+
+## R1.26/S9B1 resolved graph PASS — 2026-11-24
+
+User executed 1908bd1a with the independent paged feature and strict
+native+typed feature. The existing strict feature audit passed, with
+static producer elimination NOT_QUALIFIED. No build was executed.
+
+## R1.26/S9B2a staged — scaled FP8 VLLM cache IO
+
+The prior catalogue covers short-context FP8 read/decode, not FP8
+slot writes or scaled gather. New independently opt-in feature
+`dkr-kv-fp8-io` and Cudaforge family `kv-fp8-io` add six profiles:
+store and gather for F16/BF16/F32. One CUDA source and one PTX/CUBIN
+pair are expected for this extension; do not overwrite S7's 216
+profiles/27 images or mutate their receipts. S7/S8 remain historical
+baseline gates. A later combined staging gate must account for the
+new 27th family (222 profiles/28 images expected, not yet observed).
+The existing S7 inventory/staging and S8 evidence checks describe
+the original 26-family baseline, not this extended catalogue.
+
+The ABI uses device-resident scalar F32 K/V scales, explicit FP8
+cache representation, canonical contiguous VLLM layouts and cached
+prevalidated launch plans. Writes use direct F32 division and
+E4M3 SATFINITE rounding as in the historical scaled KV writer,
+not intermediate half rounding from the unrelated scalar cast.
+Gather decodes then multiplies by the respective scale before
+rounding to output dtype. Positive finite scales, unique writable
+slots and valid page metadata are caller contracts (no GPU->CPU
+scalar read or synchronizing validation). Invalid indices are
+bounded defensively, not reported as a new validation guarantee.
+Strided variants, U32 gather metadata, FP8 long contexts, sinks,
+MLA and FlashInfer are not closed by this step. Full-cache capability
+flags remain deliberately unchanged.
+
+An ignored GPU test independently checks stored raw E4M3 values and
+scaled gather results for three dtypes, two different scales,
+nontrivial page permutation, padding, saturation and midpoint rounding.
+Not compiled or run. No new CUDA source compiled yet. Keep old
+catalogue immutable; later build only kv-fp8-io in an isolated root,
+then stage a verified extended catalogue and run the grouped tests.
+The broad strict candidate and S9B1 remain independently opt-in;
+the new feature is not automatically enabled.
+
+Resolved graph check only:
+```bash
+cargo metadata --offline --locked --format-version 1 \
+  --features mistralrs-core/dkr-sm61-cubin-qualified,mistralrs-core/dkr-paged-catalog-only,mistralrs-core/dkr-kv-fp8-io \
+  | python3 tools/dkr_r126_strict_features.py --paged-fp8-io
+```

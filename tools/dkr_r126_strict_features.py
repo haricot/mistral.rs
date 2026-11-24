@@ -30,6 +30,12 @@ try:
         missing = wanted - graph[name]
         if missing:
             raise ValueError(f"{name} lacks {sorted(missing)}")
+    if "--paged-fp8-io" in sys.argv[1:]:
+        for name in ("mistralrs-core", "mistralrs-paged-attn"):
+            missing = {"dkr-paged-catalog-only", "dkr-kv-fp8-io"} - graph[name]
+            if missing:
+                raise ValueError(f"{name} lacks {sorted(missing)}")
+        print("DKR_R126_S9B2_FEATURES=PASS paged_catalog_only=true fp8_io=true")
     print("DKR_R126_STRICT_FEATURES=PASS candle_embedded=true typed=true legacy_flags=false")
     print("DKR_R126_STATIC_PRODUCER_ELIMINATION=NOT_QUALIFIED mistral_build_scripts=remain")
 except (OSError, ValueError, KeyError, TypeError) as exc:
