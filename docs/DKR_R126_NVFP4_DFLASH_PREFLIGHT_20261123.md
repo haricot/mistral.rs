@@ -588,3 +588,46 @@ Mistral core/quant/paged-attn build.rs still produce static CUDA
 archives even when legacy features are off; audit source-level
 dispatch and FFI closure before attempting to disable those
 producers. No claim of complete elimination of static kernels.
+
+## R1.26/S7 observed PASS — 2026-11-24
+
+User supplied inventory-v2 and final staged evidence. All 26 registered
+families, 216 profiles and 27 distinct PTX/CUBIN pairs are present;
+19 newly paired families, seven preserved families (eight images).
+The three logits profiles were indeed in sparse-logits. All earlier
+paired image identities match the inventory. The staged report contains
+648 file digests and binds the exact inventory SHA256
+`35b38d90eec1639bbaf8df55daf470c921b0bf78cbb7c25ae89a81d9d093ef43`.
+Submitted staged report SHA256
+`19ecb4e5d930893603e8237443d2bad42f04357c899d77310d56ec6579c55d15`.
+Resolved feature audit PASS (native embedded, typed, no legacy flags).
+This is structural catalogue integrity and feature resolution only;
+full embedded GPU and static producer elimination remain unqualified.
+
+## R1.26/S8 staged — native Candle input preflight
+
+At the pinned Candle revision d40ac1b4d69a209d08f76c5b5bd4e267ec63b4f0,
+the native qualified feature already has the catalogue-owned FP8, FP4,
+BF16 and routed recipes and the 10 MMQ codecs. Its build contract requires
+five native inputs with cross-attested SHA256 provenance. Do not enable
+S31/legacy to compensate for missing native inputs. The native catalogue
+has 25 families, distinct from the 26 registered typed Mistral families.
+
+The new tools/dkr_r126_candle_native_preflight.py locates the exact
+Candle checkout from locked Cargo metadata, imports its existing S5.5c
+offline verifier, validates a prior R1.25 P1/P2 receipt (including the
+seal and derived manifests), and verifies all 648 S7 staged file
+identities. It emits six build-input paths (five native plus typed)
+in a JSON report without running Cargo build, NVCC, ptxas, or GPU.
+Missing or inconsistent historical artifacts block rather than trigger a
+rebuild. A receipt proves input provenance, not new physical execution.
+If multiple distinct valid native bundles are found, select an explicit
+receipt; never silently choose one. S8 preflight has not been run on
+the user's files. No change to pinned Candle or CUDA sources.
+
+Remaining closure: Mistral core/quant/paged-attn static FFI and build
+producers need an independent audit; absence of legacy feature flags is
+not absence of static archives. Next physical gate should use strict
+native and typed embedded profiles together, check BF16/FP8 conversions
+and operation dispatch, and reuse the 27 typed images. Do not regenerate
+native recipes merely to combine the two catalogues.
