@@ -301,8 +301,8 @@ pub fn flashinfer_decode(query:&Tensor,key_cache:&Tensor,value_cache:&Tensor,sca
         (DType::F32,true)=>run!(f32,float8::F8E4M3),
         _=>unreachable!(),
     }?;
-    drop((qs,ks,vs,os,ps,ss,is,ns,ls,rs,ts,us,cs,ms));
-    Ok(output)
+    // Storage and stream guards are released in reverse declaration order.
+    Ok(output.clone())
 }
 
 #[cfg(test)]
@@ -317,6 +317,51 @@ mod tests {
         assert!(disjoint(&[(100,200),(199,300)],&[]).is_err());
         assert!(disjoint(&[(100,200)],&[(150,160)]).is_err());
     }
+    #[test]
+    #[ignore="requires real flashinfer-decode and flashinfer-merge images plus CUDA"]
+    fn dkr_flashinfer_direct_split_gpu() -> Result<()> {
+        let dev=Device::new_cuda(0)?;
+        let q=Tensor::zeros((1,1,64),DType::F32,&dev)?;
+        let k=Tensor::zeros((2,1,4,64),DType::F32,&dev)?;
+        let v=Tensor::from_vec((0..512).map(|i|if i<256{1f32}else{3f32}).collect::<Vec<_>>(),
+            (2,1,4,64),&dev)?;
+        let ip=Tensor::from_vec(vec![0i32,2],2,&dev)?;
+        let ids=Tensor::from_vec(vec![0i32,1],2,&dev)?;
+        let last=Tensor::from_vec(vec![3i32],1,&dev)?;
+        let direct_r=Tensor::from_vec(vec![0i32],1,&dev)?;
+        let direct_t=Tensor::from_vec(vec![0i32],1,&dev)?;
+        let direct_o=Tensor::from_vec(vec![0i32,1],2,&dev)?;
+        let direct_m=Tensor::from_vec(vec![1u8],1,&dev)?;
+        let split_r=Tensor::from_vec(vec![0i32,0,-1],3,&dev)?;
+        let split_t=Tensor::from_vec(vec![0i32,1,-1],3,&dev)?;
+        let split_o=Tensor::from_vec(vec![0i32,2],2,&dev)?;
+        let split_m=Tensor::from_vec(vec![1u8,1,0],3,&dev)?;
+        let chunk=Tensor::from_vec(vec![4i32],1,&dev)?;
+        let tmp_v=Tensor::zeros((4,1,64),DType::F32,&dev)?;
+        let tmp_s=Tensor::zeros((4,1),DType::F32,&dev)?;
+        for (window,expected) in [(None,13f32/7.),(Some(2),3.)] {
+            for cap in [None,Some(2.)] {
+                let direct=flashinfer_decode(&q,&k,&v,DEFAULT_FP8_KV_CACHE_SCALES,&ip,&ids,&last,
+                    &direct_r,&direct_t,&direct_o,&chunk,&direct_m,0.125,window,cap,None)?;
+                let split=||flashinfer_decode(&q,&k,&v,DEFAULT_FP8_KV_CACHE_SCALES,&ip,&ids,&last,
+                    &split_r,&split_t,&split_o,&chunk,&split_m,0.125,window,cap,
+                    Some(FlashInferDecodeScratch{tmp_v:&tmp_v,tmp_s:&tmp_s}));
+                let actual=split()?.flatten_all()?.to_vec1::<f32>()?;
+                let direct=direct.flatten_all()?.to_vec1::<f32>()?;
+                assert_eq!(actual.len(),64);
+                for (&a,&d) in actual.iter().zip(&direct) {
+                    assert!(a.is_finite() && d.is_finite());
+                    assert!((a-expected).abs()<1e-4 && (d-expected).abs()<1e-4,
+                        "window={window:?} cap={cap:?} actual={a} direct={d} expected={expected}");
+                }
+                let count=PLANS.with(|p|p.borrow().len());
+                assert_eq!(split()?.flatten_all()?.to_vec1::<f32>()?,actual);
+                assert_eq!(PLANS.with(|p|p.borrow().len()),count);
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn dkr_flashinfer_decode_geometry_cpu() {
         let mut eligible=0;

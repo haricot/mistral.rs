@@ -1187,3 +1187,10 @@ remain S9B4d5 gates; no claim of safe admission for arbitrary untrusted
 metadata. The 77 quarantined geometries remain unsupported.
 The static CUDA producer is unchanged outside catalog-only; feature audit
 does not establish closure. No local Rust/CUDA compilation or GPU test.
+
+Added ignored physical-GPU regression for direct vs split F32, two
+nonuniform pages, optional window/softcap, reusable scratch, deliberately
+invalid masked padding and repeat-plan stability. It must run with real
+external or embedded images in S10; CPU helper tests require the CUDA
+feature build but perform no GPU operations. No extra synchronization in
+the production adapter; same-stream scratch ownership is required.
