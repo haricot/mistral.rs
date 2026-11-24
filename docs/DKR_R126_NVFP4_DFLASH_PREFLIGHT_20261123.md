@@ -469,3 +469,74 @@ sm61.hidden, restore only the dedicated copy after verifying that
 no test is running and its original path is absent. Full-model
 inference and performance remain separate gates. No Candle source
 change is required for this S5 experiment.
+
+## R1.26/S5 physical PASS — 2026-11-24
+
+User executed fb64c508, Nextest run 8f18c786-b4b6-4831-9518-29414f25a92b.
+All six tests passed (1.221s overall). Host build 5m08s. The submitted
+log begins at the build completion; it does not independently enumerate
+native CUDA build cache hits. No new external image was requested.
+The exact embedded catalogue of 20 profiles emitted its admission
+marker in all six separate processes. All four original CUBIN/PTX
+pairs were admitted in strict CUBIN mode, without filesystem catalogue
+admission or PTX fallback. Dedicated build input absent before and
+after the tests. NVFP4 full projection and all sampled GEMM cases
+again displayed zero errors at eight decimals against rounded CPU
+reference; synthetic bias cases passed.
+
+Report:
+target/dkr-r126-quant-embedded/20261124T090835-123259/evidence.json
+Recorded Nextest log SHA256:
+`06b81d121ca8acd0c8cf9b42d1cfbbdd9eefafa1069240da34c546ca17cbdd39`.
+Recorded S4 report SHA256:
+`d5403531a053b59543fb6e16ee620e01af1af1237e2cb0130aed99fc00ae128a`.
+embedded_runtime_qualified=true, same_process_all_four_families=false,
+full_model_qualified=false, performance_qualified=false.
+This is the scoped embedded quant transport and functional gate,
+not proof of eliminating every static Candle CUDA kernel.
+
+## R1.26/S6 staged — read-only full typed package coverage inventory
+
+The current Cudaforge builder registers 26 families (25 before
+the added NVFP4 GEMM). Four have the S5 embedded quant qualification.
+MoE grouped GEMM, indexed-copy and paged-decode have earlier targeted
+R1.25 filesystem pilot evidence; inspect the exact local package and
+log before reusing them. The remaining 19 registered families have
+not been covered by S5. This is a package-family count, not an
+exhaustive count of all CUDA operations or backend methods.
+
+The new tools/dkr_r126_full_catalog_inventory.py reads the builder's
+registered family names and actual local manifest trees. It verifies
+PTX/CUBIN digests, basic entry/target and CUDA ELF identity, reports
+missing/invalid/PTX-only/partially paired/paired families, and binds S5
+to S4's evidence hash. Earlier three-family log evidence is recognized
+when the relevant test passed and an image of that family was observed
+in the campaign; this is not a new per-profile attestation.
+The inventory does not run compilers or GPU and does not claim
+all ABI signatures, numerical coverage, or absence of static fallbacks.
+
+Important remaining architectural debt: S5 uses Candle generic
+cuda-legacy-bf16 and cuda-legacy-fp8 compatibility for tensor
+conversions, and the broad dkr-sm61-experimental feature enables
+cuda-legacy and native cuda-dkr-s31. Do not promote that broad feature
+as a purely catalogue-only deployment. Future full qualification must
+audit the resolved feature graph and actual production dispatch
+(including native Candle and GGUF/MMQ routes), not just the 26 packages.
+
+Run the inventory before assembling or compiling any missing families:
+```bash
+cd /home/np/dkr-worktrees/r125-candle-integration
+git fetch origin feature/dkr-r126-nvfp4-typed-sm61
+git switch --detach origin/feature/dkr-r126-nvfp4-typed-sm61
+python3 tools/dkr_r126_full_catalog_inventory.py \
+  --source /home/np/tmp/mistralrs_provider/mistral.rs/kernel-packages/build/cuda/sm61 \
+  --quant target/dkr-r126-quant-catalog/sm61 \
+  --quant-evidence target/dkr-r126-quant-catalog/evidence.json \
+  --embedded-evidence target/dkr-r126-quant-embedded/20261124T090835-123259/evidence.json \
+  --real target/dkr-r125-real-pilot/sm61 \
+  --real-log target/dkr-r125-real-pilot/r125-real.log \
+  --json-out target/dkr-r126-full-catalog/inventory.json
+```
+
+S6 is not yet run on the local files. No change to CUDA or Rust
+sources, feature flags or Candle pin for this audit.
