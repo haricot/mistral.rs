@@ -414,3 +414,104 @@ pub(super) fn try_decode(
     Ok(output.map(|storage| (storage, out_shape)))
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires physical CUDA and staged paged-options and paged-v2 CUBINs"]
+    fn dkr_paged_options_gpu() -> Result<()> {
+        let _evidence = mistralrs_kernel_runtime::RuntimeEvidenceGuard;
+        let dev = Device::new_cuda(0)?;
+        let (seqs, heads, hd, page, stride) = (3usize, 2usize, 64usize, 16usize, 34usize);
+        let blocks = seqs * stride;
+        let table_data: Vec<u32> = (0..blocks).map(|i| (blocks-1-i) as u32).collect();
+        let table = Tensor::from_vec(table_data.clone(), (seqs,stride), &dev)?;
+        let ks = Tensor::from_vec(vec![0.5f32],1,&dev)?;
+        let vs = Tensor::from_vec(vec![2f32],1,&dev)?;
+        let slopes = Tensor::from_vec(vec![0.03125f32,0.0625],heads,&dev)?;
+        let sinks = Tensor::from_vec(vec![2f32,-1.0],heads,&dev)?;
+        let kval = |t:usize| (t%5) as f32-2.0;
+        let vval = |t:usize,d:usize,seq:usize| (((t+d+seq)%13) as f32-6.0)*0.125;
+        for dtype in [DType::F16,DType::BF16,DType::F32] {
+            let mut queries = vec![0f32;seqs*heads*hd];
+            for row in 0..seqs*heads { queries[row*hd]=if row%2==0 {2.0} else {-2.0}; }
+            let q=Tensor::from_vec(queries,(seqs,heads,hd),&dev)?.to_dtype(dtype)?;
+            for scaled in [false,true] {
+                let x = if scaled {16} else if dtype==DType::F32 {4} else {8};
+                let mut k=vec![0f32;blocks*hd*page];
+                let mut v=k.clone();
+                for seq in 0..seqs {
+                    for t in 0..stride*page {
+                        let p=table_data[seq*stride+t/page] as usize;
+                        let slot=t%page;
+                        k[p*hd*page+slot*x]=kval(t);
+                        for d in 0..hd { v[p*hd*page+d*page+slot]=vval(t,d,seq); }
+                    }
+                }
+                let cd=if scaled {DType::F8E4M3} else {dtype};
+                let kc=Tensor::from_vec(k,(blocks,1,hd/x,page,x),&dev)?.to_dtype(cd)?;
+                let vc=Tensor::from_vec(v,(blocks,1,hd,page),&dev)?.to_dtype(cd)?;
+                for max in [256usize,257,513] {
+                    let contexts=[max,max/2,0];
+                    let lens=Tensor::from_vec(contexts.map(|n|n as u32).to_vec(),seqs,&dev)?;
+                    // Isolate each optional term, then combine them. Windows 1
+                    // and 17 mask whole partitions; 257 crosses a boundary.
+                    for (alibi,sink,window,cap) in [
+                        (true,false,None,1f32),
+                        (false,true,None,1.0),
+                        (false,false,Some(1usize),1.0),
+                        (false,false,None,2.0),
+                        (true,true,Some(17),2.0),
+                        (true,true,Some(257),1.0),
+                    ] {
+                        let run=||super::super::paged_attention::paged_attention_with_window(
+                            &q, scaled.then_some(&ks), scaled.then_some(&vs),
+                            &kc,&vc,&table,&lens,alibi.then_some(&slopes),max,1.0,cap,
+                            sink.then_some(&sinks),window);
+                        let actual=run()?.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+                        let mut error=0f32;
+                        for seq in 0..seqs {
+                            let ctx=contexts[seq];
+                            let start=ctx.saturating_sub(window.unwrap_or(ctx));
+                            for h in 0..heads {
+                                let sign=if h==0 {2.0f64} else {-2.0};
+                                let logit=|t:usize| {
+                                    let mut l=sign*kval(t) as f64*if scaled {0.5} else {1.0};
+                                    if cap!=1.0 {l=(l/cap as f64).tanh()*cap as f64;}
+                                    if alibi {l+=(if h==0 {0.03125} else {0.0625}) * (t as f64-ctx as f64+1.0);}
+                                    l
+                                };
+                                let sink_log=if h==0 {2.0f64} else {-1.0};
+                                let m=(start..ctx).map(logit).fold(if sink {sink_log} else {f64::NEG_INFINITY},f64::max);
+                                for d in 0..hd {
+                                    let mut denom=if sink {(sink_log-m).exp()} else {0.0};
+                                    let mut numer=0f64;
+                                    for t in start..ctx {
+                                        let w=(logit(t)-m).exp();
+                                        denom+=w;
+                                        numer+=w*vval(t,d,seq) as f64*if scaled {2.0} else {1.0};
+                                    }
+                                    let expected=if denom>0.0 {(numer/denom) as f32} else {0.0};
+                                    let got=actual[(seq*heads+h)*hd+d];
+                                    assert!(got.is_finite());
+                                    error=error.max((got-expected).abs());
+                                }
+                            }
+                        }
+                        let tol=match dtype {DType::F32=>3e-5,DType::F16=>0.001,_=>0.006};
+                        assert!(error<=tol,"paged options {dtype:?} fp8={scaled} max={max} alibi={alibi} sink={sink} window={window:?} cap={cap} error={error}");
+                        let cached=PLANS.with(|p|p.borrow().len());
+                        assert!(cached>0);
+                        let again=run()?.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+                        assert_eq!(actual,again);
+                        assert_eq!(cached,PLANS.with(|p|p.borrow().len()));
+                        eprintln!("DKR_R126_PAGED_OPTIONS=PASS dtype={dtype:?} fp8={scaled} context={max} alibi={alibi} sink={sink} window={window:?} cap={cap} max_abs={error:.8}");
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}

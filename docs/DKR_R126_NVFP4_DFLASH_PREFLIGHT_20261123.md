@@ -838,3 +838,30 @@ S7 baseline unchanged: prospective extension 28 families, 231
 profiles, 29 CUBINs (two new translation units including kv-fp8-io).
 The original S7/S8 scripts still describe the original baseline;
 extended staging must be supplied before physical tests.
+
+## R1.26/S9B3a staged — paged decode options
+
+New independent opt-in dkr-paged-options, forwarded through core.
+The paged-options family provides 12 partition profiles (three query
+dtypes, plain/FP8 K/V, with/without ALiBi) and three sink merge profiles.
+The existing no-sink V2 merge is reused. Optional tensor parameters are
+represented by separate signatures rather than null or fake tensor
+arguments. Window and cap are scalar parameters. Mask is exactly the
+last W tokens; ALiBi uses signed token-context+1; tanh softcap precedes
+ALiBi. The sink is included once in global merge, including empty
+partitions. Non-finite input values are not qualified. The reference
+kernel uses accurate tanhf rather than the historical fast_tanh
+approximation; numerical parity must be measured, not assumed bitwise.
+Context admission 1..32768, canonical contiguous VLLM layouts and
+supported head sizes; positive finite scales and valid metadata remain
+caller contracts. Existing workspace stream/graph lifetime limits apply.
+No change to S7 images. Prospective 29 families, 246 profiles, 30
+CUBINs (three new sources). Counts are targets, not built artifacts.
+
+Ignored dkr_paged_options_gpu exercises 108 configurations:
+F16/BF16/F32, plain/FP8, contexts 256/257/513, six option combinations,
+three unequal sequence lengths including empty, permuted pages, GQA,
+independent CPU F64 reference, repeat dispatch. Not compiled or run.
+Dense and varlen FlashAttnSinks APIs (prefill) are separate from paged
+decode and still reject in catalog-only profile. MLA/FlashInfer and
+other layout signatures remain open. No full backend closure claimed.
