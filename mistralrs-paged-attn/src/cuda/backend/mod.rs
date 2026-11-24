@@ -39,6 +39,8 @@ mod paged_decode_dynamic;
 mod paged_fp8_dynamic;
 #[cfg(feature = "dkr-paged-v2")]
 mod paged_v2_dynamic;
+#[cfg(feature = "dkr-paged-options")]
+mod paged_options_dynamic;
 #[cfg(feature = "dkr-kv-scales")]
 mod kv_scales_dynamic;
 #[cfg(not(feature = "dkr-paged-catalog-only"))]

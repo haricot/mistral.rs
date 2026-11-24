@@ -125,6 +125,13 @@ impl PagedAttention {
             self.v_scale.as_ref(),
             "paged_attention",
         )?;
+        #[cfg(feature = "dkr-paged-options")]
+        if let Some(result) = super::paged_options_dynamic::try_decode(
+            q, q_l, &self.key_cache, &self.value_cache, &self.block_tables, &self.context_lens,
+            self.softmax_scale, self.softcapping, self.max_context_len,
+            self.k_scale.as_ref().zip(self.v_scale.as_ref()),
+            self.alibi_slopes.as_ref(), self.sinks.as_ref(), self.sliding_window,
+        )? { return Ok(result); }
         // Explicitly scaled E4M3 K/V route. Both scale tensors are required
         // by this fixed ABI; unscaled/complex requests keep the static FFI.
         #[cfg(feature = "dkr-paged-fp8")]
