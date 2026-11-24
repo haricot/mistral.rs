@@ -982,3 +982,46 @@ Prospective extended catalogue 32 families, 408 profiles, 33 images
 512-profile limit, subject to actual artifact sizes and validation.
 No new compilation requested. Next: MLA decode, then FlashInfer
 decode with split-KV scheduler/scratch contract preserved.
+
+## R1.26/S9B4b resolved graph PASS — 2026-11-24
+
+User executed d1b70ae8. S9B2, S9B3, S9B4A, S9B4B and strict
+features PASS. Static producer elimination still NOT_QUALIFIED.
+No compilation or physical execution.
+
+## R1.26/S9B4c staged — historical MLA decode, typed launch
+
+Important correction to the initial split-KV expectation: current
+flashinfer_mla_decode.cu invokes the generic dispatch with null tmp_v
+and tmp_s, so the historical MLA API uses nonpartitioned full-context
+decode. It has no scratch argument. Do not claim split-KV qualification.
+New optional dkr-mla-decode forwards through core and replaces that
+public reexport, with no static FFI in the selected adapter. The
+legacy global entry and the new typed entry share the same vendored
+device body, avoiding algorithm duplication. Retain original
+512/64 dimensions, 32x8x1 block, two heads per y lane, 1/2 stages
+selected at device compile target, fast-math and dynamic shared
+memory from the historical dispatch formula. The new Cudaforge
+recipe watches the vendored FlashInfer files, and uses extended
+lambda support. Device code reconstructs Params from typed tensors
+and scalar arguments; no C++ struct ABI crosses the Rust boundary.
+Host fastdiv magic values use the existing unsigned algorithm and
+are cached with the device-aware launch plan. No runtime CC branch
+in Rust. Same public I32 planner metadata, no extra CPU reads.
+Valid planner contents, nonempty contexts, aligned contiguous
+Q/cache layouts and same device are caller contracts. Bounds on
+packed offsets and shapes are enforced; no general metadata value
+validation. No FP8 MLA, split-KV, graph-safety or performance claim.
+
+Three profiles F16/BF16/F32. Prospective extended catalogue
+33 families, 411 profiles, 34 CUBIN images, seven new sources
+relative to S7. Original 27 images remain unchanged. The new
+ignored GPU test covers three dtypes, three page sizes (including
+nonpower-of-two), two request mappings and two scales, 36 cases,
+17 heads, partial pages, distinct CKV/KPE contributions, CPU F64
+reference and repeated dispatch. CPU fastdiv test exercises all
+admitted page divisors. These crate tests have not been built/run.
+Legacy device wrapper refactor also needs regression validation
+at the grouped gate. No new CUDA build requested.
+Next: ordinary FlashInfer Decode with its actual optional scratch
+and partition merge semantics, then closure and grouped GPU tests.

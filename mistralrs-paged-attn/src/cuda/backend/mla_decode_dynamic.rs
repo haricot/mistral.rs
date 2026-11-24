@@ -160,3 +160,104 @@ pub fn flashinfer_mla_decode(q_nope:&Tensor,q_pe:&Tensor,ckv_cache:&Tensor,kpe_c
     }
     Ok(output)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dkr_mla_fastdiv_cpu(){
+        // Covers the entire admitted range of divisors, plus dense samples
+        // near page boundaries and the maximum supported packed offset.
+        for d in 1..=65536u32{
+            let (m,s,a)=fastdiv(d);
+            assert!(s<32);
+            for n in [0,1,d-1,d,d+1,2*d-1,2*d,65535,1234567,0x7fff_feff]{
+                let q=if d==1{n}else{((((m as u64*n as u64)>>32) as u32)
+                    .wrapping_add(a.wrapping_mul(n)))>>s};
+                assert_eq!(q,n/d,"d={d}, n={n}");
+                assert_eq!(n-q*d,n%d);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore="requires staged mla-decode CUBIN and physical CUDA"]
+    fn dkr_mla_decode_gpu()->Result<()>{
+        let _evidence=mistralrs_kernel_runtime::RuntimeEvidenceGuard;
+        let dev=Device::new_cuda(0)?;
+        let (batch,heads,blocks)=(2usize,17usize,3usize);
+        let qnval=|b:usize,h:usize,d:usize|->f32{
+            if d==0 {(if h%2==0{1.0}else{-1.0})*(1.0+b as f32*0.25)}
+            else if d==31 {0.5} else {0.0}
+        };
+        let qpval=|b:usize,h:usize,d:usize|->f32{
+            if d==0 {0.25*(1+(b+h)%3) as f32}else if d==63{-0.5}else{0.0}
+        };
+        let ckval=|p:usize,t:usize,d:usize|->f32{(((p*3+t*5+d)%13) as f32-6.0)*0.125};
+        let pkval=|p:usize,t:usize,d:usize|->f32{(((p+t*3+d)%9) as f32-4.0)*0.25};
+        let qn=(0..batch*heads*512).map(|i|qnval(i/(heads*512),i/512%heads,i%512)).collect::<Vec<_>>();
+        let qp=(0..batch*heads*64).map(|i|qpval(i/(heads*64),i/64%heads,i%64)).collect::<Vec<_>>();
+        for dtype in [DType::F16,DType::BF16,DType::F32]{
+            let qn=Tensor::from_vec(qn.clone(),(batch,heads,512),&dev)?.to_dtype(dtype)?;
+            let qp=Tensor::from_vec(qp.clone(),(batch,heads,64),&dev)?.to_dtype(dtype)?;
+            for page in [7usize,8,16]{
+                let ck=Tensor::from_vec((0..blocks*page*512).map(|i|ckval(i/(page*512),i/512%page,i%512))
+                    .collect::<Vec<_>>(),(blocks,page,512),&dev)?.to_dtype(dtype)?;
+                let pk=Tensor::from_vec((0..blocks*page*64).map(|i|pkval(i/(page*64),i/64%page,i%64))
+                    .collect::<Vec<_>>(),(blocks,page,64),&dev)?.to_dtype(dtype)?;
+                let indptr=Tensor::from_vec(vec![0i32,2,3],3,&dev)?;
+                let indices=Tensor::from_vec(vec![2i32,0,1],3,&dev)?;
+                let last=Tensor::from_vec(vec![3i32,(page-2) as i32],2,&dev)?;
+                let tile=Tensor::from_vec(vec![0i32,0],2,&dev)?;
+                let outptr=Tensor::from_vec(vec![0i32,1,2],3,&dev)?;
+                let chunk=Tensor::from_vec(vec![(2*page) as i32],1,&dev)?;
+                for mapping in [[0usize,1],[1,0]]{
+                    let requests=Tensor::from_vec(mapping.map(|x|x as i32).to_vec(),batch,&dev)?;
+                    for scale in [0.125f32,0.5]{
+                        let run=||super::super::flashinfer_mla_decode(
+                            &qn,&qp,&ck,&pk,&indptr,&indices,&last,&requests,&tile,&outptr,&chunk,scale);
+                        let out=run()?;
+                        assert_eq!(out.dims(),[batch,heads,512]);
+                        assert_eq!(out.dtype(),dtype);
+                        let actual=out.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+                        let mut max_err=0f64;
+                        for (out_b,&b) in mapping.iter().enumerate(){
+                            let len=if b==0 {page+3}else{page-2};
+                            let physical=|t:usize|if b==0 {if t<page {2}else{0}}else{1};
+                            for h in 0..heads{
+                                let logits=(0..len).map(|t|{
+                                    let p=physical(t);let s=t%page;
+                                    let a=qnval(b,h,0) as f64*ckval(p,s,0) as f64+
+                                          qnval(b,h,31) as f64*ckval(p,s,31) as f64+
+                                          qpval(b,h,0) as f64*pkval(p,s,0) as f64+
+                                          qpval(b,h,63) as f64*pkval(p,s,63) as f64;
+                                    a*scale as f64
+                                }).collect::<Vec<_>>();
+                                let m=logits.iter().copied().fold(f64::NEG_INFINITY,f64::max);
+                                let w=logits.iter().map(|v|(v-m).exp()).collect::<Vec<_>>();
+                                let den=w.iter().sum::<f64>();
+                                for d in 0..512{
+                                    let want=w.iter().enumerate().map(|(t,w)|w*ckval(physical(t),t%page,d) as f64)
+                                        .sum::<f64>()/den;
+                                    let got=actual[(out_b*heads+h)*512+d] as f64;
+                                    assert!(got.is_finite());
+                                    max_err=max_err.max((got-want).abs());
+                                }
+                            }
+                        }
+                        let tol=match dtype{DType::F32=>5e-5,DType::F16=>0.001,_=>0.006};
+                        assert!(max_err<=tol,"MLA decode dtype={dtype:?} page={page} mapping={mapping:?} scale={scale} err={max_err}");
+                        let count=PLANS.with(|c|c.borrow().len());
+                        assert!(count>0);
+                        let again=run()?.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+                        assert_eq!(actual,again);
+                        assert_eq!(count,PLANS.with(|c|c.borrow().len()));
+                        eprintln!("DKR_R126_MLA_DECODE=PASS dtype={dtype:?} page={page} mapping={mapping:?} scale={scale} max_abs={max_err:.8}");
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
