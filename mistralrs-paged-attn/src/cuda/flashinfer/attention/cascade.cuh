@@ -365,10 +365,10 @@ __global__ void MergeStatesLargeNumIndexSetsKernel(DTypeIn* __restrict__ V, floa
  */
 template <uint32_t vec_size, uint32_t bdx, uint32_t bdy, uint32_t num_smem_stages, typename DTypeIn,
           typename DTypeO, typename IdType>
-__global__ void PersistentVariableLengthMergeStatesKernel(
+__device__ __forceinline__ void PersistentVariableLengthMergeStatesDevice(
     DTypeIn* __restrict__ V, float* __restrict__ S, IdType* indptr, DTypeO* __restrict__ v_merged,
     float* __restrict__ s_merged, uint32_t max_seq_len, uint32_t* __restrict__ seq_len_ptr,
-    uint32_t num_heads) {
+    uint32_t num_heads, uint8_t* smem) {
   uint32_t tx = threadIdx.x, ty = threadIdx.y;
   uint32_t cta_id = blockIdx.x;
   uint32_t num_ctas = gridDim.x;
@@ -376,7 +376,6 @@ __global__ void PersistentVariableLengthMergeStatesKernel(
   uint32_t num_iters = ceil_div(seq_len * num_heads, num_ctas);
   constexpr uint32_t vec_bits = sizeof(DTypeIn) * vec_size * 8;
   constexpr uint32_t head_dim = vec_size * bdx;
-  extern __shared__ uint8_t smem[];
   DTypeIn* v_smem = (DTypeIn*)smem;
   float* s_smem = (float*)(smem + num_smem_stages * bdy * head_dim * sizeof(DTypeIn));
 
@@ -464,6 +463,17 @@ __global__ void PersistentVariableLengthMergeStatesKernel(
 #if (__CUDACC_VER_MAJOR__ >= 12 && defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
   asm volatile("griddepcontrol.launch_dependents;");
 #endif
+}
+
+template <uint32_t vec_size, uint32_t bdx, uint32_t bdy, uint32_t num_smem_stages, typename DTypeIn,
+          typename DTypeO, typename IdType>
+__global__ void PersistentVariableLengthMergeStatesKernel(
+    DTypeIn* __restrict__ V, float* __restrict__ S, IdType* indptr, DTypeO* __restrict__ v_merged,
+    float* __restrict__ s_merged, uint32_t max_seq_len, uint32_t* __restrict__ seq_len_ptr,
+    uint32_t num_heads) {
+  extern __shared__ uint8_t smem[];
+  PersistentVariableLengthMergeStatesDevice<vec_size,bdx,bdy,num_smem_stages,DTypeIn,DTypeO,IdType>(
+      V,S,indptr,v_merged,s_merged,max_seq_len,seq_len_ptr,num_heads,smem);
 }
 
 template <uint32_t vec_size, uint32_t bdx, uint32_t bdy, uint32_t num_smem_stages, typename DTypeIn,

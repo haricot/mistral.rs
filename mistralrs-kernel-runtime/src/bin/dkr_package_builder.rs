@@ -49,6 +49,7 @@ const PACKAGES: &[Package] = &[
     Package { name: "prefill-sinks", source: "prefill_sinks.cu", fast_math: false },
     Package { name: "mla-cache-io", source: "mla_cache_io.cu", fast_math: false },
     Package { name: "mla-decode", source: "mla_decode.cu", fast_math: true },
+    Package { name: "flashinfer-merge", source: "flashinfer_merge.cu", fast_math: true },
     Package { name: "flashinfer-hnd-io", source: "flashinfer_hnd_io.cu", fast_math: false },
     Package { name: "kv-cache-ops", source: "kv_cache_ops.cu", fast_math: false },
     Package { name: "kv-fp8-io", source: "kv_fp8_io.cu", fast_math: false },
@@ -122,7 +123,7 @@ fn compile_ptx(
     if !header_dependencies.is_empty() {
         builder = builder.arg("-DALLOW_LEGACY_BF16");
     }
-    if source.file_stem().is_some_and(|s| s == "mla_decode") {
+    if source.file_stem().is_some_and(|s| s == "mla_decode" || s == "flashinfer_merge") {
         builder = builder.arg("--expt-extended-lambda");
     }
     if let Some(mode) = mode {
@@ -296,7 +297,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             package(&python, &script, cc, &output, &moe_dir, true, root)?;
         } else {
-            let watched = if pkg.name == "mla-decode" {
+            let watched = if matches!(pkg.name, "mla-decode" | "flashinfer-merge") {
                 flashinfer_headers.as_slice()
             } else if cc == 61 && matches!(pkg.name, "paged-decode" | "paged-v2") {
                 paged_headers.as_slice()
