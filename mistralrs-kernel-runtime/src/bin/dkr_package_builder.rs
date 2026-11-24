@@ -46,6 +46,7 @@ const PACKAGES: &[Package] = &[
     Package { name: "paged-v2", source: "paged_v2.cu", fast_math: false },
     Package { name: "paged-fp8-v2", source: "paged_fp8_v2.cu", fast_math: false },
     Package { name: "paged-options", source: "paged_options.cu", fast_math: false },
+    Package { name: "prefill-sinks", source: "prefill_sinks.cu", fast_math: false },
     Package { name: "kv-cache-ops", source: "kv_cache_ops.cu", fast_math: false },
     Package { name: "kv-fp8-io", source: "kv_fp8_io.cu", fast_math: false },
     Package { name: "routed-quant", source: "routed_quant.cu", fast_math: false },
