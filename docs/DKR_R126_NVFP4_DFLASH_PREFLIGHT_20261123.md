@@ -1116,3 +1116,41 @@ closure qualification was performed in this staging step. Do not interpret
 logical capacity as admission of the FlashInfer variants. The non-shared
 CUDA loader's physical module reuse and external registry handoff costs
 remain to be measured; no performance claim is made.
+
+
+## R1.26/S9B4d2 CPU gate PASS — user evidence
+
+Nextest 11/11, 226 ms total, including 2151-profile synthetic catalogue
+and over-limit rejection; builder-cudaforge cargo check exit 0.
+No physical CUDA image or GPU gate.
+
+## R1.26/S9B4d3 — typed ordinary FlashInfer decode (source staged)
+
+External CUDA entry wrappers use the existing BatchDecodeWithPagedKVCacheDevice,
+HND cache, exact historical geometry, scale multiplication, optional window
+and softcap, page fastdiv fields, and distinct direct/partition outputs.
+Partition outputs match flashinfer-merge's typed partial and base-2 LSE.
+A mandatory typed U8 mask span plus use_mask flag represents optional masks;
+invalid padded blocks return before reading request/tile metadata. No host
+adapter is enabled: stride, capacity, graph padding, mask, fastdiv and
+planner invariants must be validated before launch in S9B4d4.
+
+The historical body uses full-warp shuffles, and sync_state writes float
+vectors at shared base and metadata after the K/V staging buffers. In addition
+to the 2 shared-limit and 39 partial-warp flags, quarantine geometries with
+bdz>1 and 2*stages*tile*sizeof(KV)<4 (57 flags, overlapping other flags).
+A larger allocation alone would not fix the overlap. For SM61 the union
+quarantines 77 of 216 geometries, leaving 139 staged geometries, 1112
+logical profiles and 30 bounded image shards (maximum 64 entries each).
+The conservative physical count is 453 = 411 + 12 + 30, logical count 1535.
+These are source candidates, not a support matrix. No fallback or change
+to the historical kernel was introduced. Other CCs use the same conservative
+48 KiB staging limit; no other architecture is qualified.
+
+The Python emitter plans and stamps only, checks exact PTX entry sets and
+parameter widths, refuses changed existing artifacts, and supports a
+synthetic PTX self-test. Cudaforge compiles each planned image separately
+with persistent per-image cache and the same vendored headers and flags.
+Existing S7 manifests and Cargo.lock are untouched. Actual CUDA compilation,
+real image sizes, driver loading, numeric qualification and producer closure
+remain pending. S9B4d4 must integrate the typed host adapter and merge.

@@ -50,6 +50,7 @@ const PACKAGES: &[Package] = &[
     Package { name: "mla-cache-io", source: "mla_cache_io.cu", fast_math: false },
     Package { name: "mla-decode", source: "mla_decode.cu", fast_math: true },
     Package { name: "flashinfer-merge", source: "flashinfer_merge.cu", fast_math: true },
+    Package { name: "flashinfer-decode", source: "flashinfer_decode.cu", fast_math: true },
     Package { name: "flashinfer-hnd-io", source: "flashinfer_hnd_io.cu", fast_math: false },
     Package { name: "kv-cache-ops", source: "kv_cache_ops.cu", fast_math: false },
     Package { name: "kv-fp8-io", source: "kv_fp8_io.cu", fast_math: false },
@@ -123,7 +124,7 @@ fn compile_ptx(
     if !header_dependencies.is_empty() {
         builder = builder.arg("-DALLOW_LEGACY_BF16");
     }
-    if source.file_stem().is_some_and(|s| s == "mla_decode" || s == "flashinfer_merge") {
+    if source.file_stem().is_some_and(|s| s == "mla_decode" || s == "flashinfer_merge" || s == "flashinfer_decode") {
         builder = builder.arg("--expt-extended-lambda");
     }
     if let Some(mode) = mode {
@@ -302,7 +303,35 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             return Err(format!("missing DKR CUDA source: {}", source.display()).into());
         }
         let script = dir.join("build.py");
-        if pkg.name == "moe" {
+        if pkg.name == "flashinfer-decode" {
+            // Python emits only the bounded source plan and stamps verified PTX.
+            // Cudaforge owns every device compilation, cached per image identity.
+            let planned = Command::new(&python).arg(&script)
+                .args(["--cc", &cc.to_string(), "--list-images"])
+                .current_dir(root).output()?;
+            if !planned.status.success() {
+                return Err(format!("FlashInfer image plan failed: {}", String::from_utf8_lossy(&planned.stderr)).into());
+            }
+            let ids = String::from_utf8(planned.stdout)?;
+            let mut seen = std::collections::BTreeSet::new();
+            for line in ids.lines() {
+                let id: u32 = line.parse()?;
+                if id == 0 || id >= (1 << 14) || !seen.insert(id) {
+                    return Err("invalid or duplicate FlashInfer image identity".into());
+                }
+                let define = format!("-DDKR_FLASHINFER_IMAGE={id}");
+                let compiled = compile_ptx(&source, &work.join(pkg.name).join(format!("image-{id:05}")),
+                    cc, pkg.fast_math, Some(&define), &flashinfer_headers)?;
+                let status = Command::new(&python).arg(&script)
+                    .args(["--cc", &cc.to_string(), "--image", &id.to_string()])
+                    .arg("--output").arg(&output).arg("--ptx-file").arg(&compiled)
+                    .current_dir(root).status()?;
+                if !status.success() {
+                    return Err(format!("FlashInfer shard packaging failed for {id}: {status}").into());
+                }
+            }
+            if seen.is_empty() { return Err("empty FlashInfer image plan".into()); }
+        } else if pkg.name == "moe" {
             let moe_dir = work.join("moe");
             for (variant, define) in [
                 ("f16", "-UDKR_BF16_MODE"),
