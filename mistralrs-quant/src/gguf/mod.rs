@@ -947,6 +947,25 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "dkr-static-closure-probe")]
+    #[test]
+    #[ignore = "requires native Candle CUDA catalogue and supported GGUF profiles"]
+    fn dkr_s9c_gguf_dense_reference_gpu() -> Result<()> {
+        let _evidence = mistralrs_kernel_runtime::RuntimeEvidenceGuard;
+        let device = Device::new_cuda(0)?;
+        let weight = Tensor::ones((2, TEST_EMBEDDING_DIM), DType::F32, &device)?;
+        let layer = GgufMatMul::from_qtensor(QTensor::quantize(&weight, GgmlDType::Q8_0)?, None);
+        assert!(!layer.uses_fast_mmvq());
+        for rows in [1usize, 17] {
+            let x = Tensor::ones((rows,TEST_EMBEDDING_DIM),DType::F32,&device)?;
+            let actual = layer.forward_raw(&x)?;
+            let expected = x.matmul(&layer.dequantize_w()?.t()?)?;
+            let diff = (actual - expected)?.abs()?.max_all()?.to_scalar::<f32>()?;
+            assert!(diff < 0.5, "GGUF native reference diff={diff}");
+        }
+        Ok(())
+    }
+
     #[test]
     fn forward_accepts_non_contiguous_f32_input() -> Result<()> {
         let device = Device::Cpu;

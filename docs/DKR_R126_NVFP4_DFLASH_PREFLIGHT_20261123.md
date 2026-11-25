@@ -1290,3 +1290,40 @@ FlashInfer decode shards are rejected. The hardcoded 26-family count is
 replaced by the package builder's actual registered family set (35 on
 this revision). Regenerate the inventory after staging missing families.
 No package bytes are generated or modified by the source audit.
+
+
+## R1.26/S9C.2A and initial S9C.2B — typed dispatch closure
+
+User evidence: S9C metadata/feature audit PASS; lexical inventory
+core=128, quant=317, paged=31 explicit symbols; synthetic tests 3/3 PASS.
+No actual no-producer link evidence yet.
+
+Probe-only changes:
+- MXFP4 dense no longer depends on the static HAVE_MXFP4_GEMM_KERNELS
+  flag to reach typed GEMV/GEMM. Static fallback and indexed/grouped
+  implementations are cfg-excluded; unsupported CUDA signatures fail closed.
+- Scalar FP8 cast and blockwise FP8 matmul have cfg-excluded static tails.
+  Blockwise weight quantization/dequantization are explicitly unsupported,
+  not claimed migrated. Dense/routed FP8 misses do not silently dequantize
+  the full weight tensor in probe mode.
+- Quant GEMV/GEMM, NVFP4 GEMV/GEMM and routed quant admission enabled in
+  closure probe independent of normal opt-in environment defaults.
+  NVFP4 explicit GEMV=0 remains rejected at construction. Probe admits
+  dense and rank-3 W4A16, not dynamic W4A4; no portable W4A16 FFI.
+- Routed quant gather can compose shared or per-expert bias after typed
+  kernel launch. Old fused CUDA GLU/FFN paths return None (optional
+  optimization; caller must execute full unfused semantics). Remaining
+  higher-level routed-MoE and GLU FFI consumers still need closure.
+- GGUF dense high-level dispatch uses the pre-existing Candle QMatMul
+  reference route rather than Mistral fast MMQ/MMVQ, unqualified for
+  performance and native catalogue coverage. CUDA indexed MoE returns
+  an explicit error rather than materialize all expert weights.
+  Optional GGUF grouping and gated-mix fusions are disabled in probe.
+  Direct MMQ/MMVQ and GGUF MoE APIs remain and must be migrated; no
+  global GGUF link closure claimed.
+
+Ignored GPU regressions added for routed bias (both stages and all four
+codecs) and Q8_0 dense reference, to be run only in the grouped campaign.
+The new source audit records route admission and explicit unsupported
+operations, not Rust cfg expansion, runtime reachability or full link proof.
+No Candle, lockfile, device package or historical cache modifications.

@@ -514,6 +514,42 @@ mod tests {
         check_stage(17, TOPK)
     }
 
+    #[cfg(feature = "dkr-static-closure-probe")]
+    #[test]
+    #[ignore = "requires complete typed catalogue and CUDA GPU"]
+    fn dkr_s9c_routed_bias_gpu() -> Result<()> {
+        let _evidence = mistralrs_kernel_runtime::RuntimeEvidenceGuard;
+        let device = Device::new_cuda(0)?;
+        for tokens in [2usize, 17] {
+            let ids = Tensor::from_vec(
+                (0..tokens * TOPK).map(|i| (i % EXPERTS) as u32).collect::<Vec<_>>(),
+                (tokens, TOPK), &device,
+            )?;
+            for codec in [Codec::Fp8, Codec::Mxfp8, Codec::Mxfp4, Codec::Nvfp4] {
+                for dtype in [DType::F16, DType::BF16, DType::F32] {
+                    let x = Tensor::zeros((tokens, 1, K), dtype, &device)?;
+                    let mut w = weights(codec, &device)?;
+                    for shared in [false, true] {
+                        let rows = if shared { 1 } else { EXPERTS };
+                        let values: Vec<f32> = (0..rows*N).map(|i| (i as f32 - 3.) * 0.25).collect();
+                        let bias = Tensor::from_vec(values.clone(), (rows,N), &device)?.to_dtype(dtype)?;
+                        w.bias = Some(if shared { bias.squeeze(0)? } else { bias });
+                        let result = crate::try_routed_gather(&x,&ids,&w)?
+                            .ok_or_else(|| candle_core::Error::msg("typed routed bias not selected"))?;
+                        let actual = result.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+                        for route in 0..tokens*TOPK {
+                            let row = if shared { 0 } else { route % EXPERTS };
+                            for col in 0..N {
+                                assert_eq!(actual[route*N+col], values[row*N+col]);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn dkr_routed_quant_refuses_biased_or_affine_weights() -> Result<()> {
         let device = Device::Cpu;
