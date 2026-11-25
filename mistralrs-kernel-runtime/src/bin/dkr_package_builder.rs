@@ -55,6 +55,7 @@ const PACKAGES: &[Package] = &[
     Package { name: "kv-cache-ops", source: "kv_cache_ops.cu", fast_math: false },
     Package { name: "kv-fp8-io", source: "kv_fp8_io.cu", fast_math: false },
     Package { name: "routed-quant", source: "routed_quant.cu", fast_math: false },
+    Package { name: "gguf-mmvq", source: "gguf_mmvq.cu", fast_math: false },
 ];
 
 fn parse_args() -> Result<(usize, PathBuf, String, bool, bool, Option<String>), Box<dyn std::error::Error>> {
@@ -333,6 +334,26 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             if seen.is_empty() { return Err("empty FlashInfer image plan".into()); }
+        } else if pkg.name == "gguf-mmvq" {
+            let kernels = root.join("mistralrs-quant/kernels");
+            let watched = [
+                kernels.join("mmvq_gguf/mmvq_gguf.cu"),
+                kernels.join("mmvq_gguf/prefetch_row.cuh"),
+                kernels.join("gguf/vecdot.cuh"),
+                kernels.join("gemv/row.cuh"),
+            ];
+            for id in 1..=11 {
+                let define = format!("-DDKR_GGUF_MMVQ_IMAGE={id}");
+                let compiled = compile_ptx(&source, &work.join(pkg.name).join(format!("image-{id:02}")),
+                    cc, pkg.fast_math, Some(&define), &watched)?;
+                let status = Command::new(&python).arg(&script)
+                    .args(["--cc", &cc.to_string(), "--image", &id.to_string()])
+                    .arg("--output").arg(&output).arg("--ptx-file").arg(&compiled)
+                    .current_dir(root).status()?;
+                if !status.success() {
+                    return Err(format!("GGUF MMVQ shard packaging failed for {id}: {status}").into());
+                }
+            }
         } else if pkg.name == "moe" {
             let moe_dir = work.join("moe");
             for (variant, define) in [

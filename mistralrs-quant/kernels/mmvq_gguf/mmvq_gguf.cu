@@ -141,6 +141,10 @@ mmvq_core_impl(const void *__restrict__ vx, const block_q8_1 *__restrict__ y,
 #pragma unroll
       for (int i = 0; i < rows_per_cuda_block; ++i) {
         const int row = row0 + i;
+        #ifdef DKR_GGUF_MMVQ_IMAGE
+        // The typed ABI admits exact-size packed weights, including odd N.
+        if (row >= nrows_x) continue;
+        #endif
         const int weight_kbx = row * blocks_per_row_x + kbx;
         tmp[j][i] +=
             vec_dot_q_cuda(static_cast<const block_q_t *>(vx) + weight_kbx,
@@ -184,6 +188,7 @@ mmvq_core_impl(const void *__restrict__ vx, const block_q8_1 *__restrict__ y,
   }
 }
 
+#ifndef DKR_GGUF_MMVQ_IMAGE
 struct MixedMmvqArgs {
   const void *quant_weight;
   const void *quant_input;
@@ -470,6 +475,8 @@ static __device__ void mmvq_core_fused_qkv_impl(
   }
 }
 
+#endif // historical mixed/fused bodies
+
 #define MMVQ_PLAIN_ENTRY(tag, block_q_t, qk_val, qi_val, vdr_val, vec_dot,     \
                          dst_tag, dst_c_type, ncols)                           \
   extern "C" __global__ void __launch_bounds__(                                \
@@ -605,6 +612,7 @@ static __device__ void mmvq_core_fused_qkv_impl(
   MMVQ_FUSED_GLU_ENTRY(tag, block_q_t, qk_val, qi_val, vdr_val, vec_dot,       \
                        dst_tag, dst_c_type, 8)
 
+#ifndef DKR_GGUF_MMVQ_IMAGE
 MMVQ_PLAIN_BATCH_SET(q4_0, block_q4_0, QK4_0, QI4_0, VDR_Q4_0_Q8_1_MMVQ,
                      vec_dot_q4_0_q8_1)
 MMVQ_PLAIN_BATCH_SET(q4_1, block_q4_1, QK4_1, QI4_1, VDR_Q4_1_Q8_1_MMVQ,
@@ -625,6 +633,60 @@ MMVQ_PLAIN_BATCH_SET(q5_k, block_q5_K, QK_K, QI5_K, VDR_Q5_K_Q8_1_MMVQ,
                      vec_dot_q5_K_q8_1)
 MMVQ_PLAIN_BATCH_SET(q6_k, block_q6_K, QK_K, QI6_K, VDR_Q6_K_Q8_1_MMVQ,
                      vec_dot_q6_K_q8_1)
+#else
+// Standalone L2-prefetch entry, same historical prefetch_row body.
+#define DKR_PREFETCH_ENTRY(tag, weight, qk, qi, vdr, dot, dtype, T) \
+extern "C" __global__ void __launch_bounds__(256, 1) \
+dkr_mmvq_##tag##_##dtype##_prefetch(const void* w, const void* y, T* dst, int k) { \
+  prefetch_row<T, qk, qi, weight, vdr, dot>( \
+      static_cast<const weight*>(w) + (size_t)blockIdx.x * (k / qk), \
+      static_cast<const block_q8_1*>(y), dst + blockIdx.x, k); \
+}
+#define DKR_PREFETCH_SET(tag, weight, qk, qi, vdr, dot) \
+  DKR_PREFETCH_ENTRY(tag, weight, qk, qi, vdr, dot, f16, half) \
+  DKR_PREFETCH_ENTRY(tag, weight, qk, qi, vdr, dot, bf16, __nv_bfloat16) \
+  DKR_PREFETCH_ENTRY(tag, weight, qk, qi, vdr, dot, f32, float)
+#if DKR_GGUF_MMVQ_IMAGE == 1
+MMVQ_PLAIN_BATCH_SET(q4_0, block_q4_0, QK4_0, QI4_0, VDR_Q4_0_Q8_1_MMVQ, vec_dot_q4_0_q8_1)
+DKR_PREFETCH_SET(q4_0, block_q4_0, QK4_0, QI4_0, VDR_Q4_0_Q8_1_MMVQ, vec_dot_q4_0_q8_1)
+#endif
+#if DKR_GGUF_MMVQ_IMAGE == 2
+MMVQ_PLAIN_BATCH_SET(q4_1, block_q4_1, QK4_1, QI4_1, VDR_Q4_1_Q8_1_MMVQ, vec_dot_q4_1_q8_1)
+DKR_PREFETCH_SET(q4_1, block_q4_1, QK4_1, QI4_1, VDR_Q4_1_Q8_1_MMVQ, vec_dot_q4_1_q8_1)
+#endif
+#if DKR_GGUF_MMVQ_IMAGE == 3
+MMVQ_PLAIN_BATCH_SET(q5_0, block_q5_0, QK5_0, QI5_0, VDR_Q5_0_Q8_1_MMVQ, vec_dot_q5_0_q8_1)
+DKR_PREFETCH_SET(q5_0, block_q5_0, QK5_0, QI5_0, VDR_Q5_0_Q8_1_MMVQ, vec_dot_q5_0_q8_1)
+#endif
+#if DKR_GGUF_MMVQ_IMAGE == 4
+MMVQ_PLAIN_BATCH_SET(q5_1, block_q5_1, QK5_1, QI5_1, VDR_Q5_1_Q8_1_MMVQ, vec_dot_q5_1_q8_1)
+DKR_PREFETCH_SET(q5_1, block_q5_1, QK5_1, QI5_1, VDR_Q5_1_Q8_1_MMVQ, vec_dot_q5_1_q8_1)
+#endif
+#if DKR_GGUF_MMVQ_IMAGE == 5
+MMVQ_PLAIN_BATCH_SET(q8_0, block_q8_0, QK8_0, QI8_0, VDR_Q8_0_Q8_1_MMVQ, vec_dot_q8_0_q8_1)
+DKR_PREFETCH_SET(q8_0, block_q8_0, QK8_0, QI8_0, VDR_Q8_0_Q8_1_MMVQ, vec_dot_q8_0_q8_1)
+#endif
+#if DKR_GGUF_MMVQ_IMAGE == 6
+MMVQ_PLAIN_BATCH_SET(q2_k, block_q2_K, QK_K, QI2_K, VDR_Q2_K_Q8_1_MMVQ, vec_dot_q2_K_q8_1)
+#endif
+#if DKR_GGUF_MMVQ_IMAGE == 7
+MMVQ_PLAIN_BATCH_SET(q3_k, block_q3_K, QK_K, QI3_K, VDR_Q3_K_Q8_1_MMVQ, vec_dot_q3_K_q8_1)
+#endif
+#if DKR_GGUF_MMVQ_IMAGE == 8
+MMVQ_PLAIN_BATCH_SET(q4_k, block_q4_K, QK_K, QI4_K, VDR_Q4_K_Q8_1_MMVQ, vec_dot_q4_K_q8_1)
+DKR_PREFETCH_SET(q4_k, block_q4_K, QK_K, QI4_K, VDR_Q4_K_Q8_1_MMVQ, vec_dot_q4_K_q8_1)
+#endif
+#if DKR_GGUF_MMVQ_IMAGE == 9
+MMVQ_PLAIN_BATCH_SET(q5_k, block_q5_K, QK_K, QI5_K, VDR_Q5_K_Q8_1_MMVQ, vec_dot_q5_K_q8_1)
+DKR_PREFETCH_SET(q5_k, block_q5_K, QK_K, QI5_K, VDR_Q5_K_Q8_1_MMVQ, vec_dot_q5_K_q8_1)
+#endif
+#if DKR_GGUF_MMVQ_IMAGE == 10
+MMVQ_PLAIN_BATCH_SET(q6_k, block_q6_K, QK_K, QI6_K, VDR_Q6_K_Q8_1_MMVQ, vec_dot_q6_K_q8_1)
+DKR_PREFETCH_SET(q6_k, block_q6_K, QK_K, QI6_K, VDR_Q6_K_Q8_1_MMVQ, vec_dot_q6_K_q8_1)
+#endif
+#endif // DKR_GGUF_MMVQ_IMAGE
+
+#ifndef DKR_GGUF_MMVQ_IMAGE
 
 #define MMVQ_FUSED_GLU_TYPE_SET(tag, block_q_t, qk_val, qi_val, vdr_val,       \
                                 vec_dot)                                       \
@@ -686,6 +748,10 @@ MMVQ_FUSED_QKV_TYPE_SET(q5_k, block_q5_K, QK_K, QI5_K, VDR_Q5_K_Q8_1_MMVQ,
 MMVQ_FUSED_QKV_TYPE_SET(q6_k, block_q6_K, QK_K, QI6_K, VDR_Q6_K_Q8_1_MMVQ,
                         vec_dot_q6_K_q8_1)
 
+#endif // historical fused instantiations
+
+#if !defined(DKR_GGUF_MMVQ_IMAGE) || DKR_GGUF_MMVQ_IMAGE == 11
+static_assert(sizeof(block_q8_1) == 36, "Q8_1 packed ABI");
 extern "C" __global__ void
 mmvq_gguf_quantize_q8_1_bf16(const __nv_bfloat16 *__restrict__ x,
                              void *__restrict__ vy, const int kx,
@@ -786,6 +852,9 @@ mmvq_gguf_quantize_q8_1_f32(const float *__restrict__ x, void *__restrict__ vy,
   reinterpret_cast<half &>(y[ib].ds.y) = (half)sum;
 }
 
+#endif // quantizer image
+
+#ifndef DKR_GGUF_MMVQ_IMAGE
 #define MMVQ_LAUNCHER_PLAIN(tag, dst_tag, dst_c_type)                          \
   extern "C" void launch_mmvq_gguf_##tag##_##dst_tag##_plain(                  \
       const void *vx, const void *vy, void *dst, int ncols_x, int nrows_x,     \
@@ -1105,3 +1174,4 @@ extern "C" void launch_mmvq_gguf_quantize_q8_1_f32(const void *x, void *vy,
   mmvq_gguf_quantize_q8_1_f32<<<grid, block, 0, s>>>((const float *)x, vy, kx,
                                                      kx_padded);
 }
+#endif // historical host launchers
