@@ -56,6 +56,7 @@ const PACKAGES: &[Package] = &[
     Package { name: "kv-fp8-io", source: "kv_fp8_io.cu", fast_math: false },
     Package { name: "routed-quant", source: "routed_quant.cu", fast_math: false },
     Package { name: "gguf-mmvq", source: "gguf_mmvq.cu", fast_math: false },
+    Package { name: "gguf-mmq", source: "gguf_mmq.cu", fast_math: false },
 ];
 
 fn parse_args() -> Result<(usize, PathBuf, String, bool, bool, Option<String>), Box<dyn std::error::Error>> {
@@ -298,6 +299,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let work = output.join(format!("sm{cc}/_cudaforge_cache"));
     if !pair_existing {
     for pkg in PACKAGES.iter().filter(|p| family.as_ref().is_none_or(|name| p.name == name.as_str())) {
+        if pkg.name == "gguf-mmq" && cc != 61 {
+            if family.is_some() { return Err("GGUF MMQ typed package is qualified for source target SM61 only".into()); }
+            println!("DKR_GGUF_MMQ_SKIPPED target_cc={cc} reason=sm61_source_only");
+            continue;
+        }
         let dir = sources.join(pkg.name);
         let source = dir.join(pkg.source);
         if !source.is_file() {
@@ -334,6 +340,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             if seen.is_empty() { return Err("empty FlashInfer image plan".into()); }
+        } else if pkg.name == "gguf-mmq" {
+            let kernels = root.join("mistralrs-quant/kernels/mmq_gguf");
+            let watched = ["mmq_common.cuh","mmq_gguf.cuh","mmq_vecdotq.cuh",
+                "mmq_mma.cuh","mmq_quantize.cu"].map(|name| kernels.join(name));
+            for id in 1..=11 {
+                let define = format!("-DDKR_GGUF_MMQ_IMAGE={id}");
+                let compiled = compile_ptx(&source, &work.join(pkg.name).join(format!("image-{id:02}")),
+                    cc, pkg.fast_math, Some(&define), &watched)?;
+                let status = Command::new(&python).arg(&script)
+                    .args(["--cc", &cc.to_string(), "--image", &id.to_string()])
+                    .arg("--output").arg(&output).arg("--ptx-file").arg(&compiled)
+                    .current_dir(root).status()?;
+                if !status.success() { return Err(format!("GGUF MMQ shard packaging failed for {id}: {status}").into()); }
+            }
         } else if pkg.name == "gguf-mmvq" {
             let kernels = root.join("mistralrs-quant/kernels");
             let watched = [

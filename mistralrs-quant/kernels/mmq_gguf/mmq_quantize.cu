@@ -96,7 +96,11 @@ __device__ __forceinline__ float4 load_mmq4<__nv_bfloat16>(
 }
 
 template <typename input_t, mmq_q8_1_ds_layout ds_layout>
+#ifdef DKR_GGUF_MMQ_IMAGE
+static __device__ __forceinline__ void
+#else
 static __global__ void
+#endif
 quantize_mmq_q8_1(const input_t *__restrict__ x,
                   const int32_t *__restrict__ ids, void *__restrict__ vy,
                   const int64_t ne00, const int64_t s01, const int64_t s02,
@@ -155,7 +159,13 @@ quantize_mmq_q8_1(const input_t *__restrict__ x,
     }
   }
 
+  // The typed path also quantizes zero-padded K tiles. Avoid converting NaN
+  // (0 * infinity) to int8 when an entire scale group is zero.
+#ifdef DKR_GGUF_MMQ_IMAGE
+  const float d_inv = amax == 0.0f ? 0.0f : 127.0f / amax;
+#else
   const float d_inv = 127.0f / amax;
+#endif
   char4 q;
   q.x = roundf(xi.x * d_inv);
   q.y = roundf(xi.y * d_inv);
@@ -178,7 +188,11 @@ quantize_mmq_q8_1(const input_t *__restrict__ x,
       return;
     }
 
+    #ifdef DKR_GGUF_MMQ_IMAGE
+    const float d = amax == 0.0f ? 0.0f : 1.0f / d_inv;
+#else
     const float d = 1.0f / d_inv;
+#endif
 
     y[ib].d2s6[iqs / 64] = d;
 
@@ -189,7 +203,11 @@ quantize_mmq_q8_1(const input_t *__restrict__ x,
     return;
   }
 
-  const float d = 1.0f / d_inv;
+  #ifdef DKR_GGUF_MMQ_IMAGE
+    const float d = amax == 0.0f ? 0.0f : 1.0f / d_inv;
+#else
+    const float d = 1.0f / d_inv;
+#endif
 
   if (ds_layout == MMQ_Q8_1_DS_LAYOUT_DS4) {
     y[ib].ds4[iqs / 32] = mmq_encode_ds4(d, sum);
@@ -198,6 +216,7 @@ quantize_mmq_q8_1(const input_t *__restrict__ x,
   }
 }
 
+#ifndef DKR_GGUF_MMQ_IMAGE
 static __device__ __forceinline__ float mmq_glu_silu(float x) {
   return x / (1.0f + expf(-x));
 }
@@ -475,3 +494,4 @@ launch_mmq_quantize_glu_q8_1_D2S6(const void *gate, const void *up,
   launch_mmq_quantize_glu_q8_1_typed<MMQ_Q8_1_DS_LAYOUT_D2S6>(
       gate, up, ids, vy, type_x, ne00, s01, ne0, ne1, activation, stream);
 }
+#endif // historical fused quantization and host launchers
