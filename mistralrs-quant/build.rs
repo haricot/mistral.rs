@@ -124,7 +124,17 @@ fn main() -> Result<(), String> {
     println!("cargo::rustc-check-cfg=cfg(has_nvfp4_cutlass_kernels)");
     println!("cargo::rustc-check-cfg=cfg(cuda_ge_13000)");
 
-    #[cfg(feature = "cuda")]
+    #[cfg(all(feature = "cuda", feature = "dkr-static-closure-probe"))]
+    {
+        assert!(!cfg!(any(feature = "cuda-legacy", feature = "cuda-legacy-bf16",
+            feature = "cuda-legacy-fp8", feature = "cuda-legacy-fp4", feature = "cutile")),
+            "DKR closure probe cannot include legacy CUDA producers");
+        println!("cargo:rerun-if-changed=build.rs");
+        println!("cargo:warning=DKR_STATIC_PRODUCER_DISABLED component=mistralrs-quant mode=closure-probe");
+        return Ok(());
+    }
+
+    #[cfg(all(feature = "cuda", not(feature = "dkr-static-closure-probe")))]
     {
         use std::{path::Path, path::PathBuf, vec};
         const CUDA_NVCC_FLAGS: Option<&'static str> = option_env!("CUDA_NVCC_FLAGS");

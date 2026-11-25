@@ -92,7 +92,17 @@ fn main() {
     #[cfg(feature = "cudnn")]
     add_cudnn_link_search();
 
-    #[cfg(feature = "cuda")]
+    #[cfg(all(feature = "cuda", feature = "dkr-static-closure-probe"))]
+    {
+        assert!(!cfg!(any(feature = "cuda-legacy", feature = "cuda-legacy-bf16",
+            feature = "cuda-legacy-fp8", feature = "cuda-legacy-fp4",
+            feature = "cutile", feature = "flash-attn", feature = "flash-attn-v3")),
+            "DKR closure probe cannot include legacy or separate CUDA producers");
+        println!("cargo:rerun-if-changed=build.rs");
+        println!("cargo:warning=DKR_STATIC_PRODUCER_DISABLED component=mistralrs-core mode=closure-probe");
+    }
+
+    #[cfg(all(feature = "cuda", not(feature = "dkr-static-closure-probe")))]
     {
         use std::path::PathBuf;
         let cuda_version_code = set_cuda_toolkit_version();

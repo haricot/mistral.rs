@@ -1250,3 +1250,33 @@ contexts, GQA groups, native/FP8 caches, nonunit FP8 scales, window/softcap,
 and reusable scratch with inactive padding. Expected 215 geometries,
 1720 direct/partition cases on SM61. Numerical tolerances are initial
 gates, not measured parity. GPU tests and Rust compilation not run here.
+
+
+## R1.26/S9C.1 — source inventory and no-producer link probe
+
+S9B4d5 source plan, shard self-test and standalone F64 oracle passed on
+the user system (215 geometries, 1720 profiles, 48 images, 2/2 tests).
+
+The paged crate already excludes its FFI module and static producer
+under dkr-paged-catalog-only. dkr-paged-full-catalog aggregates its staged
+routes, including ordinary FlashInfer. The independent
+dkr-static-closure-probe feature disables the core and quant build
+producer blocks before any toolkit detection, CUTLASS fetch or archive
+link directive. It is NOT added to the existing qualified-default
+feature. No fake symbols or dummy successful launches. Unresolved
+legacy externs remain link blockers, intentionally visible.
+Core rounded RoPE no longer calls its static fallback in probe mode;
+noncontiguous inputs are explicitly materialized before typed fusion.
+Completion input pack uses generic Candle stack/cat in probe mode;
+extra launches may cost performance, pending measurement.
+Dense quant GEMV rejects unsupported typed signatures, with its old
+FFI module and three legacy dispatch functions excluded in probe mode.
+
+Remaining source risks include core GDN, DFlash context/selector,
+speculative rejection, top-k/sort/sampling, attention prep, dynamic
+conv and graph-copy FFI; quant GGUF MMQ/MMVQ/indexed-MoE, rotary,
+embedding, GPTQ/HQQ/AFQ/BnB, LFM3 conv, MXFP8 and LoRA. Some routes
+may already be gated or covered by other native operations. Lexical
+references are NOT proven live link dependencies. Need compiled object
+and linker evidence to classify each. No production closure or S10
+readiness claimed. Keep historical caches and local Cargo.lock.

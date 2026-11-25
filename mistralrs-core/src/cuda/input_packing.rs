@@ -3,6 +3,7 @@ use candle_core::{
     Storage, Tensor,
 };
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 struct CompletionInputPackOp {
     staged_rows: Vec<Tensor>,
     batch: usize,
@@ -10,6 +11,7 @@ struct CompletionInputPackOp {
     staged_width: usize,
 }
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 impl CustomOp1 for CompletionInputPackOp {
     fn name(&self) -> &'static str {
         "completion-input-pack"
@@ -225,6 +227,15 @@ pub(crate) fn pack_completion_input(host: &Tensor, staged_rows: &[Tensor]) -> Re
             candle_core::bail!("completion input staged rows must be contiguous CUDA U32 rows")
         }
     }
+    #[cfg(feature = "dkr-static-closure-probe")]
+    {
+        if batch == 0 || host_width == 0 {
+            candle_core::bail!("invalid completion input packing dimensions");
+        }
+        let staged = Tensor::stack(staged_rows, 0)?;
+        return Tensor::cat(&[host, &staged], 1);
+    }
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     host.apply_op1_no_bwd(&CompletionInputPackOp {
         staged_rows: staged_rows.to_vec(),
         batch,

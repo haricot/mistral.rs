@@ -30,6 +30,12 @@ anyhow.workspace = true
 mistralrs-metal-compile = { workspace = true, optional = true }
 
 [features]
+# All staged paged routes; unsupported signatures still fail closed.
+dkr-paged-full-catalog = [
+    "dkr-paged-catalog-only", "dkr-kv-fp8-io", "dkr-paged-options",
+    "dkr-prefill-sinks", "dkr-mla-cache-io", "dkr-flashinfer-hnd-io",
+    "dkr-mla-decode", "dkr-flashinfer-decode",
+]
 # Independent typed decode + persistent merge pilot; no legacy flags.
 dkr-flashinfer-decode = ["cuda", "dep:mistralrs-kernel-runtime", "mistralrs-kernel-runtime/cuda"]
 dkr-mla-decode = ["cuda", "dep:mistralrs-kernel-runtime", "mistralrs-kernel-runtime/cuda"]

@@ -10,7 +10,7 @@
 //! - Static shared memory for block-level reduction
 //! - Supports batch sizes 1-8 efficiently
 
-#[cfg(feature = "cuda")]
+#[cfg(all(feature = "cuda", not(feature = "dkr-static-closure-probe")))]
 mod ffi;
 #[cfg(feature = "dkr-gemv")]
 mod dynamic;
@@ -325,7 +325,12 @@ pub fn gemv(x: &Tensor, w: &Tensor, bias: Option<&Tensor>) -> Result<Tensor> {
         return Ok(result);
     }
 
-    // Dispatch based on dtype
+    #[cfg(feature = "dkr-static-closure-probe")]
+    {
+        candle_core::bail!("DKR_STATIC_CLOSURE: dense GEMV signature not admitted by typed catalogue");
+    }
+    // Legacy dispatch is excluded from the diagnostic no-producer build.
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     match x.dtype() {
         DType::BF16 => gemv_bf16(dev, x, w, bias, batch_size, m, k, &output_shape),
         DType::F16 => gemv_f16(dev, x, w, bias, batch_size, m, k, &output_shape),
@@ -334,7 +339,7 @@ pub fn gemv(x: &Tensor, w: &Tensor, bias: Option<&Tensor>) -> Result<Tensor> {
     }
 }
 
-#[cfg(feature = "cuda")]
+#[cfg(all(feature = "cuda", not(feature = "dkr-static-closure-probe")))]
 #[allow(clippy::too_many_arguments)]
 fn gemv_bf16(
     dev: &CudaDevice,
@@ -408,7 +413,7 @@ fn gemv_bf16(
     Ok(y)
 }
 
-#[cfg(feature = "cuda")]
+#[cfg(all(feature = "cuda", not(feature = "dkr-static-closure-probe")))]
 #[allow(clippy::too_many_arguments)]
 fn gemv_f16(
     dev: &CudaDevice,
@@ -479,7 +484,7 @@ fn gemv_f16(
     Ok(y)
 }
 
-#[cfg(feature = "cuda")]
+#[cfg(all(feature = "cuda", not(feature = "dkr-static-closure-probe")))]
 #[allow(clippy::too_many_arguments)]
 fn gemv_f32(
     dev: &CudaDevice,

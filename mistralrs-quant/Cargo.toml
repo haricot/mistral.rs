@@ -46,6 +46,12 @@ cutile = { workspace = true, optional = true, features = ["experimental-tune"] }
 mistralrs-metal-compile = { workspace = true, optional = true, features = ["metal"] }
 
 [features]
+# Diagnostic only: no producer, no fake FFI implementation.
+dkr-static-closure-probe = [
+    "dkr-reduce-norm", "dkr-gemv", "dkr-gemm", "dkr-fp8-cast",
+    "dkr-fp4-dequant", "dkr-quant-gemv", "dkr-quant-gemm",
+    "dkr-routed-quant", "dkr-nvfp4-gemv",
+]
 dkr-reduce-norm = ["cuda"]
 dkr-gemv = ["cuda"]
 dkr-fp8-cast = ["cuda"]

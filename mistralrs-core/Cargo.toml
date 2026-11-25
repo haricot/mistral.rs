@@ -123,6 +123,16 @@ dispatch2 = { workspace = true, optional = true }
 mistralrs-metal-compile = { workspace = true, optional = true, features = ["metal"] }
 
 [features]
+# Diagnostic link-closure candidate, NOT a deployment or model qualification.
+# Deliberately leaves unresolved legacy externs visible to the linker.
+dkr-static-closure-probe = [
+    "dkr-typed-operations",
+    "mistralrs-quant/dkr-static-closure-probe",
+    "mistralrs-paged-attn/dkr-paged-full-catalog",
+    "dkr-paged-catalog-only", "dkr-kv-fp8-io", "dkr-paged-options",
+    "dkr-prefill-sinks", "dkr-mla-cache-io", "dkr-flashinfer-hnd-io",
+    "dkr-mla-decode", "dkr-flashinfer-decode",
+]
 # R1.25 typed-only real workload pilot. NO native S31 catalogue.
 # Candle's *generic* BF16 tensor utilities must still work on pre-Ampere:
 # fill.cu::const_set_bf16 and cast.cu::cast_bf16_f32 are guarded by the

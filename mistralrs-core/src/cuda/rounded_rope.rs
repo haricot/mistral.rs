@@ -4,6 +4,7 @@ use candle_core::{
 };
 use std::ffi::c_void;
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 #[repr(C)]
 struct NormRopeArgs {
     input: *const c_void,
@@ -19,6 +20,7 @@ struct NormRopeArgs {
     strides: [i64; 4],
     epsilon: f32,
 }
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 unsafe extern "C" {
     fn launch_rounded_norm_rope(args: NormRopeArgs, dtype: i32, stream: *mut c_void);
 }
@@ -68,6 +70,16 @@ pub(crate) fn try_rms_norm_partial_rotary_neox(
         );
     }
 
+    #[cfg(feature = "dkr-static-closure-probe")]
+    {
+        // Typed fusion admits contiguous rows only. Explicit materialization
+        // is a correctness route, not a claimed performance optimization.
+        return super::rounded_rope_dynamic::run(
+            &input.contiguous()?, weight, cos, sin, epsilon, dimensions, half_rot,
+        );
+    }
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
+    {
     let dev = input.device().as_cuda_device()?;
     let stream = dev.cuda_stream();
     let (input_s, input_l) = input.storage_and_layout();
@@ -124,5 +136,6 @@ pub(crate) fn try_rms_norm_partial_rotary_neox(
         DType::F16 => launch!(half::f16, 1),
         DType::BF16 => launch!(half::bf16, 2),
         _ => unreachable!(),
+    }
     }
 }

@@ -105,6 +105,7 @@ fn main() -> Result<()> {
     // deliberately do not emit has_fp8 (full FP8 cache capability).
     if cfg!(feature = "dkr-paged-catalog-only") {
         println!("cargo:warning=DKR_PAGED_STATIC_PRODUCER=DISABLED scope=vllm_catalog_only");
+        println!("cargo:warning=DKR_STATIC_PRODUCER_DISABLED component=mistralrs-paged-attn mode=catalog-only");
         return Ok(());
     }
     println!("cargo:rerun-if-env-changed=CUDA_NVCC_FLAGS");

@@ -66,8 +66,24 @@ try:
             if missing:
                 raise ValueError(f"{name} lacks {sorted(missing)}")
         print("DKR_R126_S9B4D4_FEATURES=PASS flashinfer_decode=true flashinfer_hnd_io=true")
+    if "--static-closure-probe" in sys.argv[1:]:
+        for name, wanted in {
+            "mistralrs-core": {"dkr-static-closure-probe", "dkr-flashinfer-decode"},
+            "mistralrs-quant": {"dkr-static-closure-probe"},
+            "mistralrs-paged-attn": {"dkr-paged-full-catalog", "dkr-paged-catalog-only",
+                                     "dkr-kv-fp8-io", "dkr-paged-options", "dkr-prefill-sinks",
+                                     "dkr-mla-cache-io", "dkr-flashinfer-hnd-io", "dkr-mla-decode",
+                                     "dkr-flashinfer-decode"},
+        }.items():
+            missing = wanted - graph[name]
+            if missing:
+                raise ValueError(f"{name} lacks {sorted(missing)}")
+        if {"flash-attn", "flash-attn-v3"} & graph["mistralrs-core"]:
+            raise ValueError("separate FlashAttention producer in closure probe")
+        print("DKR_R126_S9C_FEATURES=PASS three_producers_guarded=true link_qualified=false")
     print("DKR_R126_STRICT_FEATURES=PASS candle_embedded=true typed=true legacy_flags=false")
-    print("DKR_R126_STATIC_PRODUCER_ELIMINATION=NOT_QUALIFIED mistral_build_scripts=remain")
+    print("DKR_R126_STATIC_PRODUCER_ELIMINATION=NOT_QUALIFIED " +
+          ("closure_probe=true link_evidence=missing" if "--static-closure-probe" in sys.argv[1:] else "mistral_build_scripts=remain"))
 except (OSError, ValueError, KeyError, TypeError) as exc:
     print(f"DKR_R126_STRICT_FEATURES=FAIL reason={exc}", file=sys.stderr)
     sys.exit(1)
