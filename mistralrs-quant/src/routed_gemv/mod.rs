@@ -76,6 +76,25 @@ pub fn try_routed_gather(
     indices: &Tensor,
     weights: &RoutedWeights,
 ) -> Result<Option<Tensor>> {
+    // The typed kernel has no bias ABI. Compose the same post-projection
+    // bias operation used by the existing routed fallback, without host readback.
+    #[cfg(feature = "dkr-static-closure-probe")]
+    if x.device().is_cuda() {
+        if let Some(bias) = &weights.bias {
+            if !bias.device().same_device(x.device())
+                || bias.dtype() != x.dtype()
+                || !(bias.dims() == [weights.n] || bias.dims() == [weights.experts, weights.n])
+            {
+                candle_core::bail!("invalid routed DKR bias contract");
+            }
+            let mut unbiased = weights.clone();
+            unbiased.bias = None;
+            if let Some(output) = dynamic::try_gather(x, indices, &unbiased)? {
+                return add_routed_bias(output, Some(bias), indices).map(Some);
+            }
+            return Ok(None);
+        }
+    }
     // S8 is explicitly opt-in even when the Cargo feature is compiled.
     // Historical fused decode and grouped-MoE paths remain the default.
     #[cfg(feature = "dkr-routed-quant")]

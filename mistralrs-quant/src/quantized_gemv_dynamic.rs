@@ -18,6 +18,7 @@ use std::cell::RefCell;
 use std::sync::OnceLock;
 
 fn enabled() -> bool {
+    if cfg!(feature = "dkr-static-closure-probe") { return true; }
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
         std::env::var("MISTRALRS_DKR_QUANT_GEMV").map_or(true, |value| value != "0")

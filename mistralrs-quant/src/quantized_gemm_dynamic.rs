@@ -21,6 +21,7 @@ const GEMV_BOUNDARY: usize = 8;
 static ENABLED: OnceLock<bool> = OnceLock::new();
 
 fn enabled() -> bool {
+    if cfg!(feature = "dkr-static-closure-probe") { return true; }
     *ENABLED.get_or_init(|| std::env::var("MISTRALRS_DKR_QUANT_GEMM")
         .map_or(true, |value| value != "0"))
 }

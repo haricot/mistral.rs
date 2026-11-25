@@ -346,7 +346,7 @@ impl GgufMatMul {
         }
     }
 
-    #[cfg(feature = "cuda")]
+    #[cfg(all(feature = "cuda", not(feature = "dkr-static-closure-probe")))]
     fn uses_fast_mmvq(&self) -> bool {
         matches!(
             &self.w,
@@ -354,7 +354,12 @@ impl GgufMatMul {
         )
     }
 
-    #[cfg(feature = "cuda")]
+    #[cfg(all(feature = "cuda", feature = "dkr-static-closure-probe"))]
+    fn uses_fast_mmvq(&self) -> bool {
+        false
+    }
+
+    #[cfg(all(feature = "cuda", not(feature = "dkr-static-closure-probe")))]
     fn try_fast_forward(&self, a: &Tensor) -> Result<Option<Tensor>> {
         if !self.uses_fast_mmvq() || !matches!(a.dtype(), DType::BF16 | DType::F16 | DType::F32) {
             return Ok(None);
@@ -525,6 +530,7 @@ impl QuantMethod for GgufMatMul {
         }
         #[cfg(feature = "cuda")]
         {
+            #[cfg(not(feature = "dkr-static-closure-probe"))]
             if let Some(out) = self.try_fast_forward(a)? {
                 return self.add_bias(out);
             }
@@ -569,6 +575,12 @@ impl QuantMethod for GgufMatMul {
         // For CPU and Metal: use dequantize-then-matmul approach
         #[cfg(feature = "cuda")]
         let res = if x.device().is_cuda() {
+            #[cfg(feature = "dkr-static-closure-probe")]
+            {
+                // Avoid silently materializing all expert weights in VRAM.
+                candle_core::bail!("DKR_STATIC_CLOSURE: GGUF indexed MoE requires its own typed migration");
+            }
+            #[cfg(not(feature = "dkr-static-closure-probe"))]
             cuda::qmatmul_indexed_moe_forward(&self.w, x, indices)?
         } else {
             cpu::cpu_indexed_moe_forward(&self.w, x, indices)?

@@ -955,6 +955,10 @@ impl QuantMethod for BlockwiseFP8Linear {
             }
         }
 
+        #[cfg(feature = "dkr-static-closure-probe")]
+        if x.device().is_cuda() {
+            candle_core::bail!("DKR_STATIC_CLOSURE: FP8 dense signature not admitted (no dense materialization)");
+        }
         // Try to use native FP8 GEMM kernel on CUDA
         #[cfg(feature = "cuda")]
         {
@@ -1121,6 +1125,10 @@ impl QuantMethod for BlockwiseFP8Linear {
             if let Some(result) = crate::moe::grouped_fp8::gather(x, indices, view)? {
                 return crate::routed_gemv::add_routed_bias(result, self.bias.as_ref(), indices);
             }
+        }
+        #[cfg(feature = "dkr-static-closure-probe")]
+        if x.device().is_cuda() {
+            candle_core::bail!("DKR_STATIC_CLOSURE: FP8 routed signature not admitted (no dense materialization)");
         }
         // Try to use native FP8 indexed MoE GEMM kernel on CUDA
         #[cfg(feature = "cuda")]

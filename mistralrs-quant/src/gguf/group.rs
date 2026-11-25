@@ -70,7 +70,7 @@ fn forward_group(
     if xs.device().is_cpu() {
         return forward_group_cpu(xs, entries, kind);
     }
-    #[cfg(feature = "cuda")]
+    #[cfg(all(feature = "cuda", not(feature = "dkr-static-closure-probe")))]
     if xs.device().is_cuda() {
         return cuda::forward_group(xs, entries, kind);
     }
@@ -92,7 +92,7 @@ fn forward_group_cpu(
     QTensor::gemv_fused_shared_lhs(&weights, xs)
 }
 
-#[cfg(feature = "cuda")]
+#[cfg(all(feature = "cuda", not(feature = "dkr-static-closure-probe")))]
 mod cuda {
     use candle_core::{quantized::QTensor, Result, Tensor};
 
