@@ -147,7 +147,9 @@ def main():
                 and not output.is_relative_to(assembly), "assembly/output overlap")
         pending = {f: v for f,v in plan.items() if not v[1]["paired_profiles"]}
         preserved = {f: v for f,v in plan.items() if v[1]["paired_profiles"]}
-        require(pending, "no missing CUBIN pairs to stage")
+        if a.phase == "stage" and not pending:
+            print(f"DKR_R126_FULL_STAGE=PASS preserved_families={len(preserved)} pending_families=0 unique_pending_ptx=0")
+            return
         if a.phase == "stage":
             atomic_catalog(assembly,
                            lambda dest: [copy_profiles(src, dest, rows) for src,_,rows in pending.values()],
@@ -157,7 +159,8 @@ def main():
             return
         require(not a.json_out.exists(), "report already exists")
         require(not a.json_out.resolve().is_relative_to(output), "report must be outside catalogue")
-        validate_copy(assembly, pending, True)
+        if pending:
+            validate_copy(assembly, pending, True)
         def writer(dest):
             for family,(root,_,rows) in preserved.items():
                 copy_profiles(root, dest, rows)

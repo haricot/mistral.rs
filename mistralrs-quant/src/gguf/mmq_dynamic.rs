@@ -254,6 +254,29 @@ mod tests {
         }
     }
     #[test]
+    #[ignore="requires staged GGUF GLU encode and MMQ catalogue"]
+    fn dkr_s9c_gguf_glu_encode_gpu()->Result<()>{
+        let _evidence=mistralrs_kernel_runtime::RuntimeEvidenceGuard;
+        let dev=Device::new_cuda(0)?;
+        for q in [GgmlDType::Q8_0,GgmlDType::Q4K,GgmlDType::Q2K]{
+            let w=QTensor::quantize(&Tensor::from_vec((0..65*256).map(|i|((i%17)as f32-8.)/8.).collect::<Vec<_>>(),(65,256),&dev)?,q)?;
+            let gate=Tensor::from_vec((0..17*256).map(|i|((i%13)as f32-6.)/8.).collect::<Vec<_>>(),(17,256),&dev)?;
+            let up=Tensor::from_vec((0..17*256).map(|i|((i%11)as f32-5.)/8.).collect::<Vec<_>>(),(17,256),&dev)?;
+            for dt in [DType::F16,DType::BF16,DType::F32]{
+                let gate=gate.to_dtype(dt)?;let up=up.to_dtype(dt)?;
+                for activation in [crate::GluActivationType::Silu,crate::GluActivationType::Gelu,
+                    crate::GluActivationType::Relu,crate::GluActivationType::GeluErf,crate::GluActivationType::Sigmoid]{
+                    let actual=down_from_glu(&w,&gate,&up,activation)?.to_dtype(DType::F32)?;
+                    let materialized=super::super::super::group::typed_glu(&gate,&up,activation)?;
+                    let expected=shared_lhs(&[&w],&materialized)?.pop().unwrap().to_dtype(DType::F32)?;
+                    let delta=(actual-expected)?.abs()?.max_all()?.to_scalar::<f32>()?;
+                    assert!(delta<0.25,"{q:?} {dt:?} {delta}");
+                }
+            }
+        }
+        Ok(())
+    }
+    #[test]
     #[ignore="requires staged GGUF MMQ SM61 catalogue and CUDA"]
     fn dkr_s9c_gguf_mmq_dense_gpu()->Result<()> {
         let _evidence=mistralrs_kernel_runtime::RuntimeEvidenceGuard;

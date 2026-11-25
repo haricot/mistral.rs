@@ -179,6 +179,50 @@ mod tests {
     use super::*;
     #[test]
     #[ignore="requires staged GGUF MMVQ catalogue and CUDA device"]
+    fn dkr_s9c_gguf_shared_lhs_gpu()->Result<()>{
+        let _evidence=mistralrs_kernel_runtime::RuntimeEvidenceGuard;
+        let dev=Device::new_cuda(0)?;
+        let q=QTensor::quantize(&Tensor::ones((65,256),DType::F32,&dev)?,GgmlDType::Q4K)?;
+        let k=QTensor::quantize(&Tensor::ones((17,256),DType::F32,&dev)?,GgmlDType::Q8_0)?;
+        let v=QTensor::quantize(&Tensor::ones((33,256),DType::F32,&dev)?,GgmlDType::Q5K)?;
+        for batch in [1usize,3,8] {
+            let x=Tensor::from_vec((0..batch*256).map(|i|((i%13)as f32-6.)/8.).collect::<Vec<_>>(),(batch,256),&dev)?;
+            for dt in [DType::F16,DType::BF16,DType::F32] {
+                let x=x.to_dtype(dt)?;
+                let weights=[&q,&k,&v];
+                let out=shared_lhs(&weights,&x)?;
+                for (w,o) in weights.into_iter().zip(out){
+                    let expected=plain(w,&x)?;
+                    let delta=(o.to_dtype(DType::F32)?-expected.to_dtype(DType::F32)?)?.abs()?.max_all()?.to_scalar::<f32>()?;
+                    assert_eq!(delta,0.0);
+                }
+            }
+        }
+        Ok(())
+    }
+    #[test]
+    #[ignore="requires staged gated mix catalogue and CUDA device"]
+    fn dkr_s9c_gguf_gated_mix_gpu()->Result<()>{
+        let _evidence=mistralrs_kernel_runtime::RuntimeEvidenceGuard;
+        let dev=Device::new_cuda(0)?;
+        let w=QTensor::quantize(&Tensor::from_vec((0..6*256).map(|i|((i%17)as f32-8.)/128.).collect::<Vec<_>>(),(6,256),&dev)?,GgmlDType::Q4K)?;
+        let x=Tensor::from_vec((0..256).map(|i|((i%9)as f32-4.)/8.).collect::<Vec<_>>(),(1,256),&dev)?;
+        let residual=Tensor::from_vec(vec![1f32,-2.,3.,4.,-5.,6.],(1,6),&dev)?;
+        for dt in [DType::F16,DType::BF16,DType::F32]{
+            let x=x.to_dtype(dt)?;let residual=residual.to_dtype(dt)?;
+            for divisor in [None,Some(2f32)]{
+                let actual=gated_mix(&w,&x,&residual,2,divisor)?.to_dtype(DType::F32)?;
+                let transformed=if let Some(d)=divisor{candle_nn::ops::silu(&x.affine(1.0/d as f64,0.)?)?}else{x.clone()};
+                let gate=plain(&w,&transformed)?.to_dtype(DType::F32)?;
+                let expected=candle_nn::ops::sigmoid(&gate)?.broadcast_mul(&residual.to_dtype(DType::F32)?)?.reshape((2,3))?.sum(0)?.affine(0.5,0.)?.reshape((1,3))?;
+                let delta=(actual-expected)?.abs()?.max_all()?.to_scalar::<f32>()?;
+                assert!(delta<0.05,"{dt:?} {divisor:?} {delta}");
+            }
+        }
+        Ok(())
+    }
+    #[test]
+    #[ignore="requires staged GGUF MMVQ catalogue and CUDA device"]
     fn dkr_s9c_gguf_mmvq_gpu() -> Result<()> {
         let _evidence=mistralrs_kernel_runtime::RuntimeEvidenceGuard;
         let device=Device::new_cuda(0)?;

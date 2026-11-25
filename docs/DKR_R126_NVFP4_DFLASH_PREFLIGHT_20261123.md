@@ -1421,3 +1421,35 @@ families require shard compaction before exceeding 512.
 CPU worklist oracle and synthetic PTX self-test prepared; ignored GPU
 tests cover formats, input layouts, odd N, route order, skew and invalid
 IDs. Source-only; no Rust/CUDA compile, no link or numeric qualification.
+
+
+## R1.26/S9C.2B4 — grouped dense pipeline and catalogue compaction
+
+User B3 worklist oracle and synthetic package 35 profiles/11 images
+PASS, plan exit 0; dispatch output truncated after COMPLETE, exit
+not evidenced. Compact tool is read-only by default, optionally copies
+to a new disjoint root. First-fit shard packing within a family only
+when artifact names do not conflict by content hash; complete logical
+profile fields and PTX/CUBIN bytes preserved, <=64 profiles and 256KiB
+per shard. Original manifests are not rewritten. Legacy manifest hash
+is not the same as the new canonical shard-profile hash; requalification
+is required for manifest-bound evidence. Synthetic 65-to-2 fixture,
+corruption/overlap rejection. Actual savings depend on built catalogue.
+All-paired stage/finalize no longer requires an empty pairing run.
+
+Typed MMVQ shared-LHS quantizes once even for heterogeneous supported
+formats; pair/QKV public APIs compose separate typed matvec launches.
+This is NOT the historical single-kernel QKV or fused GLU decode.
+Dense GroupKind dispatch re-enabled for bias-free supported weights.
+MMQ FFN uses shared gate/up then a real fused historical GLU->Q8_1
+encoder and typed down projection (nine new profiles, one shard).
+Standalone GLU composes generic tensor ops in probe. Gated Mix uses
+historical projected sigmoid stream reduction and scaled-SiLU row
+encoder (36 profiles, one shard), no expanded gate allocation.
+Added ignored GPU regressions for shared LHS, fused MMQ encode and
+gated mix. Tests not run; no compiler invoked here.
+Projected cumulative upper bound 506 physical / 2979 logical before
+compaction. Remaining: single-kernel MMVQ pair/QKV/GLU, grouped
+MoE GLU/fused decode and weighted reduction closure, direct residual
+FFI and complete S10 qualification. Shared headers changed, old cache
+bytes not deleted but Cudaforge may rebuild affected images.

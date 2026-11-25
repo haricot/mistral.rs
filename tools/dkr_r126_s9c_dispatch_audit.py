@@ -26,7 +26,11 @@ CASES = {
     "gguf_moe_worklist": ("gguf/moe_dynamic.rs", 'run!(p.work,bp,tp,cp,ei,ai,ci);'),
     "gguf_moe_dispatch": ("gguf/cuda.rs", "super::fast_mmq::moe_dynamic::dispatch("),
     "gguf_group_disabled": ("gguf/group.rs", '#[cfg(all(feature = "cuda", not(feature = "dkr-static-closure-probe")))]\nmod cuda {'),
-    "gguf_gated_mix_optional": ("gguf/gated_mix.rs", "Optional fusion: caller must execute the unfused operation."),
+    "gguf_gated_mix_typed": ("gguf/gated_mix.rs", "super::fast_mmvq::typed_gated_mix("),
+    "gguf_group_typed": ("gguf/group.rs", "return typed_group(xs,entries,kind);"),
+    "gguf_mmvq_shared": ("gguf/mmvq_dynamic.rs", "if index==0 {"),
+    "gguf_glu_encode": ("gguf/mmq_dynamic.rs", 'format!("quant.gguf.glu.{}.encode.v1",key.layout)'),
+    "gguf_glu_down": ("gguf/fast_mmq.rs", "dynamic::down_from_glu(down,gate,up,activation)"),
 }
 FORCED = ("quantized_gemv_dynamic.rs", "quantized_gemm_dynamic.rs",
           "nvfp4/gemv_dynamic.rs", "routed_gemv/dynamic.rs")
@@ -49,7 +53,7 @@ def main():
                 status="SOURCE_MARKERS_PRESENT",compilation=False,
                 full_link_qualified=False,full_model_qualified=False,
                 unresolved=["blockwise_fp8_weight_quant_dequant","gguf_indexed_mmvq_optimized",
-                            "gguf_direct_mmq_mmvq","higher_level_routed_moe_glu",
+                            "gguf_direct_mmq_mmvq","gguf_qkv_monokernel","gguf_grouped_moe_glu","higher_level_routed_moe_glu",
                             "other_core_and_quant_ffi"])
     if a.json_out:
         a.json_out.parent.mkdir(parents=True,exist_ok=True)
