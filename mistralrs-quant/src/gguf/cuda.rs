@@ -537,6 +537,12 @@ fn indexed_moe_forward_fused_q8_1_input(
 ///
 /// # Returns
 /// Output tensor [batch, topk, n]
+#[cfg(feature = "dkr-static-closure-probe")]
+pub fn qtensor_indexed_moe_forward(qtensor: &QTensor, x: &Tensor, ids: &Tensor) -> Result<Tensor> {
+    super::fast_mmq::moe_dynamic::indexed(qtensor,x,ids)
+}
+
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 pub fn qtensor_indexed_moe_forward(qtensor: &QTensor, x: &Tensor, ids: &Tensor) -> Result<Tensor> {
     let dtype = qtensor.dtype();
 
@@ -613,6 +619,18 @@ pub fn qmatmul_indexed_moe_forward(qmatmul: &QMatMul, x: &Tensor, ids: &Tensor) 
 /// Values are always non-negative so u32 and i32 are interchangeable.
 /// We use u32 so the sorted_token_ids can be wrapped directly into
 /// Candle tensors (which don't support i32).
+#[cfg(feature = "dkr-static-closure-probe")]
+pub fn moe_dispatch_build(
+    topk_ids_flat: &CudaSlice<u32>,
+    total_assignments: usize,
+    num_experts: usize,
+    topk: usize,
+    dev: &CudaDevice,
+) -> Result<(CudaSlice<u32>, CudaSlice<u32>, CudaSlice<u32>)> {
+    super::fast_mmq::moe_dynamic::dispatch(topk_ids_flat,0,total_assignments,num_experts,topk,1,dev)
+}
+
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 pub fn moe_dispatch_build(
     topk_ids_flat: &CudaSlice<u32>,
     total_assignments: usize,

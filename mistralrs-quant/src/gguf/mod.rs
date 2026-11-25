@@ -593,12 +593,6 @@ impl QuantMethod for GgufMatMul {
         // For CPU and Metal: use dequantize-then-matmul approach
         #[cfg(feature = "cuda")]
         let res = if x.device().is_cuda() {
-            #[cfg(feature = "dkr-static-closure-probe")]
-            {
-                // Avoid silently materializing all expert weights in VRAM.
-                candle_core::bail!("DKR_STATIC_CLOSURE: GGUF indexed MoE requires its own typed migration");
-            }
-            #[cfg(not(feature = "dkr-static-closure-probe"))]
             cuda::qmatmul_indexed_moe_forward(&self.w, x, indices)?
         } else {
             cpu::cpu_indexed_moe_forward(&self.w, x, indices)?

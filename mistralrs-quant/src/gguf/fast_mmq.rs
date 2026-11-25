@@ -571,6 +571,10 @@ impl DenseGluDownRun<'_> {
 mod dynamic;
 
 #[cfg(feature = "dkr-static-closure-probe")]
+#[path = "moe_dynamic.rs"]
+pub(super) mod moe_dynamic;
+
+#[cfg(feature = "dkr-static-closure-probe")]
 pub(crate) fn shared_lhs(weights: &[&QTensor], xs: &Tensor) -> Result<Vec<Tensor>> {
     dynamic::shared_lhs(weights, xs)
 }
@@ -862,6 +866,24 @@ pub(crate) fn fused_ffn(
 /// lets callers produce rows in flat assignment order for downstream grouped
 /// MoE stages.
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "dkr-static-closure-probe")]
+pub fn grouped(
+    weight: &QTensor,
+    xs: &Tensor,
+    ids_src: &CudaSlice<u32>,
+    ids_dst: &CudaSlice<u32>,
+    expert_bounds: &CudaSlice<u32>,
+    total_assignments: usize,
+    ncols_max: usize,
+    num_experts: usize,
+    dev: &CudaDevice,
+) -> Result<Tensor> {
+    let _ = ncols_max; // GPU worklist determines the actual maximum.
+    let mut outputs = moe_dynamic::grouped(&[weight],xs,ids_src,ids_dst,expert_bounds,total_assignments,num_experts,dev)?;
+    Ok(outputs.pop().expect("one projection"))
+}
+
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 pub fn grouped(
     weight: &QTensor,
     xs: &Tensor,
@@ -1310,6 +1332,27 @@ pub fn grouped_from_glu_packed(
 ///
 /// Gate/up share one MMQ activation quantization pass and one packed output.
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "dkr-static-closure-probe")]
+pub fn grouped_pair_packed(
+    gate: &QTensor,
+    up: &QTensor,
+    xs: &Tensor,
+    ids_src: &CudaSlice<u32>,
+    ids_dst: &CudaSlice<u32>,
+    expert_bounds: &CudaSlice<u32>,
+    total_assignments: usize,
+    topk: usize,
+    num_experts: usize,
+    dev: &CudaDevice,
+) -> Result<Tensor> {
+    if gate.shape()!=up.shape() || xs.dim(0)?.checked_mul(topk)!=Some(total_assignments) {
+        candle_core::bail!("DKR compact gate/up shape mismatch");
+    }
+    let outputs=moe_dynamic::grouped(&[gate,up],xs,ids_src,ids_dst,expert_bounds,total_assignments,num_experts,dev)?;
+    Tensor::cat(&outputs,1)
+}
+
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 pub fn grouped_pair_packed(
     gate: &QTensor,
     up: &QTensor,

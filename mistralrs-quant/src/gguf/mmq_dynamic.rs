@@ -28,7 +28,7 @@ thread_local! {
     static PLANS:RefCell<LaunchPlanCache<Key,Plans>>=RefCell::new(LaunchPlanCache::new());
 }
 
-fn format(dt:GgmlDType)->Option<&'static str> {
+pub(super) fn format(dt:GgmlDType)->Option<&'static str> {
     Some(match dt {
         GgmlDType::Q4_0=>"q4_0",GgmlDType::Q4_1=>"q4_1",
         GgmlDType::Q5_0=>"q5_0",GgmlDType::Q5_1=>"q5_1",
@@ -38,13 +38,13 @@ fn format(dt:GgmlDType)->Option<&'static str> {
         _=>return None,
     })
 }
-fn layout(dt:GgmlDType)->&'static str {
+pub(super) fn layout(dt:GgmlDType)->&'static str {
     match ds_layout_for(dt) {DsLayout::D4=>"d4",DsLayout::DS4=>"ds4",DsLayout::D2S6=>"d2s6"}
 }
 
 // Exact historical mmq_get_dp4a_tile_x_sizes for Y=64.
 // y tiles have 144-byte blocks and are rounded to 256 int lanes.
-fn shared_bytes(dt:GgmlDType,tile:usize)->usize {
+pub(super) fn shared_bytes(dt:GgmlDType,tile:usize)->usize {
     let (qs,dm,sc)=match dt {
         GgmlDType::Q4_0|GgmlDType::Q4_1=>(64*33,64*32/4+64/4,0),
         GgmlDType::Q5_0|GgmlDType::Q5_1|GgmlDType::Q8_0=>(64*65,64*64/8+64/4,0),
@@ -69,11 +69,11 @@ fn choose_tile(dt:GgmlDType,batch:usize,limit:usize)->Option<(usize,usize)> {
     }
     best
 }
-fn tensor(dt:ElementType,shape:Vec<usize>,repr:Option<&str>)->Argument {
+pub(super) fn tensor(dt:ElementType,shape:Vec<usize>,repr:Option<&str>)->Argument {
     Argument::Tensor {dtype:dt,shape,contiguous:true,start_offset:0,representation:repr.map(str::to_owned)}
 }
-fn scalar()->Argument {Argument::Scalar{dtype:ElementType::I32}}
-fn prepare_one(device:&Device,operation:String,args:Vec<Argument>,
+pub(super) fn scalar()->Argument {Argument::Scalar{dtype:ElementType::I32}}
+pub(super) fn prepare_one(device:&Device,operation:String,args:Vec<Argument>,
                grid:[u32;3],block:[u32;3],smem:u32)->Result<PrevalidatedLaunchPlan> {
     let mut req=LaunchRequest{operation,cc:0,args,grid,max_dynamic_shared_mem_bytes:smem};
     let prepared=catalog()?.prepare_for_device(&mut req,device)
@@ -101,10 +101,10 @@ fn prepare(key:Key,device:&Device)->Result<Plans> {
     Ok(Plans{encode,mmq})
 }
 
-fn mul(a:usize,b:usize)->Result<usize> {
+pub(super) fn mul(a:usize,b:usize)->Result<usize> {
     a.checked_mul(b).ok_or_else(||candle_core::Error::msg("DKR MMQ size overflow"))
 }
-fn i32_span(v:usize)->Result<usize> {
+pub(super) fn i32_span(v:usize)->Result<usize> {
     if v>i32::MAX as usize {candle_core::bail!("DKR MMQ index span exceeds i32");}
     Ok(v)
 }
