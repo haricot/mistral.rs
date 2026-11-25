@@ -105,7 +105,9 @@ impl QuantMethod for MXFP4Layer {
     #[allow(unused_variables)]
     fn forward_raw(&self, x: &Tensor) -> Result<Tensor> {
         #[cfg(feature = "cuda")]
-        if matches!(x.device(), Device::Cuda(_)) && ffi::HAVE_MXFP4_GEMM_KERNELS {
+        if matches!(x.device(), Device::Cuda(_))
+            && (cfg!(feature = "dkr-static-closure-probe") || ffi::HAVE_MXFP4_GEMM_KERNELS)
+        {
             let orig_dims = x.dims().to_vec();
             let x_2d = if orig_dims.len() > 2 {
                 let features = orig_dims[orig_dims.len() - 1];
@@ -171,7 +173,11 @@ impl QuantMethod for MXFP4Layer {
                 return Ok(output);
             }
         }
-        #[cfg(feature = "cuda")]
+        #[cfg(all(feature = "cuda", feature = "dkr-static-closure-probe"))]
+        if x.device().is_cuda() {
+            candle_core::bail!("DKR_STATIC_CLOSURE: MXFP4 routed signature not admitted");
+        }
+        #[cfg(all(feature = "cuda", not(feature = "dkr-static-closure-probe")))]
         if matches!(x.device(), Device::Cuda(_)) && ffi::HAVE_MXFP4_GEMM_KERNELS {
             return ops::mxfp4_indexed_moe_gemm(
                 x,

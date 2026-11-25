@@ -235,12 +235,14 @@ impl Nvfp4Layer {
         }
         #[cfg(feature = "dkr-nvfp4-gemv")]
         let dkr_typed_only = parts.weight.device().is_cuda()
-            && std::env::var("MISTRALRS_DKR_NVFP4_TYPED_ONLY").as_deref() == Ok("1");
+            && (cfg!(feature = "dkr-static-closure-probe")
+                || std::env::var("MISTRALRS_DKR_NVFP4_TYPED_ONLY").as_deref() == Ok("1"));
         #[cfg(not(feature = "dkr-nvfp4-gemv"))]
         let dkr_typed_only = false;
         if dkr_typed_only {
-            if dims.len() != 2 || parts.activation != Nvfp4ActivationMode::None {
-                candle_core::bail!("DKR NVFP4 typed-only requires dense rank-2 W4A16 weights");
+            if (!cfg!(feature = "dkr-static-closure-probe") && dims.len() != 2)
+                || parts.activation != Nvfp4ActivationMode::None {
+                candle_core::bail!("DKR NVFP4 typed-only requires W4A16 weights (rank-3 only in closure probe)");
             }
             if std::env::var("MISTRALRS_DKR_NVFP4_GEMV").as_deref() == Ok("0") {
                 candle_core::bail!("DKR NVFP4 typed-only cannot disable the external GEMV");
@@ -762,6 +764,9 @@ impl Nvfp4Layer {
             }
             return self.forward_native(x);
         }
+        #[cfg(feature = "dkr-static-closure-probe")]
+        candle_core::bail!("DKR_STATIC_CLOSURE: NVFP4 dense signature not admitted");
+        #[cfg(not(feature = "dkr-static-closure-probe"))]
         portable::matmul(x, self.portable_weights())
     }
 
@@ -780,6 +785,9 @@ impl Nvfp4Layer {
                 self.input_global_scale.is_some(),
             );
         }
+        #[cfg(feature = "dkr-static-closure-probe")]
+        candle_core::bail!("DKR_STATIC_CLOSURE: NVFP4 routed signature not admitted");
+        #[cfg(not(feature = "dkr-static-closure-probe"))]
         portable::gather(x, indices, self.portable_weights())
     }
 

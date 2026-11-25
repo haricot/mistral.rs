@@ -78,6 +78,7 @@ thread_local! {
 }
 
 fn enabled() -> bool {
+    if cfg!(feature = "dkr-static-closure-probe") { return true; }
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
         std::env::var("MISTRALRS_DKR_ROUTED_QUANT")

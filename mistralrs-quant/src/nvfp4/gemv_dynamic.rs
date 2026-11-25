@@ -17,6 +17,7 @@ use std::cell::RefCell;
 use std::sync::OnceLock;
 
 fn enabled() -> bool {
+    if cfg!(feature = "dkr-static-closure-probe") { return true; }
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
         std::env::var("MISTRALRS_DKR_NVFP4_GEMV").map_or(true, |value| value != "0")
@@ -28,6 +29,7 @@ const TILE: usize = 16;
 const MAX_BATCH: usize = 8;
 
 fn gemm_enabled() -> bool {
+    if cfg!(feature = "dkr-static-closure-probe") { return true; }
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("MISTRALRS_DKR_NVFP4_GEMM").as_deref() == Ok("1"))
 }

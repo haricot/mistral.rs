@@ -33,202 +33,210 @@ pub fn mxfp4_matmul(
         return Ok(output);
     }
 
-    if !ffi::HAVE_MXFP4_GEMM_KERNELS {
-        candle_core::bail!("MXFP4 GEMM kernels not available");
+    #[cfg(feature = "dkr-static-closure-probe")]
+    {
+        candle_core::bail!("DKR_STATIC_CLOSURE: MXFP4 dense signature not admitted");
     }
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
+    {
+        if !ffi::HAVE_MXFP4_GEMM_KERNELS {
+            candle_core::bail!("MXFP4 GEMM kernels not available");
+        }
 
-    let input = if input.is_contiguous() {
-        input.clone()
-    } else {
-        input.contiguous()?
-    };
-    let weight = if weight.is_contiguous() {
-        weight.clone()
-    } else {
-        weight.contiguous()?
-    };
-    let scale = if scale.is_contiguous() {
-        scale.clone()
-    } else {
-        scale.contiguous()?
-    };
+        let input = if input.is_contiguous() {
+            input.clone()
+        } else {
+            input.contiguous()?
+        };
+        let weight = if weight.is_contiguous() {
+            weight.clone()
+        } else {
+            weight.contiguous()?
+        };
+        let scale = if scale.is_contiguous() {
+            scale.clone()
+        } else {
+            scale.contiguous()?
+        };
 
-    let input_dims = input.dims();
-    let weight_dims = weight.dims();
+        let input_dims = input.dims();
+        let weight_dims = weight.dims();
 
-    if input_dims.len() != 2 {
-        candle_core::bail!("Expected input to be rank 2, got {:?}", input_dims);
-    }
+        if input_dims.len() != 2 {
+            candle_core::bail!("Expected input to be rank 2, got {:?}", input_dims);
+        }
 
-    let m = input_dims[0];
-    let k = input_dims[1];
-    let n = weight_dims[0];
+        let m = input_dims[0];
+        let k = input_dims[1];
+        let n = weight_dims[0];
 
-    if weight_dims[1] != k / 2 {
-        candle_core::bail!(
-            "Weight shape mismatch: expected [N, K/2] = [{}, {}], got {:?}",
-            n,
-            k / 2,
-            weight_dims
-        );
-    }
+        if weight_dims[1] != k / 2 {
+            candle_core::bail!(
+                "Weight shape mismatch: expected [N, K/2] = [{}, {}], got {:?}",
+                n,
+                k / 2,
+                weight_dims
+            );
+        }
 
-    let dev = match input.device() {
-        Device::Cuda(dev) => dev,
-        _ => candle_core::bail!("Expected CUDA device"),
-    };
+        let dev = match input.device() {
+            Device::Cuda(dev) => dev,
+            _ => candle_core::bail!("Expected CUDA device"),
+        };
 
-    let input_l = input.layout();
-    let weight_l = weight.layout();
-    let scale_l = scale.layout();
+        let input_l = input.layout();
+        let weight_l = weight.layout();
+        let scale_l = scale.layout();
 
-    let input_storage = input.storage_and_layout().0;
-    let weight_storage = weight.storage_and_layout().0;
-    let scale_storage = scale.storage_and_layout().0;
+        let input_storage = input.storage_and_layout().0;
+        let weight_storage = weight.storage_and_layout().0;
+        let scale_storage = scale.storage_and_layout().0;
 
-    let weight_s = match &*weight_storage {
-        Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<u8>()?,
-        _ => candle_core::bail!("Expected CUDA storage for weight"),
-    };
-    let scale_s = match &*scale_storage {
-        Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<u8>()?,
-        _ => candle_core::bail!("Expected CUDA storage for scale"),
-    };
+        let weight_s = match &*weight_storage {
+            Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<u8>()?,
+            _ => candle_core::bail!("Expected CUDA storage for weight"),
+        };
+        let scale_s = match &*scale_storage {
+            Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<u8>()?,
+            _ => candle_core::bail!("Expected CUDA storage for scale"),
+        };
 
-    let (weight_ptr, _weight_guard) = slice_ptr(weight_s, weight_l.start_offset());
-    let (scale_ptr, _scale_guard) = slice_ptr(scale_s, scale_l.start_offset());
+        let (weight_ptr, _weight_guard) = slice_ptr(weight_s, weight_l.start_offset());
+        let (scale_ptr, _scale_guard) = slice_ptr(scale_s, scale_l.start_offset());
 
-    let has_bias = bias.is_some();
+        let has_bias = bias.is_some();
 
-    match input.dtype() {
-        candle_core::DType::F16 => {
-            let output = dev.alloc_zeros::<f16>(m * n)?;
+        match input.dtype() {
+            candle_core::DType::F16 => {
+                let output = dev.alloc_zeros::<f16>(m * n)?;
 
-            let input_s = match &*input_storage {
-                Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<f16>()?,
-                _ => candle_core::bail!("Expected CUDA storage for input"),
-            };
-            let (input_ptr, _input_guard) = slice_ptr(input_s, input_l.start_offset());
-            let (output_ptr, _output_guard) = slice_ptr(&output, 0);
-
-            let bias_ptr = if has_bias {
-                let b = bias.unwrap();
-                let b_l = b.layout();
-                let b_storage = b.storage_and_layout().0;
-                let b_s = match &*b_storage {
+                let input_s = match &*input_storage {
                     Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<f16>()?,
-                    _ => candle_core::bail!("Expected CUDA storage for bias"),
+                    _ => candle_core::bail!("Expected CUDA storage for input"),
                 };
-                let (ptr, _guard) = slice_ptr(b_s, b_l.start_offset());
-                ptr as *const f16
-            } else {
-                std::ptr::null()
-            };
+                let (input_ptr, _input_guard) = slice_ptr(input_s, input_l.start_offset());
+                let (output_ptr, _output_guard) = slice_ptr(&output, 0);
 
-            unsafe {
-                if ffi::HAVE_MXFP4_WMMA_KERNELS {
-                    ffi::launch_mxfp4_matmul_wmma_f16(
-                        input_ptr as *const f16,
-                        weight_ptr as *const u8,
-                        scale_ptr as *const u8,
-                        bias_ptr,
-                        output_ptr as *mut f16,
-                        m as i32,
-                        n as i32,
-                        k as i32,
-                        has_bias,
-                        dev.cuda_stream().cu_stream(),
-                    );
+                let bias_ptr = if has_bias {
+                    let b = bias.unwrap();
+                    let b_l = b.layout();
+                    let b_storage = b.storage_and_layout().0;
+                    let b_s = match &*b_storage {
+                        Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<f16>()?,
+                        _ => candle_core::bail!("Expected CUDA storage for bias"),
+                    };
+                    let (ptr, _guard) = slice_ptr(b_s, b_l.start_offset());
+                    ptr as *const f16
                 } else {
-                    ffi::launch_mxfp4_matmul_f16(
-                        input_ptr as *const f16,
-                        weight_ptr as *const u8,
-                        scale_ptr as *const u8,
-                        bias_ptr,
-                        output_ptr as *mut f16,
-                        m as i32,
-                        n as i32,
-                        k as i32,
-                        has_bias,
-                        dev.cuda_stream().cu_stream(),
-                    );
+                    std::ptr::null()
+                };
+
+                unsafe {
+                    if ffi::HAVE_MXFP4_WMMA_KERNELS {
+                        ffi::launch_mxfp4_matmul_wmma_f16(
+                            input_ptr as *const f16,
+                            weight_ptr as *const u8,
+                            scale_ptr as *const u8,
+                            bias_ptr,
+                            output_ptr as *mut f16,
+                            m as i32,
+                            n as i32,
+                            k as i32,
+                            has_bias,
+                            dev.cuda_stream().cu_stream(),
+                        );
+                    } else {
+                        ffi::launch_mxfp4_matmul_f16(
+                            input_ptr as *const f16,
+                            weight_ptr as *const u8,
+                            scale_ptr as *const u8,
+                            bias_ptr,
+                            output_ptr as *mut f16,
+                            m as i32,
+                            n as i32,
+                            k as i32,
+                            has_bias,
+                            dev.cuda_stream().cu_stream(),
+                        );
+                    }
                 }
+
+                drop(_output_guard);
+                let output_storage = CudaStorage::wrap_cuda_slice(output, dev.clone());
+                Ok(Tensor::from((
+                    Storage::Cuda(output_storage),
+                    Shape::from((m, n)),
+                )))
             }
+            candle_core::DType::BF16 => {
+                let output = dev.alloc_zeros::<bf16>(m * n)?;
 
-            drop(_output_guard);
-            let output_storage = CudaStorage::wrap_cuda_slice(output, dev.clone());
-            Ok(Tensor::from((
-                Storage::Cuda(output_storage),
-                Shape::from((m, n)),
-            )))
-        }
-        candle_core::DType::BF16 => {
-            let output = dev.alloc_zeros::<bf16>(m * n)?;
-
-            let input_s = match &*input_storage {
-                Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<bf16>()?,
-                _ => candle_core::bail!("Expected CUDA storage for input"),
-            };
-            let (input_ptr, _input_guard) = slice_ptr(input_s, input_l.start_offset());
-            let (output_ptr, _output_guard) = slice_ptr(&output, 0);
-
-            let bias_ptr = if has_bias {
-                let b = bias.unwrap();
-                let b_l = b.layout();
-                let b_storage = b.storage_and_layout().0;
-                let b_s = match &*b_storage {
+                let input_s = match &*input_storage {
                     Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<bf16>()?,
-                    _ => candle_core::bail!("Expected CUDA storage for bias"),
+                    _ => candle_core::bail!("Expected CUDA storage for input"),
                 };
-                let (ptr, _guard) = slice_ptr(b_s, b_l.start_offset());
-                ptr as *const bf16
-            } else {
-                std::ptr::null()
-            };
+                let (input_ptr, _input_guard) = slice_ptr(input_s, input_l.start_offset());
+                let (output_ptr, _output_guard) = slice_ptr(&output, 0);
 
-            unsafe {
-                if ffi::HAVE_MXFP4_WMMA_KERNELS {
-                    ffi::launch_mxfp4_matmul_wmma_bf16(
-                        input_ptr as *const bf16,
-                        weight_ptr as *const u8,
-                        scale_ptr as *const u8,
-                        bias_ptr,
-                        output_ptr as *mut bf16,
-                        m as i32,
-                        n as i32,
-                        k as i32,
-                        has_bias,
-                        dev.cuda_stream().cu_stream(),
-                    );
+                let bias_ptr = if has_bias {
+                    let b = bias.unwrap();
+                    let b_l = b.layout();
+                    let b_storage = b.storage_and_layout().0;
+                    let b_s = match &*b_storage {
+                        Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<bf16>()?,
+                        _ => candle_core::bail!("Expected CUDA storage for bias"),
+                    };
+                    let (ptr, _guard) = slice_ptr(b_s, b_l.start_offset());
+                    ptr as *const bf16
                 } else {
-                    ffi::launch_mxfp4_matmul_bf16(
-                        input_ptr as *const bf16,
-                        weight_ptr as *const u8,
-                        scale_ptr as *const u8,
-                        bias_ptr,
-                        output_ptr as *mut bf16,
-                        m as i32,
-                        n as i32,
-                        k as i32,
-                        has_bias,
-                        dev.cuda_stream().cu_stream(),
-                    );
-                }
-            }
+                    std::ptr::null()
+                };
 
-            drop(_output_guard);
-            let output_storage = CudaStorage::wrap_cuda_slice(output, dev.clone());
-            Ok(Tensor::from((
-                Storage::Cuda(output_storage),
-                Shape::from((m, n)),
-            )))
+                unsafe {
+                    if ffi::HAVE_MXFP4_WMMA_KERNELS {
+                        ffi::launch_mxfp4_matmul_wmma_bf16(
+                            input_ptr as *const bf16,
+                            weight_ptr as *const u8,
+                            scale_ptr as *const u8,
+                            bias_ptr,
+                            output_ptr as *mut bf16,
+                            m as i32,
+                            n as i32,
+                            k as i32,
+                            has_bias,
+                            dev.cuda_stream().cu_stream(),
+                        );
+                    } else {
+                        ffi::launch_mxfp4_matmul_bf16(
+                            input_ptr as *const bf16,
+                            weight_ptr as *const u8,
+                            scale_ptr as *const u8,
+                            bias_ptr,
+                            output_ptr as *mut bf16,
+                            m as i32,
+                            n as i32,
+                            k as i32,
+                            has_bias,
+                            dev.cuda_stream().cu_stream(),
+                        );
+                    }
+                }
+
+                drop(_output_guard);
+                let output_storage = CudaStorage::wrap_cuda_slice(output, dev.clone());
+                Ok(Tensor::from((
+                    Storage::Cuda(output_storage),
+                    Shape::from((m, n)),
+                )))
+            }
+            _ => candle_core::bail!("Unsupported dtype for MXFP4 matmul: {:?}", input.dtype()),
         }
-        _ => candle_core::bail!("Unsupported dtype for MXFP4 matmul: {:?}", input.dtype()),
     }
 }
 
 /// Fallback: groups tokens by expert on CPU and calls mxfp4_matmul per expert.
 /// Used when the fused CUDA kernel's shared memory requirement exceeds the device limit.
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 #[allow(clippy::too_many_arguments)]
 fn mxfp4_grouped_moe_gemm(
     input: &Tensor,
@@ -324,6 +332,7 @@ fn mxfp4_grouped_moe_gemm(
 ///   indices: [num_tokens, topk] u32 expert indices
 ///
 /// Returns: [num_tokens, topk, N]
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 pub fn mxfp4_indexed_moe_gemm(
     input: &Tensor,
     weight: &Tensor,

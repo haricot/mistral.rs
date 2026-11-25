@@ -166,108 +166,115 @@ impl CustomOp2 for Fp8BlockwiseDequantize {
 
         use crate::{blockwise_fp8::ffi, utils::slice_ptr};
 
-        if !ffi::HAVE_BLOCKWISE_DEQUANT_KERNELS {
-            candle_core::bail!("Do not have blockwise FP8 dequant kernels.");
+        #[cfg(feature = "dkr-static-closure-probe")]
+        {
+            candle_core::bail!("DKR_STATIC_CLOSURE: blockwise FP8 dequant requires migration");
         }
-
-        if !weight_l.is_contiguous() {
-            candle_core::bail!("Expected weight to be continuous");
-        }
-        if !scale_l.is_contiguous() {
-            candle_core::bail!("Expected scales to be continuous");
-        }
-        if weight_l.dims().len() != 2 {
-            candle_core::bail!("Expected weight to be rank 2");
-        }
-        if scale_l.dims().len() != 2 || self.weight_block_size.len() != 2 {
-            candle_core::bail!("Expected scale to be rank 2");
-        }
-
-        let dev = weight_s.device();
-
-        let (weight, _weight_guard) =
-            slice_ptr(weight_s.as_cuda_slice::<F8E4M3>()?, weight_l.start_offset());
-        let (scale, _scale_guard) =
-            slice_ptr(scale_s.as_cuda_slice::<f32>()?, scale_l.start_offset());
-
-        let weight_height = weight_l.dim(0)? as i32;
-        let weight_block_size_y = self.weight_block_size[0] as i32;
-        let weight_width = weight_l.dim(1)? as i32;
-        let weight_block_size_x = self.weight_block_size[1] as i32;
-        let scale_stride = scale_l.stride()[0] as i32;
-        let weight_row_stride = weight_l.stride()[0] as i32;
-
-        let res = match self.out_ty {
-            DType::F32 => {
-                let output = weight_s
-                    .device()
-                    .alloc_zeros::<f32>(weight_l.shape().elem_count())?;
-                let (output_ptr, output_guard) = slice_ptr(&output, 0);
-                unsafe {
-                    ffi::launch_dequant_fp8_blockwise_kernel_f32(
-                        weight as *const _,
-                        scale as *const _,
-                        output_ptr as *mut _,
-                        weight_height,
-                        weight_width,
-                        weight_row_stride,
-                        scale_stride,
-                        weight_block_size_y,
-                        weight_block_size_x,
-                        dev.cuda_stream().cu_stream(),
-                    )
-                };
-                drop(output_guard);
-                CudaStorage::wrap_cuda_slice(output, weight_s.device().clone())
+        #[cfg(not(feature = "dkr-static-closure-probe"))]
+        {
+            if !ffi::HAVE_BLOCKWISE_DEQUANT_KERNELS {
+                candle_core::bail!("Do not have blockwise FP8 dequant kernels.");
             }
-            DType::F16 => {
-                let output = weight_s
-                    .device()
-                    .alloc_zeros::<f16>(weight_l.shape().elem_count())?;
-                let (output_ptr, output_guard) = slice_ptr(&output, 0);
-                unsafe {
-                    ffi::launch_dequant_fp8_blockwise_kernel_f16(
-                        weight as *const _,
-                        scale as *const _,
-                        output_ptr as *mut _,
-                        weight_height,
-                        weight_width,
-                        weight_row_stride,
-                        scale_stride,
-                        weight_block_size_y,
-                        weight_block_size_x,
-                        dev.cuda_stream().cu_stream(),
-                    )
-                };
-                drop(output_guard);
-                CudaStorage::wrap_cuda_slice(output, weight_s.device().clone())
-            }
-            DType::BF16 => {
-                let output = weight_s
-                    .device()
-                    .alloc_zeros::<bf16>(weight_l.shape().elem_count())?;
-                let (output_ptr, output_guard) = slice_ptr(&output, 0);
-                unsafe {
-                    ffi::launch_dequant_fp8_blockwise_kernel_bf16(
-                        weight as *const _,
-                        scale as *const _,
-                        output_ptr as *mut _,
-                        weight_height,
-                        weight_width,
-                        weight_row_stride,
-                        scale_stride,
-                        weight_block_size_y,
-                        weight_block_size_x,
-                        dev.cuda_stream().cu_stream(),
-                    )
-                };
-                drop(output_guard);
-                CudaStorage::wrap_cuda_slice(output, weight_s.device().clone())
-            }
-            other => candle_core::bail!("unexpected out type of fp8 blockwise dequant {other:?}"),
-        };
 
-        Ok((res, weight_l.shape().clone()))
+            if !weight_l.is_contiguous() {
+                candle_core::bail!("Expected weight to be continuous");
+            }
+            if !scale_l.is_contiguous() {
+                candle_core::bail!("Expected scales to be continuous");
+            }
+            if weight_l.dims().len() != 2 {
+                candle_core::bail!("Expected weight to be rank 2");
+            }
+            if scale_l.dims().len() != 2 || self.weight_block_size.len() != 2 {
+                candle_core::bail!("Expected scale to be rank 2");
+            }
+
+            let dev = weight_s.device();
+
+            let (weight, _weight_guard) =
+                slice_ptr(weight_s.as_cuda_slice::<F8E4M3>()?, weight_l.start_offset());
+            let (scale, _scale_guard) =
+                slice_ptr(scale_s.as_cuda_slice::<f32>()?, scale_l.start_offset());
+
+            let weight_height = weight_l.dim(0)? as i32;
+            let weight_block_size_y = self.weight_block_size[0] as i32;
+            let weight_width = weight_l.dim(1)? as i32;
+            let weight_block_size_x = self.weight_block_size[1] as i32;
+            let scale_stride = scale_l.stride()[0] as i32;
+            let weight_row_stride = weight_l.stride()[0] as i32;
+
+            let res = match self.out_ty {
+                DType::F32 => {
+                    let output = weight_s
+                        .device()
+                        .alloc_zeros::<f32>(weight_l.shape().elem_count())?;
+                    let (output_ptr, output_guard) = slice_ptr(&output, 0);
+                    unsafe {
+                        ffi::launch_dequant_fp8_blockwise_kernel_f32(
+                            weight as *const _,
+                            scale as *const _,
+                            output_ptr as *mut _,
+                            weight_height,
+                            weight_width,
+                            weight_row_stride,
+                            scale_stride,
+                            weight_block_size_y,
+                            weight_block_size_x,
+                            dev.cuda_stream().cu_stream(),
+                        )
+                    };
+                    drop(output_guard);
+                    CudaStorage::wrap_cuda_slice(output, weight_s.device().clone())
+                }
+                DType::F16 => {
+                    let output = weight_s
+                        .device()
+                        .alloc_zeros::<f16>(weight_l.shape().elem_count())?;
+                    let (output_ptr, output_guard) = slice_ptr(&output, 0);
+                    unsafe {
+                        ffi::launch_dequant_fp8_blockwise_kernel_f16(
+                            weight as *const _,
+                            scale as *const _,
+                            output_ptr as *mut _,
+                            weight_height,
+                            weight_width,
+                            weight_row_stride,
+                            scale_stride,
+                            weight_block_size_y,
+                            weight_block_size_x,
+                            dev.cuda_stream().cu_stream(),
+                        )
+                    };
+                    drop(output_guard);
+                    CudaStorage::wrap_cuda_slice(output, weight_s.device().clone())
+                }
+                DType::BF16 => {
+                    let output = weight_s
+                        .device()
+                        .alloc_zeros::<bf16>(weight_l.shape().elem_count())?;
+                    let (output_ptr, output_guard) = slice_ptr(&output, 0);
+                    unsafe {
+                        ffi::launch_dequant_fp8_blockwise_kernel_bf16(
+                            weight as *const _,
+                            scale as *const _,
+                            output_ptr as *mut _,
+                            weight_height,
+                            weight_width,
+                            weight_row_stride,
+                            scale_stride,
+                            weight_block_size_y,
+                            weight_block_size_x,
+                            dev.cuda_stream().cu_stream(),
+                        )
+                    };
+                    drop(output_guard);
+                    CudaStorage::wrap_cuda_slice(output, weight_s.device().clone())
+                }
+                other => candle_core::bail!("unexpected out type of fp8 blockwise dequant {other:?}"),
+            };
+
+            Ok((res, weight_l.shape().clone()))
+        }
     }
 
     #[cfg(feature = "metal")]
@@ -512,103 +519,110 @@ impl CustomOp1 for Fp8BlockwiseQuantize {
 
         use crate::{blockwise_fp8::ffi, utils::slice_ptr};
 
-        if !ffi::HAVE_BLOCKWISE_QUANT_KERNELS {
-            candle_core::bail!("Do not have blockwise FP8 quant kernels.");
+        #[cfg(feature = "dkr-static-closure-probe")]
+        {
+            candle_core::bail!("DKR_STATIC_CLOSURE: blockwise FP8 quant requires migration");
         }
-
-        if input_l.start_offset() != 0 || !input_l.is_contiguous() {
-            candle_core::bail!("Expected input to have start offset 0, continuous");
-        }
-        if input_l.dims().len() != 2 {
-            candle_core::bail!("Expected input to be rank 2");
-        }
-        if self.weight_block_size.len() != 2 {
-            candle_core::bail!("Expected weight_block_size to have length 2");
-        }
-
-        let dev = input_s.device();
-
-        let weight_height = input_l.dim(0)? as i32;
-        let weight_block_size_y = self.weight_block_size[0] as i32;
-        let weight_width = input_l.dim(1)? as i32;
-        let weight_block_size_x = self.weight_block_size[1] as i32;
-        let weight_row_stride = input_l.stride()[0] as i32;
-
-        let grid_y = input_l.dim(0)?.div_ceil(self.weight_block_size[0]);
-        let grid_x = input_l.dim(1)?.div_ceil(self.weight_block_size[1]);
-        let scale_stride = grid_x as i32;
-
-        // Allocate output buffers
-        let weight_output = dev.alloc_zeros::<F8E4M3>(input_l.shape().elem_count())?;
-        let scale_output = dev.alloc_zeros::<f32>(grid_y * grid_x)?;
-
-        let (weight_ptr, weight_guard) = slice_ptr(&weight_output, 0);
-        let (scale_ptr, scale_guard) = slice_ptr(&scale_output, 0);
-
-        match input_s.dtype() {
-            DType::F32 => {
-                let (input, _input_guard) =
-                    slice_ptr(input_s.as_cuda_slice::<f32>()?, input_l.start_offset());
-                unsafe {
-                    ffi::launch_quant_fp8_blockwise_kernel_f32(
-                        input as *const _,
-                        weight_ptr as *mut _,
-                        scale_ptr as *mut _,
-                        weight_height,
-                        weight_width,
-                        weight_row_stride,
-                        scale_stride,
-                        weight_block_size_y,
-                        weight_block_size_x,
-                        dev.cuda_stream().cu_stream(),
-                    )
-                };
+        #[cfg(not(feature = "dkr-static-closure-probe"))]
+        {
+            if !ffi::HAVE_BLOCKWISE_QUANT_KERNELS {
+                candle_core::bail!("Do not have blockwise FP8 quant kernels.");
             }
-            DType::F16 => {
-                let (input, _input_guard) =
-                    slice_ptr(input_s.as_cuda_slice::<f16>()?, input_l.start_offset());
-                unsafe {
-                    ffi::launch_quant_fp8_blockwise_kernel_f16(
-                        input as *const _,
-                        weight_ptr as *mut _,
-                        scale_ptr as *mut _,
-                        weight_height,
-                        weight_width,
-                        weight_row_stride,
-                        scale_stride,
-                        weight_block_size_y,
-                        weight_block_size_x,
-                        dev.cuda_stream().cu_stream(),
-                    )
-                };
+
+            if input_l.start_offset() != 0 || !input_l.is_contiguous() {
+                candle_core::bail!("Expected input to have start offset 0, continuous");
             }
-            DType::BF16 => {
-                let (input, _input_guard) =
-                    slice_ptr(input_s.as_cuda_slice::<bf16>()?, input_l.start_offset());
-                unsafe {
-                    ffi::launch_quant_fp8_blockwise_kernel_bf16(
-                        input as *const _,
-                        weight_ptr as *mut _,
-                        scale_ptr as *mut _,
-                        weight_height,
-                        weight_width,
-                        weight_row_stride,
-                        scale_stride,
-                        weight_block_size_y,
-                        weight_block_size_x,
-                        dev.cuda_stream().cu_stream(),
-                    )
-                };
+            if input_l.dims().len() != 2 {
+                candle_core::bail!("Expected input to be rank 2");
             }
-            other => candle_core::bail!("unexpected input type for fp8 blockwise quant: {other:?}"),
+            if self.weight_block_size.len() != 2 {
+                candle_core::bail!("Expected weight_block_size to have length 2");
+            }
+
+            let dev = input_s.device();
+
+            let weight_height = input_l.dim(0)? as i32;
+            let weight_block_size_y = self.weight_block_size[0] as i32;
+            let weight_width = input_l.dim(1)? as i32;
+            let weight_block_size_x = self.weight_block_size[1] as i32;
+            let weight_row_stride = input_l.stride()[0] as i32;
+
+            let grid_y = input_l.dim(0)?.div_ceil(self.weight_block_size[0]);
+            let grid_x = input_l.dim(1)?.div_ceil(self.weight_block_size[1]);
+            let scale_stride = grid_x as i32;
+
+            // Allocate output buffers
+            let weight_output = dev.alloc_zeros::<F8E4M3>(input_l.shape().elem_count())?;
+            let scale_output = dev.alloc_zeros::<f32>(grid_y * grid_x)?;
+
+            let (weight_ptr, weight_guard) = slice_ptr(&weight_output, 0);
+            let (scale_ptr, scale_guard) = slice_ptr(&scale_output, 0);
+
+            match input_s.dtype() {
+                DType::F32 => {
+                    let (input, _input_guard) =
+                        slice_ptr(input_s.as_cuda_slice::<f32>()?, input_l.start_offset());
+                    unsafe {
+                        ffi::launch_quant_fp8_blockwise_kernel_f32(
+                            input as *const _,
+                            weight_ptr as *mut _,
+                            scale_ptr as *mut _,
+                            weight_height,
+                            weight_width,
+                            weight_row_stride,
+                            scale_stride,
+                            weight_block_size_y,
+                            weight_block_size_x,
+                            dev.cuda_stream().cu_stream(),
+                        )
+                    };
+                }
+                DType::F16 => {
+                    let (input, _input_guard) =
+                        slice_ptr(input_s.as_cuda_slice::<f16>()?, input_l.start_offset());
+                    unsafe {
+                        ffi::launch_quant_fp8_blockwise_kernel_f16(
+                            input as *const _,
+                            weight_ptr as *mut _,
+                            scale_ptr as *mut _,
+                            weight_height,
+                            weight_width,
+                            weight_row_stride,
+                            scale_stride,
+                            weight_block_size_y,
+                            weight_block_size_x,
+                            dev.cuda_stream().cu_stream(),
+                        )
+                    };
+                }
+                DType::BF16 => {
+                    let (input, _input_guard) =
+                        slice_ptr(input_s.as_cuda_slice::<bf16>()?, input_l.start_offset());
+                    unsafe {
+                        ffi::launch_quant_fp8_blockwise_kernel_bf16(
+                            input as *const _,
+                            weight_ptr as *mut _,
+                            scale_ptr as *mut _,
+                            weight_height,
+                            weight_width,
+                            weight_row_stride,
+                            scale_stride,
+                            weight_block_size_y,
+                            weight_block_size_x,
+                            dev.cuda_stream().cu_stream(),
+                        )
+                    };
+                }
+                other => candle_core::bail!("unexpected input type for fp8 blockwise quant: {other:?}"),
+            }
+
+            drop(weight_guard);
+            drop(scale_guard);
+
+            // Return just the weight tensor - we'll handle scale separately
+            let res = CudaStorage::wrap_cuda_slice(weight_output, input_s.device().clone());
+            Ok((res, input_l.shape().clone()))
         }
-
-        drop(weight_guard);
-        drop(scale_guard);
-
-        // Return just the weight tensor - we'll handle scale separately
-        let res = CudaStorage::wrap_cuda_slice(weight_output, input_s.device().clone());
-        Ok((res, input_l.shape().clone()))
     }
 
     #[cfg(feature = "metal")]
@@ -643,129 +657,136 @@ pub fn fp8_blockwise_quantize(
             candle_core::bail!("FP8 blockwise quantization only supported on CUDA for now");
         }
 
-        if !ffi::HAVE_BLOCKWISE_QUANT_KERNELS {
-            candle_core::bail!("Do not have blockwise FP8 quant kernels.");
+        #[cfg(feature = "dkr-static-closure-probe")]
+        {
+            candle_core::bail!("DKR_STATIC_CLOSURE: blockwise FP8 weight quant requires migration");
         }
-
-        let input_l = input.layout();
-        if input_l.start_offset() != 0 || !input_l.is_contiguous() {
-            candle_core::bail!("Expected input to have start offset 0, continuous");
-        }
-        if input.dims().len() != 2 {
-            candle_core::bail!("Expected input to be rank 2");
-        }
-        if weight_block_size.len() != 2 {
-            candle_core::bail!("Expected weight_block_size to have length 2");
-        }
-
-        let dev = match input.device() {
-            Device::Cuda(dev) => dev,
-            _ => unreachable!(),
-        };
-
-        let weight_height = input.dim(0)? as i32;
-        let weight_block_size_y = weight_block_size[0] as i32;
-        let weight_width = input.dim(1)? as i32;
-        let weight_block_size_x = weight_block_size[1] as i32;
-        let weight_row_stride = input_l.stride()[0] as i32;
-
-        let grid_y = input.dim(0)?.div_ceil(weight_block_size[0]);
-        let grid_x = input.dim(1)?.div_ceil(weight_block_size[1]);
-        let scale_stride = grid_x as i32;
-
-        // Allocate output buffers
-        let weight_output = dev.alloc_zeros::<F8E4M3>(input.shape().elem_count())?;
-        let scale_output = dev.alloc_zeros::<f32>(grid_y * grid_x)?;
-
-        let (weight_ptr, _weight_guard) = slice_ptr(&weight_output, 0);
-        let (scale_ptr, _scale_guard) = slice_ptr(&scale_output, 0);
-
-        match input.dtype() {
-            DType::F32 => {
-                let input_storage = input.storage_and_layout().0;
-                let input_s = match &*input_storage {
-                    Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<f32>()?,
-                    _ => candle_core::bail!("Expected CUDA storage"),
-                };
-                let (input_ptr, _input_guard) = slice_ptr(input_s, input_l.start_offset());
-                unsafe {
-                    ffi::launch_quant_fp8_blockwise_kernel_f32(
-                        input_ptr as *const _,
-                        weight_ptr as *mut _,
-                        scale_ptr as *mut _,
-                        weight_height,
-                        weight_width,
-                        weight_row_stride,
-                        scale_stride,
-                        weight_block_size_y,
-                        weight_block_size_x,
-                        dev.cuda_stream().cu_stream(),
-                    )
-                };
+        #[cfg(not(feature = "dkr-static-closure-probe"))]
+        {
+            if !ffi::HAVE_BLOCKWISE_QUANT_KERNELS {
+                candle_core::bail!("Do not have blockwise FP8 quant kernels.");
             }
-            DType::F16 => {
-                let input_storage = input.storage_and_layout().0;
-                let input_s = match &*input_storage {
-                    Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<f16>()?,
-                    _ => candle_core::bail!("Expected CUDA storage"),
-                };
-                let (input_ptr, _input_guard) = slice_ptr(input_s, input_l.start_offset());
-                unsafe {
-                    ffi::launch_quant_fp8_blockwise_kernel_f16(
-                        input_ptr as *const _,
-                        weight_ptr as *mut _,
-                        scale_ptr as *mut _,
-                        weight_height,
-                        weight_width,
-                        weight_row_stride,
-                        scale_stride,
-                        weight_block_size_y,
-                        weight_block_size_x,
-                        dev.cuda_stream().cu_stream(),
-                    )
-                };
+
+            let input_l = input.layout();
+            if input_l.start_offset() != 0 || !input_l.is_contiguous() {
+                candle_core::bail!("Expected input to have start offset 0, continuous");
             }
-            DType::BF16 => {
-                let input_storage = input.storage_and_layout().0;
-                let input_s = match &*input_storage {
-                    Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<bf16>()?,
-                    _ => candle_core::bail!("Expected CUDA storage"),
-                };
-                let (input_ptr, _input_guard) = slice_ptr(input_s, input_l.start_offset());
-                unsafe {
-                    ffi::launch_quant_fp8_blockwise_kernel_bf16(
-                        input_ptr as *const _,
-                        weight_ptr as *mut _,
-                        scale_ptr as *mut _,
-                        weight_height,
-                        weight_width,
-                        weight_row_stride,
-                        scale_stride,
-                        weight_block_size_y,
-                        weight_block_size_x,
-                        dev.cuda_stream().cu_stream(),
-                    )
-                };
+            if input.dims().len() != 2 {
+                candle_core::bail!("Expected input to be rank 2");
             }
-            other => candle_core::bail!("unexpected input type for fp8 blockwise quant: {other:?}"),
+            if weight_block_size.len() != 2 {
+                candle_core::bail!("Expected weight_block_size to have length 2");
+            }
+
+            let dev = match input.device() {
+                Device::Cuda(dev) => dev,
+                _ => unreachable!(),
+            };
+
+            let weight_height = input.dim(0)? as i32;
+            let weight_block_size_y = weight_block_size[0] as i32;
+            let weight_width = input.dim(1)? as i32;
+            let weight_block_size_x = weight_block_size[1] as i32;
+            let weight_row_stride = input_l.stride()[0] as i32;
+
+            let grid_y = input.dim(0)?.div_ceil(weight_block_size[0]);
+            let grid_x = input.dim(1)?.div_ceil(weight_block_size[1]);
+            let scale_stride = grid_x as i32;
+
+            // Allocate output buffers
+            let weight_output = dev.alloc_zeros::<F8E4M3>(input.shape().elem_count())?;
+            let scale_output = dev.alloc_zeros::<f32>(grid_y * grid_x)?;
+
+            let (weight_ptr, _weight_guard) = slice_ptr(&weight_output, 0);
+            let (scale_ptr, _scale_guard) = slice_ptr(&scale_output, 0);
+
+            match input.dtype() {
+                DType::F32 => {
+                    let input_storage = input.storage_and_layout().0;
+                    let input_s = match &*input_storage {
+                        Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<f32>()?,
+                        _ => candle_core::bail!("Expected CUDA storage"),
+                    };
+                    let (input_ptr, _input_guard) = slice_ptr(input_s, input_l.start_offset());
+                    unsafe {
+                        ffi::launch_quant_fp8_blockwise_kernel_f32(
+                            input_ptr as *const _,
+                            weight_ptr as *mut _,
+                            scale_ptr as *mut _,
+                            weight_height,
+                            weight_width,
+                            weight_row_stride,
+                            scale_stride,
+                            weight_block_size_y,
+                            weight_block_size_x,
+                            dev.cuda_stream().cu_stream(),
+                        )
+                    };
+                }
+                DType::F16 => {
+                    let input_storage = input.storage_and_layout().0;
+                    let input_s = match &*input_storage {
+                        Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<f16>()?,
+                        _ => candle_core::bail!("Expected CUDA storage"),
+                    };
+                    let (input_ptr, _input_guard) = slice_ptr(input_s, input_l.start_offset());
+                    unsafe {
+                        ffi::launch_quant_fp8_blockwise_kernel_f16(
+                            input_ptr as *const _,
+                            weight_ptr as *mut _,
+                            scale_ptr as *mut _,
+                            weight_height,
+                            weight_width,
+                            weight_row_stride,
+                            scale_stride,
+                            weight_block_size_y,
+                            weight_block_size_x,
+                            dev.cuda_stream().cu_stream(),
+                        )
+                    };
+                }
+                DType::BF16 => {
+                    let input_storage = input.storage_and_layout().0;
+                    let input_s = match &*input_storage {
+                        Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<bf16>()?,
+                        _ => candle_core::bail!("Expected CUDA storage"),
+                    };
+                    let (input_ptr, _input_guard) = slice_ptr(input_s, input_l.start_offset());
+                    unsafe {
+                        ffi::launch_quant_fp8_blockwise_kernel_bf16(
+                            input_ptr as *const _,
+                            weight_ptr as *mut _,
+                            scale_ptr as *mut _,
+                            weight_height,
+                            weight_width,
+                            weight_row_stride,
+                            scale_stride,
+                            weight_block_size_y,
+                            weight_block_size_x,
+                            dev.cuda_stream().cu_stream(),
+                        )
+                    };
+                }
+                other => candle_core::bail!("unexpected input type for fp8 blockwise quant: {other:?}"),
+            }
+
+            // Drop guards before moving the buffers
+            drop(_weight_guard);
+            drop(_scale_guard);
+
+            // Create weight tensor by wrapping the CUDA storage
+            let weight_storage = CudaStorage::wrap_cuda_slice(weight_output, dev.clone());
+            let weight = Tensor::from((Storage::Cuda(weight_storage), input.shape().clone()));
+
+            // Create scale tensor
+            let scale_storage = CudaStorage::wrap_cuda_slice(scale_output, dev.clone());
+            let scale = Tensor::from((
+                Storage::Cuda(scale_storage),
+                candle_core::Shape::from_dims(&[grid_y, grid_x]),
+            ));
+
+            Ok((weight, scale))
         }
-
-        // Drop guards before moving the buffers
-        drop(_weight_guard);
-        drop(_scale_guard);
-
-        // Create weight tensor by wrapping the CUDA storage
-        let weight_storage = CudaStorage::wrap_cuda_slice(weight_output, dev.clone());
-        let weight = Tensor::from((Storage::Cuda(weight_storage), input.shape().clone()));
-
-        // Create scale tensor
-        let scale_storage = CudaStorage::wrap_cuda_slice(scale_output, dev.clone());
-        let scale = Tensor::from((
-            Storage::Cuda(scale_storage),
-            candle_core::Shape::from_dims(&[grid_y, grid_x]),
-        ));
-
-        Ok((weight, scale))
     }
 
     #[cfg(not(feature = "cuda"))]
@@ -1034,146 +1055,153 @@ pub fn fp8_blockwise_matmul(
         return Ok(output);
     }
 
-    if !ffi::HAVE_BLOCKWISE_GEMM_KERNELS {
-        candle_core::bail!("Do not have blockwise FP8 GEMM kernels.");
+    #[cfg(feature = "dkr-static-closure-probe")]
+    {
+        candle_core::bail!("DKR_STATIC_CLOSURE: blockwise FP8 dense signature not admitted");
     }
-
-    if !matches!(input.device(), Device::Cuda(_)) {
-        candle_core::bail!("FP8 blockwise matmul only supported on CUDA");
-    }
-
-    let input = input.contiguous()?;
-    let input = if input.layout().start_offset() * input.dtype().size_in_bytes() % 16 == 0 {
-        input
-    } else {
-        input.force_contiguous()?
-    };
-    let weight = weight.contiguous()?;
-    let scales = scales.contiguous()?;
-
-    if input.dims().len() != 2 {
-        candle_core::bail!("Expected input to be rank 2, got {:?}", input.dims());
-    }
-    if weight.dims().len() != 2 {
-        candle_core::bail!("Expected weight to be rank 2, got {:?}", weight.dims());
-    }
-    if weight.dtype() != DType::F8E4M3 {
-        candle_core::bail!("Expected FP8 weight, got {:?}", weight.dtype());
-    }
-
-    let m = input.dim(0)? as i32;
-    let k = input.dim(1)? as i32;
-    let n = weight.dim(0)? as i32;
-
-    if weight.dim(1)? as i32 != k {
-        candle_core::bail!(
-            "Weight K dimension {} doesn't match input K dimension {}",
-            weight.dim(1)?,
-            k
-        );
-    }
-
-    let dev = match input.device() {
-        Device::Cuda(dev) => dev,
-        _ => unreachable!(),
-    };
-
-    let block_size_y = weight_block_size[0] as i32;
-    let block_size_x = weight_block_size[1] as i32;
-    let scale_row_stride = scales.dim(1)? as i32;
-
-    let input_l = input.layout();
-    let weight_l = weight.layout();
-    let scales_l = scales.layout();
-
-    let input_storage = input.storage_and_layout().0;
-    let weight_storage = weight.storage_and_layout().0;
-    let scales_storage = scales.storage_and_layout().0;
-
-    let weight_s = match &*weight_storage {
-        Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<F8E4M3>()?,
-        _ => candle_core::bail!("Expected CUDA storage for weight"),
-    };
-    let scales_s = match &*scales_storage {
-        Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<f32>()?,
-        _ => candle_core::bail!("Expected CUDA storage for scales"),
-    };
-
-    let (weight_ptr, _weight_guard) = slice_ptr(weight_s, weight_l.start_offset());
-    let (scales_ptr, _scales_guard) = slice_ptr(scales_s, scales_l.start_offset());
-
-    match input.dtype() {
-        DType::F16 => {
-            let output = dev.alloc_zeros::<f16>((m * n) as usize)?;
-
-            let input_s = match &*input_storage {
-                Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<f16>()?,
-                _ => candle_core::bail!("Expected CUDA storage for input"),
-            };
-
-            {
-                let (output_ptr, _output_guard) = slice_ptr(&output, 0);
-                let (input_ptr, _input_guard) = slice_ptr(input_s, input_l.start_offset());
-
-                unsafe {
-                    ffi::launch_fp8_matmul_f16(
-                        input_ptr as *const _,
-                        weight_ptr as *const _,
-                        scales_ptr as *const _,
-                        output_ptr as *mut _,
-                        m,
-                        n,
-                        k,
-                        scale_row_stride,
-                        block_size_y,
-                        block_size_x,
-                        dev.cuda_stream().cu_stream(),
-                    )
-                };
-            }
-
-            let output_storage = CudaStorage::wrap_cuda_slice(output, dev.clone());
-            Ok(Tensor::from((
-                Storage::Cuda(output_storage),
-                candle_core::Shape::from_dims(&[m as usize, n as usize]),
-            )))
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
+    {
+        if !ffi::HAVE_BLOCKWISE_GEMM_KERNELS {
+            candle_core::bail!("Do not have blockwise FP8 GEMM kernels.");
         }
-        DType::BF16 => {
-            let output = dev.alloc_zeros::<bf16>((m * n) as usize)?;
 
-            let input_s = match &*input_storage {
-                Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<bf16>()?,
-                _ => candle_core::bail!("Expected CUDA storage for input"),
-            };
-
-            {
-                let (output_ptr, _output_guard) = slice_ptr(&output, 0);
-                let (input_ptr, _input_guard) = slice_ptr(input_s, input_l.start_offset());
-
-                unsafe {
-                    ffi::launch_fp8_matmul_bf16(
-                        input_ptr as *const _,
-                        weight_ptr as *const _,
-                        scales_ptr as *const _,
-                        output_ptr as *mut _,
-                        m,
-                        n,
-                        k,
-                        scale_row_stride,
-                        block_size_y,
-                        block_size_x,
-                        dev.cuda_stream().cu_stream(),
-                    )
-                };
-            }
-
-            let output_storage = CudaStorage::wrap_cuda_slice(output, dev.clone());
-            Ok(Tensor::from((
-                Storage::Cuda(output_storage),
-                candle_core::Shape::from_dims(&[m as usize, n as usize]),
-            )))
+        if !matches!(input.device(), Device::Cuda(_)) {
+            candle_core::bail!("FP8 blockwise matmul only supported on CUDA");
         }
-        other => candle_core::bail!("Unsupported input dtype for FP8 matmul: {:?}", other),
+
+        let input = input.contiguous()?;
+        let input = if input.layout().start_offset() * input.dtype().size_in_bytes() % 16 == 0 {
+            input
+        } else {
+            input.force_contiguous()?
+        };
+        let weight = weight.contiguous()?;
+        let scales = scales.contiguous()?;
+
+        if input.dims().len() != 2 {
+            candle_core::bail!("Expected input to be rank 2, got {:?}", input.dims());
+        }
+        if weight.dims().len() != 2 {
+            candle_core::bail!("Expected weight to be rank 2, got {:?}", weight.dims());
+        }
+        if weight.dtype() != DType::F8E4M3 {
+            candle_core::bail!("Expected FP8 weight, got {:?}", weight.dtype());
+        }
+
+        let m = input.dim(0)? as i32;
+        let k = input.dim(1)? as i32;
+        let n = weight.dim(0)? as i32;
+
+        if weight.dim(1)? as i32 != k {
+            candle_core::bail!(
+                "Weight K dimension {} doesn't match input K dimension {}",
+                weight.dim(1)?,
+                k
+            );
+        }
+
+        let dev = match input.device() {
+            Device::Cuda(dev) => dev,
+            _ => unreachable!(),
+        };
+
+        let block_size_y = weight_block_size[0] as i32;
+        let block_size_x = weight_block_size[1] as i32;
+        let scale_row_stride = scales.dim(1)? as i32;
+
+        let input_l = input.layout();
+        let weight_l = weight.layout();
+        let scales_l = scales.layout();
+
+        let input_storage = input.storage_and_layout().0;
+        let weight_storage = weight.storage_and_layout().0;
+        let scales_storage = scales.storage_and_layout().0;
+
+        let weight_s = match &*weight_storage {
+            Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<F8E4M3>()?,
+            _ => candle_core::bail!("Expected CUDA storage for weight"),
+        };
+        let scales_s = match &*scales_storage {
+            Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<f32>()?,
+            _ => candle_core::bail!("Expected CUDA storage for scales"),
+        };
+
+        let (weight_ptr, _weight_guard) = slice_ptr(weight_s, weight_l.start_offset());
+        let (scales_ptr, _scales_guard) = slice_ptr(scales_s, scales_l.start_offset());
+
+        match input.dtype() {
+            DType::F16 => {
+                let output = dev.alloc_zeros::<f16>((m * n) as usize)?;
+
+                let input_s = match &*input_storage {
+                    Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<f16>()?,
+                    _ => candle_core::bail!("Expected CUDA storage for input"),
+                };
+
+                {
+                    let (output_ptr, _output_guard) = slice_ptr(&output, 0);
+                    let (input_ptr, _input_guard) = slice_ptr(input_s, input_l.start_offset());
+
+                    unsafe {
+                        ffi::launch_fp8_matmul_f16(
+                            input_ptr as *const _,
+                            weight_ptr as *const _,
+                            scales_ptr as *const _,
+                            output_ptr as *mut _,
+                            m,
+                            n,
+                            k,
+                            scale_row_stride,
+                            block_size_y,
+                            block_size_x,
+                            dev.cuda_stream().cu_stream(),
+                        )
+                    };
+                }
+
+                let output_storage = CudaStorage::wrap_cuda_slice(output, dev.clone());
+                Ok(Tensor::from((
+                    Storage::Cuda(output_storage),
+                    candle_core::Shape::from_dims(&[m as usize, n as usize]),
+                )))
+            }
+            DType::BF16 => {
+                let output = dev.alloc_zeros::<bf16>((m * n) as usize)?;
+
+                let input_s = match &*input_storage {
+                    Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<bf16>()?,
+                    _ => candle_core::bail!("Expected CUDA storage for input"),
+                };
+
+                {
+                    let (output_ptr, _output_guard) = slice_ptr(&output, 0);
+                    let (input_ptr, _input_guard) = slice_ptr(input_s, input_l.start_offset());
+
+                    unsafe {
+                        ffi::launch_fp8_matmul_bf16(
+                            input_ptr as *const _,
+                            weight_ptr as *const _,
+                            scales_ptr as *const _,
+                            output_ptr as *mut _,
+                            m,
+                            n,
+                            k,
+                            scale_row_stride,
+                            block_size_y,
+                            block_size_x,
+                            dev.cuda_stream().cu_stream(),
+                        )
+                    };
+                }
+
+                let output_storage = CudaStorage::wrap_cuda_slice(output, dev.clone());
+                Ok(Tensor::from((
+                    Storage::Cuda(output_storage),
+                    candle_core::Shape::from_dims(&[m as usize, n as usize]),
+                )))
+            }
+            other => candle_core::bail!("Unsupported input dtype for FP8 matmul: {:?}", other),
+        }
     }
 }
 
@@ -1197,179 +1225,186 @@ pub fn fp8_indexed_moe_gemm(
 
     use crate::{blockwise_fp8::ffi, utils::slice_ptr};
 
-    if !ffi::HAVE_BLOCKWISE_GEMM_KERNELS {
-        candle_core::bail!("Do not have blockwise FP8 GEMM kernels.");
+    #[cfg(feature = "dkr-static-closure-probe")]
+    {
+        candle_core::bail!("DKR_STATIC_CLOSURE: blockwise FP8 indexed signature requires typed routed dispatch");
     }
-
-    if !matches!(input.device(), Device::Cuda(_)) {
-        candle_core::bail!("FP8 indexed MoE GEMM only supported on CUDA");
-    }
-
-    let input = input.contiguous()?;
-    let weights = weights.contiguous()?;
-    let scales = scales.contiguous()?;
-    let indices = indices.contiguous()?;
-
-    // Determine input shape
-    // Input can be [num_tokens, 1, K] or [num_tokens, topk, K]
-    let (num_tokens, input_has_topk_dim, k) = if input.dims().len() == 3 {
-        let dims = input.dims3()?;
-        (dims.0, dims.1 > 1, dims.2)
-    } else if input.dims().len() == 2 {
-        let dims = input.dims2()?;
-        (dims.0, false, dims.1)
-    } else {
-        candle_core::bail!("Expected input to be rank 2 or 3, got {:?}", input.dims());
-    };
-
-    // Get topk from indices
-    let (indices_tokens, topk) = indices.dims2()?;
-    if indices_tokens != num_tokens {
-        candle_core::bail!(
-            "Indices num_tokens {} doesn't match input num_tokens {}",
-            indices_tokens,
-            num_tokens
-        );
-    }
-
-    // Weights shape: [num_experts, N, K]
-    if weights.dims().len() != 3 {
-        candle_core::bail!("Expected weights to be rank 3, got {:?}", weights.dims());
-    }
-    let (num_experts, n, weight_k) = weights.dims3()?;
-    if weight_k != k {
-        candle_core::bail!(
-            "Weights K dimension {} doesn't match input K dimension {}",
-            weight_k,
-            k
-        );
-    }
-
-    if weights.dtype() != DType::F8E4M3 {
-        candle_core::bail!("Expected FP8 weights, got {:?}", weights.dtype());
-    }
-
-    let dev = match input.device() {
-        Device::Cuda(dev) => dev,
-        _ => unreachable!(),
-    };
-
-    let block_size_y = weight_block_size[0] as i32;
-    let block_size_x = weight_block_size[1] as i32;
-
-    // Scales shape should be [num_experts, N/block_y, K/block_x]
-    let scale_row_stride = scales.dim(2)? as i32; // K/block_x
-
-    let input_l = input.layout();
-    let weights_l = weights.layout();
-    let scales_l = scales.layout();
-    let indices_l = indices.layout();
-
-    let input_storage = input.storage_and_layout().0;
-    let weights_storage = weights.storage_and_layout().0;
-    let scales_storage = scales.storage_and_layout().0;
-    let indices_storage = indices.storage_and_layout().0;
-
-    let weights_s = match &*weights_storage {
-        Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<F8E4M3>()?,
-        _ => candle_core::bail!("Expected CUDA storage for weights"),
-    };
-    let scales_s = match &*scales_storage {
-        Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<f32>()?,
-        _ => candle_core::bail!("Expected CUDA storage for scales"),
-    };
-    let indices_s = match &*indices_storage {
-        Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<u32>()?,
-        _ => candle_core::bail!("Expected CUDA storage for indices"),
-    };
-
-    let (weights_ptr, _weights_guard) = slice_ptr(weights_s, weights_l.start_offset());
-    let (scales_ptr, _scales_guard) = slice_ptr(scales_s, scales_l.start_offset());
-    let (indices_ptr, _indices_guard) = slice_ptr(indices_s, indices_l.start_offset());
-
-    match input.dtype() {
-        DType::F16 => {
-            let output = dev.alloc_zeros::<f16>(num_tokens * topk * n)?;
-
-            let input_s = match &*input_storage {
-                Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<f16>()?,
-                _ => candle_core::bail!("Expected CUDA storage for input"),
-            };
-
-            {
-                let (output_ptr, _output_guard) = slice_ptr(&output, 0);
-                let (input_ptr, _input_guard) = slice_ptr(input_s, input_l.start_offset());
-
-                unsafe {
-                    ffi::launch_fp8_indexed_moe_gemm_f16(
-                        input_ptr as *const _,
-                        weights_ptr as *const _,
-                        scales_ptr as *const _,
-                        indices_ptr as *const _,
-                        output_ptr as *mut _,
-                        num_tokens as i32,
-                        topk as i32,
-                        num_experts as i32,
-                        n as i32,
-                        k as i32,
-                        scale_row_stride,
-                        block_size_y,
-                        block_size_x,
-                        input_has_topk_dim,
-                        dev.cuda_stream().cu_stream(),
-                    )
-                };
-            }
-
-            let output_storage = CudaStorage::wrap_cuda_slice(output, dev.clone());
-            Ok(Tensor::from((
-                Storage::Cuda(output_storage),
-                candle_core::Shape::from_dims(&[num_tokens, topk, n]),
-            )))
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
+    {
+        if !ffi::HAVE_BLOCKWISE_GEMM_KERNELS {
+            candle_core::bail!("Do not have blockwise FP8 GEMM kernels.");
         }
-        DType::BF16 => {
-            let output = dev.alloc_zeros::<bf16>(num_tokens * topk * n)?;
 
-            let input_s = match &*input_storage {
-                Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<bf16>()?,
-                _ => candle_core::bail!("Expected CUDA storage for input"),
-            };
-
-            {
-                let (output_ptr, _output_guard) = slice_ptr(&output, 0);
-                let (input_ptr, _input_guard) = slice_ptr(input_s, input_l.start_offset());
-
-                unsafe {
-                    ffi::launch_fp8_indexed_moe_gemm_bf16(
-                        input_ptr as *const _,
-                        weights_ptr as *const _,
-                        scales_ptr as *const _,
-                        indices_ptr as *const _,
-                        output_ptr as *mut _,
-                        num_tokens as i32,
-                        topk as i32,
-                        num_experts as i32,
-                        n as i32,
-                        k as i32,
-                        scale_row_stride,
-                        block_size_y,
-                        block_size_x,
-                        input_has_topk_dim,
-                        dev.cuda_stream().cu_stream(),
-                    )
-                };
-            }
-
-            let output_storage = CudaStorage::wrap_cuda_slice(output, dev.clone());
-            Ok(Tensor::from((
-                Storage::Cuda(output_storage),
-                candle_core::Shape::from_dims(&[num_tokens, topk, n]),
-            )))
+        if !matches!(input.device(), Device::Cuda(_)) {
+            candle_core::bail!("FP8 indexed MoE GEMM only supported on CUDA");
         }
-        other => candle_core::bail!(
-            "Unsupported input dtype for FP8 indexed MoE GEMM: {:?}",
-            other
-        ),
+
+        let input = input.contiguous()?;
+        let weights = weights.contiguous()?;
+        let scales = scales.contiguous()?;
+        let indices = indices.contiguous()?;
+
+        // Determine input shape
+        // Input can be [num_tokens, 1, K] or [num_tokens, topk, K]
+        let (num_tokens, input_has_topk_dim, k) = if input.dims().len() == 3 {
+            let dims = input.dims3()?;
+            (dims.0, dims.1 > 1, dims.2)
+        } else if input.dims().len() == 2 {
+            let dims = input.dims2()?;
+            (dims.0, false, dims.1)
+        } else {
+            candle_core::bail!("Expected input to be rank 2 or 3, got {:?}", input.dims());
+        };
+
+        // Get topk from indices
+        let (indices_tokens, topk) = indices.dims2()?;
+        if indices_tokens != num_tokens {
+            candle_core::bail!(
+                "Indices num_tokens {} doesn't match input num_tokens {}",
+                indices_tokens,
+                num_tokens
+            );
+        }
+
+        // Weights shape: [num_experts, N, K]
+        if weights.dims().len() != 3 {
+            candle_core::bail!("Expected weights to be rank 3, got {:?}", weights.dims());
+        }
+        let (num_experts, n, weight_k) = weights.dims3()?;
+        if weight_k != k {
+            candle_core::bail!(
+                "Weights K dimension {} doesn't match input K dimension {}",
+                weight_k,
+                k
+            );
+        }
+
+        if weights.dtype() != DType::F8E4M3 {
+            candle_core::bail!("Expected FP8 weights, got {:?}", weights.dtype());
+        }
+
+        let dev = match input.device() {
+            Device::Cuda(dev) => dev,
+            _ => unreachable!(),
+        };
+
+        let block_size_y = weight_block_size[0] as i32;
+        let block_size_x = weight_block_size[1] as i32;
+
+        // Scales shape should be [num_experts, N/block_y, K/block_x]
+        let scale_row_stride = scales.dim(2)? as i32; // K/block_x
+
+        let input_l = input.layout();
+        let weights_l = weights.layout();
+        let scales_l = scales.layout();
+        let indices_l = indices.layout();
+
+        let input_storage = input.storage_and_layout().0;
+        let weights_storage = weights.storage_and_layout().0;
+        let scales_storage = scales.storage_and_layout().0;
+        let indices_storage = indices.storage_and_layout().0;
+
+        let weights_s = match &*weights_storage {
+            Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<F8E4M3>()?,
+            _ => candle_core::bail!("Expected CUDA storage for weights"),
+        };
+        let scales_s = match &*scales_storage {
+            Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<f32>()?,
+            _ => candle_core::bail!("Expected CUDA storage for scales"),
+        };
+        let indices_s = match &*indices_storage {
+            Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<u32>()?,
+            _ => candle_core::bail!("Expected CUDA storage for indices"),
+        };
+
+        let (weights_ptr, _weights_guard) = slice_ptr(weights_s, weights_l.start_offset());
+        let (scales_ptr, _scales_guard) = slice_ptr(scales_s, scales_l.start_offset());
+        let (indices_ptr, _indices_guard) = slice_ptr(indices_s, indices_l.start_offset());
+
+        match input.dtype() {
+            DType::F16 => {
+                let output = dev.alloc_zeros::<f16>(num_tokens * topk * n)?;
+
+                let input_s = match &*input_storage {
+                    Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<f16>()?,
+                    _ => candle_core::bail!("Expected CUDA storage for input"),
+                };
+
+                {
+                    let (output_ptr, _output_guard) = slice_ptr(&output, 0);
+                    let (input_ptr, _input_guard) = slice_ptr(input_s, input_l.start_offset());
+
+                    unsafe {
+                        ffi::launch_fp8_indexed_moe_gemm_f16(
+                            input_ptr as *const _,
+                            weights_ptr as *const _,
+                            scales_ptr as *const _,
+                            indices_ptr as *const _,
+                            output_ptr as *mut _,
+                            num_tokens as i32,
+                            topk as i32,
+                            num_experts as i32,
+                            n as i32,
+                            k as i32,
+                            scale_row_stride,
+                            block_size_y,
+                            block_size_x,
+                            input_has_topk_dim,
+                            dev.cuda_stream().cu_stream(),
+                        )
+                    };
+                }
+
+                let output_storage = CudaStorage::wrap_cuda_slice(output, dev.clone());
+                Ok(Tensor::from((
+                    Storage::Cuda(output_storage),
+                    candle_core::Shape::from_dims(&[num_tokens, topk, n]),
+                )))
+            }
+            DType::BF16 => {
+                let output = dev.alloc_zeros::<bf16>(num_tokens * topk * n)?;
+
+                let input_s = match &*input_storage {
+                    Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<bf16>()?,
+                    _ => candle_core::bail!("Expected CUDA storage for input"),
+                };
+
+                {
+                    let (output_ptr, _output_guard) = slice_ptr(&output, 0);
+                    let (input_ptr, _input_guard) = slice_ptr(input_s, input_l.start_offset());
+
+                    unsafe {
+                        ffi::launch_fp8_indexed_moe_gemm_bf16(
+                            input_ptr as *const _,
+                            weights_ptr as *const _,
+                            scales_ptr as *const _,
+                            indices_ptr as *const _,
+                            output_ptr as *mut _,
+                            num_tokens as i32,
+                            topk as i32,
+                            num_experts as i32,
+                            n as i32,
+                            k as i32,
+                            scale_row_stride,
+                            block_size_y,
+                            block_size_x,
+                            input_has_topk_dim,
+                            dev.cuda_stream().cu_stream(),
+                        )
+                    };
+                }
+
+                let output_storage = CudaStorage::wrap_cuda_slice(output, dev.clone());
+                Ok(Tensor::from((
+                    Storage::Cuda(output_storage),
+                    candle_core::Shape::from_dims(&[num_tokens, topk, n]),
+                )))
+            }
+            other => candle_core::bail!(
+                "Unsupported input dtype for FP8 indexed MoE GEMM: {:?}",
+                other
+            ),
+        }
     }
 }
 

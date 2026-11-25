@@ -41,6 +41,7 @@ struct Args {
     k_tiles_per_split: i32,
 }
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 unsafe extern "C" {
     fn mistralrs_nvfp4_w4a16_f16(
         args: *const Args,
@@ -131,6 +132,7 @@ struct Plan<'a> {
 }
 
 /// x [rows, K] -> [rows, N].
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 pub(crate) fn matmul(x: &Tensor, weights: Weights<'_>) -> Result<Tensor> {
     let (rows, k) = x.dims2()?;
     let (_, n, weight_k) = weights.dims();
@@ -154,6 +156,7 @@ pub(crate) fn matmul(x: &Tensor, weights: Weights<'_>) -> Result<Tensor> {
 }
 
 /// x [tokens, 1 | topk, K] with expert ids [tokens, topk] -> [tokens, topk, N].
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 pub(crate) fn gather(x: &Tensor, indices: &Tensor, weights: Weights<'_>) -> Result<Tensor> {
     let (tokens, topk) = indices.dims2()?;
     let (experts, n, k) = weights.dims();
@@ -263,6 +266,7 @@ fn split_k(blocks: usize, k_tiles: usize, target: usize) -> (usize, usize) {
     (k_tiles.div_ceil(per_split), per_split)
 }
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 fn launch(plan: Plan<'_>) -> Result<Tensor> {
     let Plan {
         x,

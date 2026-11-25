@@ -4,11 +4,11 @@ use candle_core::{Result, Tensor};
 
 use crate::{GluActivationType, QuantMethod};
 
-#[cfg(feature = "cuda")]
+#[cfg(all(feature = "cuda", not(feature = "dkr-static-closure-probe")))]
 mod cuda;
 #[cfg(feature = "dkr-routed-quant")]
 mod dynamic;
-#[cfg(all(test, feature = "cuda"))]
+#[cfg(all(test, feature = "cuda", not(feature = "dkr-static-closure-probe")))]
 mod tests;
 
 /// How a routed expert stack is packed; each variant has one CUDA codec.
@@ -82,7 +82,7 @@ pub fn try_routed_gather(
     if let Some(output) = dynamic::try_gather(x, indices, weights)? {
         return Ok(Some(output));
     }
-    #[cfg(feature = "cuda")]
+    #[cfg(all(feature = "cuda", not(feature = "dkr-static-closure-probe")))]
     if x.device().is_cuda() && cuda::enabled() {
         return cuda::gather(x, indices, weights);
     }
@@ -104,7 +104,7 @@ pub fn try_routed_glu(
     if gate.codec != up.codec || gate.shape() != up.shape() {
         return Ok(None);
     }
-    #[cfg(feature = "cuda")]
+    #[cfg(all(feature = "cuda", not(feature = "dkr-static-closure-probe")))]
     if x.device().is_cuda() && cuda::enabled() {
         return cuda::glu(x, indices, &gate, &up, activation);
     }
@@ -126,7 +126,7 @@ pub fn try_routed_ffn(
     let Some(down) = down.routed_weights() else {
         return Ok(None);
     };
-    #[cfg(feature = "cuda")]
+    #[cfg(all(feature = "cuda", not(feature = "dkr-static-closure-probe")))]
     if x.device().is_cuda() && cuda::enabled() {
         let Some(intermediate) = try_routed_glu(x, indices, gate, up, activation)? else {
             return Ok(None);
