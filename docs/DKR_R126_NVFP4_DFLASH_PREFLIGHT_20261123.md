@@ -1327,3 +1327,25 @@ codecs) and Q8_0 dense reference, to be run only in the grouped campaign.
 The new source audit records route admission and explicit unsupported
 operations, not Rust cfg expansion, runtime reachability or full link proof.
 No Candle, lockfile, device package or historical cache modifications.
+
+
+## R1.26/S9C.2B1 — GGUF MMVQ dense typed source
+
+At bc78874a the generic-catalog revision 244e8e94 is a direct ancestor
+(280 ahead / 0 behind). The new family adds 267 profiles in 11 physical
+shards: ten formats x three activation/output dtypes x eight decode
+batches, eight formats x three L2 prefetch entries, three row Q8_1
+encoders. Exact SM target, packed U8 representation, entry and parameter
+width verification, content hash, no Python CUDA compilation. Cudaforge
+watches the existing MMVQ device source and transitive local headers.
+The historical source still builds its original host entrypoints when
+the image define is absent. Typed-only plain body guards odd-N loads
+without changing historical code generation; Q8_1 is exactly 36 bytes.
+The probe now routes dense decode through typed MMVQ, with the original
+prefetch policy and persistent workspace. Paired launch plans are
+cached together; storage guards cover both launches. Prefill remains
+the native Candle reference, not MMQ parity. Added ignored GPU matrix
+over ten formats, batch 1..8, three dtypes and odd N.
+No MMQ, indexed MoE, shared-LHS, fused QKV/GLU or direct historical
+API closure yet. No PTX/CUBIN or Rust compiled here. New prospective
+SM61 physical upper=482, logical=2410, not actual packaged inventory.

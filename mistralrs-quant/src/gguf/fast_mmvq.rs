@@ -388,6 +388,16 @@ fn prefetch_launcher(dtype: GgmlDType, output: DType) -> Option<PlainLauncher> {
 /// by `w.shape().dims2()?.0` (nrows of the weight).
 ///
 /// The output dtype matches the input dtype (BF16 -> BF16, F16 -> F16, F32 -> F32).
+#[cfg(feature = "dkr-static-closure-probe")]
+#[path = "mmvq_dynamic.rs"]
+mod dynamic;
+
+#[cfg(feature = "dkr-static-closure-probe")]
+pub fn plain(w: &QTensor, xs: &Tensor) -> Result<Tensor> {
+    dynamic::plain(w, xs)
+}
+
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 pub fn plain(w: &QTensor, xs: &Tensor) -> Result<Tensor> {
     let dtype = w.dtype();
     if !supports(dtype) {
