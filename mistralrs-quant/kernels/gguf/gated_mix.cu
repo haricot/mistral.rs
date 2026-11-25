@@ -22,7 +22,12 @@ template <> __device__ __forceinline__ float mix_cast<float>(float value) {
 }
 
 template <typename T>
-__global__ void quantize_silu_q8_1(const T *__restrict__ input,
+#ifdef DKR_GGUF_GATED_MIX_IMAGE
+__device__ __forceinline__ void
+#else
+__global__ void
+#endif
+quantize_silu_q8_1(const T *__restrict__ input,
                                    block_q8_1 *__restrict__ output, int columns,
                                    int padded_columns, float divisor) {
   const int column = blockIdx.x * blockDim.x + threadIdx.x;
@@ -50,6 +55,7 @@ __global__ void quantize_silu_q8_1(const T *__restrict__ input,
   }
 }
 
+#ifndef DKR_GGUF_GATED_MIX_IMAGE
 extern "C" void launch_gguf_quantize_silu_q8_1(const void *input, void *output,
                                                int columns, int padded_columns,
                                                float divisor, int dtype,
@@ -69,9 +75,16 @@ extern "C" void launch_gguf_quantize_silu_q8_1(const void *input, void *output,
 #undef QUANTIZE
 }
 
+#endif
+
 template <typename T, typename Block, int QK, int QI, int VDR,
           float (*Dot)(const void *, const block_q8_1 *, const int &)>
-__global__ void gated_mix_kernel(const Block *__restrict__ weights,
+#ifdef DKR_GGUF_GATED_MIX_IMAGE
+__device__ __forceinline__ void
+#else
+__global__ void
+#endif
+gated_mix_kernel(const Block *__restrict__ weights,
                                  const block_q8_1 *__restrict__ input,
                                  const T *__restrict__ residual,
                                  T *__restrict__ output, int rank, int hidden,
@@ -106,6 +119,7 @@ __global__ void gated_mix_kernel(const Block *__restrict__ weights,
   }
 }
 
+#ifndef DKR_GGUF_GATED_MIX_IMAGE
 template <typename T>
 void launch_gated_mix(const void *weights, const void *input,
                       const void *residual, void *output, int rank, int hidden,
@@ -140,3 +154,4 @@ extern "C" void launch_gguf_gated_mix(const void *weights, const void *input,
                             streams, format, stream);
   }
 }
+#endif

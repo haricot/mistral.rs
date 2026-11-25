@@ -51,9 +51,19 @@ pub fn try_fused_quantized_gated_mix(
 ) -> Result<Option<Tensor>> {
     #[cfg(feature = "dkr-static-closure-probe")]
     {
-        // Optional fusion: caller must execute the unfused operation.
-        let _ = (input, projection, residual, streams, transform);
-        return Ok(None);
+        if !input.device().is_cuda() || projection.has_bias() || !crate::group_allowed(input,&[projection])
+            || !matches!(input.dtype(),DType::F16|DType::BF16|DType::F32) {return Ok(None);}
+        let Some(weight)=projection.get_qtensor() else{return Ok(None);};
+        let rank=input.dim(candle_core::D::Minus1)?;
+        let width=residual.dim(candle_core::D::Minus1)?;
+        if rank==0 || input.elem_count()!=rank || width==0 || streams==0 || width%streams!=0
+            || residual.elem_count()!=width || weight.shape().dims()!=[width,rank]
+            || !weight.device().same_device(input.device()) || !residual.device().same_device(input.device())
+            || residual.dtype()!=input.dtype() || rank%weight.dtype().block_size()!=0
+            || !(super::fast_mmvq::supports(weight.dtype()) || weight.dtype()==candle_core::quantized::GgmlDType::Q8_1) {return Ok(None);}
+        let divisor=match transform{QuantizedInputTransform::Identity=>None,
+            QuantizedInputTransform::ScaledSilu{divisor}=>Some(divisor)};
+        super::fast_mmvq::typed_gated_mix(&weight,input,residual,streams,divisor).map(Some)
     }
     #[cfg(not(feature = "dkr-static-closure-probe"))]
     {

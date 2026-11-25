@@ -203,3 +203,76 @@ mod tests {
         Ok(())
     }
 }
+
+#[derive(Clone,Copy,PartialEq,Eq)]
+struct MixKey{fmt:&'static str, dtype:DType, rank:usize,hidden:usize,streams:usize,padded:usize,packed:usize,silu:bool}
+struct MixPlans{encode:PrevalidatedLaunchPlan,mix:PrevalidatedLaunchPlan}
+thread_local!{static MIX:RefCell<LaunchPlanCache<MixKey,MixPlans>>=RefCell::new(LaunchPlanCache::new());}
+fn mix_plans(key:MixKey,device:&Device)->Result<MixPlans>{
+    let dt=dtype(key.dtype)?;
+    let scratch=||tensor(ElementType::U8,vec![1,key.padded/32*36],Some("gguf.q8_1.row.v1"));
+    let mut args=vec![tensor(dt,vec![1,key.rank],None),scratch(),scalar(),scalar()];
+    if key.silu {args.push(Argument::Scalar{dtype:ElementType::F32});}
+    let encode=prepare_one(device,if key.silu{"quant.gguf.mix.silu.encode.v1".into()}else{"quant.gguf.q8_1.row.encode.v1".into()},
+        args,[key.padded.div_ceil(256) as u32,1,1],[256,1,1])?;
+    let repr=format!("gguf.{}.packed.v1",key.fmt);
+    let mix=prepare_one(device,format!("quant.gguf.mix.{}.v1",key.fmt),
+        vec![tensor(ElementType::U8,vec![key.hidden*key.streams,key.packed],Some(&repr)),scratch(),
+             tensor(dt,vec![key.streams,key.hidden],None),tensor(dt,vec![key.hidden],None),scalar(),scalar(),scalar()],
+        [key.hidden.div_ceil(4) as u32,1,1],[128,1,1])?;
+    Ok(MixPlans{encode,mix})
+}
+pub(crate) fn gated_mix(w:&QTensor,x:&Tensor,r:&Tensor,streams:usize,divisor:Option<f32>)->Result<Tensor>{
+    let fmt=if w.dtype()==GgmlDType::Q8_1{"q8_1"}else{format(w.dtype()).ok_or_else(||candle_core::Error::msg("DKR gated mix format"))?};
+    let (width,rank)=w.shape().dims2()?;
+    if streams==0 || rank==0 || width==0 || width%streams!=0 || x.elem_count()!=rank || r.elem_count()!=width
+        || x.dim(candle_core::D::Minus1)?!=rank || r.dim(candle_core::D::Minus1)?!=width
+        || r.dtype()!=x.dtype() || !w.device().same_device(x.device()) || !r.device().same_device(x.device())
+        || rank%w.dtype().block_size()!=0 || divisor.is_some_and(|d|!d.is_finite()||d==0.0){
+        candle_core::bail!("DKR gated mix contract");
+    }
+    dtype(x.dtype())?;
+    let Device::Cuda(dev)=w.device() else{candle_core::bail!("DKR gated mix CUDA required");};
+    let hidden=width/streams;
+    let padded=rank.checked_add(511).ok_or_else(||candle_core::Error::msg("DKR mix padding"))?/512*512;
+    let packed=(rank/w.dtype().block_size()).checked_mul(w.dtype().type_size())
+        .ok_or_else(||candle_core::Error::msg("DKR mix packed row"))?;
+    let bytes=(padded/32).checked_mul(36).ok_or_else(||candle_core::Error::msg("DKR mix scratch"))?;
+    if [rank,padded,width,streams,bytes].iter().any(|&n|n>i32::MAX as usize)
+        || width.checked_mul(packed).is_none_or(|n|n>i32::MAX as usize){
+        candle_core::bail!("DKR mix index span");
+    }
+    let key=MixKey{fmt,dtype:x.dtype(),rank,hidden,streams,padded,packed,silu:divisor.is_some()};
+    let x=x.contiguous()?;let r=r.contiguous()?;
+    let (xs,xl)=x.storage_and_layout();let (rs,rl)=r.storage_and_layout();
+    let (Storage::Cuda(xs),Storage::Cuda(rs))=(&*xs,&*rs)else{candle_core::bail!("DKR mix CUDA storage");};
+    let stream=dev.cuda_stream();
+    let mut ws=workspace_ensure(&dev,bytes,&stream)?;
+    let (scratch,_sg)=ws.ptr_mut();
+    let (wp,_wg)=w.device_ptr_with_guard(&stream)?;
+    let (ki,pi,hi,si)=(rank as i32,padded as i32,hidden as i32,streams as i32);
+    let mut shape=r.dims().to_vec();*shape.last_mut().unwrap()=hidden;
+    macro_rules! run {($t:ty)=>{{
+        let (xp,_xg)=slice_ptr_on_stream(xs.as_cuda_slice::<$t>()?,xl.start_offset(),&stream);
+        let (rp,_rg)=slice_ptr_on_stream(rs.as_cuda_slice::<$t>()?,rl.start_offset(),&stream);
+        let mut out=unsafe{dev.alloc::<$t>(hidden)?};
+        {
+            let (op,_og)=slice_ptr_mut_on_stream(&mut out,0,&stream);
+            MIX.with(|cache|cache.borrow_mut().with_plan(key,x.device(),||mix_plans(key,x.device()),|p|{
+                unsafe{p.encode.with_prevalidated_launch(|fun,cfg|{
+                    let mut b=stream.launch_builder(fun);
+                    b.arg(&xp).arg(&scratch).arg(&ki).arg(&pi);
+                    if let Some(d)=divisor{b.arg(&d);b.launch(cfg)?;}else{b.launch(cfg)?;}
+                    Ok(())
+                })}.map_err(|e|candle_core::Error::msg(e.to_string()))?;
+                unsafe{p.mix.with_prevalidated_launch(|fun,cfg|{
+                    let mut b=stream.launch_builder(fun);b.arg(&wp).arg(&scratch).arg(&rp).arg(&op).arg(&ki).arg(&hi).arg(&si);
+                    b.launch(cfg)?;Ok(())
+                })}.map_err(|e|candle_core::Error::msg(e.to_string()))?;
+                Ok(())
+            }))?;
+        }
+        Ok(Tensor::from((Storage::Cuda(CudaStorage::wrap_cuda_slice(out,dev.clone())),candle_core::Shape::from(shape))))
+    }}}
+    match x.dtype(){DType::F16=>run!(half::f16),DType::BF16=>run!(half::bf16),DType::F32=>run!(f32),_=>unreachable!()}
+}

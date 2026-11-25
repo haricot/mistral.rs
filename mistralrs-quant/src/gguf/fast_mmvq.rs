@@ -391,6 +391,8 @@ fn prefetch_launcher(dtype: GgmlDType, output: DType) -> Option<PlainLauncher> {
 #[cfg(feature = "dkr-static-closure-probe")]
 #[path = "mmvq_dynamic.rs"]
 mod dynamic;
+#[cfg(feature = "dkr-static-closure-probe")]
+pub(crate) use dynamic::gated_mix as typed_gated_mix;
 
 #[cfg(feature = "dkr-static-closure-probe")]
 pub fn plain(w: &QTensor, xs: &Tensor) -> Result<Tensor> {
