@@ -1349,3 +1349,12 @@ over ten formats, batch 1..8, three dtypes and odd N.
 No MMQ, indexed MoE, shared-LHS, fused QKV/GLU or direct historical
 API closure yet. No PTX/CUBIN or Rust compiled here. New prospective
 SM61 physical upper=482, logical=2410, not actual packaged inventory.
+
+S9C.2B2 geometry planning also records the historical Pascal MMQ
+conventional tiling (mmq_y=64, mmq_x=8..64 by 8, 256 threads), exact
+shared memory from the DP4A tile sizes, and D4/DS4/D2S6 activation
+layouts. This is distinct from the 36-byte row Q8_1 of MMVQ.
+The projected plain and indexed profiles are not a registration or ABI
+implementation. The indexed scheduler, fastdiv scalarization, device
+entry refactor and grouped numeric parity remain mandatory; Stream-K
+on other architectures is not covered by this SM61 planning gate.
