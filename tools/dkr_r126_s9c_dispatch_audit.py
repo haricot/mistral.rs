@@ -21,7 +21,10 @@ CASES = {
     "routed_bias": ("routed_gemv/mod.rs", "unbiased.bias = None;"),
     "routed_no_static_module": ("routed_gemv/mod.rs", '#[cfg(all(feature = "cuda", not(feature = "dkr-static-closure-probe")))]\nmod cuda;'),
     "gguf_dense_reference": ("gguf/mod.rs", "let x = self.w.forward(&a_f32)?;"),
-    "gguf_moe_gap": ("gguf/mod.rs", "GGUF indexed MoE requires its own typed migration"),
+    "gguf_moe_typed": ("gguf/cuda.rs", "super::fast_mmq::moe_dynamic::indexed(qtensor,x,ids)"),
+    "gguf_moe_grouped": ("gguf/fast_mmq.rs", "moe_dynamic::grouped(&[gate,up]"),
+    "gguf_moe_worklist": ("gguf/moe_dynamic.rs", 'run!(p.work,bp,tp,cp,ei,ai,ci);'),
+    "gguf_moe_dispatch": ("gguf/cuda.rs", "super::fast_mmq::moe_dynamic::dispatch("),
     "gguf_group_disabled": ("gguf/group.rs", '#[cfg(all(feature = "cuda", not(feature = "dkr-static-closure-probe")))]\nmod cuda {'),
     "gguf_gated_mix_optional": ("gguf/gated_mix.rs", "Optional fusion: caller must execute the unfused operation."),
 }
@@ -45,7 +48,7 @@ def main():
     report=dict(schema="dkr.r126.s9c2.dispatch.source.v1",checks=checks,
                 status="SOURCE_MARKERS_PRESENT",compilation=False,
                 full_link_qualified=False,full_model_qualified=False,
-                unresolved=["blockwise_fp8_weight_quant_dequant","gguf_indexed_moe",
+                unresolved=["blockwise_fp8_weight_quant_dequant","gguf_indexed_mmvq_optimized",
                             "gguf_direct_mmq_mmvq","higher_level_routed_moe_glu",
                             "other_core_and_quant_ffi"])
     if a.json_out:

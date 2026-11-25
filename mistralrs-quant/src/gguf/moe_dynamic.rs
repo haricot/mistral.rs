@@ -53,7 +53,7 @@ pub(crate) fn dispatch(ids:&CudaSlice<u32>,offset:usize,a:usize,e:usize,topk:usi
         || offset.checked_add(a).is_none_or(|end|end>ids.len()) {
         candle_core::bail!("DKR indexed dispatch shape mismatch");
     }
-    i32_span(a)?;i32_span(e+1)?;i32_span(topk)?;
+    i32_span(a)?;i32_span(e)?;i32_span(e+1)?;i32_span(topk)?;
     let device=Device::Cuda(dev.clone());
     let stream=dev.cuda_stream();
     let mut counts=unsafe{dev.alloc::<u32>(e)?};
@@ -229,6 +229,23 @@ mod tests{
                 }
             }
         }
+    }
+    #[test]
+    #[ignore="requires SM61 compact catalogue and CUDA"]
+    fn dkr_s9c_compact_invalid_ids_gpu()->Result<()>{
+        let _evidence=mistralrs_kernel_runtime::RuntimeEvidenceGuard;
+        let dev=Device::new_cuda(0)?;
+        let weight=QTensor::quantize(&Tensor::ones((2,64,256),DType::F32,&dev)?,candle_core::quantized::GgmlDType::Q8_0)?;
+        let x=Tensor::ones((2,1,256),DType::F32,&dev)?;
+        let ids=Tensor::from_vec(vec![0u32,99,1,u32::MAX],(2,2),&dev)?;
+        let actual=indexed(&weight,&x,&ids)?.flatten_all()?.to_vec1::<f32>()?;
+        for i in 0..4 {
+            for &v in &actual[i*64..(i+1)*64] {
+                if i%2==0 {assert!(v.is_finite() && (v-256.).abs()<2.);}
+                else {assert!(v.is_nan());}
+            }
+        }
+        Ok(())
     }
     #[test]
     #[ignore="requires SM61 compact catalogue and CUDA"]

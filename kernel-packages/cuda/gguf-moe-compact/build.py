@@ -119,7 +119,31 @@ def package(root,cc,image,rows,data):
     manifest.write_bytes(encoded)
 
 
+def worklist_oracle():
+    # CPU reference for exact route coverage and bounded worklist. No GPU claim.
+    import random
+    rng=random.Random(126)
+    for routes in (1,2,7,8,9,16,17,63,64,65,129,1024,8193):
+        for experts in (1,2,7,64,257,1025):
+            for skew in (False,True):
+                ids=[(0 if skew and i%5 else rng.randrange(experts+1)) for i in range(routes)]
+                by_expert=[[] for _ in range(experts)]
+                for i,e in enumerate(ids):
+                    if e<experts: by_expert[e].append(i)
+                cap=min(routes,routes//8+experts)
+                tiles=[]
+                for e,assigned in enumerate(by_expert):
+                    x=8
+                    while x<64 and x<len(assigned): x*=2
+                    for j in range(0,len(assigned),x):
+                        tiles.append((e,assigned[j:j+x]))
+                assert len(tiles)<=cap
+                got=[i for e,rows in tiles for i in rows if ids[i]==e]
+                assert sorted(got)==[i for i,e in enumerate(ids) if e<experts]
+    print("DKR_R126_S9C2B3_WORKLIST_ORACLE=PASS synthetic_cpu=true")
+
 def self_test(cc,images):
+    worklist_oracle()
     with tempfile.TemporaryDirectory() as tmp:
         root=Path(tmp)
         for image,rows in images.items():

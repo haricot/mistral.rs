@@ -1386,3 +1386,38 @@ migration. No closure of all direct FFI consumers is claimed.
 Ignored GPU test covers 10 formats, three dtypes, full/tail N, four
 batch shapes, zero activation row and shared LHS. Geometry unit test
 checks smallest-tile ties. No GPU compilation or numerical result here.
+
+
+## R1.26/S9C.2B3 — SM61 indexed/compact MMQ
+
+User supplied B1/B2 synthetic package tests PASS (267/489 profiles).
+Historical compact MMQ requires INT8 MMA, width up to 128, Y=128;
+it is not admitted on Pascal. The new SM61 provider uses the original
+DP4A tile body, Y=64, adaptive X=8/16/32/64, F32 route outputs, and
+the historical 144-byte Q8_1 D4/DS4/D2S6 encoding.
+GPU count/prefix/scatter produce expert bounds and original flat
+destination/source IDs. Worklist capacity min(A, floor(A/8)+E);
+actual tile count stays on device. Invalid expert IDs are omitted,
+with their F32 route rows left NaN. Grouped raw slice callers must
+provide producer-owned metadata; malformed duplicate destination IDs
+are not a supported public input. Bounds checks and source clamping
+protect memory access, not semantic validity of arbitrary metadata.
+No CPU readback, no full expert weight dequantization or fixup buffer.
+Direct indexed gather and grouped APIs use typed plans in closure probe;
+grouped gate/up shares worklist and quantization, but currently packs
+two outputs with Tensor::cat. High-level all-GGUF routed execution uses
+the existing individual gather path with unfused activation to avoid
+the legacy fused pipeline pending B4. LoRA and high-level weighted
+reduction closure still need audit. Decode currently uses compact MMQ
+even for small route counts; original indexed MMVQ/prefetch performance
+is not preserved or qualified yet.
+Separate family gguf-moe-compact (20 projection profiles, 9 encoders,
+6 metadata/fill operations, 11 images), keeps existing dense shard
+identities. Shared encoder source has a typed source-row bound, so
+Cudaforge may invalidate dense MMQ source fingerprints on next build;
+no cache files or qualified artifact bytes are deleted or overwritten.
+Conservative cumulative budget 504 physical / 2934 logical. Future
+families require shard compaction before exceeding 512.
+CPU worklist oracle and synthetic PTX self-test prepared; ignored GPU
+tests cover formats, input layouts, odd N, route order, skew and invalid
+IDs. Source-only; no Rust/CUDA compile, no link or numeric qualification.

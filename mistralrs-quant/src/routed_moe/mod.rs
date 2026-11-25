@@ -114,6 +114,13 @@ impl RoutedExperts<'_> {
         activation: RoutedActivation<'_>,
     ) -> Result<Tensor> {
         let forward = Execution::new(input, activation)?;
+        // B3 covers indexed/grouped projections, not the historical fused
+        // whole-expert pipelines. Do not enter those producers in the probe.
+        #[cfg(all(feature = "cuda", feature = "dkr-static-closure-probe"))]
+        if forward.xs_flat.device().is_cuda()
+            && self.members().iter().all(|member| member.get_qtensor().is_some()) {
+            return self.gather_impl(&forward);
+        }
         if crate::group_allowed(forward.xs_flat, &self.members()) {
             if forward.lora.is_some() {
                 #[cfg(feature = "cuda")]
@@ -185,6 +192,15 @@ impl RoutedExperts<'_> {
         } else {
             (gate, up)
         };
+        #[cfg(all(feature = "cuda", feature = "dkr-static-closure-probe"))]
+        let down_input = if gate.device().is_cuda()
+            && self.members().iter().all(|member| member.get_qtensor().is_some()) {
+            // Temporary unfused reference until B4 closes the GLU ABI.
+            (forward.activation.fallback.forward(&gate)? * &up)?
+        } else {
+            forward.activation.apply(&gate,&up)?
+        };
+        #[cfg(not(all(feature = "cuda", feature = "dkr-static-closure-probe")))]
         let down_input = forward.activation.apply(&gate, &up)?;
         self.down.process_routed_stats(&down_input, ids)?;
         let down = self.down.gather_forward(&down_input, ids)?;
