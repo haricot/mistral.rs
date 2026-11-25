@@ -689,6 +689,11 @@ pub(crate) fn shared_lhs(weights: &[&QTensor], xs: &Tensor) -> Result<Vec<Tensor
     }
 }
 
+#[cfg(feature = "dkr-static-closure-probe")]
+fn down_from_glu(down:&QTensor,gate:&Tensor,up:&Tensor,activation:GluActivationType)->Result<Tensor>{
+    dynamic::down_from_glu(down,gate,up,activation)
+}
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 fn down_from_glu(
     down: &QTensor,
     gate: &Tensor,
@@ -836,6 +841,9 @@ pub(crate) fn fused_glu(
     let mut outputs = shared_lhs(&[gate_w, up_w], xs)?;
     let up = outputs.pop().expect("two weights produce two outputs");
     let gate = outputs.pop().expect("two weights produce two outputs");
+    #[cfg(feature = "dkr-static-closure-probe")]
+    { return super::group::typed_glu(&gate,&up,activation); }
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     crate::fused_glu(&gate, &up, activation)
 }
 

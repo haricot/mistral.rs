@@ -590,6 +590,11 @@ pub fn plain(w: &QTensor, xs: &Tensor) -> Result<Tensor> {
     }
 }
 
+#[cfg(feature = "dkr-static-closure-probe")]
+pub(crate) fn shared_lhs(weights: &[&QTensor], xs: &Tensor) -> Result<Vec<Tensor>> {
+    dynamic::shared_lhs(weights,xs)
+}
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 pub(crate) fn shared_lhs(weights: &[&QTensor], xs: &Tensor) -> Result<Vec<Tensor>> {
     let Device::Cuda(dev) = xs.device() else {
         candle_core::bail!("shared MMVQ input must live on CUDA");
@@ -834,6 +839,18 @@ pub(crate) fn try_dense_pair(
     }
 }
 
+#[cfg(feature = "dkr-static-closure-probe")]
+pub fn fused_glu(
+    gate_w: &QTensor,
+    up_w: &QTensor,
+    xs: &Tensor,
+    activation: GluActivationType,
+) -> Result<Tensor> {
+    if gate_w.shape()!=up_w.shape(){candle_core::bail!("DKR GLU shape mismatch");}
+    let mut o=shared_lhs(&[gate_w,up_w],xs)?.into_iter();
+    super::group::typed_glu(&o.next().unwrap(),&o.next().unwrap(),activation)
+}
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 pub fn fused_glu(
     gate_w: &QTensor,
     up_w: &QTensor,
@@ -1044,6 +1061,12 @@ pub fn fused_glu(
 /// Compute Q, K, and V matvecs with one input quantization pass and one MMVQ
 /// kernel. The result tensors match the unfused `plain` outputs for each
 /// projection and preserve the input dtype.
+#[cfg(feature = "dkr-static-closure-probe")]
+pub fn fused_qkv(q_w:&QTensor,k_w:&QTensor,v_w:&QTensor,xs:&Tensor)->Result<(Tensor,Tensor,Tensor)>{
+    let mut o=shared_lhs(&[q_w,k_w,v_w],xs)?.into_iter();
+    Ok((o.next().unwrap(),o.next().unwrap(),o.next().unwrap()))
+}
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 pub fn fused_qkv(
     q_w: &QTensor,
     k_w: &QTensor,
@@ -1053,11 +1076,18 @@ pub fn fused_qkv(
     fused_qkv_optional(q_w, k_w, Some(v_w), xs)
 }
 
+#[cfg(feature = "dkr-static-closure-probe")]
+pub fn fused_pair(left:&QTensor,right:&QTensor,xs:&Tensor)->Result<(Tensor,Tensor)>{
+    let mut o=shared_lhs(&[left,right],xs)?.into_iter();
+    Ok((o.next().unwrap(),o.next().unwrap()))
+}
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 pub fn fused_pair(left: &QTensor, right: &QTensor, xs: &Tensor) -> Result<(Tensor, Tensor)> {
     let (left, right, _) = fused_qkv_optional(left, right, None, xs)?;
     Ok((left, right))
 }
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 fn fused_qkv_optional(
     q_w: &QTensor,
     k_w: &QTensor,

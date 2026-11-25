@@ -82,31 +82,41 @@ fn prepare(key:Key, device:&Device) -> Result<Plans> {
     Ok(Plans {encode,matvec})
 }
 
-pub(super) fn plain(w:&QTensor, xs:&Tensor) -> Result<Tensor> {
-    let fmt=format(w.dtype()).ok_or_else(|| candle_core::Error::msg("DKR GGUF format not admitted"))?;
-    let Device::Cuda(dev)=w.device() else { candle_core::bail!("DKR MMVQ requires CUDA weights"); };
-    if !xs.device().same_device(&w.device()) {
-        candle_core::bail!("DKR MMVQ requires same-device activations");
-    }
-    let (n,k)=w.shape().dims2()?;
+pub(super) fn plain(w:&QTensor,xs:&Tensor)->Result<Tensor>{
+    Ok(shared_lhs(&[w],xs)?.pop().expect("one projection"))
+}
+
+pub(super) fn shared_lhs(weights:&[&QTensor], xs:&Tensor) -> Result<Vec<Tensor>> {
+    let first=weights.first().ok_or_else(|| candle_core::Error::msg("DKR MMVQ empty group"))?;
+    let Device::Cuda(dev)=first.device() else {candle_core::bail!("DKR MMVQ requires CUDA");};
+    let (_,k)=first.shape().dims2()?;
+    if !xs.device().same_device(&first.device()){candle_core::bail!("DKR MMVQ input device");}
     let Some((&input_k,dims))=xs.dims().split_last() else { candle_core::bail!("DKR MMVQ input rank"); };
     let batch=dims.iter().try_fold(1usize,|a,&b|a.checked_mul(b))
         .ok_or_else(|| candle_core::Error::msg("DKR MMVQ batch overflow"))?;
-    let block_elements=w.dtype().block_size();
-    if input_k!=k || k==0 || n==0 || k%block_elements!=0
+
+    if input_k!=k || k==0
         || !(1..=MMVQ_MAX_BATCH).contains(&batch) {
         candle_core::bail!("DKR MMVQ shape not admitted");
     }
     dtype(xs.dtype())?;
-    let weight_row=(k/block_elements).checked_mul(w.dtype().type_size())
-        .ok_or_else(|| candle_core::Error::msg("DKR MMVQ weight row overflow"))?;
-    let weight_bytes=weight_row.checked_mul(n)
-        .ok_or_else(|| candle_core::Error::msg("DKR MMVQ weight span overflow"))?;
     let padded=k.checked_add(511).ok_or_else(|| candle_core::Error::msg("DKR MMVQ padding overflow"))? / 512 * 512;
     let scratch_row=(padded/32).checked_mul(36)
         .ok_or_else(|| candle_core::Error::msg("DKR MMVQ scratch row overflow"))?;
     let scratch_bytes=scratch_row.checked_mul(batch)
         .ok_or_else(|| candle_core::Error::msg("DKR MMVQ scratch overflow"))?;
+    let mut keys=Vec::with_capacity(weights.len());
+    for w in weights {
+        let (n,wk)=w.shape().dims2()?;
+        let fmt=format(w.dtype()).ok_or_else(||candle_core::Error::msg("DKR GGUF format not admitted"))?;
+        let block_elements=w.dtype().block_size();
+        if n==0 || wk!=k || k%block_elements!=0 || !w.device().same_device(&first.device()){
+            candle_core::bail!("DKR MMVQ group weight mismatch");
+        }
+    let weight_row=(k/block_elements).checked_mul(w.dtype().type_size())
+        .ok_or_else(|| candle_core::Error::msg("DKR MMVQ weight row overflow"))?;
+    let weight_bytes=weight_row.checked_mul(n)
+        .ok_or_else(|| candle_core::Error::msg("DKR MMVQ weight span overflow"))?;
     let count=n.checked_mul(batch).ok_or_else(|| candle_core::Error::msg("DKR MMVQ output overflow"))?;
     // Historical device indexing is signed i32, including row/block products.
     if [n,k,padded,count,weight_bytes,scratch_bytes].iter().any(|&v|v>i32::MAX as usize)
@@ -117,46 +127,51 @@ pub(super) fn plain(w:&QTensor, xs:&Tensor) -> Result<Tensor> {
     let prefetch=batch==1 && !matches!(fmt,"q2_k"|"q3_k")
         && use_single_row_prefetch(w.dtype(),k,weight_bytes) && prefers_weight_prefetch(&dev);
     let key=Key{format:fmt,dtype:xs.dtype(),batch,n,k,padded,weight_row,scratch_row,prefetch};
+        keys.push((key,count));
+
+    }
     let stream=dev.cuda_stream();
     let xs=xs.contiguous()?;
     let (storage,layout)=xs.storage_and_layout();
     let Storage::Cuda(storage)=&*storage else { candle_core::bail!("DKR MMVQ requires CUDA activations"); };
-    let (weight_ptr,_wg)=w.device_ptr_with_guard(&stream)?;
     let mut workspace=workspace_ensure(&dev,scratch_bytes,&stream)?;
     let (scratch_ptr,_sg)=workspace.ptr_mut();
     let ki=k as i32;
-    let ni=n as i32;
     let pi=padded as i32;
     let stride=(padded/32) as i32;
-    PLANS.with(|plans|plans.borrow_mut().with_plan(key,xs.device(),
-        ||prepare(key,xs.device()),|plans|{
-            macro_rules! launch {
-                ($t:ty)=>{{
-                    let (xp,_xg)=slice_ptr_on_stream(storage.as_cuda_slice::<$t>()?,layout.start_offset(),&stream);
-                    let mut out=unsafe{dev.alloc::<$t>(count)?};
-                    {
-                        let (yp,_yg)=slice_ptr_mut_on_stream(&mut out,0,&stream);
-                        unsafe{plans.encode.with_prevalidated_launch(|fun,cfg|{
-                            let mut b=stream.launch_builder(fun);
-                            b.arg(&xp).arg(&scratch_ptr).arg(&ki).arg(&pi);
-                            b.launch(cfg)?;
-                            Ok(())
-                        })}.map_err(|e|candle_core::Error::msg(e.to_string()))?;
+    macro_rules! launch {
+        ($t:ty)=>{{
+            let (xp,_xg)=slice_ptr_on_stream(storage.as_cuda_slice::<$t>()?,layout.start_offset(),&stream);
+            let mut outputs=Vec::with_capacity(weights.len());
+            for (index,(w,(key,count))) in weights.iter().zip(keys.iter().copied()).enumerate(){
+                let (wp,_wg)=w.device_ptr_with_guard(&stream)?;
+                let ni=key.n as i32;
+                let mut out=unsafe{dev.alloc::<$t>(count)?};
+                {
+                    let (yp,_yg)=slice_ptr_mut_on_stream(&mut out,0,&stream);
+                    PLANS.with(|plans|plans.borrow_mut().with_plan(key,xs.device(),||prepare(key,xs.device()),|plans|{
+                        if index==0 {
+                            unsafe{plans.encode.with_prevalidated_launch(|fun,cfg|{
+                                let mut b=stream.launch_builder(fun);
+                                b.arg(&xp).arg(&scratch_ptr).arg(&ki).arg(&pi);b.launch(cfg)?;Ok(())
+                            })}.map_err(|e|candle_core::Error::msg(e.to_string()))?;
+                        }
                         unsafe{plans.matvec.with_prevalidated_launch(|fun,cfg|{
                             let mut b=stream.launch_builder(fun);
-                            b.arg(&weight_ptr).arg(&scratch_ptr).arg(&yp).arg(&ki);
-                            if !prefetch {b.arg(&ni).arg(&stride).arg(&ni);}
-                            b.launch(cfg)?;
-                            Ok(())
+                            b.arg(&wp).arg(&scratch_ptr).arg(&yp).arg(&ki);
+                            if !key.prefetch {b.arg(&ni).arg(&stride).arg(&ni);}
+                            b.launch(cfg)?;Ok(())
                         })}.map_err(|e|candle_core::Error::msg(e.to_string()))?;
-                    }
-                    Ok(Tensor::from((Storage::Cuda(CudaStorage::wrap_cuda_slice(out,dev.clone())),
-                                    output_shape(&xs,n))))
-                }}
+                        Ok(())
+                    }))?;
+                }
+                outputs.push(Tensor::from((Storage::Cuda(CudaStorage::wrap_cuda_slice(out,dev.clone())),output_shape(&xs,key.n))));
             }
-            match key.dtype {DType::F16=>launch!(half::f16),DType::BF16=>launch!(half::bf16),
-                             DType::F32=>launch!(f32),_=>unreachable!()}
-        }))
+            Ok(outputs)
+        }}
+    }
+    match xs.dtype(){DType::F16=>launch!(half::f16),DType::BF16=>launch!(half::bf16),
+                     DType::F32=>launch!(f32),_=>unreachable!()}
 }
 
 #[cfg(test)]

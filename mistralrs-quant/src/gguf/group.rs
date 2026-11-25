@@ -70,6 +70,10 @@ fn forward_group(
     if xs.device().is_cpu() {
         return forward_group_cpu(xs, entries, kind);
     }
+    #[cfg(all(feature = "cuda", feature = "dkr-static-closure-probe"))]
+    if xs.device().is_cuda() {
+        return typed_group(xs,entries,kind);
+    }
     #[cfg(all(feature = "cuda", not(feature = "dkr-static-closure-probe")))]
     if xs.device().is_cuda() {
         return cuda::forward_group(xs, entries, kind);
@@ -261,5 +265,51 @@ mod cuda {
         Ok(Some(vec![fast_mmq::fused_ffn(
             gate, up, down, xs, activation,
         )?]))
+    }
+}
+
+#[cfg(all(feature = "cuda", feature = "dkr-static-closure-probe"))]
+pub(super) fn typed_glu(gate:&Tensor,up:&Tensor,activation:crate::GluActivationType)->Result<Tensor>{
+    use crate::GluActivationType::*;
+    // Preserve the activation rounding before multiply, as in historical MMQ GLU.
+    let dtype=gate.dtype();
+    let g=gate.to_dtype(DType::F32)?;
+    let a=match activation {
+        Silu=>candle_nn::ops::silu(&g)?,
+        Gelu=>g.gelu()?,
+        Relu=>g.relu()?,
+        GeluErf=>g.gelu_erf()?,
+        Sigmoid=>candle_nn::ops::sigmoid(&g)?,
+    };
+    a.to_dtype(dtype)? * up
+}
+#[cfg(all(feature = "cuda", feature = "dkr-static-closure-probe"))]
+fn typed_group(xs:&Tensor,entries:&[GroupEntry<'_>],kind:GroupKind<'_>)->Result<Option<Vec<Tensor>>>{
+    use super::{fast_mmq,fast_mmvq};
+    let Some(w)=weights(entries) else{return Ok(None);};
+    let Some((&k,dims))=xs.dims().split_last() else{return Ok(None);};
+    if w.is_empty() || k==0 || !matches!(xs.dtype(),DType::F16|DType::BF16|DType::F32){return Ok(None);}
+    let tokens=dims.iter().try_fold(1usize,|a,&b|a.checked_mul(b))
+        .ok_or_else(||candle_core::Error::msg("GGUF grouped batch overflow"))?;
+    if tokens==0{return Ok(None);}
+    let decode=tokens<=fast_mmvq::MMVQ_MAX_BATCH;
+    let admitted=|weights:&[&QTensor]| weights.iter().all(|w|
+        w.shape().dims2().is_ok_and(|(_,cols)|cols==k)
+        && w.device().same_device(xs.device())
+        && if decode {fast_mmvq::supports(w.dtype())} else {k%256==0 && fast_mmq::supports(w.dtype()) && w.dtype()==weights[0].dtype()});
+    match kind{
+        GroupKind::Dense if admitted(&w)=>{
+            if decode {fast_mmvq::shared_lhs(&w,xs).map(Some)} else {fast_mmq::shared_lhs(&w,xs).map(Some)}
+        }
+        GroupKind::Glu{activation} if w.len()==2 && admitted(&w) && w[0].shape()==w[1].shape()=>{
+            let out=if decode{fast_mmvq::shared_lhs(&w,xs)?}else{fast_mmq::shared_lhs(&w,xs)?};
+            Ok(Some(vec![typed_glu(&out[0],&out[1],activation)?]))
+        }
+        GroupKind::Ffn{activation} if !decode && w.len()==3 && admitted(&w[..2])
+            && w[0].shape()==w[1].shape() && fast_mmq::supports(w[2].dtype())
+            && w[2].shape().dims2().is_ok_and(|(_,cols)|cols==w[0].shape().dims()[0] && cols%256==0)=>{
+            Ok(Some(vec![fast_mmq::fused_ffn(w[0],w[1],w[2],xs,activation)?]))
+        }
+        _=>Ok(None),
     }
 }

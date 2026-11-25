@@ -21,7 +21,7 @@ const ITER_K:usize=256;
 struct Key {
     format:&'static str, layout:&'static str, dtype:DType,
     batch:usize, n:usize, k:usize, padded:usize, blocks_k:usize,
-    row_bytes:usize, scratch_col_bytes:usize, tile:usize, shared:usize,
+    row_bytes:usize, scratch_col_bytes:usize, tile:usize, shared:usize, glu:bool,
 }
 struct Plans { encode:PrevalidatedLaunchPlan, mmq:PrevalidatedLaunchPlan }
 thread_local! {
@@ -88,9 +88,15 @@ fn prepare(key:Key,device:&Device)->Result<Plans> {
     let repr=format!("gguf.q8_1.mmq.{}.v1",key.layout);
     // K-major block planes, each containing batch * 144 bytes.
     let scratch=||tensor(ElementType::U8,vec![key.padded/128,key.scratch_col_bytes],Some(&repr));
-    let encode=prepare_one(device,format!("quant.gguf.q8_1.mmq.{}.encode.v1",key.layout),
-        vec![tensor(dt,vec![key.batch,key.k],None),scratch(),scalar(),scalar(),scalar()],
-        [key.batch as u32,(key.padded/512) as u32,1],[128,1,1],0)?;
+    let input=||tensor(dt,vec![key.batch,key.k],None);
+    let (operation,args)=if key.glu {
+        (format!("quant.gguf.glu.{}.encode.v1",key.layout),
+         vec![input(),input(),scratch(),scalar(),scalar(),scalar(),scalar()])
+    } else {
+        (format!("quant.gguf.q8_1.mmq.{}.encode.v1",key.layout),
+         vec![input(),scratch(),scalar(),scalar(),scalar()])
+    };
+    let encode=prepare_one(device,operation,args,[key.batch as u32,(key.padded/512) as u32,1],[128,1,1],0)?;
     let weight_repr=format!("gguf.{}.packed.v1",key.format);
     let bounds=if key.n%Y==0 {"full"} else {"tail"};
     let mmq=prepare_one(device,format!("quant.gguf.mmq.{}.x{}.{}.v1",key.format,key.tile,bounds),
@@ -109,6 +115,17 @@ pub(super) fn i32_span(v:usize)->Result<usize> {
     Ok(v)
 }
 pub(super) fn shared_lhs(weights:&[&QTensor],xs:&Tensor)->Result<Vec<Tensor>> {
+    run(weights,xs,None)
+}
+pub(super) fn down_from_glu(w:&QTensor,gate:&Tensor,up:&Tensor,activation:crate::GluActivationType)->Result<Tensor>{
+    Ok(run(&[w],gate,Some((up,activation as i32)))?.pop().expect("one projection"))
+}
+fn run(weights:&[&QTensor],xs:&Tensor,glu:Option<(&Tensor,i32)>)->Result<Vec<Tensor>> {
+    if let Some((up,_))=glu {
+        if up.shape()!=xs.shape() || up.dtype()!=xs.dtype() || !up.device().same_device(xs.device()){
+            candle_core::bail!("DKR GLU encoder input mismatch");
+        }
+    }
     let Some(first)=weights.first() else {candle_core::bail!("DKR MMQ requires a weight");};
     let quant=first.dtype();
     let fmt=format(quant).ok_or_else(||candle_core::Error::msg("DKR MMQ unsupported weight format"))?;
@@ -154,11 +171,13 @@ pub(super) fn shared_lhs(weights:&[&QTensor],xs:&Tensor)->Result<Vec<Tensor>> {
         i32_span(n.checked_add(Y).ok_or_else(||candle_core::Error::msg("DKR MMQ row overflow"))?)?;
         i32_span(batch.checked_add(tile).ok_or_else(||candle_core::Error::msg("DKR MMQ column overflow"))?)?;
         keys.push(Key{format:fmt,layout:layout(quant),dtype:xs.dtype(),batch,n,k,padded,
-                      blocks_k,row_bytes,scratch_col_bytes,tile,shared});
+                      blocks_k,row_bytes,scratch_col_bytes,tile,shared,glu:glu.is_some()});
     }
     let xs=xs.contiguous()?;
     let (storage,l)=xs.storage_and_layout();
     let Storage::Cuda(storage)=&*storage else {candle_core::bail!("DKR MMQ requires CUDA activations");};
+    let up=glu.map(|(up,_)|up.contiguous()).transpose()?;
+    let up_storage=up.as_ref().map(|t|t.storage_and_layout());
     let stream=dev.cuda_stream();
     let mut workspace=workspace_ensure(&MMQ_WORKSPACE,&dev,workspace_bytes,&stream)?;
     let (scratch,_sg)=workspace.ptr_mut();
@@ -171,6 +190,12 @@ pub(super) fn shared_lhs(weights:&[&QTensor],xs:&Tensor)->Result<Vec<Tensor>> {
             let (xp,_xg)=slice_ptr_on_stream(storage.as_cuda_slice::<$t>()?,l.start_offset(),&stream);
             // Historical float4/half2/bfloat162 activation loads require alignment.
             if xp%16!=0 {candle_core::bail!("DKR MMQ activation pointer alignment");}
+            let up_ptr=if let Some((st,l))=up_storage.as_ref(){
+                let Storage::Cuda(st)=&**st else{candle_core::bail!("DKR GLU CUDA storage");};
+                let (p,g)=slice_ptr_on_stream(st.as_cuda_slice::<$t>()?,l.start_offset(),&stream);
+                if p%16!=0{candle_core::bail!("DKR GLU alignment");}
+                Some((p,g))
+            }else{None};
             let mut outputs=Vec::with_capacity(weights.len());
             for (index,(w,key)) in weights.iter().zip(keys.iter().copied()).enumerate() {
                 let (wp,_wg)=w.device_ptr_with_guard(&stream)?;
@@ -183,7 +208,11 @@ pub(super) fn shared_lhs(weights:&[&QTensor],xs:&Tensor)->Result<Vec<Tensor>> {
                             if index==0 {
                                 unsafe{plans.encode.with_prevalidated_launch(|fun,cfg|{
                                     let mut b=stream.launch_builder(fun);
-                                    b.arg(&xp).arg(&scratch).arg(&ki).arg(&pi).arg(&bi);
+                                    b.arg(&xp);
+                                    if let Some((ptr,_))=&up_ptr{b.arg(ptr);}
+                                    b.arg(&scratch).arg(&ki).arg(&pi).arg(&bi);
+                                    let act=glu.map(|(_,a)|a).unwrap_or(0);
+                                    if key.glu{b.arg(&act);}
                                     b.launch(cfg)?;Ok(())
                                 })}.map_err(|e|candle_core::Error::msg(e.to_string()))?;
                             }

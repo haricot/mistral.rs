@@ -223,7 +223,7 @@ quantize_mmq_q8_1(const input_t *__restrict__ x,
   }
 }
 
-#ifndef DKR_GGUF_MMQ_IMAGE
+ #if !defined(DKR_GGUF_MMQ_IMAGE) || defined(DKR_GGUF_GLU_IMAGE)
 static __device__ __forceinline__ float mmq_glu_silu(float x) {
   return x / (1.0f + expf(-x));
 }
@@ -261,7 +261,12 @@ mmq_glu_product(const float gate, const float up, const int activation) {
 }
 
 template <typename input_t, mmq_q8_1_ds_layout ds_layout>
-static __global__ void quantize_mmq_q8_1_glu(
+#ifdef DKR_GGUF_GLU_IMAGE
+static __device__ __forceinline__ void
+#else
+static __global__ void
+#endif
+quantize_mmq_q8_1_glu(
     const input_t *__restrict__ gate, const input_t *__restrict__ up,
     const int32_t *__restrict__ ids, void *__restrict__ vy, const int64_t ne00,
     const int64_t s01, const int64_t ne0, const int ne1, const int activation) {
@@ -312,7 +317,11 @@ static __global__ void quantize_mmq_q8_1_glu(
     }
   }
 
+  #ifdef DKR_GGUF_GLU_IMAGE
+  const float d_inv = amax == 0.0f ? 0.0f : 127.0f / amax;
+#else
   const float d_inv = 127.0f / amax;
+#endif
   char4 q;
   q.x = roundf(xi.x * d_inv);
   q.y = roundf(xi.y * d_inv);
@@ -333,7 +342,11 @@ static __global__ void quantize_mmq_q8_1_glu(
       return;
     }
 
+    #ifdef DKR_GGUF_GLU_IMAGE
+    const float d = amax == 0.0f ? 0.0f : 1.0f / d_inv;
+#else
     const float d = 1.0f / d_inv;
+#endif
     y[ib].d2s6[iqs / 64] = d;
     return;
   }
@@ -342,13 +355,20 @@ static __global__ void quantize_mmq_q8_1_glu(
     return;
   }
 
-  const float d = 1.0f / d_inv;
+  #ifdef DKR_GGUF_GLU_IMAGE
+    const float d = amax == 0.0f ? 0.0f : 1.0f / d_inv;
+#else
+    const float d = 1.0f / d_inv;
+#endif
   if (ds_layout == MMQ_Q8_1_DS_LAYOUT_DS4) {
     y[ib].ds4[iqs / 32] = mmq_encode_ds4(d, sum);
   } else {
     y[ib].d4[iqs / 32] = d;
   }
 }
+
+#endif // GLU device body
+#ifndef DKR_GGUF_MMQ_IMAGE
 
 template <mmq_q8_1_ds_layout ds_layout>
 static void launch_mmq_quantize_q8_1_typed(const void *x, const int32_t *ids,
