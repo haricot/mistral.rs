@@ -1,5 +1,5 @@
-//! Standalone F64 attention oracle: rustc --edition=2024 --test -O this_file.rs.
-//! No Candle, CUDA, FlashInfer or DKR dependencies.
+// Standalone F64 attention oracle: rustc --edition=2024 --test -O this_file.rs.
+// No Candle, CUDA, FlashInfer or DKR dependencies.
 #[derive(Debug, Clone)]
 pub struct Fixture {
     pub page: usize, pub pages: usize, pub batch: usize, pub kv_heads: usize,
