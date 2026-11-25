@@ -103,6 +103,9 @@ pub(crate) fn make_paged_kv_tensors<T: BlockTableRows + ?Sized>(
     block_size: usize,
     padded_indices_len: usize,
 ) -> Result<(Tensor, Tensor, Tensor)> {
+    if block_size == 0 {
+        anyhow::bail!("paged kv block size must be nonzero");
+    }
     let batch_size = tables.len();
     let mut paged_kv_indices = Vec::new();
     let mut paged_kv_indptr = Vec::with_capacity(batch_size + 1);
@@ -181,6 +184,9 @@ pub(crate) fn make_paged_kv_decode_tensors<T: BlockTableRows + ?Sized>(
             context_lens.len()
         );
     }
+    if block_size == 0 || split_pages == Some(0) {
+        anyhow::bail!("paged kv decode block/chunk size must be nonzero");
+    }
     let chunk_pages = split_pages.unwrap_or(usize::MAX).max(1);
     let mut request_indices = Vec::new();
     let mut kv_tile_indices = Vec::new();
@@ -221,10 +227,13 @@ pub(crate) fn make_paged_kv_decode_tensors<T: BlockTableRows + ?Sized>(
     let request_indices = Tensor::from_vec(request_indices, (padded_tiles_len,), &Device::Cpu)?;
     let kv_tile_indices = Tensor::from_vec(kv_tile_indices, (padded_tiles_len,), &Device::Cpu)?;
     let o_indptr = Tensor::from_vec(o_indptr, (tables.len() + 1,), &Device::Cpu)?;
-    let chunk_size = split_pages
-        .unwrap_or(1)
-        .checked_mul(block_size)
-        .ok_or_else(|| anyhow::anyhow!("paged kv chunk size overflow"))?;
+    // Graph padding can choose the partitioned kernel even with a single
+    // tile per request. A no-split schedule must cover the entire context.
+    let chunk_size = match split_pages {
+        Some(pages) => pages.checked_mul(block_size)
+            .ok_or_else(|| anyhow::anyhow!("paged kv chunk size overflow"))?,
+        None => context_lens.iter().copied().max().unwrap_or(0).max(block_size),
+    };
     let kv_chunk_size = Tensor::from_vec(vec![i32::try_from(chunk_size)?], (1,), &Device::Cpu)?;
     let block_valid_mask = Tensor::from_vec(block_valid_mask, (padded_tiles_len,), &Device::Cpu)?;
     Ok((
@@ -241,6 +250,9 @@ pub(crate) fn make_paged_kv_decode_tensors_from_lens(
     block_size: usize,
     split_pages: Option<usize>,
 ) -> Result<(Tensor, Tensor, Tensor, Tensor, Tensor)> {
+    if block_size == 0 || split_pages == Some(0) {
+        anyhow::bail!("paged kv decode block/chunk size must be nonzero");
+    }
     let chunk_pages = split_pages.unwrap_or(usize::MAX).max(1);
     let tables = context_lens
         .iter()
@@ -937,6 +949,19 @@ fn fa3_scheduler_metadata_len(batch: usize, causal: bool) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dkr_flashinfer_no_split_graph_padding_covers_context() -> Result<()> {
+        let tables=vec![vec![0,1,2],vec![3,4]];
+        let (r,t,o,c,m)=make_paged_kv_decode_tensors(&tables,&[17,9],8,None,4)?;
+        assert_eq!(r.to_vec1::<i32>()?,vec![0,1,0,0]);
+        assert_eq!(t.to_vec1::<i32>()?,vec![0,0,0,0]);
+        assert_eq!(o.to_vec1::<i32>()?,vec![0,1,2]);
+        assert_eq!(c.to_vec1::<i32>()?,vec![17]);
+        assert_eq!(m.to_vec1::<u8>()?,vec![1,1,0,0]);
+        assert!(make_paged_kv_decode_tensors(&tables,&[17,9],8,Some(0),4).is_err());
+        Ok(())
+    }
 
     #[test]
     fn decode_split_fills_small_grids_and_leaves_full_ones_alone() {

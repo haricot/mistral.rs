@@ -1228,3 +1228,25 @@ adapter compilation, real PTX/CUBIN, performance and GPU parity remain
 unqualified. The historical finite sentinel (-50000) remains; extreme
 logits near/below that sentinel and all-masked requests require separate
 qualification. No new synchronization or static fallback.
+
+### Producer audit and standalone oracle
+
+The actual caller is paged_attention/layers/paged_attention.rs
+run_flashinfer_decode; flashinfer/mod.rs decode_metadata selects the
+sliding-window view and device tensors, and flashinfer/metadata.rs
+make_paged_kv_tensors / make_paged_kv_decode_tensors construct CSR and
+ordered contiguous active tile intervals on CPU before upload. Inactive
+rows have mask zero. No-split plans previously used a one-page chunk even
+if graph padding selected partitioned execution; set the no-split chunk
+to at least the longest context. Reject zero block/chunk sizes before
+division. The producer still does not receive cache page capacity; actual
+page IDs and replay ownership remain trusted scheduler invariants.
+
+Standalone rustc --test tools/dkr_r126_flashinfer_oracle.rs checks an
+independent F64 dense attention computation against base-2 LSE merge
+and rejects inconsistent metadata. The ignored GPU matrix uses exact
+binary fraction fixtures, nonidentity page IDs, two KV heads, ragged
+contexts, GQA groups, native/FP8 caches, nonunit FP8 scales, window/softcap,
+and reusable scratch with inactive padding. Expected 215 geometries,
+1720 direct/partition cases on SM61. Numerical tolerances are initial
+gates, not measured parity. GPU tests and Rust compilation not run here.

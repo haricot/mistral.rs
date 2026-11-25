@@ -323,6 +323,9 @@ pub fn flashinfer_decode(query:&Tensor,key_cache:&Tensor,value_cache:&Tensor,sca
 }
 
 #[cfg(test)]
+mod oracle { include!(concat!(env!("CARGO_MANIFEST_DIR"),"/../tools/dkr_r126_flashinfer_oracle.rs")); }
+
+#[cfg(test)]
 mod tests {
     use super::*;
     #[test]
@@ -376,6 +379,69 @@ mod tests {
                 assert_eq!(PLANS.with(|p|p.borrow().len()),count);
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore="requires staged safe2 CUDA catalogue and physical GPU"]
+    fn dkr_flashinfer_safe2_f64_matrix_gpu() -> Result<()> {
+        use super::oracle::Fixture;
+        let dev=Device::new_cuda(0)?;
+        // This is the one grouped SM61 qualification, not an architecture
+        // capability claim for other targets.
+        let mut geometries=0;
+        let mut cases=0;
+        for dt in [DType::F16,DType::BF16,DType::F32] {
+            for fp8 in [false,true] {
+                for hd in [64,128,256,512] {
+                    for group in [1,2,3,4,5,6,7,8,16] {
+                        let f=Fixture::new(hd,group);
+                        let split=f.schedule(true);let direct=f.schedule(false);
+                        let key=Key{dtype:dt,fp8,batch:f.batch,padded:split.requests.len(),heads:f.heads,
+                            kv_heads:f.kv_heads,hd,pages:f.pages,page:f.page,indices:f.indices.len(),
+                            q_span:f.q.len(),window:false,softcap:false};
+                        if decode_geometry(key,61).is_err(){continue;}
+                        let cd=if fp8{DType::F8E4M3}else{dt};
+                        let scales=if fp8{KvCacheScales{k:0.5,v:2.}}else{DEFAULT_FP8_KV_CACHE_SCALES};
+                        let q=Tensor::from_vec(f.q.clone(),(f.batch,f.heads,hd),&Device::Cpu)?
+                            .to_dtype(dt)?.to_device(&dev)?;
+                        let k=Tensor::from_vec(f.k.clone(),(f.pages,f.kv_heads,f.page,hd),&Device::Cpu)?
+                            .to_dtype(cd)?.to_device(&dev)?;
+                        let v=Tensor::from_vec(f.v.clone(),(f.pages,f.kv_heads,f.page,hd),&Device::Cpu)?
+                            .to_dtype(cd)?.to_device(&dev)?;
+                        let ints=|x:&[i32]| Tensor::from_vec(x.to_vec(),x.len(),&dev);
+                        let ip=ints(&f.indptr)?;let ids=ints(&f.indices)?;let last=ints(&f.last)?;
+                        let scratch_v=Tensor::zeros((split.requests.len()+1,f.heads,hd),dt,&dev)?;
+                        let scratch_s=Tensor::zeros((split.requests.len()+1,f.heads),DType::F32,&dev)?;
+                        for window in [None,Some(2)] {
+                            for cap in [None,Some(0.75f32)] {
+                                let (want,_)=f.reference(&split,0.125,scales.k as f64,scales.v as f64,
+                                    window,cap.map(f64::from)).map_err(candle_core::Error::msg)?;
+                                for (s,is_split) in [(&direct,false),(&split,true)] {
+                                    let r=ints(&s.requests)?;let t=ints(&s.tiles)?;let o=ints(&s.offsets)?;
+                                    let c=ints(&[s.chunk as i32])?;
+                                    let mask=Tensor::from_vec(s.mask.clone(),s.mask.len(),&dev)?;
+                                    let got=flashinfer_decode(&q,&k,&v,scales,&ip,&ids,&last,&r,&t,&o,&c,
+                                        &mask,0.125,window,cap,is_split.then_some(FlashInferDecodeScratch{
+                                            tmp_v:&scratch_v,tmp_s:&scratch_s}))?
+                                        .to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+                                    let tol=match dt{DType::F32=>0.0002,DType::F16=>0.002,_=>0.015};
+                                    assert_eq!(got.len(),want.len());
+                                    let err=got.iter().zip(&want).map(|(&a,&b)|{
+                                        assert!(a.is_finite());(a as f64-b).abs()
+                                    }).fold(0f64,f64::max);
+                                    assert!(err<=tol,"dtype={dt:?} fp8={fp8} hd={hd} group={group} window={window:?} cap={cap:?} split={is_split} err={err}");
+                                    cases+=1;
+                                }
+                            }
+                        }
+                        geometries+=1;
+                    }
+                }
+            }
+        }
+        assert_eq!((geometries,cases),(215,1720));
+        eprintln!("DKR_R126_FLASHINFER_SAFE2_GPU=PASS geometries={geometries} cases={cases}");
         Ok(())
     }
 
