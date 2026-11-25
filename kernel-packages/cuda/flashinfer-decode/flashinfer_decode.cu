@@ -7,7 +7,39 @@
 #include "../../../mistralrs-paged-attn/src/cuda/flashinfer/attention/default_decode_params.cuh"
 #include "../../../mistralrs-paged-attn/src/cuda/flashinfer/attention/variants.cuh"
 
+#include "safe_decode.cuh"
+
 using namespace flashinfer;
+struct DkrGeometry {uint32_t z, tile, shared;};
+constexpr DkrGeometry dkr_geometry(uint32_t stages,uint32_t width,uint32_t head,uint32_t g) {
+    const uint32_t vec=(16/width>head/32)?16/width:head/32;
+    const uint32_t x=head/vec, xy=x*g, intended=xy>128?xy:128;
+    const uint32_t old_z=intended/xy, old_tile=g==1?(width==1?2:4):1;
+    const uint32_t old_stage=2*stages*old_tile*g*old_z*head*width;
+    const uint32_t old_offsets=old_tile*intended*8, old_md=2*g*old_z*4;
+    const uint32_t old_shared=old_stage+(old_offsets>old_md?old_offsets:old_md);
+    if (xy*old_z%32==0 && old_shared<=48*1024 &&
+        (old_z==1 || 2*stages*old_tile*width>=4))
+        return {old_z,old_tile,old_shared};
+    for(uint32_t tile=old_tile;tile>0;--tile) {
+        DkrGeometry best{0,0,0};
+        uint32_t distance=0xffffffffu;
+        for(uint32_t z=1;z<=1024/xy;++z) {
+            const uint32_t threads=xy*z;
+            if(threads%32) continue;
+            const uint32_t stage=2*stages*tile*g*z*head*width;
+            const uint32_t state=z>1?4*g*z*head:0;
+            const uint32_t offsets=stage+tile*threads*8;
+            const uint32_t md=(stage>state?stage:state)+2*g*z*4;
+            const uint32_t shared=offsets>md?offsets:md;
+            const uint32_t dist=threads>intended?threads-intended:intended-threads;
+            if(shared<=48*1024 && dist<distance){best={z,tile,shared};distance=dist;}
+        }
+        if(best.z) return best;
+    }
+    return {0,0,0};
+}
+
 #ifndef DKR_FLASHINFER_IMAGE
 #error "Cudaforge must supply the image identity from the packaging plan"
 #endif
@@ -69,17 +101,11 @@ __device__ __forceinline__ void dkr_decode(
     constexpr uint32_t width=sizeof(DkrKV);
     constexpr uint32_t vec=(16/width > DKR_HEAD/32) ? 16/width : DKR_HEAD/32;
     constexpr uint32_t x=DKR_HEAD/vec;
-    constexpr uint32_t intended=(128 > x*G) ? 128 : x*G;
-    constexpr uint32_t z=intended/(x*G);
-    constexpr uint32_t tile=G==1 ? (width==1 ? 2 : 4) : 1;
-    static_assert(x*G*z%32==0, "partial warp is quarantined");
-    static_assert(z==1 || 2*stages*tile*width>=sizeof(float),
-                  "state scratch overlaps shared metadata");
-    constexpr uint32_t offsets=tile*intended*sizeof(DkrKV*);
-    constexpr uint32_t md=2*G*z*sizeof(float);
-    constexpr uint32_t shared=2*stages*tile*G*z*DKR_HEAD*width+(offsets>md?offsets:md);
-    static_assert(shared<=48*1024, "staged shared-memory limit");
-    BatchDecodeWithPagedKVCacheDevice<PosEncodingMode::kNone,stages,tile,vec,x,G,z,Variant>(p,smem);
+    constexpr auto geometry=dkr_geometry(stages,width,DKR_HEAD,G);
+    static_assert(geometry.z>0, "no safe geometry");
+    static_assert(x*G*geometry.z%32==0, "full warps required");
+    static_assert(geometry.shared<=48*1024, "staged shared-memory limit");
+    DkrSafeBatchDecodeDevice<PosEncodingMode::kNone,stages,geometry.tile,vec,x,G,geometry.z,Variant>(p,smem);
 }
 
 #define DKR_INPUTS DkrQ* q,DkrKV* k,DkrKV* v,int32_t* indptr,int32_t* indices, \

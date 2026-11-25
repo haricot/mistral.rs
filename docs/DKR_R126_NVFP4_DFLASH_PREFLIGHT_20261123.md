@@ -1194,3 +1194,37 @@ invalid masked padding and repeat-plan stability. It must run with real
 external or embedded images in S10; CPU helper tests require the CUDA
 feature build but perform no GPU operations. No extra synchronization in
 the production adapter; same-stream scratch ownership is required.
+
+
+## R1.26/S9B4d4 audit PASS — user evidence
+
+Strict feature graph exit 0 (all prior pilots and FlashInfer Decode);
+synthetic shard self-test exit 0. CUDA Rust adapter not yet compiled.
+
+## R1.26/S9B4d5 — geometry recovery, safe2 source candidate
+
+Keep the 139 prior safe launch geometries on SM61; search the remaining
+77 for whole-warp blocks with up to 1024 threads and <=48 KiB. Prefer the
+largest historical-or-smaller tile, then the closest thread count to the
+historical heuristic (ties choose fewer threads). The external-only
+safe_decode.cuh derives from the vendored device function, retains the
+existing pipeline/attention math, separates F32 state vectors from m/d,
+zero-fills invalid K loads, and uses one lane to write m/d and LSE.
+No edits to the vendored static producer or Candle. Full warp shuffles
+remain unchanged; no incomplete warp is admitted.
+
+SM61 recovery projection: 215 candidates, 76 recovered, one still
+quarantined (F32 native cache D512 GQA16: even one tile, one z group
+requires 64 KiB K/V before offsets). 1720 profiles, 48 shards, conservative
+physical upper 471, total logical 2143. All safe2 profiles have new
+implementation identity and cache directories; do not mix old decode
+shards with safe2. Existing other families remain unchanged.
+These are source candidates, not verified CUDA binaries.
+
+Planner values remain a trusted producer contract. The CPU oracle checks
+the logical paged metadata and split coverage, but does not attest the
+actual upstream device tensors on every launch. Full producer provenance,
+adapter compilation, real PTX/CUBIN, performance and GPU parity remain
+unqualified. The historical finite sentinel (-50000) remains; extreme
+logits near/below that sentinel and all-masked requests require separate
+qualification. No new synchronization or static fallback.

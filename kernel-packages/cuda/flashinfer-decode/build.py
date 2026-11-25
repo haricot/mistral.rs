@@ -48,25 +48,49 @@ def arguments(dt, cache, partition):
     args += [scalar(n, "f32") for n in ("softcap", "scale", "k_scale", "v_scale")]
     return args
 
+def safe_geometry(cc, width, head, group, historical):
+    """Preserve old safe geometry; otherwise full warps and disjoint scratch."""
+    stages = historical["stages"]
+    x = historical["block"][0]
+    old_z = historical["block"][2]
+    old_tile = historical["tile"]
+    intended = historical["intended_threads"]
+    old_ok = (not historical["partial_warp"] and
+              not historical["exceeds_requested_shared_limit"] and
+              (old_z == 1 or 2*stages*old_tile*width >= 4))
+    if old_ok:
+        return dict(historical, recovered=False)
+    candidates = []
+    for tile in range(old_tile, 0, -1):
+        for z in range(1, 1024//(x*group)+1):
+            threads = x*group*z
+            if threads % 32:
+                continue
+            stage_bytes = 2*stages*tile*group*z*head*width
+            state_bytes = 4*group*z*head if z > 1 else 0
+            # Offset table is live only during the K/V pipeline. m/d are
+            # live only during reduction; the F32 vector and m/d must not overlap.
+            shared = max(stage_bytes+tile*threads*8,
+                         max(stage_bytes,state_bytes)+2*group*z*4)
+            if shared <= SHARED_LIMIT:
+                candidates.append(((-tile,abs(threads-intended),threads),tile,z,shared))
+    if not candidates:
+        return None
+    _,tile,z,shared = min(candidates)
+    return dict(historical, block=[x,group,z], actual_threads=x*group*z,
+                tile=tile, dynamic_shared_bytes=shared, partial_warp=False,
+                exceeds_requested_shared_limit=False, recovered=True)
+
 def plan(cc, base=411):
     audit = report(cc, base, SHARED_LIMIT)
     eligible, rejected = [], []
     for row in audit["geometries"]:
         width = 1 if row["cache"] == "fp8" else (4 if row["dtype"] == "f32" else 2)
-        reasons = []
-        if row["exceeds_requested_shared_limit"]:
-            reasons.append("dynamic_shared")
-        if row["partial_warp"]:
-            reasons.append("partial_warp_full_shuffle_mask")
-        # sync_state stores float vectors at smem base, metadata begins
-        # immediately after K/V staging. Increasing the allocation alone
-        # cannot resolve overlap between these two live arrays.
-        if row["block"][2] > 1 and 2 * row["stages"] * row["tile"] * width < 4:
-            reasons.append("float_state_metadata_overlap")
-        if reasons:
-            rejected.append(dict(row, reasons=reasons))
+        candidate = safe_geometry(cc, width, row["head"], row["group"], row)
+        if candidate is None:
+            rejected.append(dict(row, reasons=["no_full_warp_geometry_within_shared_budget"]))
         else:
-            eligible.append(row)
+            eligible.append(candidate)
     images = []
     # The full typed signatures are larger than the synthetic S9B4d2 rows.
     # Six groups (48 entries) leave headroom in the 256 KiB manifest,
@@ -88,12 +112,12 @@ def plan(cc, base=411):
                     suffix = f"d{hd}.g{g}.w{w}.s{s}.{mode}.v1"
                     profiles.append(dict(schema="DKR-KERNEL-MODULE-V1", abi="dkr.typed.v1",
                         operation=f"attention.flashinfer.decode.{suffix}",
-                        implementation_id=f"cuda.flashinfer_decode.{dt}.{cache}.{suffix}",
+                        implementation_id=f"cuda.flashinfer_decode.{dt}.{cache}.safe2.{suffix}",
                         artifact=ARTIFACT, entry=entry, target_cc=cc, min_cc=cc, max_cc=cc,
                         block=r["block"], shared_mem_bytes=r["dynamic_shared_bytes"],
                         arguments=arguments(dt, cache, mode == "partition")))
             images.append(dict(image=image, dtype=dt, cache=cache, head=hd,
-                               groups=[r["group"] for r in chunk], profiles=profiles))
+                               groups=[r["group"] for r in chunk], geometries=chunk, profiles=profiles))
     logical = sum(len(i["profiles"]) for i in images)
     # Conservative bound: every existing logical profile occupies a separate manifest.
     physical_upper = base + audit["merge_profiles"] + len(images)
@@ -101,7 +125,7 @@ def plan(cc, base=411):
     if physical_upper > audit["catalogue_limit"] or total > audit["logical_profile_limit"]:
         raise ValueError("planned catalogue exceeds resource bounds")
     return dict(schema="dkr.r126.flashinfer.decode.shards.v1", cc=cc,
-                eligible_geometries=len(eligible), quarantined_geometries=rejected,
+                eligible_geometries=len(eligible), recovered_geometries=sum(r["recovered"] for r in eligible), quarantined_geometries=rejected,
                 decode_profiles=logical, images=images, physical_manifest_upper=physical_upper,
                 prospective_logical_profiles=total, compilation=False, gpu_qualified=False,
                 closure_qualified=False)
@@ -135,13 +159,17 @@ def verify_ptx(data, image, cc):
 def package(output, cc, image, data):
     verify_ptx(data, image, cc)
     sha = hashlib.sha256(data).hexdigest()
-    folder = output / f"sm{cc}" / "flashinfer-decode" / f"image-{image['image']:05d}"
+    folder = output / f"sm{cc}" / "flashinfer-decode" / f"safe2-image-{image['image']:05d}"
     profiles = [dict(p, sha256=sha) for p in image["profiles"]]
     shard = dict(schema="DKR-KERNEL-SHARD-V1", profiles=profiles)
     encoded = (json.dumps(shard, indent=2) + "\n").encode()
     # Reserve space for CUBIN path/hash and pretty-print overhead.
     if len(encoded) + 256 * len(profiles) > MAX_MANIFEST:
         raise ValueError("manifest pairing budget exceeded")
+    # Mixing two generations would create ambiguous typed profiles.
+    family = folder.parent
+    if any(family.glob("image-*/manifest.json")):
+        raise ValueError("old decode generation present; stage safe2 in a fresh root")
     folder.mkdir(parents=True, exist_ok=True)
     manifest, artifact = folder / "manifest.json", folder / ARTIFACT
     if manifest.is_file() and artifact.is_file():
@@ -166,9 +194,10 @@ def self_test(cc):
     assert len(set(ids)) == len(ids) == result["decode_profiles"]
     assert all(0 < len(i["profiles"]) <= 48 for i in images)
     if cc == 61:
-        assert result["eligible_geometries"] == 139 and len(result["quarantined_geometries"]) == 77
-        assert len(images) == 37 and len(ids) == 1112
-        assert result["physical_manifest_upper"] == 460
+        assert result["eligible_geometries"] == 215 and len(result["quarantined_geometries"]) == 1
+        assert result["recovered_geometries"] == 76
+        assert len(images) == 48 and len(ids) == 1720
+        assert result["physical_manifest_upper"] == 471
     with tempfile.TemporaryDirectory() as tmp:
         for i in images:
             src = f".version 8.0\n.target sm_{cc}\n.address_size 64\n"
@@ -177,7 +206,7 @@ def self_test(cc):
                 src += f".visible .entry {p['entry']}({params}) {{ ret; }}\n"
             data = src.encode()
             package(Path(tmp), cc, i, data)
-            manifest = Path(tmp) / f"sm{cc}" / "flashinfer-decode" / f"image-{i['image']:05d}" / "manifest.json"
+            manifest = Path(tmp) / f"sm{cc}" / "flashinfer-decode" / f"safe2-image-{i['image']:05d}" / "manifest.json"
             paired = json.loads(manifest.read_text())
             for row in paired["profiles"]:
                 row["cubin_artifact"] = "flashinfer_decode.cubin"
@@ -194,7 +223,7 @@ def self_test(cc):
             else:
                 raise AssertionError("invalid ABI was accepted")
         assert len(list(Path(tmp).rglob("manifest.json"))) == len(images)
-    print(f"DKR_R126_S9B4D3_SELF_TEST=PASS cc={cc} images={len(images)} profiles={len(ids)} synthetic_ptx=true")
+    print(f"DKR_R126_S9B4D5_SELF_TEST=PASS cc={cc} images={len(images)} profiles={len(ids)} synthetic_ptx=true")
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
@@ -219,7 +248,7 @@ def main():
     if a.json_out:
         a.json_out.parent.mkdir(parents=True, exist_ok=True)
         a.json_out.write_text(json.dumps(r, indent=2) + "\n")
-        print(f"DKR_R126_S9B4D3_PLAN=COMPLETE cc={a.cc} eligible={r['eligible_geometries']} "
+        print(f"DKR_R126_S9B4D5_PLAN=COMPLETE cc={a.cc} eligible={r['eligible_geometries']} recovered={r['recovered_geometries']} "
               f"quarantined={len(r['quarantined_geometries'])} profiles={r['decode_profiles']} "
               f"images={len(r['images'])} physical_upper={r['physical_manifest_upper']} "
               f"logical_total={r['prospective_logical_profiles']} compilation=false closure_qualified=false")

@@ -86,10 +86,27 @@ fn decode_geometry(k: Key, cc: u32) -> Result<([u32;3],u32)> {
     let z = intended/(x*g);
     let tile = if g == 1 {if width == 1 {2} else {4}} else {1};
     let shared = 2*stages*tile*g*z*k.hd*width + (tile*intended*8).max(2*g*z*4);
-    if x*g*z%32 != 0 || (z>1 && 2*stages*tile*width<4) || shared>48*1024 {
-        candle_core::bail!("DKR FlashInfer geometry quarantined");
+    if x*g*z%32 == 0 && (z==1 || 2*stages*tile*width>=4) && shared<=48*1024 {
+        return Ok(([x as u32,g as u32,z as u32],shared as u32));
     }
-    Ok(([x as u32,g as u32,z as u32],shared as u32))
+    for tile in (1..=tile).rev() {
+        let mut best: Option<(usize,usize,usize)>=None; // distance, z, shared
+        for z in 1..=1024/(x*g) {
+            let threads=x*g*z;
+            if threads%32!=0 {continue;}
+            let stage=2*stages*tile*g*z*k.hd*width;
+            let state=if z>1{4*g*z*k.hd}else{0};
+            let shared=(stage+tile*threads*8).max(stage.max(state)+2*g*z*4);
+            let distance=threads.abs_diff(intended);
+            if shared<=48*1024 && best.is_none_or(|b|distance<b.0) {
+                best=Some((distance,z,shared));
+            }
+        }
+        if let Some((_,z,shared))=best {
+            return Ok(([x as u32,g as u32,z as u32],shared as u32));
+        }
+    }
+    candle_core::bail!("DKR FlashInfer geometry quarantined")
 }
 fn prepare(k: Key, dev: &Device) -> Result<Plan> {
     let (dt, name) = dtype(k.dtype)?;
@@ -110,7 +127,7 @@ fn prepare(k: Key, dev: &Device) -> Result<Plan> {
     args.extend((0..4).map(|_|scalar(ElementType::F32)));
     let suffix = format!("d{}.g{}.w{}.s{}.{}.v1",k.hd,k.heads/k.kv_heads,
         k.window as u8,k.softcap as u8,if partition {"partition"} else {"direct"});
-    let implementation = format!("cuda.flashinfer_decode.{name}.{}.{suffix}",if k.fp8 {"fp8"} else {"plain"});
+    let implementation = format!("cuda.flashinfer_decode.{name}.{}.safe2.{suffix}",if k.fp8 {"fp8"} else {"plain"});
     let mut req = LaunchRequest {operation:format!("attention.flashinfer.decode.{suffix}"),
         cc:0,args,grid:[k.padded as u32,k.kv_heads as u32,1],max_dynamic_shared_mem_bytes:48*1024};
     let p = catalog()?.prepare_for_device(&mut req,dev).map_err(|e| candle_core::Error::msg(e.to_string()))?;
@@ -376,6 +393,6 @@ mod tests {
                 }
             }
         }
-        assert_eq!(eligible,139);
+        assert_eq!(eligible,215);
     }
 }

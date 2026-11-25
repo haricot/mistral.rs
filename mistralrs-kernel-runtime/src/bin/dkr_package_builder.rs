@@ -320,8 +320,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     return Err("invalid or duplicate FlashInfer image identity".into());
                 }
                 let define = format!("-DDKR_FLASHINFER_IMAGE={id}");
-                let compiled = compile_ptx(&source, &work.join(pkg.name).join(format!("image-{id:05}")),
-                    cc, pkg.fast_math, Some(&define), &flashinfer_headers)?;
+                let mut watched = flashinfer_headers.clone();
+                watched.push(dir.join("safe_decode.cuh"));
+                let compiled = compile_ptx(&source, &work.join(pkg.name).join(format!("safe2-image-{id:05}")),
+                    cc, pkg.fast_math, Some(&define), &watched)?;
                 let status = Command::new(&python).arg(&script)
                     .args(["--cc", &cc.to_string(), "--image", &id.to_string()])
                     .arg("--output").arg(&output).arg("--ptx-file").arg(&compiled)
