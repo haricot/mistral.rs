@@ -24,48 +24,89 @@ def package_dir(family):
     return PACKAGE_DIRS.get(family, family)
 
 
+MAX_PHYSICAL = 512
+MAX_LOGICAL = 4096
+MAX_SHARD = 64
+MAX_MANIFEST = 256 * 1024
+MAX_IMAGE = 32 * 1024 * 1024
+
+def manifest_profiles(m):
+    if m.get("schema") == "DKR-KERNEL-MODULE-V1":
+        rows = [m]
+    elif m.get("schema") == "DKR-KERNEL-SHARD-V1":
+        rows = m.get("profiles")
+        if not isinstance(rows,list) or not 1 <= len(rows) <= MAX_SHARD:
+            raise ValueError("invalid shard cardinality")
+    else:
+        raise ValueError("unknown manifest schema")
+    if any(not isinstance(p,dict) or p.get("schema")!="DKR-KERNEL-MODULE-V1"
+           or p.get("abi")!="dkr.typed.v1" or p.get("target_cc")!=61
+           or p.get("min_cc",61)>61 or p.get("max_cc",61)<61 for p in rows):
+        raise ValueError("invalid typed SM61 contract")
+    return rows
+
+def read_manifest(path):
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_MANIFEST:
+        raise ValueError(f"invalid manifest path/size: {path}")
+    m=json.loads(path.read_text())
+    manifest_profiles(m)
+    return m
+
 def inspect(root, family):
     paths = sorted((root / package_dir(family)).rglob("manifest.json"))
     ptxs, cubins, pairs, keys = set(), set(), set(), set()
     paired = 0
+    validated = {}
+    def artifact(path, m, field, hash_field):
+        name, sha = m[field], m[hash_field]
+        if not isinstance(name,str) or name in ("", ".", "..") or Path(name).name != name:
+            raise ValueError(f"unsafe artifact: {path}")
+        p=path.parent/name
+        if p not in validated:
+            if p.is_symlink() or not p.is_file() or p.stat().st_size>MAX_IMAGE:
+                raise ValueError(f"missing, unsafe or oversized artifact: {p}")
+            actual=digest(p)
+            if field=="artifact":
+                code=p.read_text()
+                if not re.search(r"\.target\s+sm_61(?:\s|,|$)",code):
+                    raise ValueError(f"PTX target mismatch: {p}")
+                entries=set(re.findall(r"\.entry\s+(\w+)\s*\(",code))
+            else:
+                with p.open("rb") as f:
+                    header=f.read(64)
+                if (len(header)!=64 or header[:6]!=b"\x7fELF\x02\x01"
+                    or int.from_bytes(header[18:20],"little")!=190
+                    or (int.from_bytes(header[48:52],"little")&255)!=61):
+                    raise ValueError(f"invalid CUDA SM61 ELF: {p}")
+                entries=None
+            validated[p]=(actual,field,entries)
+        actual,kind,entries=validated[p]
+        if actual!=sha or kind!=field:
+            raise ValueError(f"artifact digest/type mismatch: {p}")
+        if field=="artifact" and m["entry"] not in entries:
+            raise ValueError(f"PTX entry absent: {p}: {m['entry']}")
     for path in paths:
-        m = json.loads(path.read_text())
-        if m.get("schema") != "DKR-KERNEL-MODULE-V1" or m.get("abi") != "dkr.typed.v1" or m.get("target_cc") != 61:
-            raise ValueError(f"invalid typed SM61 contract: {path}")
-        key = (m["operation"], m["implementation_id"], m["target_cc"])
-        if key in keys:
-            raise ValueError(f"duplicate catalogue identity: {path}")
-        keys.add(key)
-        def artifact(field, hash_field):
-            name, sha = m[field], m[hash_field]
-            if not isinstance(name, str) or name in ("", ".", "..") or Path(name).name != name:
-                raise ValueError(f"unsafe artifact: {path}")
-            p = path.parent / name
-            if p.is_symlink() or not p.is_file() or digest(p) != sha:
-                raise ValueError(f"artifact missing or changed: {p}")
-            return p
-        p = artifact("artifact", "sha256")
-        code = p.read_text()
-        if not re.search(r"\.target\s+sm_61(?:\s|,|$)", code) or not re.search(
-            r"\.entry\s+" + re.escape(m["entry"]) + r"\s*\(", code):
-            raise ValueError(f"PTX target/entry mismatch: {p}")
-        ptxs.add(m["sha256"])
-        if (m.get("cubin_artifact") is None) != (m.get("cubin_sha256") is None):
-            raise ValueError(f"incomplete CUBIN pair: {path}")
-        if m.get("cubin_artifact") is not None:
-            p = artifact("cubin_artifact", "cubin_sha256")
-            with p.open("rb") as f:
-                header = f.read(64)
-            if (len(header) != 64 or header[:6] != b"\x7fELF\x02\x01"
-                or int.from_bytes(header[18:20], "little") != 190
-                or (int.from_bytes(header[48:52], "little") & 255) != 61):
-                raise ValueError(f"invalid CUDA SM61 ELF: {p}")
-            paired += 1
-            cubins.add(m["cubin_sha256"])
-            pairs.add((m["cubin_sha256"], m["sha256"]))
-    return dict(profiles=len(paths), paired_profiles=paired,
-                ptx_images=sorted(ptxs), cubin_images=sorted(cubins),
-                image_pairs=sorted(pairs))
+        rows=manifest_profiles(read_manifest(path))
+        for m in rows:
+            key=(m["operation"],m["implementation_id"],m["target_cc"])
+            if key in keys:
+                raise ValueError(f"duplicate catalogue identity: {path}")
+            keys.add(key)
+            if family=="flashinfer-decode" and ".safe2." not in m["implementation_id"]:
+                raise ValueError(f"obsolete FlashInfer decode generation: {path}")
+            artifact(path,m,"artifact","sha256")
+            ptxs.add(m["sha256"])
+            if (m.get("cubin_artifact") is None)!=(m.get("cubin_sha256") is None):
+                raise ValueError(f"incomplete CUBIN pair: {path}")
+            if m.get("cubin_artifact") is not None:
+                artifact(path,m,"cubin_artifact","cubin_sha256")
+                paired+=1
+                cubins.add(m["cubin_sha256"])
+                pairs.add((m["cubin_sha256"],m["sha256"]))
+    if len(paths)>MAX_PHYSICAL or len(keys)>MAX_LOGICAL:
+        raise ValueError("family exceeds catalogue bounds")
+    return dict(profiles=len(keys), physical_manifests=len(paths), paired_profiles=paired,
+                ptx_images=sorted(ptxs),cubin_images=sorted(cubins),image_pairs=sorted(pairs))
 
 
 def main():
@@ -127,6 +168,8 @@ def main():
         counts = {status: sum(r["status"] == status for r in rows.values())
                   for status in ("MISSING", "INVALID", "PTX_ONLY", "PARTIAL_PAIR", "PAIRED")}
         report = dict(schema="dkr.r126.full-catalog.inventory.v1", target_cc=61,
+                      physical_manifests=sum(r.get("physical_manifests",0) for r in rows.values()),
+                      logical_profiles=sum(r.get("profiles",0) for r in rows.values()),
                       registered_families=len(families), counts=counts, families=rows,
                       s4_evidence_sha256=digest(a.quant_evidence),
                       s5_evidence_sha256=digest(a.embedded_evidence),

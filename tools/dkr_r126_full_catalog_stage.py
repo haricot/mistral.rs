@@ -11,7 +11,8 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from dkr_r126_full_catalog_inventory import inspect, package_dir
+from dkr_r126_full_catalog_inventory import (inspect, package_dir, read_manifest,
+    manifest_profiles, MAX_PHYSICAL, MAX_LOGICAL)
 from dkr_r126_nvfp4_preflight import digest
 
 
@@ -25,7 +26,7 @@ def snapshot(root, family):
     result = {}
     for p in sorted(directory.rglob("manifest.json")):
         rel = p.relative_to(root)
-        m = json.loads(p.read_text())
+        m = read_manifest(p)
         result[str(rel)] = (m, digest(p))
     return result
 
@@ -35,9 +36,11 @@ def copy_profiles(src, dest, rows):
         path = Path(rel)
         folder = dest / path.parent
         folder.mkdir(parents=True, exist_ok=True)
-        for name in ("artifact", "cubin_artifact"):
-            if m.get(name) is not None:
-                shutil.copyfile(src / path.parent / m[name], folder / m[name])
+        names = {row[name] for row in manifest_profiles(m)
+                 for name in ("artifact","cubin_artifact") if row.get(name) is not None}
+        for name in sorted(names):
+            require(Path(name).name == name and name not in ("", ".", ".."), "unsafe image path")
+            shutil.copyfile(src / path.parent / name, folder / name)
         shutil.copyfile(src / path, dest / path)
 
 
@@ -60,8 +63,8 @@ def load_plan(inventory, logits_root):
             and data.get("target_cc") == 61, "wrong inventory schema/target")
     builder = Path(__file__).resolve().parents[1] / "mistralrs-kernel-runtime/src/bin/dkr_package_builder.rs"
     registered = set(re.findall(r'Package\s*\{\s*name:\s*"([^"]+)"', builder.read_text()))
-    require(set(data["families"]) == registered and len(registered) == 26,
-            "inventory does not cover current 26 registered families")
+    require(set(data["families"]) == registered,
+            f"inventory does not cover current {len(registered)} registered families")
     plan = {}
     for family, row in data["families"].items():
         root = Path(row["root"]).resolve()
@@ -73,13 +76,16 @@ def load_plan(inventory, logits_root):
             require(row["status"] in ("PAIRED", "PTX_ONLY"),
                     f"{family} {row['status']}; correct inventory before assembly")
             actual = inspect(root, family)
-            for field in ("profiles", "paired_profiles", "ptx_images", "cubin_images"):
+            for field in ("profiles", "physical_manifests", "paired_profiles", "ptx_images", "cubin_images"):
                 require(actual[field] == row[field], f"{family}: inventory drift in {field}")
             require(actual["image_pairs"] == [tuple(p) for p in row["image_pairs"]],
                     f"{family}: inventory image-pair drift")
         require(actual["profiles"] > 0 and actual["paired_profiles"] in (0, actual["profiles"]),
                 f"{family}: missing or partial original package")
         plan[family] = (root, actual, snapshot(root, family))
+    require(sum(v[1]["physical_manifests"] for v in plan.values())<=MAX_PHYSICAL and
+            sum(v[1]["profiles"] for v in plan.values())<=MAX_LOGICAL,
+            "combined catalogue exceeds physical or logical admission limit")
     return plan
 
 
@@ -95,19 +101,27 @@ def validate_copy(root, plan, final):
         expected_paths.update(now)
         for path, (m, sha) in now.items():
             prior, prior_sha = old[path]
-            key = (m["operation"], m["implementation_id"], m["target_cc"])
-            require(key not in keys, f"duplicate catalogue identity: {path}")
-            keys.add(key)
+            for row in manifest_profiles(m):
+                key = (row["operation"], row["implementation_id"], row["target_cc"])
+                require(key not in keys, f"duplicate catalogue identity: {path}")
+                keys.add(key)
             if original["paired_profiles"]:
                 require(sha == prior_sha, f"qualified manifest changed: {path}")
             else:
-                stripped = {k:v for k,v in m.items() if k not in ("cubin_artifact", "cubin_sha256")}
-                expected = {k:v for k,v in prior.items() if k not in ("cubin_artifact", "cubin_sha256")}
-                require(stripped == expected, f"non-pairing manifest metadata changed: {path}")
+                def stripped_manifest(value):
+                    def strip(row):
+                        return {k:v for k,v in row.items() if k not in ("cubin_artifact","cubin_sha256")}
+                    if value["schema"] == "DKR-KERNEL-SHARD-V1":
+                        return dict(value,profiles=[strip(row) for row in manifest_profiles(value)])
+                    return strip(value)
+                require(stripped_manifest(m) == stripped_manifest(prior),
+                        f"non-pairing manifest metadata changed: {path}")
         if original["paired_profiles"]:
             require(current["image_pairs"] == original["image_pairs"], f"{family}: existing CUBIN changed")
         if final:
             require(current["profiles"] == current["paired_profiles"], f"{family}: CUBIN pairing not complete")
+    require(len(expected_paths)<=MAX_PHYSICAL and len(keys)<=MAX_LOGICAL,
+            "assembled catalogue exceeds physical or logical admission limit")
     require({str(p.relative_to(root)) for p in root.rglob("manifest.json")} == expected_paths,
             "unexpected manifest outside planned families")
     return {family: inspect(root, family) for family in plan}
@@ -155,6 +169,7 @@ def main():
         images = {h for r in results.values() for h in r["cubin_images"]}
         report = dict(schema="dkr.r126.full-catalog.staged.v1", status="PASS", target_cc=61,
                       families=len(results), profiles=sum(r["profiles"] for r in results.values()),
+                      physical_manifests=sum(r["physical_manifests"] for r in results.values()),
                       cubin_images=len(images), preserved_families=sorted(preserved),
                       newly_paired_families=sorted(pending), inventory_sha256=digest(a.inventory),
                       catalogue=str(output), files=files, family_artifacts=results,

@@ -1280,3 +1280,13 @@ may already be gated or covered by other native operations. Lexical
 references are NOT proven live link dependencies. Need compiled object
 and linker evidence to classify each. No production closure or S10
 readiness claimed. Keep historical caches and local Cargo.lock.
+
+The S9C assembly tooling now supports both single-profile and bounded
+shard manifests. Logical profile counts and physical file counts are
+distinct; staged catalogue admission enforces 4096 logical / 512 physical.
+Previously paired manifests must keep their byte hashes; PTX-only
+manifests may change only by per-profile CUBIN pairing. Old non-safe2
+FlashInfer decode shards are rejected. The hardcoded 26-family count is
+replaced by the package builder's actual registered family set (35 on
+this revision). Regenerate the inventory after staging missing families.
+No package bytes are generated or modified by the source audit.
