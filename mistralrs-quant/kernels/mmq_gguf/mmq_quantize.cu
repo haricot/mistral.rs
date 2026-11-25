@@ -105,7 +105,11 @@ quantize_mmq_q8_1(const input_t *__restrict__ x,
                   const int32_t *__restrict__ ids, void *__restrict__ vy,
                   const int64_t ne00, const int64_t s01, const int64_t s02,
                   const int64_t s03, const int64_t ne0, const int ne1,
-                  const int ne2) {
+                  const int ne2
+#ifdef DKR_GGUF_MMQ_IMAGE
+                  , const int source_rows = -1
+#endif
+                  ) {
 
   constexpr int vals_per_scale = ds_layout == MMQ_Q8_1_DS_LAYOUT_D2S6 ? 64 : 32;
   constexpr int vals_per_sum = ds_layout == MMQ_Q8_1_DS_LAYOUT_D2S6 ? 16 : 32;
@@ -121,7 +125,10 @@ quantize_mmq_q8_1(const input_t *__restrict__ x,
   const int64_t i3 = blockIdx.z / ne2;
 
   const int64_t i00 = i0;
-  const int64_t i01 = ids ? ids[i1] : i1;
+  int64_t i01 = ids ? ids[i1] : i1;
+#ifdef DKR_GGUF_MMQ_IMAGE
+  if (source_rows >= 0 && (i01 < 0 || i01 >= source_rows)) i01 = 0;
+#endif
   const int64_t i02 = i2;
   const int64_t i03 = i3;
 

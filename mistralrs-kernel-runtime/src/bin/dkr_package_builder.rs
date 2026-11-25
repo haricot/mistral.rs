@@ -57,6 +57,7 @@ const PACKAGES: &[Package] = &[
     Package { name: "routed-quant", source: "routed_quant.cu", fast_math: false },
     Package { name: "gguf-mmvq", source: "gguf_mmvq.cu", fast_math: false },
     Package { name: "gguf-mmq", source: "gguf_mmq.cu", fast_math: false },
+    Package { name: "gguf-moe-compact", source: "gguf_moe_compact.cu", fast_math: false },
 ];
 
 fn parse_args() -> Result<(usize, PathBuf, String, bool, bool, Option<String>), Box<dyn std::error::Error>> {
@@ -299,7 +300,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let work = output.join(format!("sm{cc}/_cudaforge_cache"));
     if !pair_existing {
     for pkg in PACKAGES.iter().filter(|p| family.as_ref().is_none_or(|name| p.name == name.as_str())) {
-        if pkg.name == "gguf-mmq" && cc != 61 {
+        if matches!(pkg.name, "gguf-mmq" | "gguf-moe-compact") && cc != 61 {
             if family.is_some() { return Err("GGUF MMQ typed package is qualified for source target SM61 only".into()); }
             println!("DKR_GGUF_MMQ_SKIPPED target_cc={cc} reason=sm61_source_only");
             continue;
@@ -340,12 +341,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             if seen.is_empty() { return Err("empty FlashInfer image plan".into()); }
-        } else if pkg.name == "gguf-mmq" {
+        } else if matches!(pkg.name, "gguf-mmq" | "gguf-moe-compact") {
             let kernels = root.join("mistralrs-quant/kernels/mmq_gguf");
             let watched = ["mmq_common.cuh","mmq_gguf.cuh","mmq_vecdotq.cuh",
                 "mmq_mma.cuh","mmq_quantize.cu"].map(|name| kernels.join(name));
             for id in 1..=11 {
-                let define = format!("-DDKR_GGUF_MMQ_IMAGE={id}");
+                let define = if pkg.name == "gguf-mmq" { format!("-DDKR_GGUF_MMQ_IMAGE={id}") } else { format!("-DDKR_GGUF_MOE_IMAGE={id}") };
                 let compiled = compile_ptx(&source, &work.join(pkg.name).join(format!("image-{id:02}")),
                     cc, pkg.fast_math, Some(&define), &watched)?;
                 let status = Command::new(&python).arg(&script)
