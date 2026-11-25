@@ -368,12 +368,14 @@ impl GgufMatMul {
         let Some((_, batch_dims)) = a.dims().split_last() else { return Ok(None); };
         let rows = batch_dims.iter().try_fold(1usize, |v, &d| v.checked_mul(d))
             .ok_or_else(|| candle_core::Error::msg("GGUF batch overflows"))?;
-        if !(1..=fast_mmvq::MMVQ_MAX_BATCH).contains(&rows) {
-            // MMQ still pending. Keep the native Candle reference for prefill.
-            return Ok(None);
-        }
+        if rows == 0 { return Ok(None); }
         let QMatMul::QTensor(q) = &self.w else { unreachable!() };
-        Ok(Some(fast_mmvq::plain(q,a)?))
+        if rows <= fast_mmvq::MMVQ_MAX_BATCH {
+            return Ok(Some(fast_mmvq::plain(q,a)?));
+        }
+        // The SM61 typed prefill path deliberately rejects unsupported K
+        // instead of silently switching to a static or dense-weight backend.
+        Ok(Some(fast_mmq::plain(q,a)?))
     }
 
     #[cfg(all(feature = "cuda", not(feature = "dkr-static-closure-probe")))]
@@ -972,7 +974,7 @@ mod tests {
         let weight = Tensor::ones((2, TEST_EMBEDDING_DIM), DType::F32, &device)?;
         let layer = GgufMatMul::from_qtensor(QTensor::quantize(&weight, GgmlDType::Q8_0)?, None);
         assert!(layer.uses_fast_mmvq());
-        // Keep this test specific to the prefill reference route.
+        // Compare typed MMQ against the independent dequantized reference.
         for rows in [17usize] {
             let x = Tensor::ones((rows,TEST_EMBEDDING_DIM),DType::F32,&device)?;
             let actual = layer.forward_raw(&x)?;

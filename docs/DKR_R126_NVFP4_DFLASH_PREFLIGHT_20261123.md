@@ -1358,3 +1358,31 @@ The projected plain and indexed profiles are not a registration or ABI
 implementation. The indexed scheduler, fastdiv scalarization, device
 entry refactor and grouped numeric parity remain mandatory; Stream-K
 on other architectures is not covered by this SM61 planning gate.
+
+
+## R1.26/S9C.2B2 — dense typed MMQ
+
+SM61 conventional tiling only. The existing mul_mat_q_process_tile
+device body is called directly with identity output-column mapping;
+no struct-valued fastdiv ABI, no Stream-K/fixup buffer. Preserve all
+eight historical tile widths and both full/tail N variants. Mask Y
+cooperative tail loads, and require K divisible by 256 to avoid partial
+historical tile_x loads. The Q8_1 encoder reuses the historical D4,
+DS4, D2S6 code, with zero-maximum groups encoded as zero in typed mode.
+The intermediate representation is K-block-major (144 bytes per
+128 activation values), not MMVQ row-major Q8_1.
+
+Cudaforge builds 11 images (480 projection profiles + 9 encoders);
+the packager checks exact PTX entry sets, widths, target and shard size.
+Current projected upper bound 493 physical / 2899 logical after dense
+MMQ, excluding the remaining indexed MoE profiles.
+The closure probe routes batch > 8 to typed MMQ and the direct
+shared_lhs API quantizes once for same-format projections. Historical
+workspace identity and capacity rounding remain; no fixup allocation.
+Actual CUDA SM, warp, shared limit, exact buffer spans, grid limits and
+input alignment are checked. Unsupported K/SM/layout returns error.
+Existing fused GLU down and indexed/compact MoE paths still require
+migration. No closure of all direct FFI consumers is claimed.
+Ignored GPU test covers 10 formats, three dtypes, full/tail N, four
+batch shapes, zero activation row and shared LHS. Geometry unit test
+checks smallest-tile ties. No GPU compilation or numerical result here.

@@ -566,6 +566,16 @@ impl DenseGluDownRun<'_> {
     }
 }
 
+#[cfg(feature = "dkr-static-closure-probe")]
+#[path = "mmq_dynamic.rs"]
+mod dynamic;
+
+#[cfg(feature = "dkr-static-closure-probe")]
+pub(crate) fn shared_lhs(weights: &[&QTensor], xs: &Tensor) -> Result<Vec<Tensor>> {
+    dynamic::shared_lhs(weights, xs)
+}
+
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 pub(crate) fn shared_lhs(weights: &[&QTensor], xs: &Tensor) -> Result<Vec<Tensor>> {
     let Some(first) = weights.first() else {
         candle_core::bail!("fast_mmq shared_lhs: at least one weight is required");
