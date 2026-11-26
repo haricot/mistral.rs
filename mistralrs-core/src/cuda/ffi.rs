@@ -1050,6 +1050,7 @@ extern "C" {
         dtype: i32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn gated_delta_rule_recurrence(
         q: *const f32,
         k: *const f32,
@@ -1067,6 +1068,7 @@ extern "C" {
         state_dtype: i32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn warp_gated_delta_rule_recurrence(
         q: *const f32,
         k: *const f32,
@@ -1084,6 +1086,7 @@ extern "C" {
         state_dtype: i32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn vmajor_warp_gated_delta_rule_recurrence(
         q: *const f32,
         k: *const f32,
@@ -1101,6 +1104,7 @@ extern "C" {
         state_dtype: i32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn vmajor_grouped_warp_gated_delta_rule_recurrence(
         q: *const f32,
         k: *const f32,
@@ -1131,6 +1135,7 @@ extern "C" {
     #[cfg(has_flashinfer_gdn_sm90_kernel)]
     pub(crate) fn mistralrs_flashinfer_gdn_sm90_launch(params: *const c_void) -> i32;
     // Chunked GDN recurrence for prefill (processes tokens in BT=64 chunks)
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn chunked_gated_delta_rule_recurrence(
         q: *const f32,
         k: *const f32,
@@ -1148,6 +1153,7 @@ extern "C" {
         state_dtype: i32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn vmajor_chunked_gated_delta_rule_recurrence(
         q: *const f32,
         k: *const f32,
@@ -1165,6 +1171,7 @@ extern "C" {
         state_dtype: i32,
         stream: i64,
     ) -> i32;
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn causal_conv1d_update(
         x: *const c_void,
         weight: *const c_void,
@@ -1180,6 +1187,7 @@ extern "C" {
         dtype: i32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn causal_conv1d_full(
         x: *const c_void,
         weight: *const c_void,
