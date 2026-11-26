@@ -116,6 +116,13 @@ struct alignas(16) RowState {
   uint32_t eq_count[kMaxCtasPerGroup];
 };
 
+static_assert(sizeof(uint32_t) == 4 && sizeof(int) == 4);
+static_assert(alignof(RowState) == 16);
+static_assert(offsetof(RowState, histogram) == 0);
+static_assert(offsetof(RowState, arrival_counter) == 3072);
+static_assert(offsetof(RowState, gt_count) == 3076);
+static_assert(offsetof(RowState, eq_count) == 4100);
+static_assert(sizeof(RowState) == 5136); // Rust ABI: 1284 U32 words
 static_assert(sizeof(RowState) % sizeof(uint32_t) == 0);
 
 inline constexpr size_t workspace_words_per_row() {
@@ -224,7 +231,11 @@ __device__ __forceinline__ uint32_t warp_min(uint32_t value) {
 }
 
 template <typename T, uint32_t VecSize>
+#ifdef DKR_COOPERATIVE_RADIX_EXTERNAL
+__device__ __forceinline__ void ranked_radix_select(
+#else
 __global__ void __launch_bounds__(kBlockThreads) ranked_radix_select(
+#endif
     const T *__restrict__ input, float *__restrict__ packed_output, int nrows,
     int ncols, int top_k, RowState *__restrict__ row_states,
     uint32_t chunk_size, uint32_t ctas_per_group) {
@@ -481,7 +492,11 @@ __device__ __forceinline__ float ordered_to_float(uint32_t ordered) {
   return __uint_as_float(bits);
 }
 
-__global__ void ranked_radix_sort_pack(float *__restrict__ packed_output,
+#ifdef DKR_COOPERATIVE_RADIX_EXTERNAL
+__device__ __forceinline__ void ranked_radix_sort_pack(
+#else
+__global__ void ranked_radix_sort_pack(
+#endiffloat *__restrict__ packed_output,
                                        int top_k) {
   const uint32_t lane = threadIdx.x;
   float *row_output = packed_output + static_cast<size_t>(blockIdx.x) * 2 * top_k;
@@ -513,6 +528,7 @@ __global__ void ranked_radix_sort_pack(float *__restrict__ packed_output,
   }
 }
 
+#ifndef DKR_COOPERATIVE_RADIX_EXTERNAL
 template <typename T, uint32_t VecSize>
 inline cudaError_t launch_vec(const T *input, float *packed_output, int nrows,
                               int ncols, int top_k, RowState *states,
@@ -655,5 +671,7 @@ inline cudaError_t launch(const T *input, float *packed_output, void *workspace,
     return cudaSuccess;
   }
 }
+
+#endif // !DKR_COOPERATIVE_RADIX_EXTERNAL
 
 } // namespace mistralrs_radix_topk
