@@ -259,7 +259,10 @@ DKR_ROUTER_MOE_ENTRY
 #pragma unroll
   for (int i = 0; i < values_per_thread; i++) {
     const int expert = lane + i * 32;
-    selection[i] = score[i];
+    // Padded warp lanes must never compete with real experts, notably
+    // sigmoid/softmax scores plus negative selection bias. Otherwise an
+    // out-of-range expert id can index expert_scale below.
+    selection[i] = expert < n_experts ? score[i] : -INFINITY;
     if constexpr (has_bias) {
       if (expert < n_experts) {
         selection[i] += selection_bias[expert];
