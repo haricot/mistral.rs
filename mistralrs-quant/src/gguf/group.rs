@@ -299,10 +299,22 @@ fn typed_group(xs:&Tensor,entries:&[GroupEntry<'_>],kind:GroupKind<'_>)->Result<
         && if decode {fast_mmvq::supports(w.dtype())} else {k%256==0 && fast_mmq::supports(w.dtype()) && w.dtype()==weights[0].dtype()});
     match kind{
         GroupKind::Dense if admitted(&w)=>{
-            if decode {fast_mmvq::shared_lhs(&w,xs).map(Some)} else {fast_mmq::shared_lhs(&w,xs).map(Some)}
+            if decode {
+                match w.as_slice(){
+                    [q,k,v] if q.dtype()==k.dtype()&&q.dtype()==v.dtype()=>{
+                        let (q,k,v)=fast_mmvq::fused_qkv(q,k,v,xs)?;Ok(Some(vec![q,k,v]))
+                    }
+                    [left,right] if left.dtype()==right.dtype() &&
+                        fast_mmvq::prefers_fused_pair(xs.device().as_cuda_device()?,tokens,[left.shape().dims2()?.0,right.shape().dims2()?.0])=>{
+                        let (l,r)=fast_mmvq::fused_pair(left,right,xs)?;Ok(Some(vec![l,r]))
+                    }
+                    _=>fast_mmvq::shared_lhs(&w,xs).map(Some)
+                }
+            } else {fast_mmq::shared_lhs(&w,xs).map(Some)}
         }
         GroupKind::Glu{activation} if w.len()==2 && admitted(&w) && w[0].shape()==w[1].shape()=>{
-            let out=if decode{fast_mmvq::shared_lhs(&w,xs)?}else{fast_mmq::shared_lhs(&w,xs)?};
+            if decode{return Ok(Some(vec![fast_mmvq::fused_glu(w[0],w[1],xs,activation)?]));}
+            let out=fast_mmq::shared_lhs(&w,xs)?;
             Ok(Some(vec![typed_glu(&out[0],&out[1],activation)?]))
         }
         GroupKind::Ffn{activation} if !decode && w.len()==3 && admitted(&w[..2])

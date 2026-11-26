@@ -320,3 +320,192 @@ pub(crate) fn gated_mix(w:&QTensor,x:&Tensor,r:&Tensor,streams:usize,divisor:Opt
     }}}
     match x.dtype(){DType::F16=>run!(half::f16),DType::BF16=>run!(half::bf16),DType::F32=>run!(f32),_=>unreachable!()}
 }
+
+// The historical QKV body also admits a pair (nv=0, packed grid).
+// A real one-element V allocation and a valid dummy weight pointer keep
+// the tensor ABI non-null; no V read or store is reachable in pair mode.
+#[derive(Clone,Copy,PartialEq,Eq)]
+struct FusedKey {
+    fmt:&'static str,dt:DType,batch:usize,k:usize,padded:usize,packed:usize,
+    rows:[usize;3],glu:bool,prefetch:bool,
+}
+struct FusedPlans{encode:PrevalidatedLaunchPlan,project:PrevalidatedLaunchPlan}
+thread_local!{static FUSED:RefCell<LaunchPlanCache<FusedKey,FusedPlans>>=RefCell::new(LaunchPlanCache::new());}
+fn fused_grid(key:FusedKey)->([u32;3],[u32;3]){
+    let [q,k,v]=key.rows;
+    let b=key.batch;
+    if key.glu {
+        let rows=if (2..=4).contains(&b){1}else{2};
+        return ([q.div_ceil(rows) as u32,1,1],[32,if b==1{4}else{2},1]);
+    }
+    if key.prefetch{return ([(q+k+v) as u32,1,1],[32,8,1]);}
+    let max=q.max(k).max(v);let min=q.min(k).min(v);
+    let packed=v==0 || max>=2*min;
+    let grid=if packed{[(q.div_ceil(2)+k.div_ceil(2)+v.div_ceil(2)) as u32,1,1]}else{[max.div_ceil(2) as u32,3,1]};
+    (grid,[32,if b==1{8}else if b<=4{4}else{2},1])
+}
+fn fused_plans(key:FusedKey,device:&Device)->Result<FusedPlans>{
+    let dt=dtype(key.dt)?;
+    let q8=||tensor(ElementType::U8,vec![key.batch,key.padded/32*36],Some("gguf.q8_1.row.v1"));
+    let enc=prepare_one(device,"quant.gguf.q8_1.row.encode.v1".into(),
+        vec![tensor(dt,vec![key.batch,key.k],None),q8(),scalar(),scalar()],
+        [key.padded.div_ceil(256) as u32,key.batch as u32,1],[256,1,1])?;
+    let repr=format!("gguf.{}.packed.v1",key.fmt);
+    let w=|n|tensor(ElementType::U8,vec![n,key.packed],Some(&repr));
+    let out=|n|tensor(dt,vec![key.batch,n],None);
+    let [q,k,v]=key.rows;
+    let (kind,args)=if key.glu {
+        ("glu",vec![w(q),w(k),q8(),out(q),scalar(),scalar(),scalar(),scalar(),scalar()])
+    }else{
+        ("qkv",vec![w(q),w(k),w(if v==0{q}else{v}),q8(),out(q),out(k),
+            if v==0{tensor(dt,vec![1,1],None)}else{out(v)},scalar(),scalar(),scalar(),scalar(),scalar()])
+    };
+    let variant=if key.prefetch{"prefetch".into()}else{format!("b{}",key.batch)};
+    let (grid,block)=fused_grid(key);
+    let project=prepare_one(device,format!("quant.gguf.mmvq.fused.{kind}.{}.{variant}.v1",key.fmt),args,grid,block)?;
+    Ok(FusedPlans{encode:enc,project})
+}
+fn checked_span(v:usize)->Result<usize>{
+    if v>i32::MAX as usize{candle_core::bail!("DKR fused MMVQ span exceeds i32");}Ok(v)
+}
+fn prod(a:usize,b:usize)->Result<usize>{a.checked_mul(b).ok_or_else(||candle_core::Error::msg("DKR MMVQ span overflow"))}
+
+pub(super) fn fused(q:&QTensor,k:&QTensor,v:Option<&QTensor>,xs:&Tensor,act:Option<i32>)->Result<Vec<Tensor>>{
+    let fmt=format(q.dtype()).ok_or_else(||candle_core::Error::msg("DKR fused MMVQ format"))?;
+    let (nq,columns)=q.shape().dims2()?;let (nk,kc)=k.shape().dims2()?;
+    let (nv,vc)=if let Some(v)=v{v.shape().dims2()?}else{(0,columns)};
+    let vw=v.unwrap_or(q);
+    let Device::Cuda(dev)=q.device()else{candle_core::bail!("DKR fused MMVQ CUDA required");};
+    let Some((&input,dims))=xs.dims().split_last()else{candle_core::bail!("DKR fused MMVQ input rank");};
+    let batch=dims.iter().try_fold(1usize,|a,&b|a.checked_mul(b)).ok_or_else(||candle_core::Error::msg("batch overflow"))?;
+    if columns==0 || nq==0 || nk==0 || v.is_some_and(|_|nv==0) || kc!=columns || vc!=columns || input!=columns
+        || columns%q.dtype().block_size()!=0 || !(1..=MMVQ_MAX_BATCH).contains(&batch)
+        || act.is_some_and(|a| !(0..=4).contains(&a)||nq!=nk||v.is_some())
+        || [q,k,vw].iter().any(|w|w.dtype()!=q.dtype()||!w.device().same_device(xs.device())){
+        candle_core::bail!("DKR fused MMVQ shape/device/format mismatch");
+    }
+    dtype(xs.dtype())?;
+    let packed=prod(columns/q.dtype().block_size(),q.dtype().type_size())?;
+    let padded=columns.checked_add(511).ok_or_else(||candle_core::Error::msg("padding overflow"))?/512*512;
+    let scratch_bytes=prod(prod(padded/32,36)?,batch)?;
+    checked_span(prod(padded,batch)?)?;checked_span(scratch_bytes)?;
+    let total=nq.checked_add(nk).and_then(|n|n.checked_add(nv)).ok_or_else(||candle_core::Error::msg("row sum overflow"))?;
+    checked_span(total.checked_add(2).ok_or_else(||candle_core::Error::msg("row grid overflow"))?)?;
+    checked_span(prod(total,packed)?)?;
+    for n in [nq,nk,nv]{checked_span(prod(n,batch)?)?;checked_span(prod(n,columns/q.dtype().block_size())?)?;}
+    let prefetch=act.is_none() && batch==1 && !matches!(fmt,"q2_k"|"q3_k")
+        && use_single_row_prefetch(q.dtype(),columns,total*packed) && prefers_weight_prefetch(&dev);
+    let key=FusedKey{fmt,dt:xs.dtype(),batch,k:columns,padded,packed,rows:[nq,nk,nv],glu:act.is_some(),prefetch};
+    let xs=xs.contiguous()?;let (st,l)=xs.storage_and_layout();
+    let Storage::Cuda(st)=&*st else{candle_core::bail!("DKR fused MMVQ activation CUDA");};
+    let stream=dev.cuda_stream();
+    let mut ws=workspace_ensure(&dev,scratch_bytes,&stream)?;
+    let (scratch,_sg)=ws.ptr_mut();
+    let (qp,_qg)=q.device_ptr_with_guard(&stream)?;
+    let (kp,_kg)=k.device_ptr_with_guard(&stream)?;
+    let (vp,_vg)=vw.device_ptr_with_guard(&stream)?;
+    let (ci,pi,qi,ki,vi,si)=(columns as i32,padded as i32,nq as i32,nk as i32,nv as i32,(padded/32) as i32);
+    let activation=act.unwrap_or(0);
+    macro_rules! run {($t:ty)=>{{
+        let (xp,_xg)=slice_ptr_on_stream(st.as_cuda_slice::<$t>()?,l.start_offset(),&stream);
+        let mut qo=unsafe{dev.alloc::<$t>(batch*nq)?};
+        let mut ko=unsafe{dev.alloc::<$t>(if key.glu{1}else{batch*nk})?};
+        let mut vo=unsafe{dev.alloc::<$t>((batch*nv).max(1))?};
+        {
+            let (qop,_qog)=slice_ptr_mut_on_stream(&mut qo,0,&stream);
+            let (kop,_kog)=slice_ptr_mut_on_stream(&mut ko,0,&stream);
+            let (vop,_vog)=slice_ptr_mut_on_stream(&mut vo,0,&stream);
+            FUSED.with(|cache|cache.borrow_mut().with_plan(key,xs.device(),||fused_plans(key,xs.device()),|p|{
+                unsafe{p.encode.with_prevalidated_launch(|fun,cfg|{
+                    let mut b=stream.launch_builder(fun);b.arg(&xp).arg(&scratch).arg(&ci).arg(&pi);b.launch(cfg)?;Ok(())
+                })}.map_err(|e|candle_core::Error::msg(e.to_string()))?;
+                unsafe{p.project.with_prevalidated_launch(|fun,cfg|{
+                    let mut b=stream.launch_builder(fun);
+                    if key.glu {
+                        b.arg(&qp).arg(&kp).arg(&scratch).arg(&qop).arg(&ci).arg(&qi).arg(&si).arg(&qi).arg(&activation);
+                        b.launch(cfg)?;
+                    }else{
+                        b.arg(&qp).arg(&kp).arg(&vp).arg(&scratch).arg(&qop).arg(&kop).arg(&vop)
+                         .arg(&ci).arg(&qi).arg(&ki).arg(&vi).arg(&si);
+                        b.launch(cfg)?;
+                    }
+                    Ok(())
+                })}.map_err(|e|candle_core::Error::msg(e.to_string()))?;
+                Ok(())
+            }))?;
+        }
+        let mut out=vec![Tensor::from((Storage::Cuda(CudaStorage::wrap_cuda_slice(qo,dev.clone())),output_shape(&xs,nq)))];
+        if !key.glu{out.push(Tensor::from((Storage::Cuda(CudaStorage::wrap_cuda_slice(ko,dev.clone())),output_shape(&xs,nk))));}
+        if nv!=0{out.push(Tensor::from((Storage::Cuda(CudaStorage::wrap_cuda_slice(vo,dev.clone())),output_shape(&xs,nv))));}
+        Ok(out)
+    }}}
+    match xs.dtype(){DType::F16=>run!(half::f16),DType::BF16=>run!(half::bf16),DType::F32=>run!(f32),_=>unreachable!()}
+}
+
+#[derive(Clone,Copy,PartialEq,Eq)]
+struct IndexedKey{
+    fmt:&'static str,dt:DType,e:usize,n:usize,k:usize,batch:usize,topk:usize,input_routes:usize,padded:usize,packed:usize,
+}
+struct IndexedPlans{encode:PrevalidatedLaunchPlan,gather:PrevalidatedLaunchPlan}
+thread_local!{static INDEXED:RefCell<LaunchPlanCache<IndexedKey,IndexedPlans>>=RefCell::new(LaunchPlanCache::new());}
+fn indexed_plans(key:IndexedKey,device:&Device)->Result<IndexedPlans>{
+    let rows=key.batch*key.input_routes;
+    let q8=||tensor(ElementType::U8,vec![rows,key.padded/32*36],Some("gguf.q8_1.row.v1"));
+    let encode=prepare_one(device,"quant.gguf.q8_1.row.encode.v1".into(),
+        vec![tensor(dtype(key.dt)?,vec![rows,key.k],None),q8(),scalar(),scalar()],
+        [key.padded.div_ceil(256) as u32,rows as u32,1],[256,1,1])?;
+    let repr=format!("gguf.{}.packed.v1",key.fmt);
+    let gather=prepare_one(device,format!("quant.gguf.moe.indexed_mmvq.{}.v1",key.fmt),
+        vec![tensor(ElementType::U8,vec![key.e,key.n,key.packed],Some(&repr)),q8(),
+            tensor(ElementType::U32,vec![key.batch,key.topk],None),
+            tensor(ElementType::F32,vec![key.batch,key.topk,key.n],None),
+            scalar(),scalar(),scalar(),scalar(),scalar(),scalar(),scalar()],
+        [key.n as u32,key.batch as u32,key.topk as u32],[32,4,1])?;
+    Ok(IndexedPlans{encode,gather})
+}
+pub(crate) fn indexed(w:&QTensor,x:&Tensor,ids:&Tensor)->Result<Tensor>{
+    let fmt=if w.dtype()==GgmlDType::Q8_1{"q8_1"}else{format(w.dtype()).ok_or_else(||candle_core::Error::msg("DKR indexed format"))?};
+    let (e,n,k)=w.shape().dims3()?;let (batch,input_routes,xk)=x.dims3()?;let (ib,topk)=ids.dims2()?;
+    let Device::Cuda(dev)=w.device()else{candle_core::bail!("DKR indexed MMVQ CUDA required");};
+    if e==0||n==0||k==0||batch==0||topk==0||ib!=batch||xk!=k||k%w.dtype().block_size()!=0
+        || !(input_routes==1||input_routes==topk)||ids.dtype()!=DType::U32
+        || !ids.device().same_device(x.device())||!w.device().same_device(x.device()){
+        candle_core::bail!("DKR indexed MMVQ contract");
+    }
+    dtype(x.dtype())?;
+    let rows=prod(batch,input_routes)?;let routes=prod(batch,topk)?;
+    if rows>65535||batch>65535||topk>65535{candle_core::bail!("DKR indexed MMVQ grid limit");}
+    let padded=k.checked_add(511).ok_or_else(||candle_core::Error::msg("padding overflow"))?/512*512;
+    let packed=prod(k/w.dtype().block_size(),w.dtype().type_size())?;
+    let scratch_bytes=checked_span(prod(prod(padded/32,36)?,rows)?)?;
+    checked_span(prod(rows,padded)?)?;checked_span(prod(prod(e,n)?,packed)?)?;
+    let count=checked_span(prod(routes,n)?)?;
+    for v in [e,n,k,padded,routes]{checked_span(v)?;}
+    // historical task_id uses signed i32 and gridDim.y*gridDim.z
+    let key=IndexedKey{fmt,dt:x.dtype(),e,n,k,batch,topk,input_routes,padded,packed};
+    let x=x.contiguous()?;let ids=ids.contiguous()?;
+    let (st,l)=x.storage_and_layout();let (is,il)=ids.storage_and_layout();
+    let (Storage::Cuda(st),Storage::Cuda(is))=(&*st,&*is)else{candle_core::bail!("DKR indexed storage");};
+    let stream=dev.cuda_stream();
+    let mut ws=workspace_ensure(&dev,scratch_bytes,&stream)?;
+    let (scratch,_sg)=ws.ptr_mut();let (wp,_wg)=w.device_ptr_with_guard(&stream)?;
+    let (ip,_ig)=slice_ptr_on_stream(is.as_cuda_slice::<u32>()?,il.start_offset(),&stream);
+    let (ni,ki,bi,ti,pi,ri,ei)=(n as i32,k as i32,batch as i32,topk as i32,padded as i32,input_routes as i32,e as i32);
+    let mut out=unsafe{dev.alloc::<f32>(count)?};
+    macro_rules! run {($t:ty)=>{{
+        let (xp,_xg)=slice_ptr_on_stream(st.as_cuda_slice::<$t>()?,l.start_offset(),&stream);
+        let (op,_og)=slice_ptr_mut_on_stream(&mut out,0,&stream);
+        INDEXED.with(|cache|cache.borrow_mut().with_plan(key,x.device(),||indexed_plans(key,x.device()),|p|{
+            unsafe{p.encode.with_prevalidated_launch(|fun,cfg|{
+                let mut b=stream.launch_builder(fun);b.arg(&xp).arg(&scratch).arg(&ki).arg(&pi);b.launch(cfg)?;Ok(())
+            })}.map_err(|e|candle_core::Error::msg(e.to_string()))?;
+            unsafe{p.gather.with_prevalidated_launch(|fun,cfg|{
+                let mut b=stream.launch_builder(fun);b.arg(&wp).arg(&scratch).arg(&ip).arg(&op)
+                    .arg(&ni).arg(&ki).arg(&bi).arg(&ti).arg(&pi).arg(&ri).arg(&ei);b.launch(cfg)?;Ok(())
+            })}.map_err(|e|candle_core::Error::msg(e.to_string()))?;
+            Ok(())
+        }))?;
+    }}}
+    match x.dtype(){DType::F16=>run!(half::f16),DType::BF16=>run!(half::bf16),DType::F32=>run!(f32),_=>unreachable!()}
+    Ok(Tensor::from((Storage::Cuda(CudaStorage::wrap_cuda_slice(out,dev.clone())),(batch,topk,n))))
+}

@@ -200,6 +200,12 @@ pub(crate) fn indexed(w:&QTensor,x:&Tensor,ids:&Tensor)->Result<Tensor>{
         || ids.dtype()!=DType::U32 || !ids.device().same_device(x.device()) || !w.device().same_device(x.device()){
         candle_core::bail!("DKR GGUF indexed MoE shape/dtype/device mismatch");
     }
+    // Avoid histogram/scatter/worklist overhead for small decode batches.
+    // Q8_1 weights and non-256-aligned K have no compact MMQ profile.
+    if batch<=super::super::fast_mmvq::MMVQ_MAX_BATCH || k%256!=0
+        || w.dtype()==candle_core::quantized::GgmlDType::Q8_1{
+        return super::super::fast_mmvq::typed_indexed(w,x,ids);
+    }
     let Device::Cuda(dev)=w.device() else{candle_core::bail!("DKR indexed MoE CUDA required");};
     let a=mul(batch,topk)?;
     capacity(a,e)?;

@@ -393,6 +393,8 @@ fn prefetch_launcher(dtype: GgmlDType, output: DType) -> Option<PlainLauncher> {
 mod dynamic;
 #[cfg(feature = "dkr-static-closure-probe")]
 pub(crate) use dynamic::gated_mix as typed_gated_mix;
+#[cfg(feature = "dkr-static-closure-probe")]
+pub(crate) use dynamic::indexed as typed_indexed;
 
 #[cfg(feature = "dkr-static-closure-probe")]
 pub fn plain(w: &QTensor, xs: &Tensor) -> Result<Tensor> {
@@ -849,6 +851,9 @@ pub fn fused_glu(
     activation: GluActivationType,
 ) -> Result<Tensor> {
     if gate_w.shape()!=up_w.shape(){candle_core::bail!("DKR GLU shape mismatch");}
+    if gate_w.dtype()==up_w.dtype(){
+        return Ok(dynamic::fused(gate_w,up_w,None,xs,Some(activation as i32))?.pop().unwrap());
+    }
     let mut o=shared_lhs(&[gate_w,up_w],xs)?.into_iter();
     super::group::typed_glu(&o.next().unwrap(),&o.next().unwrap(),activation)
 }
@@ -1065,7 +1070,9 @@ pub fn fused_glu(
 /// projection and preserve the input dtype.
 #[cfg(feature = "dkr-static-closure-probe")]
 pub fn fused_qkv(q_w:&QTensor,k_w:&QTensor,v_w:&QTensor,xs:&Tensor)->Result<(Tensor,Tensor,Tensor)>{
-    let mut o=shared_lhs(&[q_w,k_w,v_w],xs)?.into_iter();
+    let mut o=if q_w.dtype()==k_w.dtype() && q_w.dtype()==v_w.dtype(){
+        dynamic::fused(q_w,k_w,Some(v_w),xs,None)?
+    }else{shared_lhs(&[q_w,k_w,v_w],xs)?}.into_iter();
     Ok((o.next().unwrap(),o.next().unwrap(),o.next().unwrap()))
 }
 #[cfg(not(feature = "dkr-static-closure-probe"))]
@@ -1080,7 +1087,8 @@ pub fn fused_qkv(
 
 #[cfg(feature = "dkr-static-closure-probe")]
 pub fn fused_pair(left:&QTensor,right:&QTensor,xs:&Tensor)->Result<(Tensor,Tensor)>{
-    let mut o=shared_lhs(&[left,right],xs)?.into_iter();
+    let mut o=if left.dtype()==right.dtype(){dynamic::fused(left,right,None,xs,None)?}
+        else{shared_lhs(&[left,right],xs)?}.into_iter();
     Ok((o.next().unwrap(),o.next().unwrap()))
 }
 #[cfg(not(feature = "dkr-static-closure-probe"))]

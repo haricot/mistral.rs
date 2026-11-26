@@ -185,6 +185,7 @@ fn run(weights:&[&QTensor],xs:&Tensor,glu:Option<(&Tensor,i32)>)->Result<Vec<Ten
     let pi=padded as i32;
     let bi=batch as i32;
     let bk=blocks_k as i32;
+    let act=glu.map(|(_,a)|a).unwrap_or(0);
     macro_rules! launch {
         ($t:ty)=>{{
             let (xp,_xg)=slice_ptr_on_stream(storage.as_cuda_slice::<$t>()?,l.start_offset(),&stream);
@@ -211,7 +212,6 @@ fn run(weights:&[&QTensor],xs:&Tensor,glu:Option<(&Tensor,i32)>)->Result<Vec<Ten
                                     b.arg(&xp);
                                     if let Some((ptr,_))=&up_ptr{b.arg(ptr);}
                                     b.arg(&scratch).arg(&ki).arg(&pi).arg(&bi);
-                                    let act=glu.map(|(_,a)|a).unwrap_or(0);
                                     if key.glu{b.arg(&act);}
                                     b.launch(cfg)?;Ok(())
                                 })}.map_err(|e|candle_core::Error::msg(e.to_string()))?;
