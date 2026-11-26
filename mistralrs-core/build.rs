@@ -102,7 +102,8 @@ fn main() {
         println!("cargo:warning=DKR_STATIC_PRODUCER_DISABLED component=mistralrs-core mode=closure-probe");
     }
 
-    #[cfg(all(feature = "cuda", not(feature = "dkr-static-closure-probe")))]
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
+    #[cfg(feature = "cuda")]
     {
         use std::path::PathBuf;
         let cuda_version_code = set_cuda_toolkit_version();
