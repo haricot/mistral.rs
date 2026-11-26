@@ -1372,6 +1372,7 @@ extern "C" {
         dtype: i32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn gdn_speculative_recurrence_checkpoints(
         mixed_qkv: *const c_void,
         b: *const c_void,
@@ -1425,6 +1426,7 @@ extern "C" {
         state_dtype: i32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn gdn_deferred_recurrence_rmsnorm_gate_value_major_128(
         mixed_qkv: *const c_void,
         b: *const c_void,
@@ -1460,6 +1462,7 @@ extern "C" {
         sigmoid_gate: i32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn gdn_flush_deferred_state_value_major_128(
         state_pool: *mut f32,
         active_slots: *const u32,
