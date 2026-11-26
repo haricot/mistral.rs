@@ -29,6 +29,8 @@ fn disjoint(a:(u64,usize,usize),b:(u64,usize,usize))->Result<()>{
     if a.0<be&&b.0<ae{candle_core::bail!("GDN commit snapshot overlaps mutable pool");}
     Ok(())
 }
+// Caller must ensure non-padding slots are unique. Device-side bounds checks
+// deliberately do not read the slot table back to the host.
 pub(super) fn commit<T:candle_core::cuda_backend::CudaDType+candle_core::cuda_backend::cudarc::driver::DeviceRepr>(
     mixed:&Tensor,convolved:&Tensor,b:&Tensor,a:&Tensor,initial_conv:&Tensor,initial_rec:&Tensor,
     a_log:&Tensor,dt_bias:&Tensor,conv_pool:&Tensor,rec_pool:&Tensor,keep:&Tensor,slots:&Tensor,
@@ -97,6 +99,8 @@ pub(super) fn commit<T:candle_core::cuda_backend::CudaDType+candle_core::cuda_ba
         _=>candle_core::bail!("invalid GDN recurrent state dtype")}
 }
 
+// For write=true, active slots must belong to disjoint checkpoint groups,
+// not merely be distinct slots. Pending metadata and payload are stream-owned.
 pub(super) fn conv<T:candle_core::cuda_backend::CudaDType+candle_core::cuda_backend::cudarc::driver::DeviceRepr>(
     x:&Tensor,weight:&Tensor,state:&Tensor,slots:&Tensor,lanes:usize,write:bool,
     pending:Option<(GdnPendingSpeculativeConv<'_>,usize,usize,usize)>,
@@ -118,6 +122,10 @@ pub(super) fn conv<T:candle_core::cuda_backend::CudaDType+candle_core::cuda_back
     let (ip,_ig)=cuda_read_ptr_with_guard::<u32>(&is,il,&stream,"slots")?;
     let mut out=unsafe{dev.alloc::<T>(count)}?;
     let (op,og)=out.device_ptr_mut(&stream);
+    let bytes=std::mem::size_of::<T>();
+    let inputs=[(xp,p::span(xl)?,bytes),(wp,weight.elem_count(),bytes),(ip,batch,4)];
+    let state_range=(sp,state.elem_count(),bytes);
+    for input in inputs{disjoint(state_range,input)?;}
     let width4=cw==4&&sp%8==0&&wp%8==0;
     let mut ptrs=vec![(xp,p::span(xl)?,dt),(wp,weight.elem_count(),dt),(sp,state.elem_count(),dt),(op,count,dt),(ip,batch,p::E::U32)];
     let mut args=vec![p::n(batch)?,p::n(seq)?,p::n(cd)?,p::n(cw)?,p::n(lanes)?,p::S::I32(i32::from(write)),p::n(cap)?];
@@ -129,6 +137,12 @@ pub(super) fn conv<T:candle_core::cuda_backend::CudaDType+candle_core::cuda_back
         let (kp,_kg)=cuda_read_ptr_with_guard::<u32>(&ks,kl,&stream,"keep")?;
         let (ep,_eg)=cuda_read_ptr_with_guard::<u32>(&es,el,&stream,"epoch")?;
         let (app,_apg)=cuda_inplace_ptr_with_guard::<u32>(&aps,apl,&stream,"applied_epoch")?;
+        let writes=[state_range,(cp,pending.conv_input.elem_count(),bytes),(app,pending.applied_epochs.elem_count(),4)];
+        let reads=[(kp,pcap,4),(ep,pcap,4)];
+        for i in 0..writes.len(){
+            for j in i+1..writes.len(){disjoint(writes[i],writes[j])?;}
+            for input in inputs.into_iter().chain(reads){disjoint(writes[i],input)?;}
+        }
         ptrs.extend([(cp,pending.conv_input.elem_count(),dt),(kp,pcap,p::E::U32),(ep,pcap,p::E::U32),
             (app,pending.applied_epochs.elem_count(),p::E::U32)]);
         args.extend([p::n(max_rows)?,p::n(pcap)?,p::n(blocks)?]);args.extend(strides);
@@ -197,6 +211,37 @@ mod tests{
                 for (row,ones) in [(0,1),(1,2),(2,0),(3,0)]{
                     assert!(data[row].chunks_exact(width).all(|c|c[..width-ones].iter().all(|&v|v==0.)&&c[width-ones..].iter().all(|&v|v==1.)));
                 }
+            }
+        }
+        Ok(())
+    }
+    #[test]
+    #[ignore="requires CUDA and GDN typed catalogue"]
+    fn dkr_gdn_conv_pending_epoch_gpu()->Result<()>{
+        let device=Device::new_cuda(0)?;
+        let (cap,cd,cw)=(2usize,257usize,4usize);
+        let slots=Tensor::from_vec(vec![0u32,u32::MAX],2,&device)?;
+        for dt in [DType::F16,DType::BF16]{
+            let input=Tensor::ones((2,1,cd),dt,&device)?.affine(3.,0.)?;
+            let weight=Tensor::zeros((cd,cw),dt,&device)?;
+            let pool=Tensor::zeros((cap,cd,cw),dt,&device)?;
+            let pending=Tensor::ones((cap,2,cd),dt,&device)?;
+            let keep=Tensor::from_vec(vec![1u32,1],cap,&device)?;
+            let epoch=Tensor::from_vec(vec![7u32,9],cap,&device)?;
+            let applied=Tensor::zeros((cap,2),DType::U32,&device)?;
+            let run=||speculative_conv_checkpoints_cuda(GdnSpeculativeConvCheckpoints{x:&input,weight:&weight,
+                state_pool:&pool,active_slots:&slots,checkpoint_lanes:1,write_checkpoints:false,
+                pending:Some(GdnPendingSpeculativeConv{conv_input:&pending,keep_rows:&keep,pending_epochs:&epoch,applied_epochs:&applied})});
+            for _ in 0..2{
+                let out=run()?;
+                assert!(out.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?.iter().all(|&v|v==0.));
+                assert_eq!(applied.flatten_all()?.to_vec1::<u32>()?,vec![7,7,0,0]);
+                let states=pool.to_dtype(DType::F32)?.reshape((cap,cd*cw))?.to_vec2::<f32>()?;
+                assert!(states[0].chunks_exact(cw).all(|v|v==[0.,0.,0.,1.]));
+                assert!(states[1].iter().all(|&v|v==0.));
+                let logged=pending.to_dtype(DType::F32)?.reshape((cap,2*cd))?.to_vec2::<f32>()?;
+                assert!(logged[0][..cd].iter().all(|&v|v==3.));
+                assert!(logged[1].iter().all(|&v|v==1.));
             }
         }
         Ok(())
