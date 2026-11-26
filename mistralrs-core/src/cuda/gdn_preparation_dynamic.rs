@@ -31,8 +31,8 @@ pub(super) fn shifted(base:u64,layout:&Layout,bytes:usize)->Result<u64>{
 #[derive(Clone,Copy,Eq,PartialEq)]
 struct Key{
     op:&'static str,
-    tensors:[Option<(usize,E)>;10],
-    scalars:[Option<E>;16],
+    tensors:[Option<(usize,E)>;20],
+    scalars:[Option<E>;24],
     grid:[u32;3],
     block:[u32;3],
     shared:u32,
@@ -56,10 +56,10 @@ fn prepare(key:Key,device:&Device)->Result<PrevalidatedLaunchPlan>{
 }
 fn make_key(op:&'static str,pointers:&[(u64,usize,E)],scalars:&[S],grid:[u32;3],block:[u32;3],shared:u32,ceiling:u32)->Result<Key>{
     if shared>ceiling{candle_core::bail!("GDN dynamic shared memory exceeds ceiling");}
-    if pointers.len()>10||scalars.len()>16||pointers.iter().any(|(p,n,_)|*p==0||*n==0){
+    if pointers.len()>20||scalars.len()>24||pointers.len()+scalars.len()>32||pointers.iter().any(|(p,n,_)|*p==0||*n==0){
         candle_core::bail!("invalid GDN preparation ABI");
     }
-    let mut key=Key{op,tensors:[None;10],scalars:[None;16],grid,block,shared,ceiling};
+    let mut key=Key{op,tensors:[None;20],scalars:[None;24],grid,block,shared,ceiling};
     for (dst,&(_,n,dt)) in key.tensors.iter_mut().zip(pointers){*dst=Some((n,dt));}
     for (dst,s) in key.scalars.iter_mut().zip(scalars){*dst=Some(s.dtype());}
     Ok(key)
@@ -76,8 +76,17 @@ pub(super) unsafe fn launch(device:&Device,op:&'static str,pointers:&[(u64,usize
 }
 /// Same safety contract, plus a validated exact dynamic shared-memory size.
 pub(super) unsafe fn launch_shared(device:&Device,op:&'static str,pointers:&[(u64,usize,E)],scalars:&[S],grid:[u32;3],block:[u32;3],shared:u32,ceiling:u32)->Result<()>{
-    let key=make_key(op,pointers,scalars,grid,block,shared,ceiling)?;
     let stream=device.as_cuda_device()?.cuda_stream();
+    unsafe{launch_on_stream(device,&stream,op,pointers,scalars,grid,block,shared,ceiling)}
+}
+/// The explicit stream must belong to the validated device context. The
+/// caller owns all pointer guards on that stream, including output guards.
+pub(super) unsafe fn launch_on_stream(device:&Device,stream:&candle_core::cuda_backend::cudarc::driver::CudaStream,
+    op:&'static str,pointers:&[(u64,usize,E)],scalars:&[S],grid:[u32;3],block:[u32;3],shared:u32,ceiling:u32)->Result<()>{
+    let key=make_key(op,pointers,scalars,grid,block,shared,ceiling)?;
+    if !std::sync::Arc::ptr_eq(device.as_cuda_device()?.cuda_stream().context(),stream.context()){
+        candle_core::bail!("GDN launch stream belongs to another CUDA context");
+    }
     PLANS.with(|cache|cache.borrow_mut().with_plan(key,device,||prepare(key,device),|plan|{
         unsafe{plan.with_prevalidated_launch(|fun,cfg|{
             let mut b=stream.launch_builder(fun);
