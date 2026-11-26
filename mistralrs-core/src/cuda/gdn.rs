@@ -84,14 +84,19 @@ const GDN_TRANSITION_PUBLISH_POINTER_SEGMENTS: usize = 3;
 const GDN_TRANSITION_APPLY_POINTER_SEGMENTS: usize = 11;
 #[cfg(feature = "cuda")]
 const GDN_DECODE_KERNEL_ENV: &str = "MISTRALRS_GDN_DECODE_KERNEL";
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 #[cfg(feature = "cuda")]
 const GDN_MMA_MIN_COMPUTE_MAJOR: i32 = 8;
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 #[cfg(feature = "cuda")]
 const GDN_MMA_AUTO_COMPUTE_MAJOR: i32 = 12;
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 #[cfg(feature = "cuda")]
 const GDN_MMA_AUTO_MIN_SEQ_LEN: usize = 64;
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 #[cfg(feature = "cuda")]
 const GDN_MMA_INPUT_COUNT: usize = 5;
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 #[cfg(feature = "cuda")]
 const GDN_MMA_FUSED_BF16_INPUTS: usize = 3;
 #[cfg(feature = "cuda")]
@@ -102,6 +107,7 @@ const GDN_STATE_DTYPE_F16: i32 = 0;
 const GDN_STATE_DTYPE_BF16: i32 = 1;
 #[cfg(feature = "cuda")]
 const GDN_STATE_DTYPE_F32: i32 = 2;
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 #[cfg(all(feature = "cuda", has_flashinfer_gdn_sm90_kernel))]
 const FLASHINFER_GDN_MIN_SEQ_LEN: usize = 32;
 
@@ -2289,6 +2295,7 @@ pub enum FusedPrefillOutput {
     TokenMajor(Tensor),
 }
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 #[cfg(all(feature = "cuda", has_flashinfer_gdn_sm90_kernel))]
 #[repr(C)]
 struct FlashInferGdnSm90Params {
@@ -2310,6 +2317,7 @@ struct FlashInferGdnSm90Params {
     stream: i64,
 }
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 #[cfg(all(feature = "cuda", has_flashinfer_gdn_sm90_kernel))]
 struct FlashInferGdnSm90Launch<'a> {
     mixed_qkv: &'a Tensor,
@@ -2330,6 +2338,7 @@ struct FlashInferGdnSm90Launch<'a> {
     sm_count: i32,
 }
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 #[cfg(all(feature = "cuda", has_flashinfer_gdn_sm90_kernel))]
 impl candle_core::InplaceOp1 for FlashInferGdnSm90Launch<'_> {
     fn name(&self) -> &'static str {
@@ -2476,6 +2485,7 @@ impl candle_core::InplaceOp1 for FlashInferGdnSm90Launch<'_> {
     }
 }
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 #[cfg(feature = "cuda")]
 fn flashinfer_sm90_prefill_supported(launch: &FusedPrefillRecurrence<'_>) -> Result<bool> {
     #[cfg(not(has_flashinfer_gdn_sm90_kernel))]
@@ -2542,6 +2552,7 @@ fn flashinfer_sm90_prefill_supported(launch: &FusedPrefillRecurrence<'_>) -> Res
     }
 }
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 #[cfg(all(feature = "cuda", has_flashinfer_gdn_sm90_kernel))]
 fn flashinfer_sm90_prefill(launch: FusedPrefillRecurrence<'_>) -> Result<FusedPrefillOutput> {
     use candle_core as candle;
@@ -2665,11 +2676,47 @@ fn flashinfer_sm90_prefill(launch: FusedPrefillRecurrence<'_>) -> Result<FusedPr
     ))))
 }
 
+#[cfg(feature = "dkr-static-closure-probe")]
+fn validate_closure_prefill_request(requested: Option<GdnPrefillKernel>) -> Result<()> {
+    match requested {
+        Some(GdnPrefillKernel::Mma | GdnPrefillKernel::MmaFused) =>
+            candle_core::bail!("GDN MMA prefill provider is excluded by dkr-static-closure-probe"),
+        Some(GdnPrefillKernel::FlashInferSm90) =>
+            candle_core::bail!("FlashInfer GDN SM90 prefill provider is excluded by dkr-static-closure-probe"),
+        Some(GdnPrefillKernel::Cutile) =>
+            candle_core::bail!("cuTile GDN prefill provider is excluded by dkr-static-closure-probe"),
+        _ => Ok(()),
+    }
+}
+
+#[cfg(all(test, feature = "dkr-static-closure-probe"))]
+#[test]
+fn dkr_gdn_provider_closure_policy() {
+    for name in ["mma", "mma-fused", "flashinfer-sm90", "cutile"] {
+        let requested = parse_prefill_kernel(name).unwrap();
+        let error = validate_closure_prefill_request(requested).unwrap_err().to_string();
+        assert!(error.contains("excluded by dkr-static-closure-probe"), "{name}: {error}");
+    }
+    for name in ["auto", "vmajor1", "vmajor2", "vmajor4", "vmajor8", "legacy-chunked"] {
+        validate_closure_prefill_request(parse_prefill_kernel(name).unwrap()).unwrap();
+    }
+}
+
 #[cfg(feature = "cuda")]
 pub fn try_fused_vmajor_prefill_recurrence_cuda(
     launch: FusedPrefillRecurrence<'_>,
 ) -> Result<Option<FusedPrefillOutput>> {
     let requested = prefill_kernel_override()?;
+    #[cfg(feature = "dkr-static-closure-probe")]
+    {
+        validate_closure_prefill_request(requested)?;
+        // No specialized static provider is linked in this build. The caller
+        // proceeds with the ordinary typed recurrence catalogue.
+        let _ = launch;
+        return Ok(None);
+    }
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
+    {
     if matches!(
         requested,
         Some(GdnPrefillKernel::Mma | GdnPrefillKernel::MmaFused)
@@ -2732,8 +2779,10 @@ pub fn try_fused_vmajor_prefill_recurrence_cuda(
         candle_core::bail!("cuTile GDN prefill requires the cutile feature");
     }
     Ok(None)
+    }
 }
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 #[cfg(feature = "cuda")]
 #[repr(C)]
 struct GdnMmaParams {
@@ -2751,6 +2800,7 @@ struct GdnMmaParams {
     stream: i64,
 }
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 #[cfg(feature = "cuda")]
 #[repr(C)]
 struct GdnMmaFusedParams {
@@ -2770,6 +2820,7 @@ struct GdnMmaFusedParams {
     stream: i64,
 }
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 #[cfg(feature = "cuda")]
 fn mma_prefill_device_supported(dev: &candle_core::CudaDevice) -> Result<bool> {
     use std::collections::HashMap;
@@ -2800,6 +2851,7 @@ fn mma_prefill_device_supported(dev: &candle_core::CudaDevice) -> Result<bool> {
     Ok(supported)
 }
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 #[cfg(feature = "cuda")]
 fn mma_prefill_supported(launch: &FusedPrefillRecurrence<'_>) -> Result<bool> {
     if launch.batch_size == 0
@@ -2821,6 +2873,7 @@ fn mma_prefill_supported(launch: &FusedPrefillRecurrence<'_>) -> Result<bool> {
     mma_prefill_device_supported(launch.mixed_qkv.device().as_cuda_device()?)
 }
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 #[cfg(feature = "cuda")]
 #[derive(Clone, Copy)]
 enum GdnMmaInputKind {
@@ -2831,6 +2884,7 @@ enum GdnMmaInputKind {
     },
 }
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 #[cfg(feature = "cuda")]
 struct GdnMmaLaunch<'a> {
     inputs: [&'a Tensor; GDN_MMA_INPUT_COUNT],
@@ -2842,6 +2896,7 @@ struct GdnMmaLaunch<'a> {
     seq_len: usize,
 }
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 #[cfg(feature = "cuda")]
 impl GdnMmaLaunch<'_> {
     fn run(self, state: &mut Tensor) -> Result<Tensor> {
@@ -2866,6 +2921,7 @@ impl GdnMmaLaunch<'_> {
     }
 }
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 #[cfg(feature = "cuda")]
 impl candle_core::InplaceOp1 for GdnMmaLaunch<'_> {
     fn name(&self) -> &'static str {
@@ -2982,6 +3038,7 @@ impl candle_core::InplaceOp1 for GdnMmaLaunch<'_> {
     }
 }
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 #[cfg(feature = "cuda")]
 fn mma_prefill_recurrence(
     inputs: RecurrenceInputs<'_>,
@@ -3003,6 +3060,7 @@ fn mma_prefill_recurrence(
     .run(state)
 }
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 #[cfg(feature = "cuda")]
 fn mma_prefill(launch: FusedPrefillRecurrence<'_>) -> Result<FusedPrefillOutput> {
     let (_, seq_len, _) = launch.mixed_qkv.dims3()?;
@@ -3038,6 +3096,7 @@ fn mma_prefill(launch: FusedPrefillRecurrence<'_>) -> Result<FusedPrefillOutput>
     .map(FusedPrefillOutput::TokenMajor)
 }
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 #[cfg(feature = "cuda")]
 fn mma_fused_prefill(launch: FusedPrefillRecurrence<'_>) -> Result<FusedPrefillOutput> {
     let (_, seq_len, _) = launch.mixed_qkv.dims3()?;
@@ -3176,6 +3235,7 @@ fn cutile_prefill(launch: FusedPrefillRecurrence<'_>) -> Result<FusedPrefillOutp
     Ok(FusedPrefillOutput::TokenMajor(output))
 }
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 #[cfg(feature = "cuda")]
 fn flashinfer_sm90_prefill_dispatch(
     launch: FusedPrefillRecurrence<'_>,
