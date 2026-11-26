@@ -102,7 +102,7 @@ fn assert_close(actual: &Tensor, expected: &[f32], dtype: DType) -> Result<()> {
 
 fn check_backend(device: &Device) -> Result<()> {
     for dtype in [DType::F32, DType::F16, DType::BF16] {
-        for width in [3, OPTIMIZED_KERNEL_WIDTH] {
+        for width in [1, 3, OPTIMIZED_KERNEL_WIDTH, 9] {
             let projected_shape = (BATCH + 2, PROJECTION_PARTS * HIDDEN, SEQUENCE + 2);
             let projected = Tensor::from_vec(
                 values(
