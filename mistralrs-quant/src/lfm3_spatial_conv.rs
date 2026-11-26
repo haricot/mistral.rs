@@ -174,6 +174,7 @@ impl CustomOp2 for SpatialConv {
         ))
     }
 
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     #[cfg(feature = "cuda")]
     fn cuda_fwd(
         &self,
@@ -263,6 +264,50 @@ impl CustomOp2 for SpatialConv {
         };
         Ok((output, Shape::from((rows, self.channels))))
     }
+    #[cfg(all(feature = "cuda", feature = "dkr-static-closure-probe"))]
+    fn cuda_fwd(
+        &self,
+        projected:&candle_core::CudaStorage,
+        pl:&Layout,
+        weights:&candle_core::CudaStorage,
+        wl:&Layout,
+    )->Result<(candle_core::CudaStorage,Shape)>{
+        use crate::lfm3_dynamic as dkr;
+        use candle_core::cuda_backend::cudarc::driver::{DevicePtr,DevicePtrMut,DeviceSlice};
+        let device=projected.device();
+        let stream=device.cuda_stream();
+        let rows=pl.dims()[0];
+        let elements=dkr::checked_product(&[rows,self.channels])?;
+        let mut geometry=[0u32;5];
+        for (dst,src) in geometry.iter_mut().zip([self.height,self.width,self.merge,self.channels,self.kernel]){
+            *dst=u32::try_from(src).map_err(candle_core::Error::wrap)?;
+        }
+        macro_rules! launch{
+            ($ty:ty)=>{{
+                let x=projected.as_cuda_slice::<$ty>()?;
+                let w=weights.as_cuda_slice::<$ty>()?;
+                let spans=[dkr::span(pl,x.len())?,dkr::span(wl,w.len())?,elements];
+                let key=dkr::Key::spatial(projected.dtype(),&spans,elements)?;
+                let p=x.slice(pl.start_offset()..);
+                let w=w.slice(wl.start_offset()..);
+                let mut out=unsafe{device.alloc::<$ty>(elements)?};
+                let (pp,pg)=p.device_ptr(&stream);
+                let (wp,wg)=w.device_ptr(&stream);
+                let (op,og)=out.device_ptr_mut(&stream);
+                unsafe{dkr::spatial(key,device,[pp,wp,op],elements as u64,geometry)?;}
+                drop((pg,wg,og));
+                candle_core::CudaStorage::wrap_cuda_slice(out,device.clone())
+            }};
+        }
+        let output=match projected.dtype(){
+            DType::F32=>launch!(f32),
+            DType::F16=>launch!(half::f16),
+            DType::BF16=>launch!(half::bf16),
+            dtype=>candle_core::bail!("Unsupported LFM3 spatial convolution dtype {dtype:?}"),
+        };
+        Ok((output,Shape::from((rows,self.channels))))
+    }
+
 }
 
 pub fn gated_spatial_conv(
@@ -272,7 +317,20 @@ pub fn gated_spatial_conv(
     width: usize,
     merge: usize,
 ) -> Result<Tensor> {
-    let (channels, _, kernel, _) = weights.dims4()?;
+    let (channels, groups, kernel, kernel_width) = weights.dims4()?;
+    let (rows,projection)=projected.dims2()?;
+    let frame=height.checked_mul(width).filter(|&n|n>0&&n<=u32::MAX as usize)
+        .ok_or_else(||candle_core::Error::msg("LFM3 spatial frame overflow"))?;
+    if merge==0||height%merge!=0||width%merge!=0||rows==0||rows%frame!=0||
+        channels==0||channels.checked_mul(3)!=Some(projection)||groups!=1||
+        kernel==0||kernel!=kernel_width||
+        height.checked_add(kernel).is_none_or(|n|n>i32::MAX as usize)||
+        width.checked_add(kernel).is_none_or(|n|n>i32::MAX as usize)||
+        channels.checked_mul(kernel).and_then(|n|n.checked_mul(kernel)).is_none_or(|n|n>u32::MAX as usize)||
+        rows.checked_mul(projection).is_none()||
+        projected.dtype()!=weights.dtype()||!projected.device().same_device(weights.device()){
+        candle_core::bail!("Incompatible LFM3 spatial convolution geometry, dtype or device");
+    }
     let op = SpatialConv {
         height,
         width,
