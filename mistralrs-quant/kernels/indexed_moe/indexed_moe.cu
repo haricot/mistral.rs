@@ -1,5 +1,7 @@
 #include "../gguf/vecdot.cuh"
 
+#ifndef DKR_GGUF_INDEXED_DEVICE_ONLY
+
 extern "C" __global__ void quantize_q8_1(const float *__restrict__ x,
                                          void *__restrict__ vy, const int kx,
                                          const int kx_padded) {
@@ -132,6 +134,7 @@ extern "C" void launch_quantize_q8_1_f16(const void *x, void *vy, int kx,
   quantize_q8_1_f16<<<grid, block, 0, s>>>((const half *)x, vy, kx, kx_padded);
 }
 
+#endif
 template <int qk, int qi, typename block_q_t, int vdr,
           vec_dot_q_cuda_t vec_dot_q_cuda>
 __device__ void indexed_moe_forward(const void *__restrict__ all_weights,
@@ -140,7 +143,11 @@ __device__ void indexed_moe_forward(const void *__restrict__ all_weights,
                                     float *__restrict__ all_outputs,
                                     const int n, const int k, const int batch,
                                     const int topk, const int k_padded,
-                                    const int input_dim1) {
+                                    const int input_dim1
+#ifdef DKR_GGUF_INDEXED_DEVICE_ONLY
+                                    ,const int experts
+#endif
+                                    ) {
 
   const int current_batch = blockIdx.y;
   const int current_topk = blockIdx.z;
@@ -152,6 +159,13 @@ __device__ void indexed_moe_forward(const void *__restrict__ all_weights,
 
   const int input_idx = (input_dim1 == 1) ? current_batch : task_id;
   const unsigned int expert_id = indices[task_id];
+#ifdef DKR_GGUF_INDEXED_DEVICE_ONLY
+  if (expert_id >= (unsigned)experts) {
+    if (threadIdx.x == 0 && threadIdx.y == 0 && blockIdx.x < n)
+      all_outputs[(size_t)task_id*n+blockIdx.x] = __int_as_float(0x7fc00000);
+    return;
+  }
+#endif
 
   const size_t weight_block_size = sizeof(block_q_t);
   const size_t input_block_size = sizeof(block_q8_1);
@@ -212,6 +226,7 @@ __device__ void indexed_moe_forward(const void *__restrict__ all_weights,
   }
 }
 
+#ifndef DKR_GGUF_INDEXED_DEVICE_ONLY
 extern "C" __global__ void indexed_moe_forward_q4_0_q8_1(
     const void *__restrict__ all_weights, const void *__restrict__ all_inputs,
     const unsigned int *__restrict__ indices, float *__restrict__ all_outputs,
@@ -1013,3 +1028,4 @@ LAUNCH_DOWN_AGGREGATE(q3k_q8_1)
 LAUNCH_DOWN_AGGREGATE(q4k_q8_1)
 LAUNCH_DOWN_AGGREGATE(q5k_q8_1)
 LAUNCH_DOWN_AGGREGATE(q6k_q8_1)
+#endif // DKR_GGUF_INDEXED_DEVICE_ONLY

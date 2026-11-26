@@ -60,6 +60,7 @@ const PACKAGES: &[Package] = &[
     Package { name: "gguf-moe-compact", source: "gguf_moe_compact.cu", fast_math: false },
     Package { name: "gguf-glu-encode", source: "gguf_glu_encode.cu", fast_math: false },
     Package { name: "gguf-gated-mix", source: "gguf_gated_mix.cu", fast_math: false },
+    Package { name: "gguf-mmvq-fused", source: "gguf_mmvq_fused.cu", fast_math: false },
 ];
 
 fn parse_args() -> Result<(usize, PathBuf, String, bool, bool, Option<String>), Box<dyn std::error::Error>> {
@@ -371,7 +372,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     .current_dir(root).status()?;
                 if !status.success() { return Err(format!("GGUF MMQ shard packaging failed for {id}: {status}").into()); }
             }
-        } else if pkg.name == "gguf-mmvq" {
+        } else if matches!(pkg.name,"gguf-mmvq" | "gguf-mmvq-fused") {
             let kernels = root.join("mistralrs-quant/kernels");
             let watched = [
                 kernels.join("mmvq_gguf/mmvq_gguf.cu"),
@@ -379,8 +380,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 kernels.join("gguf/vecdot.cuh"),
                 kernels.join("gemv/row.cuh"),
             ];
-            for id in 1..=11 {
-                let define = format!("-DDKR_GGUF_MMVQ_IMAGE={id}");
+            let fused=pkg.name=="gguf-mmvq-fused";
+            let mut watched=watched.to_vec();
+            if fused {watched.push(kernels.join("indexed_moe/indexed_moe.cu"));}
+            for id in 1..=if fused {10}else{11} {
+                let define = if fused {format!("-DDKR_GGUF_MMVQ_FUSED_IMAGE={id}")}else{format!("-DDKR_GGUF_MMVQ_IMAGE={id}")};
                 let compiled = compile_ptx(&source, &work.join(pkg.name).join(format!("image-{id:02}")),
                     cc, pkg.fast_math, Some(&define), &watched)?;
                 let status = Command::new(&python).arg(&script)

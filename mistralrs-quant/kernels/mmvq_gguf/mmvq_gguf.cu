@@ -268,6 +268,8 @@ extern "C" void launch_mmvq_gguf_dense_pair(MixedMmvqArgs args, int format,
   }
 }
 
+#endif // historical mixed bodies
+#if !defined(DKR_GGUF_MMVQ_IMAGE) || defined(DKR_GGUF_MMVQ_FUSED_IMAGE)
 template <typename dst_t, int qk, int qi, typename block_q_t, int vdr,
           vec_dot_q_cuda_t vec_dot_q_cuda, int ncols_dst>
 static __device__ void mmvq_core_fused_glu_impl(
@@ -298,6 +300,9 @@ static __device__ void mmvq_core_fused_glu_impl(
 #pragma unroll
       for (int i = 0; i < rows_per_cuda_block; ++i) {
         const int row = row0 + i;
+#ifdef DKR_GGUF_MMVQ_FUSED_IMAGE
+        if (row >= nrows_x) continue;
+#endif
         const int weight_kbx = row * blocks_per_row_x + kbx;
         const block_q8_1 *yj = &y[j * stride_col_y + kby];
         tmp_gate[j][i] += vec_dot_q_cuda(
@@ -646,6 +651,7 @@ dkr_mmvq_##tag##_##dtype##_prefetch(const void* w, const void* y, T* dst, int k)
   DKR_PREFETCH_ENTRY(tag, weight, qk, qi, vdr, dot, f16, half) \
   DKR_PREFETCH_ENTRY(tag, weight, qk, qi, vdr, dot, bf16, __nv_bfloat16) \
   DKR_PREFETCH_ENTRY(tag, weight, qk, qi, vdr, dot, f32, float)
+#ifndef DKR_GGUF_MMVQ_FUSED_IMAGE
 #if DKR_GGUF_MMVQ_IMAGE == 1
 MMVQ_PLAIN_BATCH_SET(q4_0, block_q4_0, QK4_0, QI4_0, VDR_Q4_0_Q8_1_MMVQ, vec_dot_q4_0_q8_1)
 DKR_PREFETCH_SET(q4_0, block_q4_0, QK4_0, QI4_0, VDR_Q4_0_Q8_1_MMVQ, vec_dot_q4_0_q8_1)
@@ -684,6 +690,7 @@ DKR_PREFETCH_SET(q5_k, block_q5_K, QK_K, QI5_K, VDR_Q5_K_Q8_1_MMVQ, vec_dot_q5_K
 MMVQ_PLAIN_BATCH_SET(q6_k, block_q6_K, QK_K, QI6_K, VDR_Q6_K_Q8_1_MMVQ, vec_dot_q6_K_q8_1)
 DKR_PREFETCH_SET(q6_k, block_q6_K, QK_K, QI6_K, VDR_Q6_K_Q8_1_MMVQ, vec_dot_q6_K_q8_1)
 #endif
+#endif // DKR_GGUF_MMVQ_FUSED_IMAGE
 #endif // DKR_GGUF_MMVQ_IMAGE
 
 #ifndef DKR_GGUF_MMVQ_IMAGE
