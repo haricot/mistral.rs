@@ -37,7 +37,7 @@ CHUNK(chunk32k64,32,64,false)
 CHUNK(chunk64k64,64,64,false)
 CHUNK(chunk32k128,32,128,false)
 CHUNK(vmchunk32,32,128,true)
-#if DKR_GDN_LARGE_CHUNK
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 700
 CHUNK(chunk64k128,64,128,false)
 CHUNK(vmchunk64,64,128,true)
 #endif
