@@ -6064,13 +6064,13 @@ pub(crate) fn try_cuda_qk_rms_norm_rope(
                     unsafe{plan.with_prevalidated_launch(|fun,cfg|{
                         let mut builder=stream.launch_builder(fun);
                         let a0=q_ptr as u64;
-                        let a1=k_ptr as u64;
+                        let a1=if k_heads==0{q_ptr as u64}else{k_ptr as u64};
                         let a2=q_weight_ptr as u64;
                         let a3=k_weight_ptr as u64;
                         let a4=cos_ptr as u64;
                         let a5=sin_ptr as u64;
                         let a6=q_out_ptr as u64;
-                        let a7=k_out_ptr as u64;
+                        let a7=if k_heads==0{q_out_ptr as u64}else{k_out_ptr as u64};
                         let a8=q_packed[0];
                         let a9=q_packed[1];
                         let a10=k_packed[0];
@@ -6593,14 +6593,14 @@ pub(crate) fn try_cuda_qk_rms_norm_rope_positions(
                     unsafe{plan.with_prevalidated_launch(|fun,cfg|{
                         let mut builder=stream.launch_builder(fun);
                         let a0=q_ptr as u64;
-                        let a1=k_ptr as u64;
+                        let a1=if k_heads==0{q_ptr as u64}else{k_ptr as u64};
                         let a2=q_weight_ptr as u64;
                         let a3=k_weight_ptr as u64;
                         let a4=cos_ptr as u64;
                         let a5=sin_ptr as u64;
                         let a6=positions_ptr as u64;
                         let a7=q_out_ptr as u64;
-                        let a8=k_out_ptr as u64;
+                        let a8=if k_heads==0{q_out_ptr as u64}else{k_out_ptr as u64};
                         let a9=q_packed[0];
                         let a10=q_packed[1];
                         let a11=k_packed[0];
@@ -6980,7 +6980,7 @@ pub(crate) fn try_cuda_qkv_rms_norm_rope_positions(
                     unsafe{plan.with_prevalidated_launch(|fun,cfg|{
                         let mut builder=stream.launch_builder(fun);
                         let a0=q_ptr as u64;
-                        let a1=k_ptr as u64;
+                        let a1=if k_heads==0{q_ptr as u64}else{k_ptr as u64};
                         let a2=v_ptr as u64;
                         let a3=q_weight_ptr as u64;
                         let a4=k_weight_ptr as u64;

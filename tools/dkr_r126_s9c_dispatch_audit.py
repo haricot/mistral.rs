@@ -49,6 +49,8 @@ CASES = {
     "gguf_raw_decode": ("gguf/cuda.rs", "super::fast_mmvq::typed_fused_moe_decode_raw("),
     "gguf_raw_reduce": ("gguf/cuda.rs", "crate::moe::moe_weighted_reduce_raw("),
     "gguf_typed_reduce": ("gguf/cuda.rs", "crate::moe::moe_weighted_reduce(&inputs.reshape("),
+    "rotary_no_ffi_module": ("rotary/mod.rs", '#[cfg(all(feature = "cuda",not(feature = "dkr-static-closure-probe")))]\nmod ffi;'),
+    "rotary_typed_dispatch": ("rotary/mod.rs", "return super::dynamic::launch(typed_key"),
 }
 FORCED = ("quantized_gemv_dynamic.rs", "quantized_gemm_dynamic.rs",
           "nvfp4/gemv_dynamic.rs", "routed_gemv/dynamic.rs")

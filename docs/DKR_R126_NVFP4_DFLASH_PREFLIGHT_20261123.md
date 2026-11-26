@@ -1571,3 +1571,38 @@ Expected 291 guarded = 285 local + 6 module, zero unguarded,
 guard, duplicate declaration, comment-only guard and unguarded call.
 No new kernel profiles, no CUDA build, no changes to cache or lock.
 Still source-level evidence only.
+
+
+## R1.26/S9C.2C — Rotary, Normalization & Preparation (source)
+
+B5.1 user validation: 291 guarded FFI references, zero unguarded,
+46 dispatch markers PASS. Reuse seven existing typed packages:
+rounded-rope, add-rms-norm, rms-variants, reduce-norm, gated-add,
+indexed-copy, input-pad. LayerNorm and ordinary RMSNorm remain generic
+Candle operations, not new DKR-specialized profiles. New attention-prep
+family: 3 dtype shards, 88 profiles (54 fused QK/QKV norm+RoPE, 3 sincos,
+6 in-place rotary, 18 strided RMSNorm, 6 GDN gated RMSNorm, 1 pack).
+No new architecture-dependent Candle source. Preserve historical
+attention prep device bodies and six power-of-two norm block sizes;
+in-place rotary fixes block=256 instead of historical variable block
+up to 512 (performance unqualified). Indexed cache out-of-bounds
+writes NaN to affected rotary outputs instead of reading OOB.
+Strides bounded to U32 and packed in U64 pairs, max 29 arguments,
+no increase to runtime argument ceiling 32. Q-only inactive K slots
+use dummy non-null Q addresses with k_heads=0. Logical shape and
+physical span validation, guards preserved through launches.
+Strided RMSNorm uses existing attention write_norm_row body, not a
+claim of bit-exact historical strided kernel parity. Plain GDN gated
+norm uses extracted common device header: generic, warp 128-wide,
+aligned rows4. Quantized FP8 gated output and fused recurrence remain
+in S9C.2D. Input packing uses 24 explicit row pointers per launch
+instead of historical 64-row by-value pointer struct; no tensor stack
+or host-to-device pointer table transfer; launch-count regression
+possible for >24 rows. Existing packing offset test extended at
+chunk boundaries. Explicit negative cfg on migrated legacy symbols.
+Projected upper bound 526 physical / 3849 logical; requires at
+least 14 physical savings if upper bound realized; 247 logical
+headroom. Source audit checks plan caps, reused family registration,
+and negative guards; not a real full catalogue density inventory.
+No CUDA compile, no Cargo.lock or Candle changes, no cache deletion.
+GPU tests staged for grouped S10, no numerical claims yet.

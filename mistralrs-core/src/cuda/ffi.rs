@@ -46,6 +46,7 @@ extern "C" {
         row_elements: i64,
         stream: i64,
     ) -> i32;
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn pack_completion_input_u32(
         host: *const c_void,
         staged_rows: *const *const c_void,
@@ -264,6 +265,7 @@ extern "C" {
         norm_eps: f32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn rms_norm_strided_4d_f32(
         x: *const c_void,
         weight: *const c_void,
@@ -279,6 +281,7 @@ extern "C" {
         eps: f32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn rms_norm_strided_4d_f16(
         x: *const c_void,
         weight: *const c_void,
@@ -294,6 +297,7 @@ extern "C" {
         eps: f32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn rms_norm_strided_4d_bf16(
         x: *const c_void,
         weight: *const c_void,
@@ -309,6 +313,7 @@ extern "C" {
         eps: f32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn qk_rms_norm_rope(
         q: *const c_void,
         k: *const c_void,
@@ -341,6 +346,7 @@ extern "C" {
         stream: i64,
     );
 
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn qk_rms_norm_rope_positions(
         q: *const c_void,
         k: *const c_void,
@@ -373,6 +379,7 @@ extern "C" {
         stream: i64,
     );
 
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn rope_sincos_positions(
         positions: *const c_void,
         inv_freq: *const c_void,
@@ -384,6 +391,7 @@ extern "C" {
         stream: i64,
     );
 
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn qkv_rms_norm_rope_positions(
         q: *const c_void,
         k: *const c_void,
@@ -1185,6 +1193,7 @@ extern "C" {
         dtype: i32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn gdn_rmsnorm_gated(
         x: *const c_void,
         gate: *const c_void,

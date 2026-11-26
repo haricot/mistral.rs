@@ -21,6 +21,7 @@ pub(crate) fn strides(s:&[usize])->Result<[u64;2]>{
     Ok([s[0] as u64 | ((s[1] as u64)<<32),s[2] as u64 | ((s[3] as u64)<<32)])
 }
 pub(crate) fn geometry(batch:usize,q:usize,k:usize,seq:usize,head:usize,triple:bool)->Result<(u32,u32)>{
+    if batch==0||q==0||seq==0||(triple&&k==0){candle_core::bail!("empty attention geometry");}
     let heads=k.checked_mul(if triple{2}else{1}).and_then(|v|v.checked_add(q));
     let rows=heads.and_then(|v|v.checked_mul(batch)).and_then(|v|v.checked_mul(seq))
         .filter(|&v|v>0&&v<=i32::MAX as usize).ok_or_else(||candle_core::Error::msg("attention grid overflow"))?;
@@ -63,7 +64,7 @@ pub(crate) fn with_plan<R>(kind:Kind,dtype:DType,spans:&[usize],grid:u32,block:u
     launch:impl FnOnce(&PrevalidatedLaunchPlan)->Result<R>)->Result<R>{
     let dtype=match dtype{DType::F16=>ElementType::F16,DType::BF16=>ElementType::Bf16,DType::F32=>ElementType::F32,
         _=>candle_core::bail!("attention prep dtype")};
-    if spans.len()>12||spans.contains(&0)||grid==0{candle_core::bail!("attention prep ABI span");}
+    if spans.len()>12||spans.contains(&0)||grid==0||grid>i32::MAX as u32{candle_core::bail!("attention prep ABI span");}
     let mut packed=[1;12];packed[..spans.len()].copy_from_slice(spans);
     let key=Key{kind,dtype,spans:packed,grid,block};
     PLANS.with(|cache|cache.borrow_mut().with_plan(key,device,||prepare(key,device),launch))
@@ -183,4 +184,61 @@ pub(crate) fn gdn_norm(device:&Device,dt:DType,spans:[usize;4],pointers:[u64;4],
             b.arg(&eps).arg(&sigmoid);b.launch(cfg)?;Ok(())
         })}.map_err(|e|candle_core::Error::msg(e.to_string()))
     }))
+}
+
+#[cfg(test)]
+mod gpu_tests{
+    use super::*;
+    use candle_core::{Tensor,D};
+    #[test]
+    #[ignore="requires attention-prep catalogue and CUDA"]
+    fn dkr_attention_prep_strided_norm_gpu()->Result<()>{
+        let _evidence=mistralrs_kernel_runtime::RuntimeEvidenceGuard;
+        let dev=Device::new_cuda(0)?;
+        for dt in [DType::F16,DType::BF16,DType::F32]{
+            for width in [7usize,64,80,128,256,513]{
+                let x=Tensor::from_vec((0..2*3*4*width).map(|i|((i%19)as f32-9.)/8.).collect::<Vec<_>>(),(2,3,4,width),&dev)?
+                    .to_dtype(dt)?.transpose(1,2)?;
+                let w=Tensor::ones(width,dt,&dev)?;
+                let y=crate::ops::try_cuda_rms_norm_strided_4d(&x,&w,1e-5)?.unwrap().to_dtype(DType::F32)?;
+                let xf=x.to_dtype(DType::F32)?;
+                let reference=xf.broadcast_div(&(xf.sqr()?.mean_keepdim(D::Minus1)?+1e-5f64)?.sqrt()?)?;
+                let delta=(y-reference)?.abs()?.max_all()?.to_scalar::<f32>()?;
+                let tol=match dt{DType::F32=>2e-5,DType::F16=>2e-3,_=>2e-2};
+                assert!(delta<=tol,"{dt:?} width={width}: {delta}");
+            }
+        }
+        Ok(())
+    }
+    #[test]
+    #[ignore="requires attention-prep catalogue and CUDA"]
+    fn dkr_attention_prep_sincos_gpu()->Result<()>{
+        let _evidence=mistralrs_kernel_runtime::RuntimeEvidenceGuard;
+        let dev=Device::new_cuda(0)?;
+        let positions=Tensor::from_vec(vec![0u32,7,37,1024],4,&dev)?;
+        let inv=Tensor::from_vec(vec![1f32,0.5,0.125,0.03125],4,&dev)?;
+        let (c,s)=crate::ops::try_cuda_rope_sincos_positions(&positions,&inv,DType::F32)?.unwrap();
+        let angles=positions.to_dtype(DType::F32)?.unsqueeze(1)?.broadcast_mul(&inv.unsqueeze(0)?)?;
+        let cd=(c-angles.cos()?)?.abs()?.max_all()?.to_scalar::<f32>()?;
+        let sd=(s-angles.sin()?)?.abs()?.max_all()?.to_scalar::<f32>()?;
+        assert!(cd<2e-5&&sd<2e-5,"sincos deltas {cd} {sd}");
+        Ok(())
+    }
+    #[test]
+    #[ignore="requires attention-prep catalogue and CUDA"]
+    fn dkr_attention_prep_qk_indexed_gpu()->Result<()>{
+        let _evidence=mistralrs_kernel_runtime::RuntimeEvidenceGuard;
+        let dev=Device::new_cuda(0)?;
+        let positions=Tensor::from_vec(vec![0u32,1,3,7],4,&dev)?;
+        let cos=Tensor::ones((8,16),DType::F32,&dev)?;
+        let sin=Tensor::zeros((8,16),DType::F32,&dev)?;
+        let w=Tensor::ones(64,DType::F32,&dev)?;
+        let x=Tensor::from_vec((0..2*2*3*64).map(|i|((i%13)as f32-6.)/8.).collect::<Vec<_>>(),(2,2,3,64),&dev)?.transpose(1,2)?;
+        let y=crate::ops::try_cuda_qk_rms_norm_rope_positions(&x,None,&w,None,1e-5,1e-5,
+            &cos,&sin,&positions,true,crate::ops::QkRopeOutputLayout::HeadsFirst)?.unwrap().0;
+        let expected=x.broadcast_div(&(x.sqr()?.mean_keepdim(D::Minus1)?+1e-5f64)?.sqrt()?)?;
+        let delta=(y-expected)?.abs()?.max_all()?.to_scalar::<f32>()?;
+        assert!(delta<2e-5,"indexed Q-only delta {delta}");
+        Ok(())
+    }
 }

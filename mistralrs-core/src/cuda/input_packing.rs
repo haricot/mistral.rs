@@ -268,7 +268,7 @@ mod tests {
     #[ignore = "requires CUDA"]
     fn packs_current_and_staged_tokens_in_one_launch() -> Result<()> {
         let device = Device::new_cuda(0)?;
-        for batch in [1usize, 64, 65] {
+        for batch in [1usize, 23, 24, 25, 48, 49, 64, 65] {
             let host_values = (0..(batch + 2) * 2)
                 .map(|value| u32::try_from(value).unwrap())
                 .collect::<Vec<_>>();
