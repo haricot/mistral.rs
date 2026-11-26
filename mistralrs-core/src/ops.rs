@@ -4008,6 +4008,7 @@ pub fn cuda_apply_sparse_penalties_f32(
             },
         )?;
     }
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     #[cfg(not(feature = "dkr-logits"))]
     unsafe {
         ffi::apply_sparse_penalties_f32(
@@ -4180,6 +4181,7 @@ pub fn cuda_apply_sparse_logits_bias_f32(
             },
         )?;
     }
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     #[cfg(not(feature = "dkr-logits"))]
     unsafe {
         ffi::apply_sparse_logits_bias_f32(
@@ -4211,6 +4213,7 @@ pub fn cuda_apply_sparse_logits_bias_f32(
 #[cfg(all(feature = "cuda", feature = "dkr-causal-mask"))]
 pub(crate) use crate::cuda::causal_mask_dynamic::cuda_apply_causal_mask_f32;
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 #[cfg(all(feature = "cuda", not(feature = "dkr-causal-mask")))]
 pub(crate) fn cuda_apply_causal_mask_f32(
     scores: &Tensor,
@@ -4704,6 +4707,7 @@ pub fn cuda_rms_norm_residual(
                     },
                 )?;
             }
+            #[cfg(not(feature = "dkr-static-closure-probe"))]
             #[cfg(not(feature = "dkr-rms-variants"))]
             unsafe {
                 ffi::$ffi_fn(
@@ -4747,6 +4751,7 @@ pub fn cuda_rms_norm_residual(
 #[cfg(all(feature = "cuda", feature = "dkr-add-rms-norm"))]
 pub use crate::cuda::add_rms_norm_dynamic::cuda_add_rms_norm;
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 #[cfg(all(feature = "cuda", not(feature = "dkr-add-rms-norm")))]
 pub fn cuda_add_rms_norm(
     input: &Tensor,
@@ -5747,6 +5752,7 @@ pub fn cuda_rms_norm_residual_then_rms_norm(
                     },
                 )?;
             }
+            #[cfg(not(feature = "dkr-static-closure-probe"))]
             #[cfg(not(feature = "dkr-rms-variants"))]
             unsafe {
                 ffi::$ffi_fn(
