@@ -1221,6 +1221,59 @@ pub trait DeviceMappedModelLoader {
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>>;
 
+    /// Config-derived facts are available before model allocation. This is
+    /// deliberately partial: checkpoint layout, per-layer operations and
+    /// allowed request paths must be resolved by the concrete loader.
+    #[cfg(feature = "dkr-static-closure-probe")]
+    fn dkr_config_capabilities(
+        &self,
+        id: &str,
+        role: &str,
+        config: &str,
+        activation_dtype: DType,
+    ) -> Result<mistralrs_kernel_runtime::model_scope::CapabilityComponent> {
+        use mistralrs_kernel_runtime::{digest, model_scope::CapabilityComponent};
+        use serde_json::json;
+        use std::collections::BTreeMap;
+        let model = self.model_config(config)?;
+        let layers = model.num_layers();
+        anyhow::ensure!(layers > 0 && layers <= 65536, "invalid model layer count");
+        let layer_facts: Vec<_> = (0..layers).map(|i| {
+            let paged = model.layer_has_paged_kv_cache(i);
+            json!({
+                "layer": i,
+                "paged_kv": paged,
+                "attention": if paged {
+                    json!({
+                        "q_heads": model.num_attn_heads_for_layer(i),
+                        "kv_heads": model.num_kv_heads_for_layer(i),
+                        "k_head_dim": model.k_head_dim_for_layer(i),
+                        "v_head_dim": model.v_head_dim_for_layer(i),
+                        "sliding_window": model.sliding_window_for_layer(i),
+                        "owns_kv": model.uses_own_kv_cache_for_layer(i),
+                        "config_kv_layout": format!("{:?}", model.kv_cache_layout_for_layer(i)),
+                    })
+                } else { serde_json::Value::Null },
+            })
+        }).collect();
+        let facts = BTreeMap::from([
+            ("num_layers".into(), json!(layers)),
+            ("max_seq_len".into(), json!(model.max_seq_len())),
+            ("hidden_size".into(), json!(model.hidden_size())),
+            ("selected_activation_dtype".into(), json!(format!("{activation_dtype:?}").to_ascii_lowercase())),
+            ("layers".into(), json!(layer_facts)),
+            ("metadata_source".into(), json!("normalized_model_config_only")),
+        ]);
+        Ok(CapabilityComponent {
+            id: id.into(), role: role.into(), metadata_sha256: digest(config.as_bytes()),
+            facts, requirements: Vec::new(),
+            unresolved: ["checkpoint_tensor_metadata", "actual_device_and_cache_layout",
+                         "layer_operation_and_quantization_inventory", "auxiliary_and_request_paths"]
+                .into_iter().map(str::to_owned).collect(),
+        })
+    }
+
+
     fn supports_checkpoint_weight_inventory(&self, _config: &str) -> Result<bool> {
         Ok(true)
     }
