@@ -17,16 +17,33 @@ struct MoeDecodeArgs {
   int topk;
   int input_stride;
   int activation;
+#ifdef DKR_GGUF_MOE_DECODE_IMAGE
+  int experts;
+#endif
 };
 
 template <int qk, int qi, typename Weight, int vdr, vec_dot_q_cuda_t dot,
           bool gate>
-__global__ void moe_decode_prefetch(MoeDecodeArgs args) {
+#ifdef DKR_GGUF_MOE_DECODE_IMAGE
+__device__ __forceinline__ void
+#else
+__global__ void
+#endif
+moe_decode_prefetch(MoeDecodeArgs args) {
   const int blocks_per_row = args.columns / qk;
   constexpr int blocks_per_iteration = vdr * WARP_SIZE / qi;
   const int lane = threadIdx.x;
   const int row = (blockIdx.x * MOE_WARPS + threadIdx.y) * MOE_ROWS_PER_WARP;
   const int slot = blockIdx.z * args.topk + blockIdx.y;
+#ifdef DKR_GGUF_MOE_DECODE_IMAGE
+  if(args.indices[slot]>=(unsigned)args.experts){
+    if(lane==0)for(int r=0;r<MOE_ROWS_PER_WARP&&row+r<args.rows;++r){
+      if constexpr(gate)args.output[(size_t)slot*args.rows+row+r]=__int_as_float(0x7fc00000);
+      else atomicAdd(args.output+(size_t)blockIdx.z*args.rows+row+r,__int_as_float(0x7fc00000));
+    }
+    return;
+  }
+#endif
   const size_t expert_offset =
       (size_t)args.indices[slot] * args.rows * blocks_per_row;
   const auto *weight =
@@ -85,6 +102,7 @@ __global__ void moe_decode_prefetch(MoeDecodeArgs args) {
   }
 }
 
+#ifndef DKR_GGUF_MOE_DECODE_IMAGE
 #define MOE_PREFETCH_LAUNCHERS(TAG, DTYPE, ID, QK, QI, WEIGHT, VDR, DOT)       \
   extern "C" void launch_moe_gemv_fused_gate_up_##TAG##_prefetch(              \
       const void *gate, const void *up, const void *input,                     \
@@ -120,6 +138,7 @@ __global__ void moe_decode_prefetch(MoeDecodeArgs args) {
   }
 
 GGUF_VECTOR_FORMATS(MOE_PREFETCH_LAUNCHERS)
+#endif
 
 template <int Bytes>
 __device__ __forceinline__ void copy_moe_stage(unsigned char *dst,
@@ -141,7 +160,12 @@ __device__ __forceinline__ void copy_moe_stage(unsigned char *dst,
 
 template <int QK, int QI, typename Weight, int VDR, vec_dot_q_cuda_t Dot,
           bool Gate, int RowsPerWarp, int Bytes>
-__global__ void moe_decode_staged(MoeDecodeArgs args) {
+#ifdef DKR_GGUF_MOE_DECODE_IMAGE
+__device__ __forceinline__ void
+#else
+__global__ void
+#endif
+moe_decode_staged(MoeDecodeArgs args) {
   extern __shared__ __align__(16) unsigned char shared[];
   constexpr int tile_rows = MOE_WARPS * RowsPerWarp;
   const int blocks_per_row = args.columns / QK;
@@ -151,6 +175,16 @@ __global__ void moe_decode_staged(MoeDecodeArgs args) {
   const int panel_bytes = valid_rows * row_bytes;
   const int up_offset = (tile_rows * row_bytes + 15) / 16 * 16;
   const int slot = blockIdx.z * args.topk + blockIdx.y;
+#ifdef DKR_GGUF_MOE_DECODE_IMAGE
+  if(args.indices[slot]>=(unsigned)args.experts){
+    const int r=threadIdx.y*RowsPerWarp;
+    if(threadIdx.x==0)for(int j=0;j<RowsPerWarp&&r+j<valid_rows;++j){
+      if constexpr(Gate)args.output[(size_t)slot*args.rows+first_row+r+j]=__int_as_float(0x7fc00000);
+      else atomicAdd(args.output+(size_t)blockIdx.z*args.rows+first_row+r+j,__int_as_float(0x7fc00000));
+    }
+    return;
+  }
+#endif
   const size_t expert_offset =
       size_t(args.indices[slot]) * args.rows * blocks_per_row;
   const auto *weight = static_cast<const Weight *>(args.weights) +
@@ -223,6 +257,7 @@ __global__ void moe_decode_staged(MoeDecodeArgs args) {
   }
 }
 
+#ifndef DKR_GGUF_MOE_DECODE_IMAGE
 template <int QK, int QI, typename Weight, int VDR, vec_dot_q_cuda_t Dot,
           bool Gate, int RowsPerWarp, int Bytes>
 bool launch_moe_staged_tile(MoeDecodeArgs args, cudaStream_t stream) {
@@ -273,3 +308,4 @@ extern "C" bool launch_gguf_moe_staged(const MoeDecodeArgs *args, int format,
   }
 #undef STAGED_FORMAT
 }
+#endif

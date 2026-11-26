@@ -215,6 +215,19 @@ impl PreparedKernel {
             .context("persistent grid overflow")
     }
 
+    /// For a typed kernel whose manifest declares a dynamic shared-memory
+    /// ceiling, bind the shape-derived launch size rather than the ceiling.
+    /// Safety: the caller must prove the kernel's actual shared-memory
+    /// accesses fit in `bytes` for this exact validated launch signature.
+    pub unsafe fn prevalidate_launch_with_shared(
+        self: &Arc<Self>, request: &LaunchRequest, device: &Device, bytes: u32,
+    ) -> Result<PrevalidatedLaunchPlan> {
+        let mut config = self.launch_config(request, device)?;
+        ensure!(bytes <= self.manifest.shared_mem_bytes, "dynamic shared size exceeds manifest ceiling");
+        config.shared_mem_bytes = bytes;
+        Ok(PrevalidatedLaunchPlan {kernel:Arc::clone(self),config})
+    }
+
     pub fn prevalidate_launch(
         self: &Arc<Self>,
         request: &LaunchRequest,

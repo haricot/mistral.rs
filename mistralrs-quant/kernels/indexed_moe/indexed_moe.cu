@@ -489,6 +489,8 @@ extern "C" void launch_indexed_moe_forward_q8_1_q8_1(
       k_padded, input_dim1);
 }
 
+#endif // historical indexed launchers
+#if !defined(DKR_GGUF_INDEXED_DEVICE_ONLY) || defined(DKR_GGUF_MOE_DECODE_IMAGE)
 static __device__ __forceinline__ float gelu_pytorch_tanh(float x) {
   float x3 = x * x * x;
   float inner = 0.7978845608028654f * (x + 0.044715f * x3);
@@ -665,7 +667,11 @@ __device__ void moe_gemv_fused_gate_up_impl(
     const unsigned int *__restrict__ indices, float *__restrict__ all_outputs,
     const int n, const int k, const int batch, const int topk,
     const int k_padded,
-    const int act_type) { // 0=gelu_pytorch_tanh, 1=silu
+    const int act_type
+#ifdef DKR_GGUF_MOE_DECODE_IMAGE
+    ,const int experts
+#endif
+    ) { // 0=gelu_pytorch_tanh, 1=silu
 
   constexpr int ROWS_PER_WARP = 2;
   constexpr int NWARPS = 4;
@@ -681,6 +687,13 @@ __device__ void moe_gemv_fused_gate_up_impl(
 
   const int task_id = current_batch * topk + current_topk;
   const unsigned int expert_id = indices[task_id];
+#ifdef DKR_GGUF_MOE_DECODE_IMAGE
+  if(expert_id>=(unsigned)experts){
+    if(threadIdx.x==0)for(int r=0;r<ROWS_PER_WARP && row0+r<n;++r)
+        all_outputs[(size_t)task_id*n+row0+r]=__int_as_float(0x7fc00000);
+    return;
+  }
+#endif
 
   const size_t weight_block_size = sizeof(block_q_t);
   const size_t input_block_size = sizeof(block_q8_1);
@@ -737,7 +750,11 @@ __device__ void moe_gemv_down_aggregate_impl(
     const unsigned int *__restrict__ indices,
     const float *__restrict__ topk_weights_ptr, float *__restrict__ all_outputs,
     const int n, const int k, const int batch, const int topk,
-    const int k_padded) {
+    const int k_padded
+#ifdef DKR_GGUF_MOE_DECODE_IMAGE
+    ,const int experts
+#endif
+    ) {
 
   constexpr int ROWS_PER_WARP = 4;
   constexpr int NWARPS = 4;
@@ -753,6 +770,13 @@ __device__ void moe_gemv_down_aggregate_impl(
 
   const int task_id = current_batch * topk + current_topk;
   const unsigned int expert_id = indices[task_id];
+#ifdef DKR_GGUF_MOE_DECODE_IMAGE
+  if(expert_id>=(unsigned)experts){
+    if(threadIdx.x==0)for(int r=0;r<ROWS_PER_WARP && row0+r<n;++r)
+        atomicAdd(all_outputs+(size_t)current_batch*n+row0+r,__int_as_float(0x7fc00000));
+    return;
+  }
+#endif
   const float tw = topk_weights_ptr[task_id];
 
   // Weight layout: [num_experts, n, k_blocks]
@@ -797,6 +821,9 @@ __device__ void moe_gemv_down_aggregate_impl(
   }
 }
 
+
+#endif // fused MoE device bodies
+#ifndef DKR_GGUF_INDEXED_DEVICE_ONLY
 #define FUSED_GATE_UP_KERNEL(suffix, qk_val, qi_val, block_type, vdr_val,      \
                              vd_fn)                                            \
   extern "C" __global__ void moe_gemv_fused_gate_up_##suffix(                  \
