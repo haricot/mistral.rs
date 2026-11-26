@@ -39,6 +39,7 @@ CASES = {
     "gguf_fused_decode": ("routed_moe/mod.rs", "return crate::gguf::fast_mmvq::typed_fused_moe_decode("),
     "gguf_fused_decode_stage": ("gguf/mmvq_dynamic.rs", "p.prevalidate_launch_with_shared(&req,dev,shared as u32)"),
     "gguf_no_ffi_module": ("gguf/mod.rs", '#[cfg(all(feature = "cuda", not(feature = "dkr-static-closure-probe")))]\nmod ffi;'),
+    "gguf_no_packed_affine_module": ("gguf/mod.rs", '#[cfg(all(feature = "cuda", has_marlin_kernels, not(feature = "dkr-static-closure-probe")))]\nmod packed_affine;'),
     "gguf_lora_typed": ("gguf/cuda.rs", "super::fast_mmvq::typed_lora_projection("),
     "gguf_lora_gate_dispatch": ("gguf/cuda.rs", "typed_lora_projection(self.weights.gate,Some(self.weights.up)"),
     "gguf_lora_down_dispatch": ("gguf/cuda.rs", "typed_lora_projection(self.weights.down,None"),

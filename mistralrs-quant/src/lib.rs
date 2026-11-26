@@ -180,11 +180,11 @@ impl<T: QuantizedWeightSource + ?Sized> QuantizedWeightSource for Arc<T> {
 /// Subtract from the KV cache budget so the repack is planned for rather than corrected after.
 /// Returns 0 when the feature is off, which is the default.
 pub fn gguf_affine_budget_bytes(device: &Device, dtype: DType) -> usize {
-    #[cfg(all(feature = "cuda", has_marlin_kernels))]
+    #[cfg(all(feature = "cuda", has_marlin_kernels, not(feature = "dkr-static-closure-probe")))]
     {
         gguf::gguf_affine_budget_bytes(device, dtype)
     }
-    #[cfg(not(all(feature = "cuda", has_marlin_kernels)))]
+    #[cfg(not(all(feature = "cuda", has_marlin_kernels, not(feature = "dkr-static-closure-probe"))))]
     {
         let _ = (device, dtype);
         0
@@ -192,11 +192,11 @@ pub fn gguf_affine_budget_bytes(device: &Device, dtype: DType) -> usize {
 }
 
 pub fn gguf_affine_reserved_bytes(device: &Device, dtype: DType) -> usize {
-    #[cfg(all(feature = "cuda", has_marlin_kernels))]
+    #[cfg(all(feature = "cuda", has_marlin_kernels, not(feature = "dkr-static-closure-probe")))]
     {
         gguf::gguf_affine_reserved_bytes(device, dtype)
     }
-    #[cfg(not(all(feature = "cuda", has_marlin_kernels)))]
+    #[cfg(not(all(feature = "cuda", has_marlin_kernels, not(feature = "dkr-static-closure-probe"))))]
     {
         let _ = (device, dtype);
         0

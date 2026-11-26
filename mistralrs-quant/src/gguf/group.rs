@@ -27,7 +27,7 @@ impl GgufMatMul {
             return Ok(None);
         };
         // A member with a prepared packed-affine kernel is faster on its own forward.
-        #[cfg(all(feature = "cuda", has_marlin_kernels))]
+        #[cfg(all(feature = "cuda", has_marlin_kernels, not(feature = "dkr-static-closure-probe")))]
         if xs.device().is_cuda() && xs.rank() > 0 {
             let tokens = xs.elem_count() / xs.dim(candle_core::D::Minus1)?.max(1);
             if tokens >= super::GGUF_AFFINE_MIN_BATCH

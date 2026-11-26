@@ -1551,3 +1551,23 @@ Conservative cumulative upper 523 manifests / 3761 profiles before
 compaction; 335 logical headroom. Actual final catalogue must save
 at least 11 manifests if upper bound realized, preserve limits
 512/4096; no promotion based only on synthetic evidence.
+
+
+### S9C.2B5.1 — explicit Packed Affine exclusion
+
+Local B5: both synthetic package tests and plans PASS, 45 dispatch
+markers PASS. Residual audit correctly flagged six calls in
+packed_affine.rs. Build script already returns before emitting
+has_marlin_kernels in closure probe (and ordinary SM61 never enables
+Marlin), but this was not an explicit negative feature guard.
+Add the negative probe cfg consistently to module declaration,
+fields, reservation, dispatch, group admission and public budget
+wrappers; the latter return zero in probe. Normal build conditions
+remain equivalent. Audit now checks both unique module declarations
+with exact negative cfg, counts rather than discards their FFI refs,
+and separates module-guarded from local-guarded references.
+Expected 291 guarded = 285 local + 6 module, zero unguarded,
+46 global source markers. Negative synthetic tests cover missing
+guard, duplicate declaration, comment-only guard and unguarded call.
+No new kernel profiles, no CUDA build, no changes to cache or lock.
+Still source-level evidence only.

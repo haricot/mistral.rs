@@ -12,7 +12,7 @@ mod ffi;
 #[cfg(feature = "cuda")]
 pub(crate) mod gated_mix;
 pub(crate) mod group;
-#[cfg(all(feature = "cuda", has_marlin_kernels))]
+#[cfg(all(feature = "cuda", has_marlin_kernels, not(feature = "dkr-static-closure-probe")))]
 mod packed_affine;
 pub(crate) mod quantize;
 mod weight_source;
@@ -37,7 +37,7 @@ use candle_core::{
 };
 use candle_nn::{Linear, Module};
 use safetensors::tensor::Dtype;
-#[cfg(all(feature = "cuda", has_marlin_kernels))]
+#[cfg(all(feature = "cuda", has_marlin_kernels, not(feature = "dkr-static-closure-probe")))]
 use std::sync::OnceLock;
 use std::sync::{atomic::AtomicUsize, Arc};
 
@@ -50,12 +50,12 @@ use crate::{
 #[cfg(feature = "cuda")]
 pub(crate) const GGUF_AFFINE_MIN_BATCH: usize = 8;
 
-#[cfg(all(feature = "cuda", has_marlin_kernels))]
+#[cfg(all(feature = "cuda", has_marlin_kernels, not(feature = "dkr-static-closure-probe")))]
 pub(crate) fn gguf_affine_budget_bytes(device: &Device, dtype: DType) -> usize {
     packed_affine::budget_bytes(device, dtype)
 }
 
-#[cfg(all(feature = "cuda", has_marlin_kernels))]
+#[cfg(all(feature = "cuda", has_marlin_kernels, not(feature = "dkr-static-closure-probe")))]
 pub(crate) fn gguf_affine_reserved_bytes(device: &Device, dtype: DType) -> usize {
     packed_affine::reserved_bytes(device, dtype)
 }
@@ -65,9 +65,9 @@ pub struct GgufMatMul {
     pub(crate) w: QMatMul,
     pub(crate) b: Option<Tensor>,
     stats: crate::ImatrixLayerStats,
-    #[cfg(all(feature = "cuda", has_marlin_kernels))]
+    #[cfg(all(feature = "cuda", has_marlin_kernels, not(feature = "dkr-static-closure-probe")))]
     packed_affine: OnceLock<Option<Arc<packed_affine::PackedAffine>>>,
-    #[cfg(all(feature = "cuda", has_marlin_kernels))]
+    #[cfg(all(feature = "cuda", has_marlin_kernels, not(feature = "dkr-static-closure-probe")))]
     _gguf_affine_reservation: Option<packed_affine::Reservation>,
 }
 
@@ -164,15 +164,15 @@ impl GgufMatMul {
     }
 
     fn from_parts(w: QMatMul, b: Option<Tensor>, stats: crate::ImatrixLayerStats) -> Self {
-        #[cfg(all(feature = "cuda", has_marlin_kernels))]
+        #[cfg(all(feature = "cuda", has_marlin_kernels, not(feature = "dkr-static-closure-probe")))]
         let reservation = packed_affine::Reservation::new(&w);
         Self {
             w,
             b,
             stats,
-            #[cfg(all(feature = "cuda", has_marlin_kernels))]
+            #[cfg(all(feature = "cuda", has_marlin_kernels, not(feature = "dkr-static-closure-probe")))]
             packed_affine: OnceLock::new(),
-            #[cfg(all(feature = "cuda", has_marlin_kernels))]
+            #[cfg(all(feature = "cuda", has_marlin_kernels, not(feature = "dkr-static-closure-probe")))]
             _gguf_affine_reservation: reservation,
         }
     }
@@ -405,7 +405,7 @@ impl GgufMatMul {
         Ok(None)
     }
 
-    #[cfg(all(feature = "cuda", has_marlin_kernels))]
+    #[cfg(all(feature = "cuda", has_marlin_kernels, not(feature = "dkr-static-closure-probe")))]
     fn packed_affine_for(
         &self,
         flat_batch: usize,
@@ -448,7 +448,7 @@ impl GgufMatMul {
         Ok(Some(packed))
     }
 
-    #[cfg(all(feature = "cuda", has_marlin_kernels))]
+    #[cfg(all(feature = "cuda", has_marlin_kernels, not(feature = "dkr-static-closure-probe")))]
     fn packed_affine(&self, a: &Tensor) -> Result<Option<&Arc<packed_affine::PackedAffine>>> {
         let Some((&_, batch_dims)) = a.dims().split_last() else {
             return Ok(None);
@@ -463,7 +463,7 @@ impl GgufMatMul {
         self.packed_affine_for(flat_batch, dtype, a.device())
     }
 
-    #[cfg(all(feature = "cuda", has_marlin_kernels))]
+    #[cfg(all(feature = "cuda", has_marlin_kernels, not(feature = "dkr-static-closure-probe")))]
     fn packed_affine_forward(&self, a: &Tensor) -> Result<Option<Tensor>> {
         let Some(packed) = self.packed_affine(a)? else {
             return Ok(None);
@@ -541,7 +541,7 @@ impl QuantMethod for GgufMatMul {
 
     fn forward_raw(&self, a: &Tensor) -> Result<Tensor> {
         self.stats.process(a)?;
-        #[cfg(all(feature = "cuda", has_marlin_kernels))]
+        #[cfg(all(feature = "cuda", has_marlin_kernels, not(feature = "dkr-static-closure-probe")))]
         {
             if let Some(out) = self.packed_affine_forward(a)? {
                 return self.add_bias(out);
@@ -639,7 +639,7 @@ impl QuantMethod for GgufMatMul {
                 return None;
             }
         }
-        #[cfg(all(feature = "cuda", has_marlin_kernels))]
+        #[cfg(all(feature = "cuda", has_marlin_kernels, not(feature = "dkr-static-closure-probe")))]
         if matches!(
             &self.w,
             QMatMul::QTensor(q)
