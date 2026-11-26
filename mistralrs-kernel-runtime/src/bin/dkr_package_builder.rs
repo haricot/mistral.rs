@@ -28,6 +28,7 @@ const PACKAGES: &[Package] = &[
     Package { name: "logits", source: "logits.cu", fast_math: false },
     Package { name: "moe", source: "moe.cu", fast_math: false },
     Package { name: "reduce-norm", source: "reduce_norm.cu", fast_math: true },
+    Package { name: "large-topk", source: "large_topk.cu", fast_math: true },
     Package { name: "router-topk", source: "router_topk.cu", fast_math: true },
     Package { name: "rms-variants", source: "rms_variants.cu", fast_math: true },
     Package { name: "ssm", source: "ssm.cu", fast_math: true },
@@ -477,6 +478,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 let status=Command::new(&python).arg(&script).args(["--cc",&cc.to_string(),"--image",&id.to_string()])
                     .arg("--output").arg(&output).arg("--ptx-file").arg(&compiled).current_dir(root).status()?;
                 if !status.success(){return Err(format!("GDN recurrence packaging failed: {status}").into());}
+            }
+        } else if pkg.name == "large-topk" {
+            let watched=["large_topk_device.cuh","router_topk_device.cuh","radix_topk.cuh"]
+                .map(|name|root.join("mistralrs-core/src/cuda").join(name));
+            for id in [1,2] {
+                let define=format!("-DDKR_LARGE_TOPK_IMAGE={id}");
+                let compiled=compile_ptx(&source,&work.join(pkg.name).join(format!("image-{id:02}")),cc,pkg.fast_math,Some(&define),&watched)?;
+                let status=Command::new(&python).arg(&script).args(["--cc",&cc.to_string(),"--image",&id.to_string()])
+                    .arg("--output").arg(&output).arg("--ptx-file").arg(&compiled).current_dir(root).status()?;
+                if !status.success(){return Err(format!("large top-k shard packaging failed: {status}").into());}
             }
         } else if pkg.name == "router-topk" {
             let watched=[root.join("mistralrs-core/src/cuda/router_topk_device.cuh")];
