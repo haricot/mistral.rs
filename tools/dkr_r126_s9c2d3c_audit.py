@@ -10,7 +10,7 @@ from dkr_r126_gguf_residual_audit import guarded_ranges,mask
 GUARD='#[cfg(not(feature = "dkr-static-closure-probe"))]'
 ARCH=("gdn_mma_prefill_init","gdn_mma_prefill","gdn_mma_fused_prefill",
       "mistralrs_flashinfer_gdn_sm90_launch","mistralrs_flashinfer_gdn_sm90_workspace_size")
-REF=r'\b(?:crate::cuda::)?ffi::([A-Za-z_]\w*)'
+REF=r'(?<!std::)(?<!core::)\b(?:crate::cuda::)?ffi::(?!c_void\b)([A-Za-z_]\w*)'
 MMA_ITEMS=("GdnMmaParams","GdnMmaFusedParams","GdnMmaInputKind","GdnMmaLaunch",
            "mma_prefill_device_supported","mma_prefill_supported","mma_prefill_recurrence",
            "mma_prefill","mma_fused_prefill")
@@ -125,6 +125,11 @@ def audit(root):
     matches=list(re.finditer(REF,mask(source)))
     residual=[m.group(1) for m in matches if not any(a<=m.start()<b for a,b in spans)]
     require(not residual,"residual GDN FFI: "+str(residual))
+    # Count declarations only: a residual declaration is not proof of a
+    # live call or of a new catalogue profile requirement.
+    ffi_spans=guarded_ranges(strip_comments(ffi))
+    remaining_declarations=[m.group(1) for m in re.finditer(r'\bpub\(crate\)\s+fn\s+(\w+)\s*\(',mask(ffi))
+                            if not any(a<=m.start()<b for a,b in ffi_spans)]
     # Re-run the preceding cumulative gate, now accepting the fully closed
     # provider inventory as well as its original pre-C.3C state.
     spec=importlib.util.spec_from_file_location("previous_gate",root/"tools/dkr_r126_s9c2d3b2b_audit.py")
@@ -138,6 +143,7 @@ def audit(root):
     return dict(schema="dkr.r126.s9c2d3c.source.v1",status="GDN_SOURCE_COMPLETE",
                 provider_guards=providers,policy=policy,guarded_build_directives=directives,
                 guarded_gdn_ffi=len(matches),gdn_residual_ffi=residual,arch_provider_refs=[],
+                remaining_core_ffi_declarations=remaining_declarations,remaining_core_ffi_declarations_are_not_profile_counts=True,
                 profiles_added=0,images_added=0,projected_logical=4027,logical_headroom=69,
                 projected_physical_upper=533,physical_savings_required=21,
                 compilation=False,link_qualified=False,numeric_qualified=False,
