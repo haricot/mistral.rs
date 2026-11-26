@@ -56,6 +56,8 @@ pub use audio_output::{
 mod cuda;
 #[cfg(feature = "dkr-static-closure-probe")]
 pub use cuda::router_topk_dynamic::{dkr_moe_router_requirement, dkr_small_topk_requirement};
+#[cfg(feature = "dkr-static-closure-probe")]
+pub use cuda::large_topk_dynamic::{dkr_large_topk_requirements, DkrLargeTopKMode};
 mod device_map;
 mod engine;
 mod lora;
