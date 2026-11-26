@@ -62,6 +62,12 @@ pub(crate) fn cuda_topk_ranked_packed_max_k(vocab: usize) -> Option<usize> {
 // Single kernel call writes both values and indices - no post-processing needed
 // ============================================================================
 
+#[cfg(all(feature = "cuda", feature = "dkr-static-closure-probe"))]
+fn cuda_topk(input: &Tensor, k: usize) -> Result<TopKOutput> {
+    crate::cuda::router_topk_dynamic::small_topk(&final_logits_row(input)?, k)
+}
+
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 #[cfg(feature = "cuda")]
 #[allow(clippy::cast_possible_truncation)]
 fn cuda_topk(input: &Tensor, k: usize) -> Result<TopKOutput> {
@@ -240,7 +246,7 @@ pub enum MoeRouterScoreFunction {
 
 #[cfg(feature = "cuda")]
 impl MoeRouterScoreFunction {
-    const fn as_i32(self) -> i32 {
+    pub(crate) const fn as_i32(self) -> i32 {
         match self {
             Self::Raw => 0,
             Self::Softmax => 1,
@@ -259,7 +265,7 @@ pub enum MoeRouterSelectedWeight {
 
 #[cfg(feature = "cuda")]
 impl MoeRouterSelectedWeight {
-    const fn as_i32(self) -> i32 {
+    pub(crate) const fn as_i32(self) -> i32 {
         match self {
             Self::Score => 0,
             Self::Softmax => 1,
@@ -383,6 +389,17 @@ pub fn cuda_moe_router_topk_if_supported(
     cuda_moe_router_topk(logits, config, selection_bias, expert_scale).map(Some)
 }
 
+#[cfg(all(feature = "cuda", feature = "dkr-static-closure-probe"))]
+pub fn cuda_moe_router_topk(
+    logits: &Tensor,
+    config: MoeRouterTopKConfig,
+    selection_bias: Option<&Tensor>,
+    expert_scale: Option<&Tensor>,
+) -> Result<TopKOutput> {
+    crate::cuda::router_topk_dynamic::moe_router_topk(logits, config, selection_bias, expert_scale)
+}
+
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 #[cfg(feature = "cuda")]
 #[allow(clippy::cast_possible_truncation)]
 pub fn cuda_moe_router_topk(
