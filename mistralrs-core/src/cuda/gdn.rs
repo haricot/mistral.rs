@@ -13,6 +13,9 @@ mod recurrence_dynamic;
 #[path = "gdn_preparation_dynamic.rs"]
 mod preparation_dynamic;
 #[cfg(feature = "dkr-static-closure-probe")]
+#[path = "gdn_transaction_dynamic.rs"]
+mod transaction_dynamic;
+#[cfg(feature = "dkr-static-closure-probe")]
 #[path = "gdn_decode_dynamic.rs"]
 mod decode_dynamic;
 
@@ -5106,7 +5109,6 @@ pub struct GdnSpeculativeTransitionCommit<'a> {
 pub fn speculative_transition_commit_batched_cuda(
     commit: GdnSpeculativeTransitionCommit<'_>,
 ) -> Result<()> {
-    use candle::cuda_backend::cudarc::driver::DevicePtr;
     use candle_core as candle;
 
     fn cuda_commit<
@@ -5180,14 +5182,12 @@ pub fn speculative_transition_commit_batched_cuda(
 
         let cuda_stream = device.as_cuda_device()?.cuda_stream();
         let phase_timer = crate::pipeline::cuda_graph::CudaPhaseTimer::start(&cuda_stream)?;
-        let mut pointer_segments = (0..6)
-            .map(|_| Vec::with_capacity(layers.len()))
-            .collect::<Vec<_>>();
-        let mut recurrent_state_dtype = None;
+        let mut minimum_capacity=usize::MAX;
         for layer in layers {
             let (layer_batch, layer_seq, layer_conv_dim) = layer.conv_input.dims3()?;
             let conv_capacity = layer.conv_state.dim(0)?;
             let recurrent_capacity = layer.recurrent_state.dim(0)?;
+            minimum_capacity=minimum_capacity.min(conv_capacity);
             if (layer_batch, layer_seq, layer_conv_dim) != (batch_size, seq_len, conv_dim)
                 || layer.key.dims() != [batch_size, seq_len, num_k_heads, head_k_dim]
                 || layer.delta.dims() != [batch_size, seq_len, num_v_heads, head_v_dim]
@@ -5229,60 +5229,63 @@ pub fn speculative_transition_commit_batched_cuda(
                 }
             }
 
-            macro_rules! tensor_ptr {
-                ($tensor:expr, $ty:ty, $name:literal) => {{
-                    let (storage, layout) = $tensor.storage_and_layout();
-                    let storage = match &*storage {
-                        candle::Storage::Cuda(storage) => storage.as_cuda_slice::<$ty>()?,
-                        _ => candle::bail!(concat!($name, " must be CUDA")),
-                    };
-                    let pointer = storage
-                        .slice(layout.start_offset()..)
-                        .device_ptr(storage.stream())
-                        .0;
-                    pointer
+        }
+        if minimum_capacity==0||conv_dim==0||!keep_rows.is_contiguous()||!active_slots.is_contiguous(){
+            candle::bail!("GDN transition commit requires nonempty state pools and contiguous indices");
+        }
+        let layer_storage_layouts=layers.iter().map(|layer|[
+            layer.conv_input.storage_and_layout(),layer.key.storage_and_layout(),
+            layer.delta.storage_and_layout(),layer.decay.storage_and_layout(),
+            layer.conv_state.storage_and_layout(),layer.recurrent_state.storage_and_layout(),
+        ]).collect::<Vec<_>>();
+        let mut pointer_segments=(0..6).map(|_|Vec::with_capacity(layers.len())).collect::<Vec<_>>();
+        let mut pointer_guards=Vec::with_capacity(6usize.saturating_mul(layers.len()));
+        let mut recurrent_state_dtype=None;
+        for storage_layouts in &layer_storage_layouts{
+            macro_rules! read_ptr {
+                ($segment:expr,$ty:ty,$name:literal)=>{{
+                    let (storage,layout)=&storage_layouts[$segment];
+                    let (ptr,guard)=cuda_read_ptr_with_guard::<$ty>(storage,layout,&cuda_stream,$name)?;
+                    pointer_segments[$segment].push(ptr);
+                    pointer_guards.push(guard);
                 }};
             }
-            pointer_segments[0].push(tensor_ptr!(layer.conv_input, T, "conv_input"));
-            pointer_segments[1].push(tensor_ptr!(layer.key, f32, "key"));
-            pointer_segments[2].push(tensor_ptr!(layer.delta, f32, "delta"));
-            pointer_segments[3].push(tensor_ptr!(layer.decay, f32, "decay"));
-            pointer_segments[4].push(tensor_ptr!(layer.conv_state, T, "conv_state"));
-            let (state_ptr, state_dtype) =
-                cuda_recurrent_state_ptr(layer.recurrent_state, "recurrent_state")?;
-            if recurrent_state_dtype
-                .replace(state_dtype)
-                .is_some_and(|dtype| dtype != state_dtype)
-            {
-                candle::bail!("GDN transition commit recurrent state dtypes diverged");
+            read_ptr!(0,T,"conv_input");
+            read_ptr!(1,f32,"key");
+            read_ptr!(2,f32,"delta");
+            read_ptr!(3,f32,"decay");
+            let (storage,layout)=&storage_layouts[4];
+            let (ptr,guard)=cuda_inplace_ptr_with_guard::<T>(storage,layout,&cuda_stream,"conv_state")?;
+            pointer_segments[4].push(ptr);pointer_guards.push(guard);
+            let (storage,layout)=&storage_layouts[5];
+            let (ptr,dtype,guard)=cuda_recurrent_state_inplace_ptr_with_guard(recurrent_dtype,storage,layout,&cuda_stream,"recurrent_state")?;
+            if recurrent_state_dtype.replace(dtype).is_some_and(|d|d!=dtype){
+                candle::bail!("GDN transition commit state dtypes diverged");
             }
-            pointer_segments[5].push(state_ptr as u64);
+            pointer_segments[5].push(ptr);pointer_guards.push(guard);
         }
-        let pointers = pointer_segments.into_iter().flatten().collect::<Vec<_>>();
-        let pointers = pointers
-            .into_iter()
-            .map(|pointer| pointer as i64)
-            .collect::<Vec<_>>();
-        let pointer_table = Tensor::from_vec(pointers, (6 * layers.len(),), device)?;
-
-        macro_rules! tensor_ptr {
-            ($tensor:expr, $ty:ty, $name:literal) => {{
-                let (storage, layout) = $tensor.storage_and_layout();
-                let storage = match &*storage {
-                    candle::Storage::Cuda(storage) => storage.as_cuda_slice::<$ty>()?,
-                    _ => candle::bail!(concat!($name, " must be CUDA")),
-                };
-                let pointer = storage
-                    .slice(layout.start_offset()..)
-                    .device_ptr(storage.stream())
-                    .0;
-                pointer
-            }};
-        }
-        let pointer_table_ptr = tensor_ptr!(pointer_table, i64, "pointer_table") as *const u64;
-        let keep_rows_ptr = tensor_ptr!(keep_rows, u32, "keep_rows") as *const u32;
-        let active_slots_ptr = tensor_ptr!(active_slots, u32, "active_slots") as *const u32;
+        let table_count=layers.len().checked_mul(6).ok_or_else(||candle::Error::msg("GDN transition pointer count overflow"))?;
+        let pointers=pointer_segments.into_iter().flatten().map(|ptr|ptr as i64).collect::<Vec<_>>();
+        let pointer_table=Tensor::from_vec(pointers,table_count,device)?;
+        let (ts,tl)=pointer_table.storage_and_layout();
+        let (ks,kl)=keep_rows.storage_and_layout();
+        let (ss,sl)=active_slots.storage_and_layout();
+        let (table_ptr,table_guard)=cuda_read_ptr_with_guard::<i64>(&ts,tl,&cuda_stream,"pointer_table")?;
+        let (keep_ptr,keep_guard)=cuda_read_ptr_with_guard::<u32>(&ks,kl,&cuda_stream,"keep_rows")?;
+        let (slot_ptr,slot_guard)=cuda_read_ptr_with_guard::<u32>(&ss,sl,&cuda_stream,"active_slots")?;
+        let pointer_table_ptr=table_ptr as *const u64;
+        let keep_rows_ptr=keep_ptr as *const u32;
+        let active_slots_ptr=slot_ptr as *const u32;
         let stream = cuda_stream.cu_stream() as i64;
+        #[cfg(feature = "dkr-static-closure-probe")]
+        {
+            use transaction_dynamic as tx;
+            unsafe{tx::launch(tx::Kind::Commit,device,activation_tensor_dtype,recurrent_dtype,
+                &pointer_table,table_ptr,Some((keep_rows,keep_ptr)),active_slots,slot_ptr,
+                &[layers.len(),batch_size,seq_len,num_k_heads,num_v_heads,head_k_dim,head_v_dim,
+                    conv_dim,conv_width,usize::from(tiled_v_heads),usize::from(value_major),minimum_capacity])?;}
+        }
+        #[cfg(not(feature = "dkr-static-closure-probe"))]
         unsafe {
             crate::cuda::ffi::gdn_speculative_transition_commit_batched(
                 pointer_table_ptr,
@@ -5304,6 +5307,7 @@ pub fn speculative_transition_commit_batched_cuda(
                 stream,
             );
         }
+        drop(slot_guard);drop(keep_guard);drop(table_guard);drop(pointer_guards);
         if let Some(timer) = phase_timer {
             timer.finish("gdn_transition_commit", batch_size, seq_len)?;
         }
@@ -5558,6 +5562,15 @@ pub fn speculative_transition_stage_batched_cuda(
             "destination_slots",
         )?;
         let phase_timer = crate::pipeline::cuda_graph::CudaPhaseTimer::start(&cuda_stream)?;
+        #[cfg(feature = "dkr-static-closure-probe")]
+        {
+            use transaction_dynamic as tx;
+            unsafe{tx::launch(tx::Kind::Stage,device,activation_tensor_dtype,DType::F32,
+                &pointer_table,pointer_table_ptr,Some((keep_rows,keep_rows_ptr)),destination_slots,destination_slots_ptr,
+                &[layers.len(),batch_size,seq_len,max_rows,destination_capacity,num_k_heads,num_v_heads,
+                    head_k_dim,head_v_dim,conv_dim])?;}
+        }
+        #[cfg(not(feature = "dkr-static-closure-probe"))]
         unsafe {
             crate::cuda::ffi::gdn_speculative_transition_stage_batched(
                 pointer_table_ptr as *const u64,
@@ -5733,6 +5746,14 @@ pub fn pending_transition_publish_batched_cuda(
         &cuda_stream,
         "destination_slots",
     )?;
+    #[cfg(feature = "dkr-static-closure-probe")]
+    {
+        use transaction_dynamic as tx;
+        unsafe{tx::launch(tx::Kind::Publish,device,DType::F32,DType::F32,
+            &pointer_table,pointer_table_ptr,Some((keep_rows,keep_rows_ptr)),destination_slots,destination_slots_ptr,
+            &[layers.len(),batch_size,max_rows,destination_capacity])?;}
+    }
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     unsafe {
         crate::cuda::ffi::gdn_pending_transition_publish_batched(
             pointer_table_ptr as *const u64,
@@ -5996,6 +6017,15 @@ pub fn pending_transition_apply_batched_cuda(apply: GdnPendingTransitionApply<'_
             "active_slots",
         )?;
         let phase_timer = crate::pipeline::cuda_graph::CudaPhaseTimer::start(&cuda_stream)?;
+        #[cfg(feature = "dkr-static-closure-probe")]
+        {
+            use transaction_dynamic as tx;
+            unsafe{tx::launch(tx::Kind::Apply,device,activation_tensor_dtype,recurrent_dtype,
+                &pointer_table,pointer_table_ptr,None,active_slots,active_slots_ptr,
+                &[layers.len(),batch_size,max_rows,capacity,num_k_heads,num_v_heads,head_k_dim,head_v_dim,
+                    conv_dim,conv_width,usize::from(tiled_v_heads),conv_blocks])?;}
+        }
+        #[cfg(not(feature = "dkr-static-closure-probe"))]
         unsafe {
             crate::cuda::ffi::gdn_pending_transition_apply_batched(
                 pointer_table_ptr as *const u64,
