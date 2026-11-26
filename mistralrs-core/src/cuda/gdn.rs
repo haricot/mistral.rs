@@ -1371,7 +1371,8 @@ enum RecurrenceKernel {
 
 /// `state` is `[BH, K, V]` or `[BH, V, K]` (gathered), or the matching pooled layout, mutated in place.
 /// Returns output `[BH, S, V]`.
-#[cfg(all(feature = "cuda", not(feature = "dkr-static-closure-probe")))]
+#[cfg(feature = "cuda")]
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 fn launch_recurrence(
     kernel: RecurrenceKernel,
     inputs: RecurrenceInputs<'_>,
@@ -1719,7 +1720,8 @@ pub fn vmajor_chunked_gated_delta_rule_recurrence_cuda(
 /// conv_state: [B, conv_dim, kernel_size], or the [cap, conv_dim, kernel_size] pool with `Pooled` slots.
 /// Update mutates `conv_state` in place; full writes a fresh state (gathered) or the pool rows (pooled).
 /// Returns (output [B, S, conv_dim], conv_state after the step).
-#[cfg(all(feature = "cuda", not(feature = "dkr-static-closure-probe")))]
+#[cfg(feature = "cuda")]
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 pub fn causal_conv1d_cuda(
     x: &Tensor,
     weight: &Tensor,
