@@ -4406,6 +4406,13 @@ pub(crate) fn try_cuda_rms_norm_strided_4d(
         }
     }
 
+    #[cfg(feature = "dkr-static-closure-probe")]
+    {
+        if input.is_contiguous(){return Ok(None);}
+        return Ok(Some(candle_nn::ops::rms_norm(&input.contiguous()?,&weight.contiguous()?,eps)?));
+    }
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
+    {
     let (input_storage, input_layout) = input.storage_and_layout();
     if input_layout.is_contiguous() {
         return Ok(None);
@@ -4486,6 +4493,7 @@ pub(crate) fn try_cuda_rms_norm_strided_4d(
         DType::F16 => launch!(F16, half::f16, rms_norm_strided_4d_f16),
         DType::F32 => launch!(F32, f32, rms_norm_strided_4d_f32),
         _ => Ok(None),
+    }
     }
 }
 

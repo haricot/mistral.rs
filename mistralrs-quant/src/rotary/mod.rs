@@ -1,5 +1,7 @@
-#[cfg(feature = "cuda")]
+#[cfg(all(feature = "cuda",not(feature = "dkr-static-closure-probe")))]
 mod ffi;
+#[cfg(all(feature = "cuda",feature = "dkr-static-closure-probe"))]
+mod dynamic;
 
 use candle_core::{
     backend::BackendStorage, CpuStorage, CustomOp3, Layout, Result, Shape, Storage, Tensor,
@@ -966,6 +968,8 @@ mod cuda {
             )
         }
 
+        #[cfg(feature = "dkr-static-closure-probe")]
+        let typed_key=super::dynamic::Key::new(query.dtype(),query_l,cos_l,sin_l,positions.map(|(_,l)|l),is_neox)?;
         let query_dtype = query.dtype();
         let stream = dev.cuda_stream();
         let query = query.as_cuda_slice_mut::<T>()?;
@@ -1002,6 +1006,13 @@ mod cuda {
             None
         };
 
+        #[cfg(feature = "dkr-static-closure-probe")]
+        {
+            // Keep the optional position guard alive through the launch.
+            return super::dynamic::launch(typed_key,&dev,query,cos_cache,sin_cache,positions.as_ref().map(|(p,_,_)|*p));
+        }
+        #[cfg(not(feature = "dkr-static-closure-probe"))]
+        {
         let neox = if is_neox { 1 } else { 0 };
         let stream = stream.cu_stream() as c_long;
         let internal_type = rotary_dtype(query_dtype)?;
@@ -1046,6 +1057,7 @@ mod cuda {
             },
         }
         Ok(())
+        }
     }
 
     struct RotaryInplace {
