@@ -35,6 +35,8 @@ struct Key{
     scalars:[Option<E>;16],
     grid:[u32;3],
     block:[u32;3],
+    shared:u32,
+    ceiling:u32,
 }
 thread_local!{static PLANS:RefCell<LaunchPlanCache<Key,PrevalidatedLaunchPlan>>=RefCell::new(LaunchPlanCache::new());}
 fn prepare(key:Key,device:&Device)->Result<PrevalidatedLaunchPlan>{
@@ -43,18 +45,27 @@ fn prepare(key:Key,device:&Device)->Result<PrevalidatedLaunchPlan>{
         args.push(Argument::Tensor{dtype,shape:vec![size],contiguous:true,start_offset:0,representation:None});
     }
     for dtype in key.scalars.into_iter().flatten(){args.push(Argument::Scalar{dtype});}
-    let mut req=LaunchRequest{operation:key.op.into(),cc:0,args,grid:key.grid,max_dynamic_shared_mem_bytes:0};
+    let mut req=LaunchRequest{operation:key.op.into(),cc:0,args,grid:key.grid,max_dynamic_shared_mem_bytes:key.ceiling};
     let p=kernel_cache()?.prepare_for_device(&mut req,device).map_err(|e|candle_core::Error::msg(e.to_string()))?;
-    if p.manifest.block!=key.block||p.manifest.shared_mem_bytes!=0{candle_core::bail!("GDN preparation catalogue geometry mismatch");}
-    p.prevalidate_launch(&req,device).map_err(|e|candle_core::Error::msg(e.to_string()))
+    if p.manifest.block!=key.block||p.manifest.shared_mem_bytes!=key.ceiling{candle_core::bail!("GDN preparation catalogue geometry mismatch");}
+    if key.shared!=key.ceiling{
+        // The caller has validated the exact K-dependent dynamic allocation.
+        unsafe{p.prevalidate_launch_with_shared(&req,device,key.shared)}
+    }else{p.prevalidate_launch_with_optin(&req,device)}
+        .map_err(|e|candle_core::Error::msg(e.to_string()))
 }
 /// Safety: addresses are valid spans of the declared dtype, guards live across
 /// the launch, and operation-specific scalar geometry matches the tensor spans.
 pub(super) unsafe fn launch(device:&Device,op:&'static str,pointers:&[(u64,usize,E)],scalars:&[S],grid:[u32;3],block:[u32;3])->Result<()>{
+    unsafe{launch_shared(device,op,pointers,scalars,grid,block,0,0)}
+}
+/// Same safety contract, plus a validated exact dynamic shared-memory size.
+pub(super) unsafe fn launch_shared(device:&Device,op:&'static str,pointers:&[(u64,usize,E)],scalars:&[S],grid:[u32;3],block:[u32;3],shared:u32,ceiling:u32)->Result<()>{
+    if shared>ceiling{candle_core::bail!("GDN dynamic shared memory exceeds ceiling");}
     if pointers.len()>10||scalars.len()>16||pointers.iter().any(|(p,n,_)|*p==0||*n==0){
         candle_core::bail!("invalid GDN preparation ABI");
     }
-    let mut key=Key{op,tensors:[None;10],scalars:[None;16],grid,block};
+    let mut key=Key{op,tensors:[None;10],scalars:[None;16],grid,block,shared,ceiling};
     for (dst,&(_,n,dt)) in key.tensors.iter_mut().zip(pointers){*dst=Some((n,dt));}
     for (dst,s) in key.scalars.iter_mut().zip(scalars){*dst=Some(s.dtype());}
     let stream=device.as_cuda_device()?.cuda_stream();
