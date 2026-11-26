@@ -53,6 +53,9 @@ impl KernelExecutionCache {
         } else {
             read_scope_receipt(root)?
         };
+        if std::env::var_os("DKR_REQUIRE_MODEL_SCOPE").is_some_and(|v| v == "1") {
+            ensure!(scope.is_some(), "required DKR model scope receipt missing");
+        }
         if let Some(receipt) = &scope {
             receipt.verify(&catalog)?;
         }
