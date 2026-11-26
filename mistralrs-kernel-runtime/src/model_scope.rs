@@ -340,6 +340,36 @@ mod tests {
         assert!(resolve_model_scope(&d,&master,&deps).is_err());
     }
     #[test]
+    fn dkr_model_scope_canonical_receipt_and_tamper() -> Result<()> {
+        let dir=tempfile::tempdir()?;
+        let ptx=b".version 8.0\n.target sm_61\n.address_size 64\n.visible .entry fixture(.param .u32 n) {ret;}\n";
+        let manifest=json!({
+            "schema":"DKR-KERNEL-MODULE-V1","abi":"dkr.typed.v1",
+            "operation":"test.op","implementation_id":"impl.fixture","entry":"fixture",
+            "artifact":"fixture.ptx","sha256":digest(ptx),"target_cc":61,"min_cc":61,"max_cc":61,
+            "block":[256,1,1],"shared_mem_bytes":0,
+            "arguments":[{"kind":"scalar","name":"n","dtype":"u32"}]
+        });
+        std::fs::write(dir.path().join("fixture.ptx"),ptx)?;
+        std::fs::write(dir.path().join("manifest.json"),serde_json::to_vec(&manifest)?)?;
+        let catalog=KernelCatalog::discover(dir.path())?;
+        let receipt=ScopeReceipt{schema:SCOPE_SCHEMA.into(),device_cc:61,
+            scope_id:"084d8d0b35304955c8f6dc69461ef12beee7266500b06bbe97a1561d94747bcc".into(),profile_count:1};
+        receipt.verify(&catalog)?;
+        std::fs::write(dir.path().join(SCOPE_FILENAME),serde_json::to_vec(&receipt)?)?;
+        assert_eq!(read_scope_receipt(dir.path())?,Some(receipt.clone()));
+        let mut bad=receipt.clone();bad.device_cc=80;
+        assert!(bad.verify(&catalog).is_err());
+        let mut bad=receipt.clone();bad.profile_count=2;
+        assert!(bad.verify(&catalog).is_err());
+        let mut changed=manifest;
+        changed["block"]=json!([128,1,1]);
+        std::fs::write(dir.path().join("manifest.json"),serde_json::to_vec(&changed)?)?;
+        let changed_catalog=KernelCatalog::discover(dir.path())?;
+        assert!(receipt.verify(&changed_catalog).is_err());
+        Ok(())
+    }
+    #[test]
     fn dkr_model_scope_latch_rejects_live_switch(){
         let receipt=ScopeReceipt{schema:SCOPE_SCHEMA.into(),device_cc:61,scope_id:"0".repeat(64),profile_count:1};
         let latch=ScopeLatch::default();
