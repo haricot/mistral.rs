@@ -54,6 +54,8 @@ pub use audio_output::{
     encode_audio_pcm_with_speed_async,
 };
 mod cuda;
+#[cfg(feature = "dkr-static-closure-probe")]
+pub use cuda::router_topk_dynamic::{dkr_moe_router_requirement, dkr_small_topk_requirement};
 mod device_map;
 mod engine;
 mod lora;
