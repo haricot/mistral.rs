@@ -1,3 +1,8 @@
+#ifdef DKR_ROTARY_IMAGE
+#define DKR_ROTARY_FUNCTION __device__ __forceinline__
+#else
+#define DKR_ROTARY_FUNCTION __global__
+#endif
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <stdint.h>
@@ -33,7 +38,7 @@ inline __device__ void apply_rotary_embedding(
 }
 
 template <typename scalar_t, bool IS_NEOX>
-__global__ void rotary_embedding_kernel(
+DKR_ROTARY_FUNCTION void rotary_embedding_kernel(
     scalar_t *__restrict__ query, // [num_tokens, num_heads, head_size]
     scalar_t *__restrict__ key,   // [num_tokens, num_heads, head_size]
     const scalar_t *__restrict__ cos_cache, // [num_tokens, rot_dim]
@@ -66,7 +71,7 @@ __global__ void rotary_embedding_kernel(
 }
 
 template <typename scalar_t, bool IS_NEOX>
-__global__ void rotary_embedding_positions_kernel(
+DKR_ROTARY_FUNCTION void rotary_embedding_positions_kernel(
     scalar_t *__restrict__ query, // [num_tokens, num_heads, head_size]
     scalar_t *__restrict__ key,   // [num_tokens, num_heads, head_size]
     const scalar_t *__restrict__ cos_cache, // [max_position, rot_dim]
@@ -77,6 +82,19 @@ __global__ void rotary_embedding_positions_kernel(
     const int head_size) {
   const int token_idx = blockIdx.x;
   const uint32_t position = positions[token_idx];
+#ifdef DKR_ROTARY_IMAGE
+  if(position >= static_cast<uint32_t>(seq_len)) {
+    for(int i=threadIdx.x;i<num_heads*rot_dim;i+=blockDim.x) {
+      int head=i/rot_dim,off=i%rot_dim;
+      auto* row=query+token_idx*query_stride+head*head_size;
+      int x=IS_NEOX?off:2*off;
+      int y=IS_NEOX?rot_dim+off:x+1;
+      row[x]=static_cast<scalar_t>(__int_as_float(0x7fc00000));
+      row[y]=static_cast<scalar_t>(__int_as_float(0x7fc00000));
+    }
+    return;
+  }
+#endif
 
   const scalar_t *cos_ptr = cos_cache + position * rot_dim;
   const scalar_t *sin_ptr = sin_cache + position * rot_dim;
@@ -102,6 +120,7 @@ __global__ void rotary_embedding_positions_kernel(
 
 } // namespace vllm
 
+#ifndef DKR_ROTARY_IMAGE
 #define CALL_ROTARY(T, IS_NEOX)                                                \
   vllm::rotary_embedding_kernel<T, IS_NEOX><<<grid, block, 0, custream>>>(     \
       reinterpret_cast<T *>(query), reinterpret_cast<T *>(key),                \
@@ -194,3 +213,5 @@ rotary_embedding_positions(void *query, // [num_tokens, num_heads, head_size]
     }
   }
 }
+#endif // historical rotary launchers
+#undef DKR_ROTARY_FUNCTION

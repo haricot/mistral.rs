@@ -1,3 +1,8 @@
+#ifdef DKR_ATTENTION_PREP_IMAGE
+#define DKR_AP_FUNCTION __device__ __forceinline__
+#else
+#define DKR_AP_FUNCTION __global__
+#endif
 #include "cuda_bf16.h"
 #include "cuda_fp16.h"
 #include <stdint.h>
@@ -39,7 +44,7 @@ ap_from_float<__nv_bfloat16>(float value) {
 }
 
 template <typename T>
-__global__ void
+DKR_AP_FUNCTION void
 rope_sincos_positions_kernel(const uint32_t *__restrict__ positions,
                              const float *__restrict__ inv_freq,
                              T *__restrict__ cos_out, T *__restrict__ sin_out,
@@ -163,7 +168,7 @@ write_norm_row(const T *__restrict__ src, const T *__restrict__ weight,
 }
 
 template <typename T, bool IS_NEOX>
-__global__ void qk_rms_norm_rope_kernel(
+DKR_AP_FUNCTION void qk_rms_norm_rope_kernel(
     const T *__restrict__ q, const T *__restrict__ k,
     const T *__restrict__ q_weight, const T *__restrict__ k_weight,
     const T *__restrict__ cos, const T *__restrict__ sin, T *__restrict__ q_out,
@@ -220,7 +225,7 @@ __global__ void qk_rms_norm_rope_kernel(
 }
 
 template <typename T, bool IS_NEOX>
-__global__ void qk_rms_norm_rope_positions_kernel(
+DKR_AP_FUNCTION void qk_rms_norm_rope_positions_kernel(
     const T *__restrict__ q, const T *__restrict__ k,
     const T *__restrict__ q_weight, const T *__restrict__ k_weight,
     const T *__restrict__ cos, const T *__restrict__ sin,
@@ -231,7 +236,11 @@ __global__ void qk_rms_norm_rope_positions_kernel(
     const int64_t k_stride_s, const int64_t k_stride_d, const int batch,
     const int q_heads, const int k_heads, const int seq_len, const int head_dim,
     const int rot_dim, const float q_eps, const float k_eps,
-    const bool output_token_major) {
+    const bool output_token_major
+#ifdef DKR_ATTENTION_PREP_IMAGE
+    , const int cache_rows
+#endif
+    ) {
   __shared__ float reduce[1024];
 
   const int q_rows = batch * q_heads * seq_len;
@@ -248,14 +257,27 @@ __global__ void qk_rms_norm_rope_positions_kernel(
   const int batch_idx = tmp / outer;
 
   const uint32_t pos = positions[batch_idx * seq_len + seq];
-  const T *cos_row_ptr = cos + static_cast<int64_t>(pos) * rot_dim;
-  const T *sin_row_ptr = sin + static_cast<int64_t>(pos) * rot_dim;
+  #ifdef DKR_ATTENTION_PREP_IMAGE
+    const bool invalid_pos = pos >= static_cast<uint32_t>(cache_rows);
+    const auto safe_pos = invalid_pos ? 0u : pos;
+#else
+    const auto safe_pos = pos;
+#endif
+    const T *cos_row_ptr = cos + static_cast<int64_t>(safe_pos) * rot_dim;
+    const T *sin_row_ptr = sin + static_cast<int64_t>(safe_pos) * rot_dim;
 
   if (is_q) {
     const int64_t src_base = static_cast<int64_t>(batch_idx) * q_stride_b +
                              static_cast<int64_t>(head) * q_stride_h +
                              static_cast<int64_t>(seq) * q_stride_s;
     T *dst = q_out + static_cast<int64_t>(row) * head_dim;
+    #ifdef DKR_ATTENTION_PREP_IMAGE
+    if(invalid_pos) {
+      for(int col=threadIdx.x;col<head_dim;col+=blockDim.x)
+        dst[col]=ap_from_float<T>(__int_as_float(0x7fc00000));
+      return;
+    }
+#endif
     write_norm_rope_row<T, IS_NEOX>(q, q_weight, cos_row_ptr, sin_row_ptr, dst,
                                     src_base, q_stride_d, head_dim, rot_dim,
                                     q_eps, reduce);
@@ -264,6 +286,13 @@ __global__ void qk_rms_norm_rope_positions_kernel(
                              static_cast<int64_t>(head) * k_stride_h +
                              static_cast<int64_t>(seq) * k_stride_s;
     T *dst = k_out + static_cast<int64_t>(local_row) * head_dim;
+    #ifdef DKR_ATTENTION_PREP_IMAGE
+    if(invalid_pos) {
+      for(int col=threadIdx.x;col<head_dim;col+=blockDim.x)
+        dst[col]=ap_from_float<T>(__int_as_float(0x7fc00000));
+      return;
+    }
+#endif
     write_norm_rope_row<T, IS_NEOX>(k, k_weight, cos_row_ptr, sin_row_ptr, dst,
                                     src_base, k_stride_d, head_dim, rot_dim,
                                     k_eps, reduce);
@@ -271,7 +300,7 @@ __global__ void qk_rms_norm_rope_positions_kernel(
 }
 
 template <typename T, bool IS_NEOX>
-__global__ void qkv_rms_norm_rope_positions_kernel(
+DKR_AP_FUNCTION void qkv_rms_norm_rope_positions_kernel(
     const T *__restrict__ q, const T *__restrict__ k, const T *__restrict__ v,
     const T *__restrict__ q_weight, const T *__restrict__ k_weight,
     const T *__restrict__ v_weight, const T *__restrict__ cos,
@@ -285,7 +314,11 @@ __global__ void qkv_rms_norm_rope_positions_kernel(
     const int64_t v_stride_s, const int64_t v_stride_d, const int batch,
     const int q_heads, const int k_heads, const int seq_len, const int head_dim,
     const int rot_dim, const float q_eps, const float k_eps,
-    const float v_eps) {
+    const float v_eps
+#ifdef DKR_ATTENTION_PREP_IMAGE
+    , const int cache_rows
+#endif
+    ) {
   __shared__ float reduce[1024];
 
   const int q_rows = batch * q_heads * seq_len;
@@ -298,12 +331,25 @@ __global__ void qkv_rms_norm_rope_positions_kernel(
     const int head = tmp % q_heads;
     const int batch_idx = tmp / q_heads;
     const uint32_t pos = positions[batch_idx * seq_len + seq];
-    const T *cos_row_ptr = cos + static_cast<int64_t>(pos) * rot_dim;
-    const T *sin_row_ptr = sin + static_cast<int64_t>(pos) * rot_dim;
+    #ifdef DKR_ATTENTION_PREP_IMAGE
+    const bool invalid_pos = pos >= static_cast<uint32_t>(cache_rows);
+    const auto safe_pos = invalid_pos ? 0u : pos;
+#else
+    const auto safe_pos = pos;
+#endif
+    const T *cos_row_ptr = cos + static_cast<int64_t>(safe_pos) * rot_dim;
+    const T *sin_row_ptr = sin + static_cast<int64_t>(safe_pos) * rot_dim;
     const int64_t src_base = static_cast<int64_t>(batch_idx) * q_stride_b +
                              static_cast<int64_t>(head) * q_stride_h +
                              static_cast<int64_t>(seq) * q_stride_s;
     T *dst = q_out + static_cast<int64_t>(row) * head_dim;
+    #ifdef DKR_ATTENTION_PREP_IMAGE
+    if(invalid_pos) {
+      for(int col=threadIdx.x;col<head_dim;col+=blockDim.x)
+        dst[col]=ap_from_float<T>(__int_as_float(0x7fc00000));
+      return;
+    }
+#endif
     write_norm_rope_row<T, IS_NEOX>(q, q_weight, cos_row_ptr, sin_row_ptr, dst,
                                     src_base, q_stride_d, head_dim, rot_dim,
                                     q_eps, reduce);
@@ -320,12 +366,25 @@ __global__ void qkv_rms_norm_rope_positions_kernel(
 
   if (is_k) {
     const uint32_t pos = positions[batch_idx * seq_len + seq];
-    const T *cos_row_ptr = cos + static_cast<int64_t>(pos) * rot_dim;
-    const T *sin_row_ptr = sin + static_cast<int64_t>(pos) * rot_dim;
+    #ifdef DKR_ATTENTION_PREP_IMAGE
+    const bool invalid_pos = pos >= static_cast<uint32_t>(cache_rows);
+    const auto safe_pos = invalid_pos ? 0u : pos;
+#else
+    const auto safe_pos = pos;
+#endif
+    const T *cos_row_ptr = cos + static_cast<int64_t>(safe_pos) * rot_dim;
+    const T *sin_row_ptr = sin + static_cast<int64_t>(safe_pos) * rot_dim;
     const int64_t src_base = static_cast<int64_t>(batch_idx) * k_stride_b +
                              static_cast<int64_t>(head) * k_stride_h +
                              static_cast<int64_t>(seq) * k_stride_s;
     T *dst = k_out + static_cast<int64_t>(local_row) * head_dim;
+    #ifdef DKR_ATTENTION_PREP_IMAGE
+    if(invalid_pos) {
+      for(int col=threadIdx.x;col<head_dim;col+=blockDim.x)
+        dst[col]=ap_from_float<T>(__int_as_float(0x7fc00000));
+      return;
+    }
+#endif
     write_norm_rope_row<T, IS_NEOX>(k, k_weight, cos_row_ptr, sin_row_ptr, dst,
                                     src_base, k_stride_d, head_dim, rot_dim,
                                     k_eps, reduce);
@@ -339,6 +398,7 @@ __global__ void qkv_rms_norm_rope_positions_kernel(
   }
 }
 
+#ifndef DKR_ATTENTION_PREP_IMAGE
 template <typename T, bool IS_NEOX>
 void launch_qk_rms_norm_rope(
     const void *q, const void *k, const void *q_weight, const void *k_weight,
@@ -671,3 +731,5 @@ extern "C" void qkv_rms_norm_rope_positions(
     }
   }
 }
+#endif // historical attention preparation launchers
+#undef DKR_AP_FUNCTION

@@ -65,6 +65,7 @@ const PACKAGES: &[Package] = &[
     Package { name: "gguf-moe-decode", source: "gguf_moe_decode.cu", fast_math: false },
     Package { name: "gguf-residual", source: "gguf_residual.cu", fast_math: false },
     Package { name: "gguf-grouped-row", source: "gguf_grouped_row.cu", fast_math: false },
+    Package { name: "attention-prep", source: "attention_prep.cu", fast_math: false },
 ];
 
 fn parse_args() -> Result<(usize, PathBuf, String, bool, bool, Option<String>), Box<dyn std::error::Error>> {
@@ -376,7 +377,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     .current_dir(root).status()?;
                 if !status.success() { return Err(format!("GGUF MMQ shard packaging failed for {id}: {status}").into()); }
             }
-          } else if pkg.name=="gguf-grouped-row" {
+           } else if pkg.name=="attention-prep" {
+            let watched=[root.join("mistralrs-core/src/cuda/attention_prep.cu"),
+                root.join("mistralrs-quant/kernels/rotary/rotary.cu"),
+                root.join("mistralrs-quant/kernels/cuda_compat.h")];
+            let compiled=compile_ptx(&source,&work.join(pkg.name),cc,pkg.fast_math,None,&watched)?;
+            let status=Command::new(&python).arg(&script).args(["--cc",&cc.to_string(),"--image","1"])
+                .arg("--output").arg(&output).arg("--ptx-file").arg(&compiled).current_dir(root).status()?;
+            if !status.success(){return Err(format!("attention prep packaging failed: {status}").into());}
+        } else if pkg.name=="gguf-grouped-row" {
             let watched=[root.join("mistralrs-quant/kernels/moe_grouped/moe_grouped.cu")];
             let compiled=compile_ptx(&source,&work.join(pkg.name),cc,pkg.fast_math,None,&watched)?;
             let status=Command::new(&python).arg(&script).args(["--cc",&cc.to_string(),"--image","1"])
