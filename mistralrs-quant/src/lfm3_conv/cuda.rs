@@ -1,6 +1,9 @@
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 use std::ffi::c_void;
 
-use candle_core::{backend::BackendStorage, cuda::cudarc::driver::sys::CUstream, CudaStorage};
+use candle_core::{backend::BackendStorage, CudaStorage};
+#[cfg(not(feature = "dkr-static-closure-probe"))]
+use candle_core::cuda::cudarc::driver::sys::CUstream;
 
 use super::*;
 use crate::utils::{slice_ptr_mut_on_stream, slice_ptr_on_stream};
@@ -141,28 +144,32 @@ impl ConvInputs<'_> {
                 let x=projected.as_cuda_slice::<$ty>()?;
                 let w=weight.as_cuda_slice::<$ty>()?;
                 let st=state.as_cuda_slice::<$ty>()?;
-                let mut spans=vec![dkr::span(projected_layout,x.len())?,
-                                   dkr::span(weight_layout,w.len())?,
-                                   dkr::span(state_layout,st.len())?];
+                let mut spans=[dkr::span(projected_layout,x.len())?,
+                               dkr::span(weight_layout,w.len())?,
+                               dkr::span(state_layout,st.len())?,0,0,0];
                 let (xp,xg)=slice_ptr_on_stream(x,projected_layout.start_offset(),&stream);
                 let (wp,wg)=slice_ptr_on_stream(w,weight_layout.start_offset(),&stream);
                 let (sp,sg)=slice_ptr_on_stream(st,state_layout.start_offset(),&stream);
-                let mut pointers=vec![xp,wp,sp];
+                let mut pointers=[xp,wp,sp,0,0,0];
+                let mut count=3;
                 let bias_guard=if let Some((bias,layout))=bias{
                     let values=bias.as_cuda_slice::<$ty>()?;
-                    spans.push(dkr::span(layout,values.len())?);
+                    spans[count]=dkr::span(layout,values.len())?;
                     let (ptr,guard)=slice_ptr_on_stream(values,layout.start_offset(),&stream);
-                    pointers.push(ptr);
+                    pointers[count]=ptr;
+                    count+=1;
                     Some(guard)
                 }else{None};
-                spans.extend([out_len,state_len]);
-                let key=dkr::Key::causal(self.projected.dtype(),&spans,out_len,self.width,bias.is_some())?;
+                spans[count]=out_len;
+                spans[count+1]=state_len;
+                let key=dkr::Key::causal(self.projected.dtype(),&spans[..count+2],out_len,self.width,bias.is_some())?;
                 let mut output=unsafe{device.alloc::<$ty>(out_len)}?;
                 let mut next_state=unsafe{device.alloc::<$ty>(state_len)}?;
                 let (op,og)=slice_ptr_mut_on_stream(&mut output,0,&stream);
                 let (np,ng)=slice_ptr_mut_on_stream(&mut next_state,0,&stream);
-                pointers.extend([op,np]);
-                unsafe{dkr::causal(key,device,&pointers,&self.params)?;}
+                pointers[count]=op;
+                pointers[count+1]=np;
+                unsafe{dkr::causal(key,device,&pointers[..count+2],&self.params)?;}
                 drop((xg,wg,sg,bias_guard,og,ng));
                 self.tensors(
                     Storage::Cuda(CudaStorage::wrap_cuda_slice(output,device.clone())),
