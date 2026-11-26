@@ -3,8 +3,11 @@ use std::ffi::c_void;
 #[allow(dead_code)]
 extern "C" {
 
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn gdn_mma_prefill_init() -> i32;
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn gdn_mma_prefill(params: *const c_void) -> i32;
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn gdn_mma_fused_prefill(params: *const c_void) -> i32;
 
     pub(crate) fn cuda_graph_copy_bytes(
@@ -1126,6 +1129,7 @@ extern "C" {
         state_dtype: i32,
         stream: i64,
     ) -> i32;
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     #[cfg(has_flashinfer_gdn_sm90_kernel)]
     pub(crate) fn mistralrs_flashinfer_gdn_sm90_workspace_size(
         batch_size: i32,
@@ -1135,6 +1139,7 @@ extern "C" {
         sm_count: i32,
         has_slots: i32,
     ) -> u64;
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     #[cfg(has_flashinfer_gdn_sm90_kernel)]
     pub(crate) fn mistralrs_flashinfer_gdn_sm90_launch(params: *const c_void) -> i32;
     // Chunked GDN recurrence for prefill (processes tokens in BT=64 chunks)
