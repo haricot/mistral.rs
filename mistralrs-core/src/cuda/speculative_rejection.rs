@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use candle_core::backend::{BackendDevice, BackendStorage};
 use candle_core::cuda_backend::cudarc::driver::{
-    sys, CudaEvent, CudaStream, DevicePtr, DevicePtrMut, DeviceRepr, PinnedHostSlice,
+    sys, CudaEvent, CudaStream, DevicePtr, DevicePtrMut, DeviceRepr, DeviceSlice, PinnedHostSlice,
     ValidAsZeroBits,
 };
 use candle_core::cuda_backend::CudaStorageSlice;
@@ -18,6 +18,7 @@ use crate::ops::{
     CudaRankedTopKPackedWorkspace, RankedTopKPackedOutput, CUDA_TOPK_MAX_K,
 };
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 use super::ffi;
 
 pub(crate) const SPARSE_REJECTION_STATUS_OK: u32 = 0;
@@ -421,9 +422,19 @@ impl InplaceOp1 for SparseRejectionKernelLaunch {
 
     fn cuda_fwd(&self, storage: &mut CudaStorage, layout: &Layout) -> Result<()> {
         let stream = storage.device().cuda_stream();
+        #[cfg(feature = "dkr-static-closure-probe")]
+        let device = candle_core::Device::Cuda(storage.device().clone());
         let outcomes = storage.as_cuda_slice_mut::<u32>()?;
         let (outcomes_ptr, outcomes_guard) = outcomes.device_ptr_mut(&stream);
-        let outcomes_ptr = unsafe { (outcomes_ptr as *mut u32).add(layout.start_offset()) };
+        let count = usize::try_from(self.batch).map_err(candle_core::Error::wrap)?.checked_mul(3).ok_or_else(|| candle_core::Error::msg("rejection outcome span"))?;
+        let outcomes_ptr = crate::ops::cuda_large_topk_address(outcomes_ptr, layout.start_offset(), count, outcomes.len(), 4)? as *mut u32;
+        #[cfg(feature = "dkr-static-closure-probe")]
+        unsafe {
+            super::sampling_dynamic::launch_rejection(&device, &stream, [self.target_ptr as u64, self.draft_ptr as u64, self.q_ids_ptr as u64, self.q_probs_ptr as u64,
+                self.temperature_ptr as u64, self.top_k_ptr as u64, self.top_p_ptr as u64, self.min_p_ptr as u64, self.accept_ptr as u64, self.sample_ptr as u64, outcomes_ptr as u64],
+                self.batch, self.drafts, self.vocab, self.q_width, self.packed_k)?;
+        }
+        #[cfg(not(feature = "dkr-static-closure-probe"))]
         unsafe {
             match self.mode {
                 SparseRejectionMode::Categorical => ffi::sparse_rejection_categorical_f32(
@@ -1416,26 +1427,26 @@ fn sparse_rejection_cuda_device_with_outcomes(
     let dev = target_storage.device();
     let stream = dev.cuda_stream();
     let (target_ptr, target_guard) = target_slice.device_ptr(&stream);
-    let target_ptr = unsafe { (target_ptr as *const f32).add(target_layout.start_offset()) };
+    let target_ptr = crate::ops::cuda_large_topk_address(target_ptr, target_layout.start_offset(), kernel_target.elem_count(), target_slice.len(), 4)? as *const f32;
     let (draft_ptr, draft_guard) = draft_slice.device_ptr(&stream);
-    let draft_ptr = unsafe { (draft_ptr as *const u32).add(draft_layout.start_offset()) };
+    let draft_ptr = crate::ops::cuda_large_topk_address(draft_ptr, draft_layout.start_offset(), input.draft_tokens.elem_count(), draft_slice.len(), 4)? as *const u32;
     let (q_ids_ptr, q_ids_guard) = q_ids_slice.device_ptr(&stream);
-    let q_ids_ptr = unsafe { (q_ids_ptr as *const u32).add(q_ids_layout.start_offset()) };
+    let q_ids_ptr = crate::ops::cuda_large_topk_address(q_ids_ptr, q_ids_layout.start_offset(), input.q_token_ids.elem_count(), q_ids_slice.len(), 4)? as *const u32;
     let (q_probs_ptr, q_probs_guard) = q_probs_slice.device_ptr(&stream);
-    let q_probs_ptr = unsafe { (q_probs_ptr as *const f32).add(q_probs_layout.start_offset()) };
+    let q_probs_ptr = crate::ops::cuda_large_topk_address(q_probs_ptr, q_probs_layout.start_offset(), input.q_probs.elem_count(), q_probs_slice.len(), 4)? as *const f32;
     let (temperature_ptr, temperature_guard) = temperature_slice.device_ptr(&stream);
     let temperature_ptr =
-        unsafe { (temperature_ptr as *const f32).add(temperature_layout.start_offset()) };
+        crate::ops::cuda_large_topk_address(temperature_ptr, temperature_layout.start_offset(), input.inverse_temperatures.elem_count(), temperature_slice.len(), 4)? as *const f32;
     let (top_k_ptr, top_k_guard) = top_k_slice.device_ptr(&stream);
-    let top_k_ptr = unsafe { (top_k_ptr as *const u32).add(top_k_layout.start_offset()) };
+    let top_k_ptr = crate::ops::cuda_large_topk_address(top_k_ptr, top_k_layout.start_offset(), input.target_top_k.elem_count(), top_k_slice.len(), 4)? as *const u32;
     let (top_p_ptr, top_p_guard) = top_p_slice.device_ptr(&stream);
-    let top_p_ptr = unsafe { (top_p_ptr as *const f32).add(top_p_layout.start_offset()) };
+    let top_p_ptr = crate::ops::cuda_large_topk_address(top_p_ptr, top_p_layout.start_offset(), input.top_p.elem_count(), top_p_slice.len(), 4)? as *const f32;
     let (min_p_ptr, min_p_guard) = min_p_slice.device_ptr(&stream);
-    let min_p_ptr = unsafe { (min_p_ptr as *const f32).add(min_p_layout.start_offset()) };
+    let min_p_ptr = crate::ops::cuda_large_topk_address(min_p_ptr, min_p_layout.start_offset(), input.min_p.elem_count(), min_p_slice.len(), 4)? as *const f32;
     let (accept_ptr, accept_guard) = accept_slice.device_ptr(&stream);
-    let accept_ptr = unsafe { (accept_ptr as *const f32).add(accept_layout.start_offset()) };
+    let accept_ptr = crate::ops::cuda_large_topk_address(accept_ptr, accept_layout.start_offset(), input.accept_uniforms.elem_count(), accept_slice.len(), 4)? as *const f32;
     let (sample_ptr, sample_guard) = sample_slice.device_ptr(&stream);
-    let sample_ptr = unsafe { (sample_ptr as *const f32).add(sample_layout.start_offset()) };
+    let sample_ptr = crate::ops::cuda_large_topk_address(sample_ptr, sample_layout.start_offset(), input.sample_uniforms.elem_count(), sample_slice.len(), 4)? as *const f32;
 
     let outcomes = match outcomes {
         Some(outcomes) => {

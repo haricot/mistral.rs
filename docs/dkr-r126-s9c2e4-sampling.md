@@ -1,0 +1,7 @@
+# S9C.2E.4 — Sampling & DFlash: strict dispatch
+
+Source delivery following the intermediate producer commit. 32 logical profiles and three images, with maximum 16 typed arguments. All 12 historical sampling FFI declarations and their call sites are excluded by the strict closure feature. Expected remaining core inventory: 14 Argsort + 2 graph copies. No CUDA compilation, link, numeric qualification, or model fit is claimed.
+
+The strict adapter selects exact typed profile identities, checks ABI metadata, uses checked tensor spans at the Rust binding boundaries and retains the original device-pointer guards. It prevalidates static and dynamic shared memory and caches plans by exact profile, argument geometry and device. Top-1 and categorical pre-admit both stages before submitting the first. The ring reservation, completion, abort and supplied uniform logic remain in the existing callers. DFlash selection remains sequential within each sequence. Sparse rejection preserves its categorical and one-thread bounded-top-k launch geometry and status contract.
+
+The exported dkr_sampling_requirements produces exact profiles for individual request modes; automatic loader union and model fit remain unproven. Active limits stay 4096/512; projected master upper bound 4245/551. The S10 qualification must exercise all modes, offset views, identical uniform inputs, special values, reused workspaces, sparse rejection statuses and compare the legacy path to strict CUBIN. CUDA graph behavior remains pending.

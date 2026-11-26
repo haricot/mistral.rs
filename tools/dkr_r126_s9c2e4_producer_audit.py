@@ -76,7 +76,7 @@ def audit(root,self_test=False):
             raise AssertionError("incorrect ABI accepted")
     return dict(status="PRODUCER_SOURCE_COMPLETE",profiles=32,images=3,max_args=16,
         projected_master_logical=4245,projected_master_physical_upper=551,
-        residual_ffi=28,ffi_closed=False,compilation=False,link_qualified=False,
+        producer_only=True,compilation=False,link_qualified=False,
         numeric_qualified=False,full_closure=False)
 
 def main():
@@ -90,6 +90,6 @@ def main():
         a.json_out.parent.mkdir(parents=True,exist_ok=True)
         a.json_out.write_text(json.dumps(result,indent=2)+"\n")
     print("DKR_R126_S9C2E4_PRODUCER_"+("SELF_TEST=PASS" if a.self_test else "SOURCE=COMPLETE")+
-          " profiles=32 images=3 max_args=16 residual_ffi=28 ffi_closed=false compilation=false link_qualified=false")
+          " profiles=32 images=3 max_args=16 producer_only=true compilation=false link_qualified=false")
 if __name__=="__main__":
     main()

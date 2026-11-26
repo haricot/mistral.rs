@@ -854,6 +854,7 @@ extern "C" {
         nblocks: i32,
         stream: i64,
     ) -> i32;
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn sample_ranked_topk(
         packed: *const f32,
         params: *const f32,
@@ -862,6 +863,7 @@ extern "C" {
         packed_k: i32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn dflash_greedy_select(
         packed_topk: *const f32,
         projected_hidden: *const c_void,
@@ -880,6 +882,7 @@ extern "C" {
         successor_dtype: i32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn dflash_sample_select(
         packed_topk: *const f32,
         projected_hidden: *const c_void,
@@ -902,6 +905,7 @@ extern "C" {
         successor_dtype: i32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn sparse_rejection_categorical_f32(
         target_logits: *const f32,
         draft_tokens: *const u32,
@@ -920,6 +924,7 @@ extern "C" {
         q_width: i32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn sparse_rejection_topk_f32(
         packed_target: *const f32,
         draft_tokens: *const u32,
@@ -939,6 +944,7 @@ extern "C" {
         packed_k: i32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn top1_large_f32_packed(
         input: *const f32,
         block_values: *mut f32,
@@ -950,6 +956,7 @@ extern "C" {
         nblocks: i32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn top1_large_bf16_packed(
         input: *const c_void,
         block_values: *mut f32,
@@ -961,6 +968,7 @@ extern "C" {
         nblocks: i32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn top1_large_f16_packed(
         input: *const c_void,
         block_values: *mut f32,
@@ -972,6 +980,7 @@ extern "C" {
         nblocks: i32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn top1_large_f32_packed_batched(
         input: *const f32,
         block_values: *mut f32,
@@ -984,6 +993,7 @@ extern "C" {
         nblocks: i32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn top1_large_bf16_packed_batched(
         input: *const c_void,
         block_values: *mut f32,
@@ -996,6 +1006,7 @@ extern "C" {
         nblocks: i32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn top1_large_f16_packed_batched(
         input: *const c_void,
         block_values: *mut f32,
@@ -1008,6 +1019,7 @@ extern "C" {
         nblocks: i32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn categorical_large_f32_packed_batched(
         input: *const f32,
         inv_temperatures: *const f32,

@@ -3101,3 +3101,6 @@ mod dkr_s6_native;
 
 #[cfg(all(test,feature="dkr-sm61-experimental"))]
 mod dkr_s683;
+
+#[cfg(feature = "dkr-static-closure-probe")]
+pub use cuda::sampling_dynamic::{dkr_sampling_requirements, DkrSamplingMode};

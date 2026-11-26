@@ -564,7 +564,7 @@ pub fn cuda_moe_router_topk(
 }
 
 #[cfg(feature = "cuda")]
-fn cuda_large_topk_address(
+pub(crate) fn cuda_large_topk_address(
     base: u64, offset: usize, count: usize, allocation_elems: usize, element_bytes: usize,
 ) -> Result<u64> {
     if count == 0 || element_bytes == 0 ||
@@ -1616,7 +1616,7 @@ pub(crate) fn cuda_dflash_greedy_select(
     anchors: &Tensor,
 ) -> Result<Tensor> {
     use candle_core::backend::BackendStorage;
-    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
+    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut, DeviceSlice};
     use candle_core::cuda_backend::CudaStorageSlice;
     use std::ffi::c_void;
 
@@ -1750,9 +1750,9 @@ pub(crate) fn cuda_dflash_greedy_select(
         candle_core::bail!("{OP} anchor dtype mismatch");
     };
     let (packed_ptr, packed_guard) = packed_slice.device_ptr(&stream);
-    let packed_ptr = unsafe { (packed_ptr as *const f32).add(packed_layout.start_offset()) };
+    let packed_ptr = cuda_large_topk_address(packed_ptr, packed_layout.start_offset(), packed_topk.elem_count(), packed_slice.len(), 4)? as *const f32;
     let (anchor_ptr, anchor_guard) = anchor_slice.device_ptr(&stream);
-    let anchor_ptr = unsafe { (anchor_ptr as *const u32).add(anchor_layout.start_offset()) };
+    let anchor_ptr = cuda_large_topk_address(anchor_ptr, anchor_layout.start_offset(), anchors.elem_count(), anchor_slice.len(), 4)? as *const u32;
 
     macro_rules! data_ptr {
         ($storage:expr, $layout:expr, $name:expr) => {{
@@ -1760,14 +1760,12 @@ pub(crate) fn cuda_dflash_greedy_select(
                 CudaStorageSlice::F32(slice) => {
                     let (ptr, guard) = slice.device_ptr(&stream);
                     let ptr =
-                        unsafe { (ptr as *const f32).add($layout.start_offset()) as *const c_void };
+                        cuda_large_topk_address(ptr, $layout.start_offset(), $layout.shape().elem_count(), slice.len(), 4)? as *const c_void;
                     (ptr, CUDA_DFLASH_SELECTOR_F32, guard)
                 }
                 CudaStorageSlice::BF16(slice) => {
                     let (ptr, guard) = slice.device_ptr(&stream);
-                    let ptr = unsafe {
-                        (ptr as *const half::bf16).add($layout.start_offset()) as *const c_void
-                    };
+                    let ptr = cuda_large_topk_address(ptr, $layout.start_offset(), $layout.shape().elem_count(), slice.len(), 2)? as *const c_void;
                     (ptr, CUDA_DFLASH_SELECTOR_BF16, guard)
                 }
                 _ => candle_core::bail!("{OP} {} dtype mismatch", $name),
@@ -1787,6 +1785,18 @@ pub(crate) fn cuda_dflash_greedy_select(
 
     let mut selected = unsafe { dev.alloc::<u32>(rows) }?;
     let (selected_ptr, selected_guard) = selected.device_ptr_mut(&stream);
+    #[cfg(feature = "dkr-static-closure-probe")]
+    unsafe {
+        crate::cuda::sampling_dynamic::launch_dflash(
+            &candle_core::Device::Cuda(dev.clone()), &stream,
+            [hidden_dtype, predecessor_dtype, successor_dtype],
+            [batch_i32, positions_i32, rank_i32, vocab_i32, k_i32, packed_width_i32],
+            packed_ptr as u64, hidden_ptr as u64, predecessor_ptr as u64, successor_ptr as u64,
+            anchor_ptr as u64, selected_ptr as u64,
+            None,
+        )?;
+    }
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     unsafe {
         ffi::dflash_greedy_select(
             packed_ptr,
@@ -1829,7 +1839,7 @@ pub(crate) fn cuda_dflash_sample_select(
     input: DFlashSelectorSampleInput<'_>,
 ) -> Result<DFlashSelectorSampleOutput> {
     use candle_core::backend::BackendStorage;
-    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
+    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut, DeviceSlice};
     use candle_core::cuda_backend::CudaStorageSlice;
     use std::ffi::c_void;
 
@@ -2008,14 +2018,14 @@ pub(crate) fn cuda_dflash_sample_select(
         candle_core::bail!("{OP} uniform dtype mismatch");
     };
     let (packed_ptr, packed_guard) = packed_slice.device_ptr(&stream);
-    let packed_ptr = unsafe { (packed_ptr as *const f32).add(packed_layout.start_offset()) };
+    let packed_ptr = cuda_large_topk_address(packed_ptr, packed_layout.start_offset(), packed_topk.elem_count(), packed_slice.len(), 4)? as *const f32;
     let (anchor_ptr, anchor_guard) = anchor_slice.device_ptr(&stream);
-    let anchor_ptr = unsafe { (anchor_ptr as *const u32).add(anchor_layout.start_offset()) };
+    let anchor_ptr = cuda_large_topk_address(anchor_ptr, anchor_layout.start_offset(), anchors.elem_count(), anchor_slice.len(), 4)? as *const u32;
     let (temperature_ptr, temperature_guard) = temperature_slice.device_ptr(&stream);
     let temperature_ptr =
-        unsafe { (temperature_ptr as *const f32).add(temperature_layout.start_offset()) };
+        cuda_large_topk_address(temperature_ptr, temperature_layout.start_offset(), inverse_temperatures.elem_count(), temperature_slice.len(), 4)? as *const f32;
     let (uniform_ptr, uniform_guard) = uniform_slice.device_ptr(&stream);
-    let uniform_ptr = unsafe { (uniform_ptr as *const f32).add(uniform_layout.start_offset()) };
+    let uniform_ptr = cuda_large_topk_address(uniform_ptr, uniform_layout.start_offset(), uniforms.elem_count(), uniform_slice.len(), 4)? as *const f32;
 
     macro_rules! data_ptr {
         ($storage:expr, $layout:expr, $name:expr) => {{
@@ -2023,14 +2033,12 @@ pub(crate) fn cuda_dflash_sample_select(
                 CudaStorageSlice::F32(slice) => {
                     let (ptr, guard) = slice.device_ptr(&stream);
                     let ptr =
-                        unsafe { (ptr as *const f32).add($layout.start_offset()) as *const c_void };
+                        cuda_large_topk_address(ptr, $layout.start_offset(), $layout.shape().elem_count(), slice.len(), 4)? as *const c_void;
                     (ptr, CUDA_DFLASH_SELECTOR_F32, guard)
                 }
                 CudaStorageSlice::BF16(slice) => {
                     let (ptr, guard) = slice.device_ptr(&stream);
-                    let ptr = unsafe {
-                        (ptr as *const half::bf16).add($layout.start_offset()) as *const c_void
-                    };
+                    let ptr = cuda_large_topk_address(ptr, $layout.start_offset(), $layout.shape().elem_count(), slice.len(), 2)? as *const c_void;
                     (ptr, CUDA_DFLASH_SELECTOR_BF16, guard)
                 }
                 _ => candle_core::bail!("{OP} {} dtype mismatch", $name),
@@ -2054,6 +2062,18 @@ pub(crate) fn cuda_dflash_sample_select(
     let (selected_ptr, selected_guard) = selected.device_ptr_mut(&stream);
     let (candidate_ids_ptr, candidate_ids_guard) = candidate_ids.device_ptr_mut(&stream);
     let (candidate_probs_ptr, candidate_probs_guard) = candidate_probs.device_ptr_mut(&stream);
+    #[cfg(feature = "dkr-static-closure-probe")]
+    unsafe {
+        crate::cuda::sampling_dynamic::launch_dflash(
+            &candle_core::Device::Cuda(dev.clone()), &stream,
+            [hidden_dtype, predecessor_dtype, successor_dtype],
+            [batch_i32, positions_i32, rank_i32, vocab_i32, k_i32, packed_width_i32],
+            packed_ptr as u64, hidden_ptr as u64, predecessor_ptr as u64, successor_ptr as u64,
+            anchor_ptr as u64, selected_ptr as u64,
+            Some([temperature_ptr as u64, uniform_ptr as u64, candidate_ids_ptr as u64, candidate_probs_ptr as u64]),
+        )?;
+    }
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     unsafe {
         ffi::dflash_sample_select(
             packed_ptr,
@@ -2125,7 +2145,7 @@ pub(crate) fn cuda_top1_logits_f32_packed_batched(
     input: &Tensor,
 ) -> Result<Top1LogitsPackedOutput> {
     use candle_core::backend::BackendStorage;
-    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
+    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut, DeviceSlice};
     use candle_core::cuda_backend::CudaStorageSlice;
 
     const OP: &str = "cuda_top1_logits_f32_packed_batched";
@@ -2183,8 +2203,15 @@ pub(crate) fn cuda_top1_logits_f32_packed_batched(
     let (block_values_ptr, block_values_guard) = block_values.device_ptr_mut(&stream);
     let (block_indices_ptr, block_indices_guard) = block_indices.device_ptr_mut(&stream);
     let (packed_ptr, packed_guard) = packed_dst.device_ptr_mut(&stream);
-    let input_ptr = unsafe { (input_ptr as *const f32).add(input_layout.start_offset()) };
+    let input_ptr = cuda_large_topk_address(input_ptr, input_layout.start_offset(), input.elem_count(), input_slice.len(), 4)? as *const f32;
 
+    #[cfg(feature = "dkr-static-closure-probe")]
+    unsafe {
+        crate::cuda::sampling_dynamic::launch_top1(&candle_core::Device::Cuda(dev.clone()), &stream, DType::F32, true,
+            nrows_i32, ncols_i32, chunk_size_i32, nblocks_i32,
+            input_ptr as u64, block_values_ptr as u64, block_indices_ptr as u64, packed_ptr as u64, 0)?;
+    }
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     unsafe {
         ffi::top1_large_f32_packed_batched(
             input_ptr,
@@ -2242,7 +2269,7 @@ pub(crate) fn cuda_categorical_logits_f32_packed_batched(
     uniforms: &Tensor,
 ) -> Result<CategoricalLogitsPackedOutput> {
     use candle_core::backend::BackendStorage;
-    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
+    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut, DeviceSlice};
     use candle_core::cuda_backend::CudaStorageSlice;
 
     const OP: &str = "cuda_categorical_logits_f32_packed_batched";
@@ -2334,11 +2361,18 @@ pub(crate) fn cuda_categorical_logits_f32_packed_batched(
     let (block_values_ptr, block_values_guard) = block_values.device_ptr_mut(&stream);
     let (block_sums_ptr, block_sums_guard) = block_sums.device_ptr_mut(&stream);
     let (packed_ptr, packed_guard) = packed_dst.device_ptr_mut(&stream);
-    let input_ptr = unsafe { (input_ptr as *const f32).add(input_layout.start_offset()) };
+    let input_ptr = cuda_large_topk_address(input_ptr, input_layout.start_offset(), input.elem_count(), input_slice.len(), 4)? as *const f32;
     let temperature_ptr =
-        unsafe { (temperature_ptr as *const f32).add(temperature_layout.start_offset()) };
-    let uniform_ptr = unsafe { (uniform_ptr as *const f32).add(uniform_layout.start_offset()) };
+        cuda_large_topk_address(temperature_ptr, temperature_layout.start_offset(), inverse_temperatures.elem_count(), temperature_slice.len(), 4)? as *const f32;
+    let uniform_ptr = cuda_large_topk_address(uniform_ptr, uniform_layout.start_offset(), uniforms.elem_count(), uniform_slice.len(), 4)? as *const f32;
 
+    #[cfg(feature = "dkr-static-closure-probe")]
+    unsafe {
+        crate::cuda::sampling_dynamic::launch_categorical(&candle_core::Device::Cuda(dev.clone()), &stream,
+            nrows_i32, ncols_i32, chunk_size_i32, nblocks_i32,
+            input_ptr as u64, temperature_ptr as u64, uniform_ptr as u64, block_values_ptr as u64, block_sums_ptr as u64, packed_ptr as u64)?;
+    }
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     unsafe {
         ffi::categorical_large_f32_packed_batched(
             input_ptr,
@@ -3016,7 +3050,7 @@ fn cuda_top1_logits_submit_inner(
     options: CudaTop1SubmitOptions<'_>,
 ) -> Result<CudaTop1Submission> {
     use candle_core::backend::{BackendDevice, BackendStorage};
-    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
+    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut, DeviceSlice};
     use candle_core::cuda_backend::CudaStorageSlice;
     use std::ffi::c_void;
 
@@ -3083,7 +3117,7 @@ fn cuda_top1_logits_submit_inner(
     macro_rules! input_ptr {
         ($slice:expr, $ty:ty) => {{
             let (ptr, guard) = $slice.device_ptr(&stream);
-            let ptr = unsafe { (ptr as *const $ty).add(layout.start_offset()) as *const c_void };
+            let ptr = cuda_large_topk_address(ptr, layout.start_offset(), expected_elems, $slice.len(), std::mem::size_of::<$ty>())? as *const c_void;
             (ptr, guard)
         }};
     }
@@ -3109,7 +3143,7 @@ fn cuda_top1_logits_submit_inner(
         unreachable!("reserved token destination is U32")
     };
     let (token_ptr, token_guard) = token_slice.device_ptr(&stream);
-    let token_ptr = unsafe { (token_ptr as *mut u32).add(token_layout.start_offset()) };
+    let token_ptr = cuda_large_topk_address(token_ptr, token_layout.start_offset(), nrows, token_slice.len(), 4)? as *mut u32;
     let slot = &mut workspace.slots[slot_index];
 
     let result = (|| {
@@ -3127,6 +3161,13 @@ fn cuda_top1_logits_submit_inner(
         let chunk_size_i32 =
             i32::try_from(CUDA_TOPK_CHUNK_SIZE).map_err(candle_core::Error::wrap)?;
         let nblocks_i32 = i32::try_from(nblocks).map_err(candle_core::Error::wrap)?;
+        #[cfg(feature = "dkr-static-closure-probe")]
+        unsafe {
+            crate::cuda::sampling_dynamic::launch_top1(&candle_core::Device::Cuda(dev.clone()), &stream, input.dtype(), nrows != 1,
+                nrows_i32, ncols_i32, chunk_size_i32, nblocks_i32, input_ptr as u64,
+                block_values_ptr as u64, block_indices_ptr as u64, packed_ptr as u64, token_ptr as u64)?;
+        }
+        #[cfg(not(feature = "dkr-static-closure-probe"))]
         macro_rules! launch {
             ($single:path, $batched:path, $ptr:expr) => {{
                 unsafe {
@@ -3159,6 +3200,7 @@ fn cuda_top1_logits_submit_inner(
                 }
             }};
         }
+        #[cfg(not(feature = "dkr-static-closure-probe"))]
         match input.dtype() {
             DType::F32 => launch!(
                 ffi::top1_large_f32_packed,
@@ -3629,9 +3671,16 @@ fn cuda_topk_sampling_submit_inner(
         let (packed_ptr, packed_guard) = packed_slice.device_ptr(&stream);
         let (params_ptr, params_guard) = slot.params.device_ptr(&stream);
         let (tokens_ptr, tokens_guard) = token_slice.device_ptr(&stream);
-        let packed_ptr = unsafe { (packed_ptr as *const f32).add(packed_layout.start_offset()) };
-        let params_ptr = params_ptr as *const f32;
-        let tokens_ptr = unsafe { (tokens_ptr as *mut u32).add(token_layout.start_offset()) };
+        let packed_ptr = cuda_large_topk_address(packed_ptr, packed_layout.start_offset(), ranked.packed.elem_count(), packed_slice.len(), 4)? as *const f32;
+        let params_ptr = cuda_large_topk_address(params_ptr, 0, rows.checked_mul(CUDA_TOPK_SAMPLING_PARAM_WIDTH).ok_or_else(||candle_core::Error::msg("sampling parameter span"))?, slot.params.len(), 4)? as *const f32;
+        let tokens_ptr = cuda_large_topk_address(tokens_ptr, token_layout.start_offset(), *rows, token_slice.len(), 4)? as *mut u32;
+        #[cfg(feature = "dkr-static-closure-probe")]
+        unsafe {
+            crate::cuda::sampling_dynamic::launch_ranked(&candle_core::Device::Cuda(dev.clone()), &stream,
+                i32::try_from(*rows).map_err(candle_core::Error::wrap)?, i32::try_from(ranked.k).map_err(candle_core::Error::wrap)?,
+                packed_ptr as u64, params_ptr as u64, tokens_ptr as u64)?;
+        }
+        #[cfg(not(feature = "dkr-static-closure-probe"))]
         unsafe {
             ffi::sample_ranked_topk(
                 packed_ptr,
