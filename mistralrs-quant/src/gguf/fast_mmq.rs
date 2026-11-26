@@ -14,7 +14,9 @@ use candle_core::{
     CudaDevice, CudaStorage, DType, Device, Result, Shape, Storage, Tensor,
 };
 
-use super::{ffi, q8_1};
+#[cfg(not(feature = "dkr-static-closure-probe"))]
+use super::ffi;
+use super::q8_1;
 use crate::cuda_device::{cuda_device_info, CudaDeviceInfo};
 use crate::{
     utils::{slice_ptr, slice_ptr_mut_on_stream, slice_ptr_on_stream},
@@ -149,6 +151,7 @@ type QuantizeGluLauncher = unsafe extern "C" fn(
     stream: *mut std::ffi::c_void,
 );
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 fn quantize_launcher(layout: DsLayout) -> QuantizeLauncher {
     match layout {
         DsLayout::D4 => ffi::launch_mmq_quantize_q8_1_D4,
@@ -157,6 +160,7 @@ fn quantize_launcher(layout: DsLayout) -> QuantizeLauncher {
     }
 }
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 fn quantize_glu_f32_launcher(layout: DsLayout) -> QuantizeGluF32Launcher {
     match layout {
         DsLayout::D4 => ffi::launch_mmq_quantize_glu_q8_1_D4_f32,
@@ -165,6 +169,7 @@ fn quantize_glu_f32_launcher(layout: DsLayout) -> QuantizeGluF32Launcher {
     }
 }
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 fn quantize_glu_launcher(layout: DsLayout) -> QuantizeGluLauncher {
     match layout {
         DsLayout::D4 => ffi::launch_mmq_quantize_glu_q8_1_D4,
@@ -212,6 +217,7 @@ type MmqMoeLauncher = unsafe extern "C" fn(
     stream: *mut std::ffi::c_void,
 );
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 fn mmq_launcher(dtype: GgmlDType) -> Option<MmqLauncher> {
     let f: MmqLauncher = match dtype {
         GgmlDType::Q4_0 => ffi::launch_mmq_gguf_q4_0,
@@ -229,6 +235,7 @@ fn mmq_launcher(dtype: GgmlDType) -> Option<MmqLauncher> {
     Some(f)
 }
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 fn mmq_moe_launcher(dtype: GgmlDType) -> Option<MmqMoeLauncher> {
     let f: MmqMoeLauncher = match dtype {
         GgmlDType::Q4_0 => ffi::launch_mmq_gguf_q4_0_moe,
@@ -267,6 +274,7 @@ struct GroupedMmqLaunch {
     stream: *mut std::ffi::c_void,
 }
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 impl GroupedMmqLaunch {
     fn compact_type(&self) -> Option<i32> {
         let workspace_bytes = (self.assignments / COMPACT_COLUMNS + self.experts + 1)
@@ -425,6 +433,7 @@ struct DenseMmqRun<'a> {
     type_x: i32,
 }
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 impl DenseMmqRun<'_> {
     fn launch<T: CudaDType + DeviceRepr>(
         &self,
@@ -506,6 +515,7 @@ struct DenseGluDownRun<'a> {
     activation: i32,
 }
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 impl DenseGluDownRun<'_> {
     fn launch<T: CudaDType + DeviceRepr>(
         &self,

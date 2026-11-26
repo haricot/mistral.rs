@@ -239,8 +239,7 @@ impl RoutedExperts<'_> {
         #[cfg(all(feature = "cuda", feature = "dkr-static-closure-probe"))]
         let down_input = if gate.device().is_cuda()
             && self.members().iter().all(|member| member.get_qtensor().is_some()) {
-            // Temporary unfused reference until B4 closes the GLU ABI.
-            (forward.activation.fallback.forward(&gate)? * &up)?
+            forward.activation.apply(&gate,&up)?
         } else {
             forward.activation.apply(&gate,&up)?
         };

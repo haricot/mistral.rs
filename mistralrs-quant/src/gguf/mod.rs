@@ -7,11 +7,11 @@ pub mod embedding;
 pub mod fast_mmq;
 #[cfg(feature = "cuda")]
 pub mod fast_mmvq;
-#[cfg(feature = "cuda")]
+#[cfg(all(feature = "cuda", not(feature = "dkr-static-closure-probe")))]
 mod ffi;
 #[cfg(feature = "cuda")]
 pub(crate) mod gated_mix;
-mod group;
+pub(crate) mod group;
 #[cfg(all(feature = "cuda", has_marlin_kernels))]
 mod packed_affine;
 pub(crate) mod quantize;

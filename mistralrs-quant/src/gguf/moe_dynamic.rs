@@ -342,3 +342,62 @@ pub(crate) fn fused_pipeline(gate:&QTensor,up:&QTensor,down:&QTensor,x:&Tensor,i
     out.reshape((batch,topk,n))?.broadcast_mul(&routing.to_dtype(DType::F32)?.unsqueeze(2)?)?
         .sum(1)?.to_dtype(out_dtype)
 }
+
+#[derive(Clone,Copy,PartialEq,Eq)]
+struct RowGroupedKey{fmt:&'static str,n:usize,k:usize,padded:usize,e:usize,a:usize,topk:usize,input_rows:usize,packed:usize,smem:usize,weighted:bool}
+thread_local!{static ROW_GROUPED:RefCell<LaunchPlanCache<RowGroupedKey,PrevalidatedLaunchPlan>>=RefCell::new(LaunchPlanCache::new());}
+fn row_grouped_plan(key:RowGroupedKey,dev:&Device)->Result<PrevalidatedLaunchPlan>{
+    let mode=if key.weighted{"weighted"}else{"sorted"};
+    let repr=format!("gguf.{}.packed.v1",key.fmt);
+    prepare_one(dev,format!("quant.gguf.grouped_row.{}.{mode}.v1",key.fmt),
+        vec![tensor(ElementType::U8,vec![key.e,key.n,key.packed],Some(&repr)),
+            tensor(ElementType::U8,vec![key.input_rows,key.padded/32*36],Some("gguf.q8_1.row.v1")),
+            u(key.e+1),u(key.a),tensor(ElementType::F32,vec![if key.weighted{key.a}else{1}],None),
+            tensor(ElementType::F32,vec![if key.weighted{key.a/key.topk}else{key.a},key.n],None),
+            scalar(),scalar(),scalar(),scalar(),scalar(),scalar(),scalar()],
+        [key.n.div_ceil(64) as u32,key.e as u32,1],[32,8,1],key.smem as u32)
+}
+pub(crate) fn grouped_row(w:&QTensor,q:&CudaSlice<u8>,k:usize,padded:usize,bounds:&CudaSlice<u32>,ids:&CudaSlice<u32>,
+    routing:Option<u64>,a:usize,topk:usize,e:usize,input_dim1:usize,dev:&CudaDevice)->Result<Tensor>{
+    device_gate(dev)?;
+    let (we,n,wk)=w.shape().dims3()?;
+    let quant=w.dtype();
+    let fmt=if quant==candle_core::quantized::GgmlDType::Q8_1{"q8_1"}else{format(quant).ok_or_else(||candle_core::Error::msg("DKR grouped row format"))?};
+    let device=Device::Cuda(dev.clone());
+    let ordinal=dev.cuda_stream().context().ordinal();
+    if a==0||topk==0||a%topk!=0||e==0||e>65535||we!=e||n==0||k==0||wk!=k||k%quant.block_size()!=0
+        ||padded<k||padded%32!=0||bounds.len()<e+1||ids.len()<a||input_dim1>topk.max(2)
+        ||!w.device().same_device(&device)||q.ordinal()!=ordinal||bounds.ordinal()!=ordinal||ids.ordinal()!=ordinal
+        ||routing.is_some_and(|p|p==0||p%4!=0){
+        candle_core::bail!("DKR grouped row contract");
+    }
+    let input_rows=if input_dim1==1{a/topk}else{a};
+    let packed=mul(k/quant.block_size(),quant.type_size())?;
+    let bytes=i32_span(mul(mul(input_rows,padded/32)?,36)?)?;
+    if q.len()<bytes{candle_core::bail!("DKR grouped Q8_1 input span");}
+    i32_span(mul(mul(e,n)?,packed)?)?;
+    for x in [a,n,k,padded,topk,input_dim1]{i32_span(x)?;}
+    let smem=if fmt=="q8_0"{2*64*64*4+2*64*8*4+256}else{64*(if fmt.ends_with("_k"){1}else{8})*quant.type_size()+64*8*36+256};
+    if smem>cuda_device_info(dev).smem_optin||smem>49152{candle_core::bail!("DKR grouped row shared memory");}
+    let out_rows=if routing.is_some(){a/topk}else{a};let count=i32_span(mul(out_rows,n)?)?;
+    let key=RowGroupedKey{fmt,n,k,padded,e,a,topk,input_rows,packed,smem,weighted:routing.is_some()};
+    let stream=dev.cuda_stream();
+    let (wp,_wg)=w.device_ptr_with_guard(&stream)?;
+    let (qp,_qg)=slice_ptr_on_stream(q,0,&stream);
+    let (bp,_bg)=slice_ptr_on_stream(bounds,0,&stream);
+    let (ip,_ig)=slice_ptr_on_stream(ids,0,&stream);
+    let mut out=dev.alloc_zeros::<f32>(count)?;
+    {
+        let (op,_og)=slice_ptr_mut_on_stream(&mut out,0,&stream);
+        // Sorted entry ignores routing, but ABI uses a non-null dummy.
+        let rp=routing.unwrap_or(op);
+        let (ni,ki,pi,ei,ti,ri,ai)=(n as i32,k as i32,padded as i32,e as i32,topk as i32,input_dim1 as i32,a as i32);
+        ROW_GROUPED.with(|cache|cache.borrow_mut().with_plan(key,&device,||row_grouped_plan(key,&device),|p|{
+            unsafe{p.with_prevalidated_launch(|fun,cfg|{
+                let mut b=stream.launch_builder(fun);b.arg(&wp).arg(&qp).arg(&bp).arg(&ip).arg(&rp).arg(&op)
+                    .arg(&ni).arg(&ki).arg(&pi).arg(&ei).arg(&ti).arg(&ri).arg(&ai);b.launch(cfg)?;Ok(())
+            })}.map_err(|e|candle_core::Error::msg(e.to_string()))
+        }))?;
+    }
+    Ok(Tensor::from((Storage::Cuda(CudaStorage::wrap_cuda_slice(out,dev.clone())),(out_rows,n))))
+}

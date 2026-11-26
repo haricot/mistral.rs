@@ -269,7 +269,7 @@ mod cuda {
 }
 
 #[cfg(all(feature = "cuda", feature = "dkr-static-closure-probe"))]
-pub(super) fn typed_glu(gate:&Tensor,up:&Tensor,activation:crate::GluActivationType)->Result<Tensor>{
+pub(crate) fn typed_glu(gate:&Tensor,up:&Tensor,activation:crate::GluActivationType)->Result<Tensor>{
     use crate::GluActivationType::*;
     // Preserve the activation rounding before multiply, as in historical MMQ GLU.
     let dtype=gate.dtype();

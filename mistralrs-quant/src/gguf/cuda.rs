@@ -6,7 +6,9 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
-use super::{ffi, q8_1};
+#[cfg(not(feature = "dkr-static-closure-probe"))]
+use super::ffi;
+use super::q8_1;
 use crate::cuda_device::cuda_device_info;
 use crate::utils::{slice_ptr, slice_ptr_mut_on_stream, slice_ptr_on_stream};
 use candle_core::cuda::cudarc::driver::DeviceRepr;
@@ -235,6 +237,7 @@ fn check_cuda_launch(status: i32, kernel: &str) -> Result<()> {
 }
 
 /// Quantize f32 input to Q8_1 format for use with quantized matmul kernels.
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 fn quantize_q8_1(
     src: &CudaSlice<f32>,
     dst: &mut CudaSlice<u8>,
@@ -314,6 +317,7 @@ fn q8_1_bytes_checked(num_rows: usize, k_padded: usize) -> Result<usize> {
 /// * `idx_shape` - Indices shape
 /// * `dev` - CUDA device
 #[allow(clippy::too_many_arguments)]
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 fn indexed_moe_forward_fused_q8_1_input(
     weight_ptr: u64,
     w_shape: &Shape,
@@ -860,6 +864,7 @@ struct TypedReduce<'a> {
     dev: &'a CudaDevice,
 }
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 unsafe fn moe_weighted_reduce_same_dtype<T: CudaDType + DeviceRepr>(
     reduce: TypedReduce<'_>,
     launch: TypedReduceFn,
@@ -1190,6 +1195,7 @@ type LoraDownFn = unsafe extern "C" fn(
     *mut std::ffi::c_void,
 ) -> i32;
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 fn lora_gate_up_launcher(dtype: GgmlDType) -> Option<GateUpPairFn> {
     match dtype {
         GgmlDType::Q8_0 => Some(ffi::launch_moe_gemv_gate_up_pair_q8_0_q8_1),
@@ -1207,6 +1213,7 @@ fn lora_gate_up_launcher(dtype: GgmlDType) -> Option<GateUpPairFn> {
     }
 }
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 fn lora_down_launcher(dtype: GgmlDType) -> Option<LoraDownFn> {
     match dtype {
         GgmlDType::Q8_0 => Some(ffi::launch_moe_gemv_lora_down_q8_0_q8_1),
@@ -1484,6 +1491,26 @@ impl<'a> IndexedMoeLoraDecode<'a> {
 ///
 /// Avoids re-quantizing the input when the same input is used for multiple projections.
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "dkr-static-closure-probe")]
+pub fn grouped_moe_gemm_prequantized(
+    qtensor: &QTensor,
+    input_quant: &CudaSlice<u8>,
+    k: usize,
+    k_padded: usize,
+    expert_bounds: &CudaSlice<u32>,
+    sorted_token_ids: &CudaSlice<u32>,
+    topk_weights: Option<(*const f32, usize)>, // (ptr, guard_token) - raw pointer
+    total_assignments: usize,
+    topk: usize,
+    num_experts: usize,
+    input_dim1: usize,
+    dev: &CudaDevice,
+) -> Result<Tensor> {
+    // Retain the historical pointer/guard-token API; caller owns routing lifetime.
+    super::fast_mmq::moe_dynamic::grouped_row(qtensor,input_quant,k,k_padded,expert_bounds,sorted_token_ids,
+        topk_weights.map(|(p,_)|p as u64),total_assignments,topk,num_experts,input_dim1,dev)
+}
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 pub fn grouped_moe_gemm_prequantized(
     qtensor: &QTensor,
     input_quant: &CudaSlice<u8>,

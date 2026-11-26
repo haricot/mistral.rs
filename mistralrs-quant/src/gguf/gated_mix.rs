@@ -6,7 +6,9 @@ use crate::{
     QuantMethod,
 };
 
-use super::{ffi, ggml_dtype_to_uqff_code, q8_1};
+#[cfg(not(feature = "dkr-static-closure-probe"))]
+use super::ffi;
+use super::{ggml_dtype_to_uqff_code, q8_1};
 
 const MAX_TOKENS: usize = 1;
 

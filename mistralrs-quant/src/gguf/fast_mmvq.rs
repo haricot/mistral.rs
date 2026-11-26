@@ -10,7 +10,9 @@ use candle_core::{
     CudaDevice, CudaStorage, DType, Device, Result, Shape, Storage, Tensor,
 };
 
-use super::{ffi, q8_1};
+#[cfg(not(feature = "dkr-static-closure-probe"))]
+use super::ffi;
+use super::q8_1;
 use crate::cuda_device::cuda_device_info;
 use crate::{
     utils::{slice_ptr_mut_on_stream, slice_ptr_on_stream},
@@ -188,6 +190,7 @@ type FusedQkvLauncher = unsafe extern "C" fn(
     stream: *mut std::ffi::c_void,
 );
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 fn plain_launcher_bf16(dtype: GgmlDType) -> Option<PlainLauncher> {
     let f: PlainLauncher = match dtype {
         GgmlDType::Q4_0 => ffi::launch_mmvq_gguf_q4_0_bf16_plain,
@@ -205,6 +208,7 @@ fn plain_launcher_bf16(dtype: GgmlDType) -> Option<PlainLauncher> {
     Some(f)
 }
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 fn plain_launcher_f16(dtype: GgmlDType) -> Option<PlainLauncher> {
     let f: PlainLauncher = match dtype {
         GgmlDType::Q4_0 => ffi::launch_mmvq_gguf_q4_0_f16_plain,
@@ -222,6 +226,7 @@ fn plain_launcher_f16(dtype: GgmlDType) -> Option<PlainLauncher> {
     Some(f)
 }
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 fn plain_launcher_f32(dtype: GgmlDType) -> Option<PlainLauncher> {
     let f: PlainLauncher = match dtype {
         GgmlDType::Q4_0 => ffi::launch_mmvq_gguf_q4_0_f32_plain,
@@ -239,6 +244,7 @@ fn plain_launcher_f32(dtype: GgmlDType) -> Option<PlainLauncher> {
     Some(f)
 }
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 fn fused_glu_launcher(input_ty: DType, dtype: GgmlDType) -> Option<FusedGluLauncher> {
     match (input_ty, dtype) {
         (DType::BF16, GgmlDType::Q4_0) => Some(ffi::launch_mmvq_gguf_q4_0_bf16_fused_glu),
@@ -277,10 +283,16 @@ fn fused_glu_launcher(input_ty: DType, dtype: GgmlDType) -> Option<FusedGluLaunc
     }
 }
 
+#[cfg(feature = "dkr-static-closure-probe")]
+pub fn supports_fused_glu(input_ty:DType,dtype:GgmlDType)->bool{
+    supports(dtype)&&matches!(input_ty,DType::F16|DType::BF16|DType::F32)
+}
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 pub fn supports_fused_glu(input_ty: DType, dtype: GgmlDType) -> bool {
     fused_glu_launcher(input_ty, dtype).is_some()
 }
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 fn fused_qkv_launcher(input_ty: DType, dtype: GgmlDType) -> Option<FusedQkvLauncher> {
     match (input_ty, dtype) {
         (DType::BF16, GgmlDType::Q4_0) => Some(ffi::launch_mmvq_gguf_q4_0_bf16_fused_qkv),
@@ -319,6 +331,7 @@ fn fused_qkv_launcher(input_ty: DType, dtype: GgmlDType) -> Option<FusedQkvLaunc
     }
 }
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 fn qkv_prefetch_launcher(input_ty: DType, dtype: GgmlDType) -> Option<FusedQkvLauncher> {
     Some(match (input_ty, dtype) {
         (DType::BF16, GgmlDType::Q4_0) => ffi::launch_mmvq_gguf_q4_0_bf16_qkv_prefetch,
@@ -349,6 +362,7 @@ fn qkv_prefetch_launcher(input_ty: DType, dtype: GgmlDType) -> Option<FusedQkvLa
     })
 }
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 fn prefetch_launcher(dtype: GgmlDType, output: DType) -> Option<PlainLauncher> {
     Some(match (dtype, output) {
         (GgmlDType::Q8_0, DType::BF16) => ffi::launch_mmvq_gguf_q8_0_bf16_prefetch,
