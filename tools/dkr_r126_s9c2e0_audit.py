@@ -41,12 +41,15 @@ SAMPLING_GROUPS={
     "categorical":{"categorical_large_f32_packed_batched"},
 }
 
-def partition(declarations,closed_reuse=()):
+def partition(declarations,closed_reuse=(),closed_router=()):
     groups={"already_typed":set().union(*REUSE.values()),"argsort":ARG_SORT,"graph":GRAPH,**SAMPLING_GROUPS}
     require(sum(len(v) for v in groups.values())==len(set().union(*groups.values())),"overlapping symbol partition")
     closed=set(closed_reuse)
     require(closed in (set(),groups["already_typed"]),"partial reuse closure")
-    require(set(declarations)==set().union(*groups.values())-closed and len(declarations)==60-len(closed),"residual inventory drift")
+    router=set(closed_router)
+    require(router in (set(),groups["router"]|groups["small_topk"]),"partial router/top-k closure")
+    require(not router or closed==groups["already_typed"],"router closure before reuse closure")
+    require(set(declarations)==set().union(*groups.values())-closed-router and len(declarations)==60-len(closed)-len(router),"residual inventory drift")
     return {k:sorted(v) for k,v in groups.items()}
 
 def evidence(source,markers,label):
@@ -183,7 +186,8 @@ def audit(root):
     declarations=prior["residual_budget"]["remaining_core_ffi_declarations"]
     reused=set().union(*REUSE.values())
     closed=reused-set(declarations)
-    groups=partition(declarations,closed)
+    closed_router=(SAMPLING_GROUPS["router"]|SAMPLING_GROUPS["small_topk"])-set(declarations)
+    groups=partition(declarations,closed,closed_router)
     reuse=reuse_evidence(root)
     for item in reuse.values():
         item["explicit_closure_guard_pending"]=not bool(closed)
@@ -191,6 +195,7 @@ def audit(root):
     return dict(schema="dkr.r126.s9c2e0.source.v1",status="AUDIT_COMPLETE",
         residual_groups=groups,reuse=reuse,usage=usage_candidates(root),budget=budget,
         remaining_core_ffi_count=len(declarations),closed_reuse_declarations=sorted(closed),
+        closed_router_declarations=sorted(closed_router),
         current_projected_logical=prior["projected_logical"],
         current_projected_physical_upper=prior["projected_physical_upper"],
         current_logical_headroom=prior["logical_headroom"],profiles_added=0,images_added=0,
