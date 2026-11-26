@@ -6,6 +6,9 @@ use std::{env, fs, path::PathBuf};
 #[path = "src/universal.rs"]
 mod universal;
 use universal::{KernelCatalog, KernelManifest, Parameter};
+#[allow(dead_code)]
+#[path = "src/model_scope.rs"]
+mod model_scope;
 
 fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
@@ -58,13 +61,21 @@ fn main() -> Result<()> {
     const EMBED_ENV: &str = "DKR_EMBED_TYPED_DIR";
     println!("cargo:rerun-if-env-changed={EMBED_ENV}");
     println!("cargo:rerun-if-changed=src/universal.rs");
+    println!("cargo:rerun-if-changed=src/model_scope.rs");
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     let mut rows = Vec::new();
     let mut root_literal = "None".into();
+    let mut scope_literal = "None".into();
     if let Some(root) = env::var_os(EMBED_ENV) {
         let root = PathBuf::from(root).canonicalize()?;
         root_literal = format!("Some({:?})", root.to_str().unwrap());
         let catalog = KernelCatalog::discover(&root)?;
+        let scope_path = root.join(model_scope::SCOPE_FILENAME);
+        println!("cargo:rerun-if-changed={}", scope_path.display());
+        if let Some(receipt) = model_scope::read_scope_receipt(&root)? {
+            receipt.verify(&catalog)?;
+            scope_literal = format!("Some({:?})", serde_json::to_string(&receipt)?);
+        }
         let mut modules = catalog.verified_modules().collect::<Vec<_>>();
         modules.sort_by_key(|m| {
             (
@@ -111,7 +122,7 @@ fn main() -> Result<()> {
                  KernelCatalog::from_build_verified(vec![{}])", rows.join(",\n"))
     };
     fs::write(out.join("dkr_typed_embedded.rs"), format!(
-        "pub const ROOT: Option<&str> = {root_literal};\nfn load() -> Result<KernelCatalog> {{ {source} }}\n"
+        "pub const ROOT: Option<&str> = {root_literal};\npub const SCOPE_RECEIPT: Option<&str> = {scope_literal};\nfn load() -> Result<KernelCatalog> {{ {source} }}\n"
     ))?;
     Ok(())
 }
