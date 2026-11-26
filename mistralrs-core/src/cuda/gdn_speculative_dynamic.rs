@@ -3,6 +3,7 @@
 use super::*;
 use super::preparation_dynamic as p;
 use candle_core::cuda_backend::cudarc::driver::CudaStream;
+use std::sync::Arc;
 
 #[derive(Clone,Copy)]
 pub(super) struct Bound {
@@ -28,6 +29,20 @@ fn check_bindings(bindings:&[Bound])->Result<()>{
     }
     Ok(())
 }
+/// Nested InplaceOp1 callbacks need distinct storage locks, even if two
+/// tensor views occupy disjoint subranges of a single allocation.
+pub(super) fn reject_storage_aliases(inputs:&[(&Tensor,bool)])->Result<()>{
+    let layouts=inputs.iter().map(|(t,_)|t.storage_and_layout()).collect::<Vec<_>>();
+    for i in 0..inputs.len(){
+        for j in i+1..inputs.len(){
+            if (inputs[i].1||inputs[j].1)&&std::ptr::eq::<candle_core::Storage>(&*layouts[i].0,&*layouts[j].0){
+                candle_core::bail!("GDN deferred writable storage is shared with another binding");
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Collect tensor storage and same-stream guards before exposing addresses.
 /// Mutable tensors use the existing stream-owned GDN in-place contract.
 pub(super) fn with_bindings<R>(device:&Device,stream:&CudaStream,inputs:&[(&Tensor,bool)],run:impl FnOnce(&[Bound])->Result<R>)->Result<R>{
@@ -118,7 +133,7 @@ fn scale_arg(scale:(usize,i32),rows:usize)->Result<p::S>{
     p::n(stride)?;
     pack(stride,layout as usize)
 }
-pub(super) fn launch_recurrence(device:&Device,stream:&CudaStream,g:Geometry,b:[usize;3],a:[usize;3],
+pub(super) fn launch_recurrence(device:&Device,stream:&Arc<CudaStream>,g:Geometry,b:[usize;3],a:[usize;3],
     post:Option<Post>,bindings:&[Bound])->Result<()>{
     g.validate()?;
     check_bindings(bindings)?;
@@ -159,7 +174,7 @@ pub(super) fn launch_recurrence(device:&Device,stream:&CudaStream,g:Geometry,b:[
     unsafe{p::launch_on_stream(device,stream,op,&ptrs,&args,grid,block,0,0)}
 }
 
-pub(super) fn launch_deferred(device:&Device,stream:&CudaStream,bindings:&[Bound],g:Geometry,
+pub(super) fn launch_deferred(device:&Device,stream:&Arc<CudaStream>,bindings:&[Bound],g:Geometry,
     strides:[usize;7],eps:f32,sigmoid:bool,fp8:Option<(usize,i32)>)->Result<()>{
     g.validate()?;
     if g.seq!=1||g.kd!=128||g.vd!=128||!g.vm||g.lanes!=1||!eps.is_finite()||eps<0.||
@@ -184,7 +199,7 @@ pub(super) fn launch_deferred(device:&Device,stream:&CudaStream,bindings:&[Bound
         p::launch_on_stream(device,stream,"gdn.spec.deferred.advance.v1",&finalize,&finalize_args,finalize_grid,[256,1,1],0,0)
     }
 }
-pub(super) fn launch_flush(device:&Device,stream:&CudaStream,bindings:&[Bound],g:Geometry)->Result<()>{
+pub(super) fn launch_flush(device:&Device,stream:&Arc<CudaStream>,bindings:&[Bound],g:Geometry)->Result<()>{
     g.validate()?;
     if g.seq!=1||g.kd!=128||g.vd!=128||!g.vm||g.lanes!=1||bindings.len()!=6||bindings[0].ptr%16!=0{
         candle_core::bail!("invalid GDN deferred flush ABI");
@@ -220,5 +235,9 @@ mod tests{
         assert!(check_bindings(&[a,Bound::new(28,4,p::E::F32,false)]).is_err());
         assert!(check_bindings(&[a,Bound::new(32,4,p::E::F32,false)]).is_ok());
         assert_ne!(fused_operation(Mode::Direct,true,false),fused_operation(Mode::Batch,true,false));
+        let a=Tensor::zeros(4,DType::F32,&Device::Cpu).unwrap();
+        let b=a.narrow(0,1,1).unwrap();
+        assert!(reject_storage_aliases(&[(&a,true),(&b,false)]).is_err());
+        assert!(reject_storage_aliases(&[(&a,false),(&b,false)]).is_ok());
     }
 }
