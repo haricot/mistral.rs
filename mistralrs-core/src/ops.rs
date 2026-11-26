@@ -614,6 +614,7 @@ pub fn cuda_topk_logits_f32(
 
     let dev = storage.device();
     let stream = dev.cuda_stream();
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     let stream_raw = stream.cu_stream() as i64;
 
     let (src_ptr, _src_guard) = match &storage.slice {
@@ -639,6 +640,7 @@ pub fn cuda_topk_logits_f32(
     let (indices_ptr, indices_guard) = indices_dst.device_ptr_mut(&stream);
     let (softmax_info_ptr, softmax_info_guard) = softmax_info_dst.device_ptr_mut(&stream);
 
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     unsafe {
         ffi::topk_large_f32(
             src_ptr,
@@ -656,6 +658,22 @@ pub fn cuda_topk_logits_f32(
             (1.0 / temperature) as f32,
             stream_raw,
         );
+    }
+
+    #[cfg(feature = "dkr-static-closure-probe")]
+    unsafe {
+        use crate::cuda::large_topk_dynamic::{self as dkr, DkrLargeTopKMode, OutputPtrs, SoftmaxPtrs, WorkspacePtrs};
+        dkr::launch(
+            &candle_core::Device::Cuda(dev.clone()), &stream, DType::F32, 1,
+            i32::try_from(ncols).map_err(candle_core::Error::wrap)?,
+            i32::try_from(k).map_err(candle_core::Error::wrap)?,
+            CUDA_TOPK_CHUNK_SIZE as i32,
+            i32::try_from(nblocks).map_err(candle_core::Error::wrap)?,
+            DkrLargeTopKMode::SingleSplit,
+            WorkspacePtrs { input: src_ptr as u64, block_values: block_values_ptr, block_indices: block_indices_ptr },
+            SoftmaxPtrs::Single { maxes: block_maxes_ptr, sums: block_sums_ptr, temperature: (1.0 / temperature) as f32 },
+            OutputPtrs::Split { values: values_ptr, indices: indices_ptr, info: softmax_info_ptr },
+        )?;
     }
 
     drop(block_values_guard);
@@ -776,6 +794,7 @@ pub fn cuda_topk_logits_f32_packed(
 
     let dev = storage.device();
     let stream = dev.cuda_stream();
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     let stream_raw = stream.cu_stream() as i64;
 
     let (src_ptr, src_guard) = match &storage.slice {
@@ -797,6 +816,7 @@ pub fn cuda_topk_logits_f32_packed(
     let (block_sums_ptr, block_sums_guard) = block_sums.device_ptr_mut(&stream);
     let (packed_ptr, packed_guard) = packed_dst.device_ptr_mut(&stream);
 
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     unsafe {
         ffi::topk_large_f32_packed(
             src_ptr,
@@ -812,6 +832,22 @@ pub fn cuda_topk_logits_f32_packed(
             (1.0 / temperature) as f32,
             stream_raw,
         );
+    }
+
+    #[cfg(feature = "dkr-static-closure-probe")]
+    unsafe {
+        use crate::cuda::large_topk_dynamic::{self as dkr, DkrLargeTopKMode, OutputPtrs, SoftmaxPtrs, WorkspacePtrs};
+        dkr::launch(
+            &candle_core::Device::Cuda(dev.clone()), &stream, DType::F32, 1,
+            i32::try_from(ncols).map_err(candle_core::Error::wrap)?,
+            i32::try_from(k).map_err(candle_core::Error::wrap)?,
+            CUDA_TOPK_CHUNK_SIZE as i32,
+            i32::try_from(nblocks).map_err(candle_core::Error::wrap)?,
+            DkrLargeTopKMode::SinglePacked,
+            WorkspacePtrs { input: src_ptr as u64, block_values: block_values_ptr, block_indices: block_indices_ptr },
+            SoftmaxPtrs::Single { maxes: block_maxes_ptr, sums: block_sums_ptr, temperature: (1.0 / temperature) as f32 },
+            OutputPtrs::Packed(packed_ptr),
+        )?;
     }
 
     drop(src_guard);
@@ -961,6 +997,17 @@ impl CudaTopKLogitsPackedWorkspace {
     }
 }
 
+#[cfg(all(feature = "cuda", feature = "dkr-static-closure-probe"))]
+fn cuda_ranked_state_words_per_row() -> usize {
+    crate::cuda::large_topk_dynamic::RADIX_STATE_WORDS_PER_ROW
+}
+
+#[cfg(not(feature = "dkr-static-closure-probe"))]
+#[cfg(feature = "cuda")]
+fn cuda_ranked_state_words_per_row() -> usize {
+    unsafe { ffi::topk_large_ranked_state_words_per_row() }
+}
+
 #[cfg(feature = "cuda")]
 pub(crate) struct CudaRankedTopKPackedWorkspace {
     location: candle_core::DeviceLocation,
@@ -997,7 +1044,7 @@ impl CudaRankedTopKPackedWorkspace {
             .and_then(|elems| elems.checked_mul(capacity_k))
             .ok_or_else(|| candle_core::Error::msg("CUDA ranked top-k workspace overflow"))?;
         let radix_state_elems = capacity_rows
-            .checked_mul(unsafe { ffi::topk_large_ranked_state_words_per_row() })
+            .checked_mul(cuda_ranked_state_words_per_row())
             .ok_or_else(|| candle_core::Error::msg("CUDA ranked top-k radix overflow"))?;
         let index_elems = capacity_rows
             .checked_mul(nblocks)
@@ -1240,6 +1287,7 @@ pub(crate) fn cuda_topk_logits_packed_batched_with_workspace(
     let temperature_ptr =
         unsafe { (temperature_ptr as *const f32).add(temperature_layout.start_offset()) };
 
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     macro_rules! launch {
         ($kernel:path, $input:expr) => {{
             unsafe {
@@ -1261,11 +1309,25 @@ pub(crate) fn cuda_topk_logits_packed_batched_with_workspace(
             }
         }};
     }
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     match input.dtype() {
         DType::F32 => launch!(ffi::topk_large_f32_packed_batched, input_ptr.cast::<f32>()),
         DType::BF16 => launch!(ffi::topk_large_bf16_packed_batched, input_ptr),
         DType::F16 => launch!(ffi::topk_large_f16_packed_batched, input_ptr),
         _ => unreachable!(),
+    }
+
+    #[cfg(feature = "dkr-static-closure-probe")]
+    unsafe {
+        use crate::cuda::large_topk_dynamic::{self as dkr, DkrLargeTopKMode, OutputPtrs, SoftmaxPtrs, WorkspacePtrs};
+        dkr::launch(
+            &candle_core::Device::Cuda(dev.clone()), &stream, input.dtype(),
+            nrows_i32, ncols_i32, k_i32, chunk_size_i32, nblocks_i32,
+            DkrLargeTopKMode::BatchedPacked,
+            WorkspacePtrs { input: input_ptr as u64, block_values: block_values_ptr as u64, block_indices: block_indices_ptr as u64 },
+            SoftmaxPtrs::Batched { maxes: block_maxes_ptr as u64, sums: block_sums_ptr as u64, temperatures: temperature_ptr as u64 },
+            OutputPtrs::Packed(packed_ptr as u64),
+        )?;
     }
 
     drop(input_guard);
@@ -1352,7 +1414,7 @@ pub(crate) fn cuda_topk_ranked_packed_batched_with_workspace(
     let workspace_elems = batch
         .checked_mul(candidates_per_row)
         .ok_or_else(|| candle_core::Error::Msg(format!("{OP} candidate workspace overflow")))?;
-    let radix_state_words_per_row = unsafe { ffi::topk_large_ranked_state_words_per_row() };
+    let radix_state_words_per_row = cuda_ranked_state_words_per_row();
     let radix_state_elems = batch
         .checked_mul(radix_state_words_per_row)
         .ok_or_else(|| candle_core::Error::Msg(format!("{OP} radix workspace overflow")))?;
@@ -1445,6 +1507,7 @@ pub(crate) fn cuda_topk_ranked_packed_batched_with_workspace(
     let (radix_ptr, radix_guard) = radix_slice.device_ptr(&stream);
     let radix_ptr = unsafe { (radix_ptr as *mut u32).add(radix_layout.start_offset()) };
 
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     macro_rules! launch {
         ($kernel:path, $input:expr) => {{
             unsafe {
@@ -1464,6 +1527,7 @@ pub(crate) fn cuda_topk_ranked_packed_batched_with_workspace(
             }
         }};
     }
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     let status = match input.dtype() {
         DType::F32 => launch!(
             ffi::topk_large_ranked_f32_packed_batched,
@@ -1474,6 +1538,19 @@ pub(crate) fn cuda_topk_ranked_packed_batched_with_workspace(
         _ => unreachable!(),
     };
 
+    #[cfg(feature = "dkr-static-closure-probe")]
+    unsafe {
+        use crate::cuda::large_topk_dynamic::{self as dkr, DkrLargeTopKMode, OutputPtrs, SoftmaxPtrs, WorkspacePtrs};
+        dkr::launch(
+            &candle_core::Device::Cuda(dev.clone()), &stream, input.dtype(),
+            nrows_i32, ncols_i32, k_i32, chunk_size_i32, nblocks_i32,
+            DkrLargeTopKMode::Ranked,
+            WorkspacePtrs { input: input_ptr as u64, block_values: block_values_ptr as u64, block_indices: block_indices_ptr as u64 },
+            SoftmaxPtrs::None,
+            OutputPtrs::Ranked { packed: packed_ptr as u64, state: radix_ptr as u64 },
+        )?;
+    }
+
     drop(input_guard);
     drop(block_values_guard);
     drop(block_indices_guard);
@@ -1483,6 +1560,7 @@ pub(crate) fn cuda_topk_ranked_packed_batched_with_workspace(
     drop(block_indices_storage_guard);
     drop(packed_storage_guard);
     drop(radix_storage_guard);
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     if status != 0 {
         candle_core::bail!("{OP} CUDA launch failed with status {status}");
     }
