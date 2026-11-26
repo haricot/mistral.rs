@@ -1453,3 +1453,37 @@ compaction. Remaining: single-kernel MMVQ pair/QKV/GLU, grouped
 MoE GLU/fused decode and weighted reduction closure, direct residual
 FFI and complete S10 qualification. Shared headers changed, old cache
 bytes not deleted but Cudaforge may rebuild affected images.
+
+
+## R1.26/S9C.2B4e — exact device-body fused MMVQ and indexed MoE
+
+User B4 synthetic GLU 9, Gated Mix 36, compactor 65->2, dispatch
+28/28 PASS. Recovered historical same-format QKV/Pair and GLU device
+bodies for 10 formats, 3 dtypes, 8 batches (480 profiles); QKV
+L2-prefetch for 8 supported formats (24); indexed 4-warp MMVQ
+for 11 formats (including Q8_1). Odd-row GLU guard only in typed
+image, expert IDs checked before addressing packed expert weights
+(invalid routes become NaN). Pair uses nv=0, packed grid and dummy
+V allocation; heterogeneous formats retain shared-LHS. No CPU
+readback. Indexed dispatch uses MMVQ for <=8 tokens, non-256 K
+or Q8_1, compact MMQ otherwise. This threshold is provisional,
+not a measured equivalence of the historical planner.
+New gguf-mmvq-fused family: 515 profiles in 10 images, unique image
+basenames to allow future compaction. Grouped GLU encoder: 9 profiles
+in one image; indexed or sorted source mode; high-level bias-free,
+no-LoRA prefill reuses dispatch metadata and quantizes GLU directly,
+then reduces in F32. Packed gate/up views may be made contiguous;
+worklist rebuilt for down. No static GGUF launcher on these paths.
+Historical fused MoE decode gate/up/down aggregation, staged and
+prefetch MoE variants, LoRA fast paths and weighted reduction
+closure remain pending. No claim of equal performance, bit-exact
+parity or full FFI elimination. Added ignored GPU matrix tests and
+CPU geometry checks; not compiled or executed here.
+Before compaction conservative upper bound 517 physical / 3503
+logical. Assembly --compact allows intermediate above 512 physical
+only, enforces 4096 logical, validates original paired manifests
+then compacts into fresh disjoint output and rechecks caps. Existing
+default stage/finalize unchanged. Synthetic 576->9 case added.
+Cache bytes not deleted; changed shared sources may invalidate
+fingerprints. Catalogue compacted paths need fresh manifest-bound
+qualification.

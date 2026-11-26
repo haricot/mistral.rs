@@ -509,3 +509,58 @@ pub(crate) fn indexed(w:&QTensor,x:&Tensor,ids:&Tensor)->Result<Tensor>{
     match x.dtype(){DType::F16=>run!(half::f16),DType::BF16=>run!(half::bf16),DType::F32=>run!(f32),_=>unreachable!()}
     Ok(Tensor::from((Storage::Cuda(CudaStorage::wrap_cuda_slice(out,dev.clone())),(batch,topk,n))))
 }
+
+#[cfg(test)]
+mod fused_tests{
+    use super::*;
+    #[test]
+    fn dkr_s9c_fused_grid_policy(){
+        let mut key=FusedKey{fmt:"q4_k",dt:DType::F32,batch:1,k:256,padded:512,packed:144,
+            rows:[65,17,33],glu:false,prefetch:false};
+        assert_eq!(fused_grid(key),([59,1,1],[32,8,1]));
+        key.rows=[65,65,65];assert_eq!(fused_grid(key),([33,3,1],[32,8,1]));
+        key.rows=[65,17,0];assert_eq!(fused_grid(key),([42,1,1],[32,8,1]));
+        key.prefetch=true;assert_eq!(fused_grid(key),([82,1,1],[32,8,1]));
+        key.prefetch=false;key.glu=true;key.rows=[65,65,0];key.batch=3;
+        assert_eq!(fused_grid(key),([65,1,1],[32,2,1]));
+    }
+    #[test]
+    #[ignore="requires fused GGUF catalogue and SM61 GPU"]
+    fn dkr_s9c_exact_fused_mmvq_gpu()->Result<()>{
+        let _evidence=mistralrs_kernel_runtime::RuntimeEvidenceGuard;
+        let dev=Device::new_cuda(0)?;
+        for quant in [GgmlDType::Q4_0,GgmlDType::Q4_1,GgmlDType::Q5_0,GgmlDType::Q5_1,GgmlDType::Q8_0,
+            GgmlDType::Q2K,GgmlDType::Q3K,GgmlDType::Q4K,GgmlDType::Q5K,GgmlDType::Q6K]{
+            let make=|n:usize,salt:usize| QTensor::quantize(&Tensor::from_vec(
+                (0..n*256).map(|i|(((i+salt)%17)as f32-8.)/64.).collect::<Vec<_>>(),(n,256),&dev)?,quant);
+            let q=make(65,0)?;let k=make(17,2)?;let v=make(33,4)?;let up=make(65,5)?;
+            for batch in 1..=8 {
+                let x=Tensor::from_vec((0..batch*256).map(|i|((i%9)as f32-4.)/8.).collect::<Vec<_>>(),(batch,256),&dev)?;
+                for dt in [DType::F16,DType::BF16,DType::F32]{
+                    let x=x.to_dtype(dt)?;
+                    let exact=fused(&q,&k,Some(&v),&x,None)?;
+                    let expected=shared_lhs(&[&q,&k,&v],&x)?;
+                    for (a,b) in exact.into_iter().zip(expected){
+                        let delta=(a.to_dtype(DType::F32)?-b.to_dtype(DType::F32)?)?.abs()?.max_all()?.to_scalar::<f32>()?;
+                        assert!(delta<=0.01,"QKV {quant:?} {dt:?} {batch}: {delta}");
+                    }
+                    let pair=fused(&q,&k,None,&x,None)?;
+                    assert_eq!(pair.len(),2);
+                    for (a,b) in pair.into_iter().zip(shared_lhs(&[&q,&k],&x)?){
+                        let delta=(a.to_dtype(DType::F32)?-b.to_dtype(DType::F32)?)?.abs()?.max_all()?.to_scalar::<f32>()?;
+                        assert!(delta<=0.01,"pair {quant:?} {dt:?} {batch}: {delta}");
+                    }
+                    for act in [crate::GluActivationType::Silu,crate::GluActivationType::Gelu,crate::GluActivationType::Relu,
+                        crate::GluActivationType::GeluErf,crate::GluActivationType::Sigmoid]{
+                        let actual=fused(&q,&up,None,&x,Some(act as i32))?.pop().unwrap();
+                        let parts=shared_lhs(&[&q,&up],&x)?;
+                        let expected=super::super::super::group::typed_glu(&parts[0],&parts[1],act)?;
+                        let delta=(actual.to_dtype(DType::F32)?-expected.to_dtype(DType::F32)?)?.abs()?.max_all()?.to_scalar::<f32>()?;
+                        assert!(delta<=0.025,"GLU {quant:?} {dt:?} {batch}: {delta}");
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}

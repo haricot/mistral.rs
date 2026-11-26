@@ -126,7 +126,24 @@ def self_test():
         try:compact(src)
         except ValueError:pass
         else:raise AssertionError("corrupt image accepted")
+    # Exercise over-cap admission: 9 families of 64 compatible manifests
+    # are valid separately but must be compacted before runtime loading.
+    with tempfile.TemporaryDirectory() as t:
+        src=Path(t)/"original";out=Path(t)/"compacted"
+        for family in range(9):
+            for j in range(64):
+                folder=src/f"family-{family}"/str(j);folder.mkdir(parents=True)
+                (folder/"x.ptx").write_bytes(ptx);(folder/"x.cubin").write_bytes(elf)
+                p=dict(schema="DKR-KERNEL-MODULE-V1",abi="dkr.typed.v1",
+                    operation=f"demo.{family}.{j}",implementation_id=f"cuda.demo.{family}.{j}",
+                    target_cc=61,entry="e",artifact="x.ptx",sha256=hashlib.sha256(ptx).hexdigest(),
+                    cubin_artifact="x.cubin",cubin_sha256=hashlib.sha256(elf).hexdigest(),
+                    block=[32,1,1],shared_mem_bytes=0,arguments=[])
+                (folder/"manifest.json").write_text(json.dumps(p))
+        r=compact(src,out)
+        assert (r["original_manifests"],r["compacted_manifests"],r["profiles"])==(576,9,576)
     print("DKR_R126_S9C2B4_COMPACTION_SELF_TEST=PASS synthetic=true manifests=65->2 profiles=65")
+    print("DKR_R126_S9C2B4E_OVER_CAP_COMPACTION=PASS synthetic=true manifests=576->9 profiles=576")
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)

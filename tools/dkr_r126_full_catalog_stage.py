@@ -57,7 +57,7 @@ def atomic_catalog(destination, writer, validator):
         staged.rename(destination)
 
 
-def load_plan(inventory, logits_root):
+def load_plan(inventory, logits_root, allow_overphysical=False):
     data = json.loads(inventory.read_text())
     require(data.get("schema") == "dkr.r126.full-catalog.inventory.v1"
             and data.get("target_cc") == 61, "wrong inventory schema/target")
@@ -83,13 +83,13 @@ def load_plan(inventory, logits_root):
         require(actual["profiles"] > 0 and actual["paired_profiles"] in (0, actual["profiles"]),
                 f"{family}: missing or partial original package")
         plan[family] = (root, actual, snapshot(root, family))
-    require(sum(v[1]["physical_manifests"] for v in plan.values())<=MAX_PHYSICAL and
+    require((allow_overphysical or sum(v[1]["physical_manifests"] for v in plan.values())<=MAX_PHYSICAL) and
             sum(v[1]["profiles"] for v in plan.values())<=MAX_LOGICAL,
             "combined catalogue exceeds physical or logical admission limit")
     return plan
 
 
-def validate_copy(root, plan, final):
+def validate_copy(root, plan, final, allow_overphysical=False):
     expected_paths, keys = set(), set()
     for family, (_, original, old) in plan.items():
         current = inspect(root, family)
@@ -120,7 +120,7 @@ def validate_copy(root, plan, final):
             require(current["image_pairs"] == original["image_pairs"], f"{family}: existing CUBIN changed")
         if final:
             require(current["profiles"] == current["paired_profiles"], f"{family}: CUBIN pairing not complete")
-    require(len(expected_paths)<=MAX_PHYSICAL and len(keys)<=MAX_LOGICAL,
+    require((allow_overphysical or len(expected_paths)<=MAX_PHYSICAL) and len(keys)<=MAX_LOGICAL,
             "assembled catalogue exceeds physical or logical admission limit")
     require({str(p.relative_to(root)) for p in root.rglob("manifest.json")} == expected_paths,
             "unexpected manifest outside planned families")
@@ -135,9 +135,10 @@ def main():
     ap.add_argument("--output", type=Path, required=True, help="final /sm61 directory")
     ap.add_argument("--logits-root", type=Path, help="optional isolated replacement for genuinely missing logits")
     ap.add_argument("--json-out", type=Path, required=True)
+    ap.add_argument("--compact", action="store_true", help="allow an intermediate over-physical-cap catalogue; require compaction before final admission")
     a = ap.parse_args()
     try:
-        plan = load_plan(a.inventory, a.logits_root)
+        plan = load_plan(a.inventory, a.logits_root, a.compact)
         assembly, output = a.assembly.resolve(), a.output.resolve()
         roots = {root for root, _, _ in plan.values()}
         for dest in (assembly, output):
@@ -153,21 +154,44 @@ def main():
         if a.phase == "stage":
             atomic_catalog(assembly,
                            lambda dest: [copy_profiles(src, dest, rows) for src,_,rows in pending.values()],
-                           lambda dest: validate_copy(dest, pending, False))
+                           lambda dest: validate_copy(dest, pending, False, a.compact))
             unique = {h for _, info, _ in pending.values() for h in info["ptx_images"]}
             print(f"DKR_R126_FULL_STAGE=PASS preserved_families={len(preserved)} pending_families={len(pending)} unique_pending_ptx={len(unique)}")
             return
         require(not a.json_out.exists(), "report already exists")
         require(not a.json_out.resolve().is_relative_to(output), "report must be outside catalogue")
         if pending:
-            validate_copy(assembly, pending, True)
+            validate_copy(assembly, pending, True, a.compact)
         def writer(dest):
             for family,(root,_,rows) in preserved.items():
                 copy_profiles(root, dest, rows)
             for family in pending:
                 copy_profiles(assembly, dest, snapshot(assembly, family))
-        atomic_catalog(output, writer, lambda dest: validate_copy(dest, plan, True))
-        results = validate_copy(output, plan, True)
+        compaction = None
+        if a.compact:
+            from dkr_r126_catalogue_compact import compact
+            require(not output.exists(), "compacted destination must be new")
+            output.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix=".dkr-precompact-", dir=output.parent) as tmp:
+                staging = Path(tmp) / "sm61"
+                staging.mkdir()
+                writer(staging)
+                validate_copy(staging, plan, True, True)
+                compaction = compact(staging, output)
+                # The intermediate directory is intentionally temporary.
+                compaction.pop("source", None)
+            results = {family: inspect(output, family) for family in plan}
+            require(sum(v["physical_manifests"] for v in results.values())<=MAX_PHYSICAL
+                    and sum(v["profiles"] for v in results.values())<=MAX_LOGICAL,
+                    "compacted output exceeds runtime caps")
+            for family, (_, prior, _) in plan.items():
+                require(results[family]["profiles"] == prior["profiles"]
+                        and results[family]["paired_profiles"] == prior["profiles"]
+                        and results[family]["ptx_images"] == prior["ptx_images"],
+                        f"{family}: compacted profile/pair drift")
+        else:
+            atomic_catalog(output, writer, lambda dest: validate_copy(dest, plan, True))
+            results = validate_copy(output, plan, True)
         files = {str(p.relative_to(output)): digest(p) for p in sorted(output.rglob("*")) if p.is_file()}
         images = {h for r in results.values() for h in r["cubin_images"]}
         report = dict(schema="dkr.r126.full-catalog.staged.v1", status="PASS", target_cc=61,
@@ -175,7 +199,7 @@ def main():
                       physical_manifests=sum(r["physical_manifests"] for r in results.values()),
                       cubin_images=len(images), preserved_families=sorted(preserved),
                       newly_paired_families=sorted(pending), inventory_sha256=digest(a.inventory),
-                      catalogue=str(output), files=files, family_artifacts=results,
+                      catalogue=str(output), files=files, family_artifacts=results, compaction=compaction,
                       full_catalogue_qualified=False, embedded_full_qualified=False,
                       static_fallback_elimination_qualified=False, full_model_qualified=False)
         a.json_out.parent.mkdir(parents=True, exist_ok=True)

@@ -31,6 +31,11 @@ CASES = {
     "gguf_mmvq_shared": ("gguf/mmvq_dynamic.rs", "if index==0 {"),
     "gguf_glu_encode": ("gguf/mmq_dynamic.rs", 'format!("quant.gguf.glu.{}.encode.v1",key.layout)'),
     "gguf_glu_down": ("gguf/fast_mmq.rs", "dynamic::down_from_glu(down,gate,up,activation)"),
+    "gguf_fused_qkv": ("gguf/fast_mmvq.rs", "dynamic::fused(q_w,k_w,Some(v_w),xs,None)"),
+    "gguf_fused_glu": ("gguf/fast_mmvq.rs", "dynamic::fused(gate_w,up_w,None,xs,Some(activation as i32))"),
+    "gguf_indexed_mmvq": ("gguf/moe_dynamic.rs", "return super::super::fast_mmvq::typed_indexed(w,x,ids);"),
+    "gguf_grouped_glu": ("gguf/fast_mmq.rs", "moe_dynamic::grouped_glu(run.weight"),
+    "gguf_grouped_pipeline": ("routed_moe/mod.rs", "return crate::gguf::fast_mmq::typed_moe_pipeline("),
 }
 FORCED = ("quantized_gemv_dynamic.rs", "quantized_gemm_dynamic.rs",
           "nvfp4/gemv_dynamic.rs", "routed_gemv/dynamic.rs")
@@ -52,8 +57,8 @@ def main():
     report=dict(schema="dkr.r126.s9c2.dispatch.source.v1",checks=checks,
                 status="SOURCE_MARKERS_PRESENT",compilation=False,
                 full_link_qualified=False,full_model_qualified=False,
-                unresolved=["blockwise_fp8_weight_quant_dequant","gguf_indexed_mmvq_optimized",
-                            "gguf_direct_mmq_mmvq","gguf_qkv_monokernel","gguf_grouped_moe_glu","higher_level_routed_moe_glu",
+                unresolved=["blockwise_fp8_weight_quant_dequant","gguf_indexed_mmvq_prefetch_staged",
+                            "gguf_direct_mmq_mmvq","gguf_fused_decode_moe_gate_up_down","higher_level_routed_moe_glu",
                             "other_core_and_quant_ffi"])
     if a.json_out:
         a.json_out.parent.mkdir(parents=True,exist_ok=True)
