@@ -1,5 +1,6 @@
 use crate::{
     cuda::compute_capability,
+    model_scope::{read_scope_receipt, ScopeLatch, ScopeReceipt},
     universal::{KernelCatalog, KernelManifest, LaunchRequest, VerifiedKernel},
 };
 use anyhow::{anyhow, ensure, Context, Result};
@@ -10,7 +11,7 @@ use candle_core::{
 };
 use std::{
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 const MAX_PREPARED_KERNELS: usize = 128;
@@ -23,6 +24,7 @@ struct PreparedEntry {
 
 pub struct KernelExecutionCache {
     catalog: Arc<KernelCatalog>,
+    scope: Option<ScopeReceipt>,
     prepared: Mutex<Vec<PreparedEntry>>,
 }
 
@@ -46,10 +48,25 @@ impl KernelExecutionCache {
         } else {
             KernelCatalog::discover_shared(root)?
         };
+        let scope: Option<ScopeReceipt> = if source == "embedded" {
+            crate::embedded::SCOPE_RECEIPT.map(serde_json::from_str).transpose()?
+        } else {
+            read_scope_receipt(root)?
+        };
+        if let Some(receipt) = &scope {
+            receipt.verify(&catalog)?;
+        }
+        static PROCESS_SCOPE: OnceLock<ScopeLatch> = OnceLock::new();
+        PROCESS_SCOPE.get_or_init(ScopeLatch::default).admit(scope.as_ref())?;
         Ok(Self {
             catalog,
+            scope,
             prepared: Mutex::new(Vec::new()),
         })
+    }
+
+    pub fn scope_id(&self) -> Option<&str> {
+        self.scope.as_ref().map(|scope| scope.scope_id.as_str())
     }
 
     pub fn prepare_for_device(
@@ -77,6 +94,9 @@ impl KernelExecutionCache {
             return Ok(Arc::clone(&entry.kernel));
         }
         request.cc = compute_capability(device)?;
+        if let Some(scope) = &self.scope {
+            ensure!(request.cc == scope.device_cc, "device CC differs from admitted model scope");
+        }
         let ev=telemetry::handle(TYPED_ABI,&request.operation,"prepared_cache","",request.cc);
         ev.record(Event::PlanMiss);
         let kernel = match PreparedKernel::load_auto(&self.catalog, request, device) {
