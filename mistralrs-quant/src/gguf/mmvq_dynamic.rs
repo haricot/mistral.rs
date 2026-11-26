@@ -641,9 +641,26 @@ fn decode_plans(key:DecodeKey,dev:&Device)->Result<DecodePlans>{
 }
 pub(crate) fn fused_moe_decode(g:&QTensor,u:&QTensor,w:&QTensor,x:&Tensor,ids:&Tensor,routing:&Tensor,
     activation:crate::GluActivationType,out_dtype:DType)->Result<Tensor>{
+    let (b,t)=ids.dims2()?;
+    if ids.dtype()!=DType::U32||routing.shape()!=ids.shape()||!ids.device().same_device(x.device())||!routing.device().same_device(x.device()){
+        candle_core::bail!("DKR fused MoE routing contract");
+    }
+    let dev=x.device().as_cuda_device()?;
+    let ids=ids.contiguous()?;let routing=routing.to_dtype(DType::F32)?.contiguous()?;
+    let (is,il)=ids.storage_and_layout();let (rs,rl)=routing.storage_and_layout();
+    let (Storage::Cuda(is),Storage::Cuda(rs))=(&*is,&*rs)else{candle_core::bail!("DKR MoE CUDA routing");};
+    let stream=dev.cuda_stream();
+    let (ip,_ig)=slice_ptr_on_stream(is.as_cuda_slice::<u32>()?,il.start_offset(),&stream);
+    let (rp,_rg)=slice_ptr_on_stream(rs.as_cuda_slice::<f32>()?,rl.start_offset(),&stream);
+    unsafe{fused_moe_decode_raw(g,u,w,x,ip,rp,b,t,activation,out_dtype)}
+}
+/// Safety: ids and routing are device pointers to b*t elements on x's
+/// stream; the caller retains the allocation guards through completion.
+pub(crate) unsafe fn fused_moe_decode_raw(g:&QTensor,u:&QTensor,w:&QTensor,x:&Tensor,ip:u64,rp:u64,b:usize,t:usize,
+    activation:crate::GluActivationType,out_dtype:DType)->Result<Tensor>{
     let act=match activation{crate::GluActivationType::Gelu=>0i32,crate::GluActivationType::Silu=>1,
         _=>candle_core::bail!("DKR historical fused MoE decode activation unsupported")};
-    let (b,k)=x.dims2()?;let (ib,t)=ids.dims2()?;
+    let (ib,k)=x.dims2()?;
     let (e,n,gk)=g.shape().dims3()?;let (we,wn,wk)=w.shape().dims3()?;
     let gf=fmt_decode(g.dtype()).ok_or_else(||candle_core::Error::msg("DKR fused MoE gate format"))?;
     let df=fmt_decode(w.dtype()).ok_or_else(||candle_core::Error::msg("DKR fused MoE down format"))?;
@@ -651,8 +668,7 @@ pub(crate) fn fused_moe_decode(g:&QTensor,u:&QTensor,w:&QTensor,x:&Tensor,ids:&T
     let info=crate::cuda_device::cuda_device_info(dev);
     if info.capability()!=(6,1)||info.warp_size!=32||b==0||t==0||e==0||n==0||k==0||ib!=b||gk!=k||we!=e||wn!=k||wk!=n
         || u.shape()!=g.shape()||u.dtype()!=g.dtype()||k%g.dtype().block_size()!=0||n%w.dtype().block_size()!=0
-        || ids.dtype()!=DType::U32||routing.shape()!=ids.shape()||!ids.device().same_device(x.device())
-        || !routing.device().same_device(x.device())||[g,u,w].iter().any(|w|!w.device().same_device(x.device())){
+        || ip==0||rp==0||ip%4!=0||rp%4!=0||[g,u,w].iter().any(|w|!w.device().same_device(x.device())){
         candle_core::bail!("DKR fused MoE decode contract");
     }
     dtype(x.dtype())?;dtype(out_dtype)?;
@@ -668,9 +684,9 @@ pub(crate) fn fused_moe_decode(g:&QTensor,u:&QTensor,w:&QTensor,x:&Tensor,ids:&T
     let qbytes=checked_span(prod(prod(b,kp/32)?,36)?.max(prod(prod(a,np/32)?,36)?))?;
     let inter=checked_span(prod(a,n)?)?;let out_count=checked_span(prod(b,k)?)?;
     for v in [e,k,n,kp,np]{checked_span(v)?;}
-    let x=x.contiguous()?;let ids=ids.contiguous()?;let routing=routing.to_dtype(DType::F32)?.contiguous()?;
-    let (xs,xl)=x.storage_and_layout();let (is,il)=ids.storage_and_layout();let (rs,rl)=routing.storage_and_layout();
-    let (Storage::Cuda(xs),Storage::Cuda(is),Storage::Cuda(rs))=(&*xs,&*is,&*rs)else{candle_core::bail!("DKR MoE CUDA tensors");};
+    let x=x.contiguous()?;
+    let (xs,xl)=x.storage_and_layout();
+    let Storage::Cuda(xs)=&*xs else{candle_core::bail!("DKR MoE CUDA tensors");};
     let stream=dev.cuda_stream();
     let (gw,_gg)=g.device_ptr_with_guard(&stream)?;let (uw,_ug)=u.device_ptr_with_guard(&stream)?;
     let (dw,_dg)=w.device_ptr_with_guard(&stream)?;
@@ -681,8 +697,6 @@ pub(crate) fn fused_moe_decode(g:&QTensor,u:&QTensor,w:&QTensor,x:&Tensor,ids:&T
     let (mut qws,mut fws)=super::super::cuda::typed_decode_workspaces(dev,qbytes,inter)?;
     let (q,_qg)=slice_ptr_mut_on_stream(&mut qws.slice,0,&stream);
     let (mid,_mg)=slice_ptr_mut_on_stream(&mut fws.slice,0,&stream);
-    let (ip,_ig)=slice_ptr_on_stream(is.as_cuda_slice::<u32>()?,il.start_offset(),&stream);
-    let (rp,_rg)=slice_ptr_on_stream(rs.as_cuda_slice::<f32>()?,rl.start_offset(),&stream);
     let (bi,ti,ei,ki,ni,kpi,npi)=(b as i32,t as i32,e as i32,k as i32,n as i32,kp as i32,np as i32);
     let mut out=dev.alloc_zeros::<f32>(out_count)?;
     macro_rules! run{($t:ty)=>{{

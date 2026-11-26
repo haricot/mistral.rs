@@ -696,6 +696,21 @@ pub fn moe_dispatch_build(
 /// `num_tokens * topk` contiguous `f32` values on `dev`. The pointed allocation
 /// must remain alive until all work queued on `dev`'s stream by this function
 /// has completed.
+#[cfg(feature = "dkr-static-closure-probe")]
+pub unsafe fn moe_weighted_reduce_flat(
+    inputs: &Tensor,
+    topk_weights: *const f32,
+    num_tokens: usize,
+    topk: usize,
+    dev: &CudaDevice,
+) -> Result<Tensor> {
+    let (routes,hidden)=inputs.dims2()?;
+    if num_tokens.checked_mul(topk)!=Some(routes)||inputs.dtype()!=DType::F32||!inputs.device().same_device(&Device::Cuda(dev.clone())){
+        candle_core::bail!("DKR flat reduction contract");
+    }
+    unsafe{crate::moe::moe_weighted_reduce_raw(&inputs.reshape((num_tokens,topk,hidden))?,topk_weights as u64,DType::F32)}
+}
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 pub unsafe fn moe_weighted_reduce_flat(
     inputs: &Tensor,
     topk_weights: *const f32,
@@ -759,6 +774,21 @@ pub unsafe fn moe_weighted_reduce_flat(
 /// `num_tokens * topk` contiguous `f32` values on `dev`. The pointed allocation
 /// must remain alive until all work queued on `dev`'s stream by this function
 /// has completed.
+#[cfg(feature = "dkr-static-closure-probe")]
+pub unsafe fn moe_weighted_reduce_flat_bf16(
+    inputs: &Tensor,
+    topk_weights: *const f32,
+    num_tokens: usize,
+    topk: usize,
+    dev: &CudaDevice,
+) -> Result<Tensor> {
+    let (routes,hidden)=inputs.dims2()?;
+    if num_tokens.checked_mul(topk)!=Some(routes)||inputs.dtype()!=DType::F32||!inputs.device().same_device(&Device::Cuda(dev.clone())){
+        candle_core::bail!("DKR flat reduction contract");
+    }
+    unsafe{crate::moe::moe_weighted_reduce_raw(&inputs.reshape((num_tokens,topk,hidden))?,topk_weights as u64,DType::BF16)}
+}
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 pub unsafe fn moe_weighted_reduce_flat_bf16(
     inputs: &Tensor,
     topk_weights: *const f32,
@@ -903,6 +933,22 @@ unsafe fn moe_weighted_reduce_same_dtype<T: CudaDType + DeviceRepr>(
     )))
 }
 
+#[cfg(feature = "dkr-static-closure-probe")]
+pub fn moe_weighted_reduce_flat_same_dtype(
+    inputs: &Tensor,
+    topk_weights: &Tensor,
+    num_tokens: usize,
+    topk: usize,
+    dev: &CudaDevice,
+) -> Result<Tensor> {
+    let (routes,hidden)=inputs.dims2()?;
+    if num_tokens.checked_mul(topk)!=Some(routes)||!inputs.device().same_device(&Device::Cuda(dev.clone())){
+        candle_core::bail!("DKR flat reduction shape/device");
+    }
+    let weights=topk_weights.to_dtype(DType::F32)?.reshape((num_tokens,topk))?;
+    crate::moe::moe_weighted_reduce(&inputs.reshape((num_tokens,topk,hidden))?,&weights,inputs.dtype())
+}
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 pub fn moe_weighted_reduce_flat_same_dtype(
     inputs: &Tensor,
     topk_weights: &Tensor,
@@ -1533,6 +1579,30 @@ pub const ACT_SILU: i32 = 1;
 #[allow(clippy::too_many_arguments)]
 /// # Safety
 /// `topk_weights_ptr` must be a valid device pointer to `batch * topk` f32 values.
+#[cfg(feature = "dkr-static-closure-probe")]
+pub unsafe fn indexed_moe_fused_decode(
+    gate_qt: &QTensor,
+    up_qt: &QTensor,
+    down_qt: &QTensor,
+    xs_flat: &Tensor,
+    topk_ids: &CudaSlice<u32>,
+    topk_weights_ptr: *const f32,
+    batch: usize,
+    topk: usize,
+    act_type: i32,
+    dev: &CudaDevice,
+) -> Result<Tensor> {
+    if batch.checked_mul(topk).is_none_or(|n|n>topk_ids.len())||topk_ids.ordinal()!=dev.cuda_stream().context().ordinal()
+        ||!xs_flat.device().same_device(&Device::Cuda(dev.clone())){
+        candle_core::bail!("DKR raw fused decode routing span");
+    }
+    let act=match act_type{ACT_GELU_PYTORCH_TANH=>crate::GluActivationType::Gelu,ACT_SILU=>crate::GluActivationType::Silu,
+        _=>candle_core::bail!("DKR raw fused decode activation")};
+    let stream=dev.cuda_stream();
+    let (ip,_ig)=slice_ptr_on_stream(topk_ids,0,&stream);
+    unsafe{super::fast_mmvq::typed_fused_moe_decode_raw(gate_qt,up_qt,down_qt,xs_flat,ip,topk_weights_ptr as u64,batch,topk,act,DType::F32)}
+}
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 pub unsafe fn indexed_moe_fused_decode(
     gate_qt: &QTensor,
     up_qt: &QTensor,

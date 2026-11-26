@@ -9,6 +9,8 @@ mod weighted_reduce;
 #[path = "weighted_reduce_dynamic.rs"]
 mod weighted_reduce;
 pub use weighted_reduce::moe_weighted_reduce;
+#[cfg(feature = "dkr-reduce-norm")]
+pub(crate) use weighted_reduce::moe_weighted_reduce_raw;
 #[cfg(has_cutlass_moe_kernels)]
 pub mod cutlass;
 

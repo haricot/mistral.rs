@@ -35,22 +35,34 @@ pub fn moe_weighted_reduce(input: &Tensor, weights: &Tensor, output_dtype: DType
             "MoE weighted reduction requires F32 [tokens, topk] weights on the input device"
         );
     }
-    let input_dtype = dtype(input.dtype())?;
-    let output_element = dtype(output_dtype)?;
     if tokens == 0 || hidden == 0 || topk == 0 {
         return Tensor::zeros((tokens, hidden), output_dtype, input.device());
     }
-    let input = input.contiguous()?;
-    let weights = weights.contiguous()?;
-    let device = input.device().as_cuda_device()?;
-    let stream = device.cuda_stream();
-    let (input_storage, input_layout) = input.storage_and_layout();
-    let (weights_storage, weights_layout) = weights.storage_and_layout();
-    let (Storage::Cuda(input_storage), Storage::Cuda(weights_storage)) =
-        (&*input_storage, &*weights_storage)
-    else {
-        candle_core::bail!("MoE weighted reduction requires CUDA tensors")
-    };
+    let weights=weights.contiguous()?;
+    let device=input.device().as_cuda_device()?;
+    let stream=device.cuda_stream();
+    let (storage,layout)=weights.storage_and_layout();
+    let Storage::Cuda(storage)=&*storage else{candle_core::bail!("MoE weighted reduction requires CUDA weights");};
+    let (base,_guard)=storage.as_cuda_slice::<f32>()?.device_ptr(&stream);
+    let ptr=base+(layout.start_offset()*4) as u64;
+    // The storage guard is held across the launch.
+    unsafe{moe_weighted_reduce_raw(input,ptr,output_dtype)}
+}
+
+/// Safety: weights_ptr must denote tokens*topk contiguous F32 values on
+/// the input CUDA device and stay alive until stream work completes.
+pub(crate) unsafe fn moe_weighted_reduce_raw(input:&Tensor,weights_ptr:u64,output_dtype:DType)->Result<Tensor>{
+    let (tokens,topk,hidden)=input.dims3()?;
+    let input_dtype=dtype(input.dtype())?;
+    let output_element=dtype(output_dtype)?;
+    if tokens==0||hidden==0||topk==0{return Tensor::zeros((tokens,hidden),output_dtype,input.device());}
+    if weights_ptr==0||weights_ptr%4!=0{candle_core::bail!("invalid raw routing pointer");}
+    tokens.checked_mul(topk).and_then(|n|n.checked_mul(hidden)).ok_or_else(||candle_core::Error::msg("weighted reduction span overflow"))?;
+    let input=input.contiguous()?;
+    let device=input.device().as_cuda_device()?;
+    let stream=device.cuda_stream();
+    let (input_storage,input_layout)=input.storage_and_layout();
+    let Storage::Cuda(input_storage)=&*input_storage else{candle_core::bail!("MoE weighted reduction requires CUDA");};
     let tokens_u64 = u64::try_from(tokens).map_err(candle_core::Error::wrap)?;
     let topk_u64 = u64::try_from(topk).map_err(candle_core::Error::wrap)?;
     let hidden_u64 = u64::try_from(hidden).map_err(candle_core::Error::wrap)?;
@@ -108,12 +120,8 @@ pub fn moe_weighted_reduce(input: &Tensor, weights: &Tensor, output_dtype: DType
                         let (input_base, _input_guard) = input_storage
                             .as_cuda_slice::<$input_ty>()?
                             .device_ptr(&stream);
-                        let (weights_base, _weights_guard) = weights_storage
-                            .as_cuda_slice::<f32>()?
-                            .device_ptr(&stream);
-                        let input_ptr = input_base
+                         let input_ptr = input_base
                             + (input_layout.start_offset() * std::mem::size_of::<$input_ty>()) as u64;
-                        let weights_ptr = weights_base + (weights_layout.start_offset() * 4) as u64;
                         let mut output = unsafe { device.alloc::<$output_ty>(elements)? };
                         {
                             let (output_ptr, _output_guard) = output.device_ptr_mut(&stream);

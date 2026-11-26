@@ -396,7 +396,7 @@ pub(crate) use dynamic::gated_mix as typed_gated_mix;
 #[cfg(feature = "dkr-static-closure-probe")]
 pub(crate) use dynamic::indexed as typed_indexed;
 #[cfg(feature = "dkr-static-closure-probe")]
-pub(crate) use dynamic::fused_moe_decode as typed_fused_moe_decode;
+pub(crate) use dynamic::{fused_moe_decode as typed_fused_moe_decode,fused_moe_decode_raw as typed_fused_moe_decode_raw};
 #[cfg(feature = "dkr-static-closure-probe")]
 pub(crate) use dynamic::{encode_rows as typed_encode_rows,lora_projection as typed_lora_projection};
 
