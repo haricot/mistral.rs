@@ -1514,3 +1514,40 @@ Total B4e additions 634 logical / 13 physical; cumulative conservative
 upper bound 519 physical / 3613 logical before compaction. Need at
 least seven physical manifests saved if upper bound realized.
 Prepared source + regression tests, no actual Rust/CUDA compilation.
+
+
+## R1.26/S9C.2B5 — GGUF residual FFI closure (source)
+
+User B4e synthetic 634 profiles/13 images, compaction 65->2 and
+576->9, three plans, 35 dispatch markers PASS. B5 adds 66 typed
+LoRA pair/down profiles (11 formats x 3 output dtypes x 2 ops),
+60 mixed dense/quant pair profiles (10 formats x 3 dtypes x
+direct/prefetch), and 22 historical prequantized grouped row-Q8_1
+profiles (11 formats x sorted/weighted). Two packages, four images,
+148 profiles. All preserve existing device bodies, including the
+LoRA zero output for invalid IDs and mixed pair policy. Grouped row
+retains sorted output order when unweighted and weighted atomic
+aggregation otherwise; metadata checked for bounded access, assumes
+producer-owned unique destinations. Existing safe public raw-pointer
+API contract retained; no new pointer lifetime guarantees.
+Reuses existing nine dtype combinations of moe.weighted_reduce.v1
+rather than duplicating kernels; raw legacy wrappers hold caller
+allocation guards, use F32 product then sum (not the old grouped FMA
+accumulation; tolerance qualification required). Existing row encoder
+reused for prequantization. Existing raw fused decode wrapper bridged
+to typed decode. LoRA grouped path admitted only for supported
+formats/shape/activation; else per-assignment or typed gather.
+Static gguf::ffi module and historical launcher helpers excluded
+under probe; normal builds unchanged. Lexical source audit counts
+negative-cfg-contained references; not compilation or link proof.
+Source checks catch known private-module visibility and raw metadata
+device mistakes; Rust/CUDA compiler unavailable here. Added ignored
+GPU tests for LoRA pair/down, mixed direct/prefetch, grouped row.
+Remaining non-GGUF static producers, optional packed-affine Marlin
+not admitted on SM61, unsupported formats, actual full dispatch
+qualification and exact numerical/performance regressions are not
+closed. No Candle/Cargo.lock edits or cache deletion.
+Conservative cumulative upper 523 manifests / 3761 profiles before
+compaction; 335 logical headroom. Actual final catalogue must save
+at least 11 manifests if upper bound realized, preserve limits
+512/4096; no promotion based only on synthetic evidence.

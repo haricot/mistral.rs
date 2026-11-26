@@ -4,7 +4,7 @@ use super::{dynamic::{format,layout,shared_bytes,tensor,scalar,prepare_one,mul,i
     qk_for,q8_1,workspace_ensure,MMQ_WORKSPACE};
 use crate::{cuda_device::cuda_device_info,dkr_cuda::{dtype,LaunchPlanCache},
     utils::{slice_ptr_on_stream,slice_ptr_mut_on_stream}};
-use candle_core::{cuda::cudarc::driver::{CudaSlice,PushKernelArg},
+use candle_core::{cuda::cudarc::driver::{CudaSlice,DevicePtr,PushKernelArg},
     quantized::QTensor,CudaDevice,CudaStorage,DType,Device,Result,Storage,Tensor};
 use mistralrs_kernel_runtime::{universal::{Argument,ElementType},
     universal_cuda::PrevalidatedLaunchPlan};
@@ -50,6 +50,7 @@ pub(crate) fn dispatch(ids:&CudaSlice<u32>,offset:usize,a:usize,e:usize,topk:usi
  ->Result<(CudaSlice<u32>,CudaSlice<u32>,CudaSlice<u32>)>{
     device_gate(dev)?;
     if a==0 || e==0 || topk==0 || a%topk!=0 || !(input_routes==1||input_routes==topk)
+        || ids.ordinal()!=dev.cuda_stream().context().ordinal()
         || offset.checked_add(a).is_none_or(|end|end>ids.len()) {
         candle_core::bail!("DKR indexed dispatch shape mismatch");
     }
@@ -136,7 +137,9 @@ fn grouped_run(weights:&[&QTensor],xs:&Tensor,src:Option<&CudaSlice<u32>>,dst:&C
     let device=Device::Cuda(dev.clone());
     if k==0 || k%256!=0 || source_rows==0 || e==0 || a==0 || src.is_some_and(|s|s.len()<a) || dst.len()<a
         || bounds.len()<e.checked_add(1).ok_or_else(||candle_core::Error::msg("expert overflow"))?
-        || !xs.device().same_device(&device) {
+        || !xs.device().same_device(&device)
+        || src.is_some_and(|s|s.ordinal()!=dev.cuda_stream().context().ordinal())
+        || dst.ordinal()!=dev.cuda_stream().context().ordinal()||bounds.ordinal()!=dev.cuda_stream().context().ordinal() {
         candle_core::bail!("DKR compact MMQ shape/device/metadata span");
     }
     dtype(xs.dtype())?;
@@ -400,4 +403,40 @@ pub(crate) fn grouped_row(w:&QTensor,q:&CudaSlice<u8>,k:usize,padded:usize,bound
         }))?;
     }
     Ok(Tensor::from((Storage::Cuda(CudaStorage::wrap_cuda_slice(out,dev.clone())),(out_rows,n))))
+}
+
+#[cfg(test)]
+mod row_tests{
+    use super::*;
+    use candle_core::quantized::GgmlDType;
+    #[test]
+    #[ignore="requires typed grouped row catalogue and CUDA"]
+    fn dkr_s9c_grouped_row_gpu()->Result<()>{
+        let _evidence=mistralrs_kernel_runtime::RuntimeEvidenceGuard;
+        let device=Device::new_cuda(0)?;let dev=device.as_cuda_device()?;
+        let ids=Tensor::from_vec(vec![0u32,1,0,1],(2,2),&device)?;
+        let (s,l)=ids.storage_and_layout();let Storage::Cuda(s)=&*s else{unreachable!()};
+        let (bounds,dst,_src)=dispatch(s.as_cuda_slice::<u32>()?,l.start_offset(),4,2,2,1,dev)?;
+        let x=Tensor::ones((2,256),DType::F32,&device)?;
+        let (q,k,padded)=super::super::super::cuda::quantize_input_q8_1(&x,dev)?;
+        let routing=Tensor::from_vec(vec![0.25f32,0.75,0.5,0.5],(4,),&device)?;
+        let (rs,rl)=routing.storage_and_layout();let Storage::Cuda(rs)=&*rs else{unreachable!()};
+        let stream=dev.cuda_stream();
+        let (rp,_rg)=slice_ptr_on_stream(rs.as_cuda_slice::<f32>()?,rl.start_offset(),&stream);
+        for quant in [GgmlDType::Q4K,GgmlDType::Q8_0]{
+            let w=QTensor::quantize(&Tensor::from_vec((0..2*65*256).map(|i|if i<65*256{0.25f32}else{0.5}).collect::<Vec<_>>(),(2,65,256),&device)?,quant)?;
+            let sorted=grouped_row(&w,&q,k,padded,&bounds,&dst,None,4,2,2,1,dev)?;
+            let sorted=sorted.to_vec2::<f32>()?;
+            for (i,row) in sorted.iter().enumerate(){
+                let expected=if i<2{64.}else{128.};
+                assert!(row.iter().all(|v|(v-expected).abs()<3.));
+            }
+            let weighted=grouped_row(&w,&q,k,padded,&bounds,&dst,Some(rp),4,2,2,1,dev)?.to_vec2::<f32>()?;
+            for (i,row) in weighted.iter().enumerate(){
+                let expected=if i==0{112.}else{96.};
+                assert!(row.iter().all(|v|(v-expected).abs()<3.));
+            }
+        }
+        Ok(())
+    }
 }

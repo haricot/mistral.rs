@@ -1036,8 +1036,9 @@ pub fn quantize_input_q8_1(xs: &Tensor, dev: &CudaDevice) -> Result<(CudaSlice<u
     let xs_contig = xs.contiguous()?;
     let num_rows = xs_contig.dim(0)?;
     let k = xs_contig.dim(1)?;
-    let k_padded = pad(k, q8_1::ROW_PADDING);
-    let y_size_in_bytes = q8_1_bytes(num_rows, k_padded);
+    let k_padded = k.checked_add(q8_1::ROW_PADDING-1)
+        .ok_or_else(||candle_core::Error::msg("Q8_1 padding overflow"))?/q8_1::ROW_PADDING*q8_1::ROW_PADDING;
+    let y_size_in_bytes = q8_1_bytes_checked(num_rows, k_padded)?;
 
     // SAFETY: quantize kernel writes all elements up to k_padded per row
     let mut input_quant = unsafe { dev.alloc::<u8>(y_size_in_bytes)? };

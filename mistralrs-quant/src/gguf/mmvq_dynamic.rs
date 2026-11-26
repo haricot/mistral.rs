@@ -4,7 +4,7 @@ use super::{output_shape, prefers_weight_prefetch, use_single_row_prefetch,
 use crate::dkr_cuda::{catalog, dtype, LaunchPlanCache};
 use crate::utils::{slice_ptr_on_stream, slice_ptr_mut_on_stream};
 use candle_core::{
-    cuda::cudarc::driver::PushKernelArg, quantized::{GgmlDType,QTensor},
+    cuda::cudarc::driver::{DevicePtr,PushKernelArg}, quantized::{GgmlDType,QTensor},
     CudaStorage, DType, Device, Result, Storage, Tensor,
 };
 use mistralrs_kernel_runtime::{
@@ -912,4 +912,64 @@ pub(super) fn mixed_pair(w:&QTensor,dense:&Tensor,xs:&Tensor,prefetch:bool)->Res
             Tensor::from((Storage::Cuda(CudaStorage::wrap_cuda_slice(dout,dev.clone())),output_shape(&xs,dr)))))
     }}}
     match xs.dtype(){DType::F16=>run!(half::f16),DType::BF16=>run!(half::bf16),DType::F32=>run!(f32),_=>candle_core::bail!("DKR mixed dtype")}
+}
+
+#[cfg(test)]
+mod residual_tests{
+    use super::*;
+    #[test]
+    #[ignore="requires typed residual GGUF catalogue and CUDA"]
+    fn dkr_s9c_lora_projection_gpu()->Result<()>{
+        let _evidence=mistralrs_kernel_runtime::RuntimeEvidenceGuard;
+        let device=Device::new_cuda(0)?;
+        let dev=device.as_cuda_device()?;
+        let make=|salt:usize,n:usize,k:usize,q|QTensor::quantize(&Tensor::from_vec(
+            (0..3*n*k).map(|i|(((i+salt)%17)as f32-8.)/128.).collect::<Vec<_>>(),(3,n,k),&device)?,q);
+        for quant in [GgmlDType::Q4_0,GgmlDType::Q4_1,GgmlDType::Q5_0,GgmlDType::Q5_1,GgmlDType::Q8_0,
+            GgmlDType::Q2K,GgmlDType::Q3K,GgmlDType::Q4K,GgmlDType::Q5K,GgmlDType::Q6K]{
+            let g=make(0,256,256,quant)?;let u=make(1,256,256,quant)?;let w=make(2,65,256,quant)?;
+            let ids=Tensor::from_vec(vec![0u32,2,1,0,2,1],(3,2),&device)?;
+            let (s,l)=ids.storage_and_layout();let Storage::Cuda(s)=&*s else{unreachable!()};
+            assert_eq!(l.start_offset(),0);
+            let raw=s.as_cuda_slice::<u32>()?;
+            let x=Tensor::from_vec((0..3*256).map(|i|((i%11)as f32-5.)/8.).collect::<Vec<_>>(),(3,256),&device)?;
+            let routed=Tensor::from_vec((0..6*256).map(|i|((i%7)as f32-3.)/8.).collect::<Vec<_>>(),(6,256),&device)?;
+            for dt in [DType::F16,DType::BF16,DType::F32]{
+                let x=x.to_dtype(dt)?;
+                let got=lora_projection(&g,Some(&u),&x,raw,3,2,3,dev)?.to_dtype(DType::F32)?;
+                let flat=x.reshape((3,1,256))?;
+                let expect=Tensor::cat(&[indexed(&g,&flat,&ids)?,indexed(&u,&flat,&ids)?],2)?;
+                let delta=(got-expect)?.abs()?.max_all()?.to_scalar::<f32>()?;
+                assert!(delta<0.025,"LoRA pair {quant:?} {dt:?}: {delta}");
+                let routed=routed.to_dtype(dt)?;
+                let got=lora_projection(&w,None,&routed,raw,3,2,3,dev)?.to_dtype(DType::F32)?;
+                let expect=indexed(&w,&routed.reshape((3,2,256))?,&ids)?;
+                let delta=(got-expect)?.abs()?.max_all()?.to_scalar::<f32>()?;
+                assert!(delta<0.025,"LoRA down {quant:?} {dt:?}: {delta}");
+            }
+        }
+        Ok(())
+    }
+    #[test]
+    #[ignore="requires typed residual GGUF catalogue and CUDA"]
+    fn dkr_s9c_mixed_pair_gpu()->Result<()>{
+        let _evidence=mistralrs_kernel_runtime::RuntimeEvidenceGuard;
+        let dev=Device::new_cuda(0)?;
+        let dense=Tensor::from_vec((0..17*512).map(|i|((i%11)as f32-5.)/64.).collect::<Vec<_>>(),(17,512),&dev)?;
+        let w=QTensor::quantize(&Tensor::from_vec((0..64*512).map(|i|((i%17)as f32-8.)/128.).collect::<Vec<_>>(),(64,512),&dev)?,GgmlDType::Q4K)?;
+        let x=Tensor::from_vec((0..512).map(|i|((i%9)as f32-4.)/8.).collect::<Vec<_>>(),(1,512),&dev)?;
+        for dt in [DType::F16,DType::BF16,DType::F32]{
+            let x=x.to_dtype(dt)?;let dense=dense.to_dtype(dt)?;
+            for prefetch in [false,true]{
+                let (q,d)=mixed_pair(&w,&dense,&x,prefetch)?;
+                let expected=plain(&w,&x)?.to_dtype(DType::F32)?;
+                let delta=(q.to_dtype(DType::F32)?-expected)?.abs()?.max_all()?.to_scalar::<f32>()?;
+                assert!(delta<0.025,"mixed quant {dt:?} {prefetch}: {delta}");
+                let expected=x.to_dtype(DType::F32)?.matmul(&dense.to_dtype(DType::F32)?.t()?)?;
+                let delta=(d.to_dtype(DType::F32)?-expected)?.abs()?.max_all()?.to_scalar::<f32>()?;
+                assert!(delta<0.025,"mixed dense {dt:?} {prefetch}: {delta}");
+            }
+        }
+        Ok(())
+    }
 }

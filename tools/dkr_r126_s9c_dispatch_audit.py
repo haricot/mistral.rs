@@ -38,6 +38,16 @@ CASES = {
     "gguf_grouped_pipeline": ("routed_moe/mod.rs", "return crate::gguf::fast_mmq::typed_moe_pipeline("),
     "gguf_fused_decode": ("routed_moe/mod.rs", "return crate::gguf::fast_mmvq::typed_fused_moe_decode("),
     "gguf_fused_decode_stage": ("gguf/mmvq_dynamic.rs", "p.prevalidate_launch_with_shared(&req,dev,shared as u32)"),
+    "gguf_no_ffi_module": ("gguf/mod.rs", '#[cfg(all(feature = "cuda", not(feature = "dkr-static-closure-probe")))]\nmod ffi;'),
+    "gguf_lora_typed": ("gguf/cuda.rs", "super::fast_mmvq::typed_lora_projection("),
+    "gguf_lora_gate_dispatch": ("gguf/cuda.rs", "typed_lora_projection(self.weights.gate,Some(self.weights.up)"),
+    "gguf_lora_down_dispatch": ("gguf/cuda.rs", "typed_lora_projection(self.weights.down,None"),
+    "gguf_mixed_typed": ("gguf/fast_mmvq.rs", "return dynamic::mixed_pair(quant_weight,dense_weight,xs,prefetch).map(Some);"),
+    "gguf_row_encode": ("gguf/cuda.rs", "super::fast_mmvq::typed_encode_rows("),
+    "gguf_row_grouped": ("gguf/cuda.rs", "super::fast_mmq::moe_dynamic::grouped_row("),
+    "gguf_raw_decode": ("gguf/cuda.rs", "super::fast_mmvq::typed_fused_moe_decode_raw("),
+    "gguf_raw_reduce": ("gguf/cuda.rs", "crate::moe::moe_weighted_reduce_raw("),
+    "gguf_typed_reduce": ("gguf/cuda.rs", "crate::moe::moe_weighted_reduce(&inputs.reshape("),
 }
 FORCED = ("quantized_gemv_dynamic.rs", "quantized_gemm_dynamic.rs",
           "nvfp4/gemv_dynamic.rs", "routed_gemv/dynamic.rs")
@@ -60,7 +70,7 @@ def main():
                 status="SOURCE_MARKERS_PRESENT",compilation=False,
                 full_link_qualified=False,full_model_qualified=False,
                 unresolved=["blockwise_fp8_weight_quant_dequant","gguf_indexed_mmvq_prefetch_staged",
-                            "gguf_direct_mmq_mmvq","gguf_lora_fused_decode","higher_level_routed_moe_glu",
+                            "gguf_actual_link_and_numeric_qualification","higher_level_routed_moe_glu",
                             "other_core_and_quant_ffi"])
     if a.json_out:
         a.json_out.parent.mkdir(parents=True,exist_ok=True)

@@ -39,7 +39,8 @@ pub struct RoutedActivation<'a> {
 impl RoutedActivation<'_> {
     fn apply(&self, gate: &Tensor, up: &Tensor) -> Result<Tensor> {
         #[cfg(all(feature = "cuda",feature = "dkr-static-closure-probe"))]
-        if gate.device().is_cuda() && gate.dtype()==up.dtype(){
+        if gate.device().is_cuda() && gate.dtype()==up.dtype()
+            && matches!(gate.dtype(),DType::F16|DType::BF16|DType::F32){
             if let Some(act)=self.fused{return crate::gguf::group::typed_glu(gate,up,act);}
         }
         if matches!(gate.dtype(), DType::BF16 | DType::F16 | DType::F32)
