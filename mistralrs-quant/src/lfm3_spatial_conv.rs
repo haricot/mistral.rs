@@ -322,7 +322,7 @@ pub fn gated_spatial_conv(
     let frame=height.checked_mul(width).filter(|&n|n>0&&n<=u32::MAX as usize)
         .ok_or_else(||candle_core::Error::msg("LFM3 spatial frame overflow"))?;
     if merge==0||height%merge!=0||width%merge!=0||rows==0||rows%frame!=0||
-        channels==0||channels.checked_mul(3)!=Some(projection)||groups!=1||
+        channels==0||channels.checked_mul(3)!=Some(projection)||projection>u32::MAX as usize||groups!=1||
         kernel==0||kernel!=kernel_width||
         height.checked_add(kernel).is_none_or(|n|n>i32::MAX as usize)||
         width.checked_add(kernel).is_none_or(|n|n>i32::MAX as usize)||
@@ -463,6 +463,19 @@ mod tests {
             .to_dtype(DType::F32)?
             .to_vec2::<f32>()?;
         assert_eq!(actual[0][0], 0.004901886);
+        Ok(())
+    }
+
+    #[test]
+    fn spatial_conv_rejects_invalid_patch_geometry()->Result<()>{
+        let dev=&Device::Cpu;
+        let p=Tensor::zeros((24,15),DType::F32,dev)?;
+        let w=Tensor::zeros((5,1,3,3),DType::F32,dev)?;
+        assert!(gated_spatial_conv(&p,&w,4,6,0).is_err());
+        assert!(gated_spatial_conv(&p,&w,4,6,3).is_err());
+        assert!(gated_spatial_conv(&p,&w,4,5,1).is_err());
+        let wrong=Tensor::zeros((5,2,3,3),DType::F32,dev)?;
+        assert!(gated_spatial_conv(&p,&wrong,4,6,2).is_err());
         Ok(())
     }
 
