@@ -518,6 +518,46 @@ extern "C" int vmajor_grouped_warp_gated_delta_rule_recurrence(
 // ============================================================================
 
 
+// Same device-resource policy as the typed catalogue, without a CC test.
+template <typename StateT, int BT, int BK, bool VALUE_MAJOR>
+cudaError_t launch_gdn_chunk_variant(
+    const float *q, const float *k, const float *v, const float *g,
+    const float *beta, StateT *state, float *output, int bh, int seq_len,
+    int v_dim, const int32_t *slots, int heads, cudaStream_t stream,
+    int normal, int capacity) {
+  constexpr int BV = 64;
+  constexpr int smem = (BT * BK + BT * BT + 2 * BT + BK) * sizeof(float);
+  if (smem > capacity) return cudaErrorInvalidValue;
+  auto kernel = chunked_gated_delta_rule_kernel<StateT, BT, BK, BV, VALUE_MAJOR>;
+  if (smem > normal) {
+    auto status = cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
+    if (status != cudaSuccess) return status;
+  }
+  dim3 grid((v_dim + BV - 1) / BV, bh);
+  dim3 block(BV);
+  kernel<<<grid, block, smem, stream>>>(q,k,v,g,beta,state,output,seq_len,v_dim,slots,heads);
+  return cudaGetLastError();
+}
+
+template <typename StateT, int BK, bool VALUE_MAJOR>
+cudaError_t dispatch_gdn_chunk_resource(
+    const float *q, const float *k, const float *v, const float *g,
+    const float *beta, StateT *state, float *output, int bh, int seq_len,
+    int v_dim, const int32_t *slots, int heads, cudaStream_t stream) {
+  int device = 0, normal = 0, optin = 0;
+  auto status = cudaGetDevice(&device);
+  if (status != cudaSuccess) return status;
+  status = cudaDeviceGetAttribute(&normal, cudaDevAttrMaxSharedMemoryPerBlock, device);
+  if (status != cudaSuccess) return status;
+  if (cudaDeviceGetAttribute(&optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, device) != cudaSuccess)
+    optin = normal;
+  const int capacity = normal > optin ? normal : optin;
+  constexpr int large = (64 * BK + 64 * 64 + 128 + BK) * sizeof(float);
+  if (capacity >= large)
+    return launch_gdn_chunk_variant<StateT,64,BK,VALUE_MAJOR>(q,k,v,g,beta,state,output,bh,seq_len,v_dim,slots,heads,stream,normal,capacity);
+  return launch_gdn_chunk_variant<StateT,32,BK,VALUE_MAJOR>(q,k,v,g,beta,state,output,bh,seq_len,v_dim,slots,heads,stream,normal,capacity);
+}
+
 template <typename StateT, bool VALUE_MAJOR = false>
 void launch_chunked_gated_delta_rule_recurrence(
     const float *q, const float *k, const float *v, const float *g,
@@ -525,43 +565,11 @@ void launch_chunked_gated_delta_rule_recurrence(
     int k_dim, int v_dim, const int32_t *slot_indices, int num_heads,
     cudaStream_t stream) {
   if (k_dim == 128) {
-    constexpr int BT = 64;
-    constexpr int BK = 128;
-    constexpr int BV = 64;
-    // Shared memory: BT*BK + BT*BT + BT + BT + BK floats
-    size_t smem = (BT * BK + BT * BT + 2 * BT + BK) * sizeof(float);
-
-    // Request extended shared memory
-    auto kernel =
-        chunked_gated_delta_rule_kernel<StateT, BT, BK, BV, VALUE_MAJOR>;
-    cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                         smem);
-
-    dim3 grid((v_dim + BV - 1) / BV, bh);
-    dim3 block(BV);
-    kernel<<<grid, block, smem, stream>>>(q, k, v, g, beta, state, output,
-                                          seq_len, v_dim, slot_indices,
-                                          num_heads);
+    dispatch_gdn_chunk_resource<StateT,128,VALUE_MAJOR>(q,k,v,g,beta,state,output,bh,seq_len,v_dim,slot_indices,num_heads,stream);
   } else if (k_dim == 64) {
-    constexpr int BT = 64;
-    constexpr int BK = 64;
-    constexpr int BV = 64;
-    size_t smem = (BT * BK + BT * BT + 2 * BT + BK) * sizeof(float);
-
-    auto kernel =
-        chunked_gated_delta_rule_kernel<StateT, BT, BK, BV, VALUE_MAJOR>;
-    cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                         smem);
-
-    dim3 grid((v_dim + BV - 1) / BV, bh);
-    dim3 block(BV);
-    kernel<<<grid, block, smem, stream>>>(q, k, v, g, beta, state, output,
-                                          seq_len, v_dim, slot_indices,
-                                          num_heads);
+    dispatch_gdn_chunk_resource<StateT,64,VALUE_MAJOR>(q,k,v,g,beta,state,output,bh,seq_len,v_dim,slot_indices,num_heads,stream);
   } else if constexpr (!VALUE_MAJOR) {
-    launch_gated_delta_rule_recurrence(q, k, v, g, beta, state, output, bh,
-                                       seq_len, k_dim, v_dim, slot_indices,
-                                       num_heads, stream);
+    launch_gated_delta_rule_recurrence(q,k,v,g,beta,state,output,bh,seq_len,k_dim,v_dim,slot_indices,num_heads,stream);
   }
 }
 
@@ -592,27 +600,8 @@ cudaError_t launch_vmajor_chunked_gated_delta_rule_recurrence(
     const float *beta, StateT *state, float *output, int bh, int seq_len,
     int k_dim, int v_dim, const int32_t *slot_indices, int num_heads,
     cudaStream_t stream) {
-  if (k_dim != 128 || v_dim != 128) {
-    return cudaErrorInvalidValue;
-  }
-
-  constexpr int BT = 64;
-  constexpr int BK = 128;
-  constexpr int BV = 64;
-  const size_t smem = (BT * BK + BT * BT + 2 * BT + BK) * sizeof(float);
-  auto kernel = chunked_gated_delta_rule_kernel<StateT, BT, BK, BV, true>;
-  const cudaError_t attribute_status = cudaFuncSetAttribute(
-      kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
-  if (attribute_status != cudaSuccess) {
-    return attribute_status;
-  }
-
-  const dim3 grid((v_dim + BV - 1) / BV, bh);
-  const dim3 block(BV);
-  kernel<<<grid, block, smem, stream>>>(q, k, v, g, beta, state, output,
-                                        seq_len, v_dim, slot_indices,
-                                        num_heads);
-  return cudaGetLastError();
+  if (k_dim != 128 || v_dim != 128) return cudaErrorInvalidValue;
+  return dispatch_gdn_chunk_resource<StateT,128,true>(q,k,v,g,beta,state,output,bh,seq_len,v_dim,slot_indices,num_heads,stream);
 }
 
 extern "C" int vmajor_chunked_gated_delta_rule_recurrence(
