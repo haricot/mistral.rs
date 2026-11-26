@@ -12,6 +12,9 @@ mod recurrence_dynamic;
 #[cfg(feature = "dkr-static-closure-probe")]
 #[path = "gdn_preparation_dynamic.rs"]
 mod preparation_dynamic;
+#[cfg(feature = "dkr-static-closure-probe")]
+#[path = "gdn_decode_dynamic.rs"]
+mod decode_dynamic;
 
 use crate::gdn::GdnGateActivation;
 use crate::kv_cache::RecurrentStateLayout;
@@ -3242,7 +3245,12 @@ pub fn fused_decode_recurrence_cuda(launch: FusedDecodeRecurrence<'_>) -> Result
     })
 }
 
+#[cfg(feature = "dkr-static-closure-probe")]
+fn fused_decode_recurrence_cuda_impl(launch: GdnDecodeLaunch<'_>) -> Result<Tensor> {
+    decode_dynamic::decode(launch)
+}
 #[cfg(feature = "cuda")]
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 fn fused_decode_recurrence_cuda_impl(launch: GdnDecodeLaunch<'_>) -> Result<Tensor> {
     use candle::cuda_backend::cudarc::driver::DevicePtr;
     use candle_core as candle;
