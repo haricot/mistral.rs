@@ -223,6 +223,14 @@ def materialize(root,dest,grouped,manifests,images,cc):
         stage.rename(dest)
 
 def self_test():
+    # Cross-language known-answer fixture also exercised by model_scope.rs.
+    fixture=dict(schema=MODULE,abi="dkr.typed.v1",operation="test.op",implementation_id="impl.fixture",
+                 entry="fixture",artifact="fixture.ptx",
+                 sha256="e040bd8b6e9c81ddb0aaf7ff251fb13baf9e56804529f4347fc966aaa831e361",
+                 target_cc=61,min_cc=61,max_cc=61,block=[256,1,1],shared_mem_bytes=0,
+                 arguments=[dict(kind="scalar",name="n",dtype="u32")])
+    data=json.dumps([SCOPE_SCHEMA,61,[manifest_row(fixture)]],ensure_ascii=False,separators=(",",":")).encode()
+    assert sha(data)=="084d8d0b35304955c8f6dc69461ef12beee7266500b06bbe97a1561d94747bcc"
     with tempfile.TemporaryDirectory() as tmp:
         root=Path(tmp)/"master"
         def row(n,cc=61):
@@ -305,7 +313,7 @@ def self_test():
         large_group=selection(large_spec,large_records,large_manifests)
         large_report,_=report(large,large_records,large_manifests,large_spec,large_group)
         assert large_report["active_profiles"]==1 and large_report["active_manifests"]==1
-    print(f"DKR_R126_MODEL_SCOPE_SELF_TEST=PASS negative_cases={failures} synthetic=true master_over_limits=true")
+    print(f"DKR_R126_MODEL_SCOPE_SELF_TEST=PASS negative_cases={failures} synthetic=true master_over_limits=true canonical_scope=true")
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
