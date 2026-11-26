@@ -4,6 +4,7 @@ import argparse
 import importlib.util
 import json
 import re
+import tempfile
 from pathlib import Path
 from dkr_r126_s9c2d3c_audit import audit as prior_audit, strip_comments
 from dkr_r126_gguf_residual_audit import guarded_ranges,mask
@@ -49,6 +50,59 @@ def check_legacy(source,prefix):
         require(len(matches)==2 and all(any(a<=m.start()<b for a,b in spans) for m in matches),
                 "legacy FFI declaration/invocation guard: "+name)
 
+def dflash_dtype_inventory(cuda):
+    """Read the actual definition, not an unrelated or orphaned header."""
+    legacy=strip_comments((cuda/"dflash_selector.cu").read_text())
+    include=re.findall(r'^\s*#\s*include\s+"dflash_selector_device\.cuh"\s*$',legacy,re.M)
+    header=cuda/"dflash_selector_device.cuh"
+    if include:
+        require(len(include)==1 and header.is_file(),"DFlash selector shared header")
+        require(not re.search(r'\benum\s+DFlashSelectorDType\b',legacy),"duplicate DFlash selector dtype definition")
+        source=strip_comments(header.read_text())
+    else:
+        require(not header.exists(),"DFlash selector header not included")
+        source=legacy
+    enums=re.findall(r'\benum\s+DFlashSelectorDType\s*:\s*int\s*\{([^}]+)\}\s*;',source,re.S)
+    require(len(enums)==1,"DFlash selector dtype definition")
+    values=re.findall(r'\b(DFLASH_SELECTOR_\w+)\s*=\s*(\d+)\b',enums[0])
+    require(values==[("DFLASH_SELECTOR_F32","0"),("DFLASH_SELECTOR_BF16","1")],
+            "DFlash selector dtype inventory")
+    return "shared_header" if include else "legacy_inline"
+
+def dflash_dtype_inventory_self_test():
+    enum="enum DFlashSelectorDType : int { DFLASH_SELECTOR_F32 = 0, DFLASH_SELECTOR_BF16 = 1, };"
+    include='#include "dflash_selector_device.cuh"\n'
+    with tempfile.TemporaryDirectory() as tmp:
+        cuda=Path(tmp)
+        legacy=cuda/"dflash_selector.cu"
+        header=cuda/"dflash_selector_device.cuh"
+        legacy.write_text(enum)
+        require(dflash_dtype_inventory(cuda)=="legacy_inline","inline fixture")
+        legacy.write_text(include)
+        header.write_text(enum)
+        require(dflash_dtype_inventory(cuda)=="shared_header","shared fixture")
+        failures=0
+        for legacy_text,header_text in (
+            (include,None),
+            ("// "+include,enum),
+            (include+enum,enum),
+            (include,enum.replace("BF16 = 1","BF16 = 2")),
+            (include,"// "+enum),
+        ):
+            legacy.write_text(legacy_text)
+            if header_text is None:
+                header.unlink(missing_ok=True)
+            else:
+                header.write_text(header_text)
+            try:
+                dflash_dtype_inventory(cuda)
+            except ValueError:
+                failures+=1
+            else:
+                raise AssertionError("invalid DFlash dtype source accepted")
+        require(failures==5,"DFlash inventory negative fixtures")
+    return failures
+
 def budget_inventory(root,prior):
     core=root/"mistralrs-core/src"
     ffi=(core/"cuda/ffi.rs").read_text()
@@ -74,9 +128,7 @@ def budget_inventory(root,prior):
     require(experts==[1,2,4,8,16,32,64,128,256,512,576],"MoE router specialization inventory drift")
     combos=re.findall(r'launch_moe_router_topk<T,\s*(true|false),\s*(true|false)>',sort)
     require(len(set(combos))==4,"MoE bias/scale combination inventory")
-    dflash=(core/"cuda/dflash_selector.cu").read_text()
-    require("DFLASH_SELECTOR_F32 = 0" in dflash and "DFLASH_SELECTOR_BF16 = 1" in dflash,
-            "DFlash selector dtype inventory")
+    dflash_dtype_source=dflash_dtype_inventory(core/"cuda")
     runtime=(root/"mistralrs-kernel-runtime/src/universal.rs").read_text()
     require("MAX_CATALOG_PROFILES: usize = 4096" in runtime and "MAX_DISCOVERED_PACKAGES: usize = 512" in runtime
             and "MAX_ARGUMENTS: usize = 32" in runtime,"catalogue limits")
@@ -92,7 +144,7 @@ def budget_inventory(root,prior):
         moe_router=dict(expert_sizes=experts,activation_dtypes=3,bias_scale_combinations=4,
                         naive_template_profiles=len(experts)*3*4,
                         recommendation="dispatch expert-count variants within a typed device entry; preserve existing templates"),
-        dflash=dict(input_dtypes=["f32","bf16"],independent_tensors=3,selector_modes=2,
+        dflash=dict(dtype_source=dflash_dtype_source,input_dtypes=["f32","bf16"],independent_tensors=3,selector_modes=2,
                     naive_typed_profiles=2**3*2,recommendation="verify reachable dtype combinations before allocating profiles"),
         argsort=dict(legacy_f64_present="ASORT_OP(double," in sort,
                      typed_f64_supported=bool(re.search(r'\bF64\b',element_types)),
@@ -156,7 +208,8 @@ def self_test():
             failures+=1
         else:
             raise AssertionError("legacy FFI leak accepted")
-    print(f"DKR_R126_S9C2D4_AUDIT_SELF_TEST=PASS negative_cases={failures}")
+    dflash_failures=dflash_dtype_inventory_self_test()
+    print(f"DKR_R126_S9C2D4_AUDIT_SELF_TEST=PASS negative_cases={failures} dflash_negative_cases={dflash_failures}")
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)

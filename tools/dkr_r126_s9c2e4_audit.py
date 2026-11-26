@@ -5,6 +5,7 @@ import json
 import re
 from pathlib import Path
 from dkr_r126_s9c2e3_audit import audit as previous
+from dkr_r126_s9c2d4_audit import dflash_dtype_inventory, dflash_dtype_inventory_self_test
 from dkr_r126_s9c2e4_producer_audit import audit as producer, load
 from dkr_r126_s9c2e0_audit import SAMPLING_GROUPS
 from dkr_r126_s9c2e1_audit import check_declarations, checked_refs
@@ -63,7 +64,10 @@ def main():
     root=a.source_root.resolve()
     if a.self_test:
         producer(root,True)
-        print("DKR_R126_S9C2E4_AUDIT_SELF_TEST=PASS synthetic_ptx=true")
+        source=dflash_dtype_inventory(root/CORE/"cuda")
+        require(source=="shared_header","S9C.2E.4 DFlash shared header")
+        negative=dflash_dtype_inventory_self_test()
+        print(f"DKR_R126_S9C2E4_AUDIT_SELF_TEST=PASS synthetic_ptx=true dflash_dtype_source={source} dflash_negative_cases={negative}")
         return
     r=audit(root)
     if a.json_out:
