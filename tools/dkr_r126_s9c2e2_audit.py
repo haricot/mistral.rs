@@ -154,7 +154,7 @@ def guard_audit(root):
 
 def audit(root):
     prev=previous(root)
-    require(prev["residual_declarations"]==37 and set(prev["closed_router_declarations"])==NAMES,
+    require(prev["residual_declarations"] in (37,28) and set(prev["closed_router_declarations"])==NAMES,
             "cumulative residual closure")
     module,groups=plans(root)
     guards=guard_audit(root)
@@ -195,7 +195,8 @@ def audit(root):
     require(logical==4186 and physical==546,"projected master budget")
     return dict(schema="dkr.r126.s9c2e2.source.v1",status="SOURCE_COMPLETE",guards=guards,
                 router_profiles=132,small_topk_profiles=12,profiles_added=144,images_added=12,max_args=15,
-                residual_declarations=37,projected_master_logical=logical,projected_master_physical_upper=physical,
+                residual_declarations=prev["residual_declarations"],closed_large_topk_declarations=prev["closed_large_topk_declarations"],
+                projected_master_logical=logical,projected_master_physical_upper=physical,
                 active_limits_unchanged=True,master_is_not_runtime_catalogue=True,scope_example=scoped,
                 shared_body_preserved_except_padded_lane_safety=True,
                 actual_model_scope_fit_proven=False,automatic_loader_capabilities=False,
@@ -233,7 +234,7 @@ def main():
         a.json_out.parent.mkdir(parents=True,exist_ok=True)
         with a.json_out.open("x") as f:
             json.dump(r,f,indent=2,sort_keys=True);f.write("\n")
-    print("DKR_R126_S9C2E2_SOURCE=COMPLETE guarded_ffi=6 residual=37 router_profiles=132 small_topk_profiles=12 images=12 max_args=15 "
+    print(f"DKR_R126_S9C2E2_SOURCE=COMPLETE guarded_ffi=6 residual={r['residual_declarations']} router_profiles=132 small_topk_profiles=12 images=12 max_args=15 "
           "projected_master_logical=4186 projected_master_physical=546 scoped_fixture=PASS "
           "model_scope_fit=UNPROVEN compilation=false link_qualified=false full_closure=false")
 
