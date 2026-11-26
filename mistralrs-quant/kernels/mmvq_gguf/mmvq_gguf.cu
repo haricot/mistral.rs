@@ -188,7 +188,7 @@ mmvq_core_impl(const void *__restrict__ vx, const block_q8_1 *__restrict__ y,
   }
 }
 
-#ifndef DKR_GGUF_MMVQ_IMAGE
+#if !defined(DKR_GGUF_MMVQ_IMAGE) || defined(DKR_GGUF_MIXED_PAIR_IMAGE)
 struct MixedMmvqArgs {
   const void *quant_weight;
   const void *quant_input;
@@ -204,8 +204,12 @@ struct MixedMmvqArgs {
 
 template <typename T, typename Vec2, int QK, int QI, typename Weight, int VDR,
           vec_dot_q_cuda_t Dot, bool Prefetch>
-__global__ __launch_bounds__(MMVQ_NWARPS_SINGLE_COL_PLAIN *WARP_SIZE,
-                             1) void mmvq_dense_pair(MixedMmvqArgs args) {
+#ifdef DKR_GGUF_MIXED_PAIR_IMAGE
+__device__ __forceinline__ void
+#else
+__global__ __launch_bounds__(MMVQ_NWARPS_SINGLE_COL_PLAIN *WARP_SIZE,1) void
+#endif
+mmvq_dense_pair(MixedMmvqArgs args) {
   constexpr int threads = MMVQ_NWARPS_SINGLE_COL_PLAIN * WARP_SIZE;
   if (blockIdx.x < args.dense_rows) {
     const mistralrs_gemv::RowArgs<T> dense{
@@ -234,6 +238,7 @@ __global__ __launch_bounds__(MMVQ_NWARPS_SINGLE_COL_PLAIN *WARP_SIZE,
   }
 }
 
+#ifndef DKR_GGUF_MMVQ_IMAGE
 template <typename T, typename Vec2>
 void launch_dense_pair(MixedMmvqArgs args, int format, cudaStream_t stream) {
   const int quant_blocks =
@@ -268,7 +273,8 @@ extern "C" void launch_mmvq_gguf_dense_pair(MixedMmvqArgs args, int format,
   }
 }
 
-#endif // historical mixed bodies
+#endif // historical mixed launchers
+#endif // mixed bodies
 #if !defined(DKR_GGUF_MMVQ_IMAGE) || defined(DKR_GGUF_MMVQ_FUSED_IMAGE)
 template <typename dst_t, int qk, int qi, typename block_q_t, int vdr,
           vec_dot_q_cuda_t vec_dot_q_cuda, int ncols_dst>
@@ -651,7 +657,7 @@ dkr_mmvq_##tag##_##dtype##_prefetch(const void* w, const void* y, T* dst, int k)
   DKR_PREFETCH_ENTRY(tag, weight, qk, qi, vdr, dot, f16, half) \
   DKR_PREFETCH_ENTRY(tag, weight, qk, qi, vdr, dot, bf16, __nv_bfloat16) \
   DKR_PREFETCH_ENTRY(tag, weight, qk, qi, vdr, dot, f32, float)
-#ifndef DKR_GGUF_MMVQ_FUSED_IMAGE
+#if !defined(DKR_GGUF_MMVQ_FUSED_IMAGE) && !defined(DKR_GGUF_MIXED_PAIR_IMAGE)
 #if DKR_GGUF_MMVQ_IMAGE == 1
 MMVQ_PLAIN_BATCH_SET(q4_0, block_q4_0, QK4_0, QI4_0, VDR_Q4_0_Q8_1_MMVQ, vec_dot_q4_0_q8_1)
 DKR_PREFETCH_SET(q4_0, block_q4_0, QK4_0, QI4_0, VDR_Q4_0_Q8_1_MMVQ, vec_dot_q4_0_q8_1)
