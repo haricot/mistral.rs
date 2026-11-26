@@ -98,7 +98,11 @@ def audit(root):
         group=guarded if any(a<=m.start()<b for a,b in spans) else arch if name in ARCH else residual
         group.setdefault(name,[]).append(source.count("\n",0,m.start())+1)
     require(not residual,"ordinary GDN residual FFI: "+str(sorted(residual)))
-    require(set(arch)==set(ARCH),"architecture-provider inventory")
+    # Historical B.2B permitted these five references. C.3C closes all five.
+    # Accept either complete state, never a partial/mixed migration.
+    closed_arch={name:guarded[name] for name in ARCH if name in guarded}
+    require((set(arch)==set(ARCH) and not closed_arch) or
+            (not arch and set(closed_arch)==set(ARCH)), "architecture-provider inventory")
     for name in MIGRATED:
         require(name in guarded and GUARD+"\n    pub(crate) fn "+name+"(" in ffi,"missing FFI guard "+name)
     adapter=(core/"gdn_speculative_dynamic.rs").read_text()
@@ -137,7 +141,7 @@ def audit(root):
     return dict(schema="dkr.r126.s9c2d3b2b.source.v1",status="ORDINARY_GDN_SOURCE_COMPLETE",
         profiles=len(all_profiles),images=2,modern_profiles=59,modern_images=3,max_arguments=31,
         image_contracts=manifests,migrated_ffi={n:guarded[n] for n in MIGRATED},
-        gdn_residual_ffi=residual,arch_provider_refs=arch,projected_physical_upper=physical,
+        gdn_residual_ffi=residual,arch_provider_refs=arch,arch_provider_guarded=closed_arch,projected_physical_upper=physical,
         physical_savings_required=physical-512,projected_logical=logical,logical_headroom=4096-logical,
         budget_is_projection=True,compilation=False,link_qualified=False,numeric_qualified=False,full_closure=False,
         outstanding_contracts=["unique_slots_or_checkpoint_groups","same_stream_order",
