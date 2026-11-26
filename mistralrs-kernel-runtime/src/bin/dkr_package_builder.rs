@@ -35,6 +35,7 @@ const PACKAGES: &[Package] = &[
     Package { name: "gdn-decode", source: "gdn_decode.cu", fast_math: true },
     Package { name: "gdn-transaction", source: "gdn_transaction.cu", fast_math: true },
     Package { name: "gdn-checkpoint", source: "gdn_checkpoint.cu", fast_math: true },
+    Package { name: "gdn-speculative", source: "gdn_speculative.cu", fast_math: true },
     Package { name: "dynamic-conv", source: "dynamic_conv.cu", fast_math: false },
     Package { name: "rounded-rope", source: "rounded_rope.cu", fast_math: true },
     Package { name: "dense-gemv", source: "dense_gemv.cu", fast_math: false },
@@ -434,6 +435,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 if !status.success() {
                     return Err(format!("GGUF MMVQ shard packaging failed for {id}: {status}").into());
                 }
+            }
+        } else if pkg.name == "gdn-speculative" {
+            let watched=["gdn_speculative_device.cuh","gdn_checkpoint_device.cuh","gdn_recurrence_conv_device.cuh",
+                "gdn_decode_device.cuh","gdn_norm_device.cuh","gdn_preparation_device.cuh"]
+                .map(|name|root.join("mistralrs-core/src/cuda").join(name));
+            let ids=if cc>=80{&[1,2,3][..]}else{&[1,2][..]};
+            for id in ids {
+                let define=format!("-DDKR_GDN_SPEC_IMAGE_ID={id}");
+                let compiled=compile_ptx(&source,&work.join(pkg.name).join(format!("image-{id:02}")),cc,pkg.fast_math,Some(&define),&watched)?;
+                let status=Command::new(&python).arg(&script).args(["--cc",&cc.to_string(),"--image",&id.to_string()])
+                    .arg("--output").arg(&output).arg("--ptx-file").arg(&compiled).current_dir(root).status()?;
+                if !status.success(){return Err(format!("GDN speculative shard packaging failed: {status}").into());}
             }
         } else if pkg.name == "gdn-checkpoint" {
             let watched=[root.join("mistralrs-core/src/cuda/gdn_checkpoint_device.cuh"),
