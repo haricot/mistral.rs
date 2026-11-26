@@ -4645,7 +4645,9 @@ pub fn deferred_recurrence_rmsnorm_gate_cuda(
     {
         candle::bail!("deferred GDN recurrence requires value-major 128x128 state");
     }
-    let expected_conv_dim = 2 * num_k_heads * head_k_dim + num_v_heads * head_v_dim;
+    let expected_conv_dim = num_k_heads.checked_mul(head_k_dim).and_then(|v|v.checked_mul(2))
+        .and_then(|v|num_v_heads.checked_mul(head_v_dim).and_then(|w|v.checked_add(w)))
+        .ok_or_else(||candle::Error::msg("GDN deferred recurrence width overflow"))?;
     if conv_dim != expected_conv_dim
         || b.dims3()? != (batch_size, 1, num_v_heads)
         || a.dims3()? != (batch_size, 1, num_v_heads)
@@ -4794,15 +4796,8 @@ pub fn deferred_recurrence_rmsnorm_gate_cuda(
         f32,
         "dt_bias"
     );
-    cuda_read_ptr!(
-        state_pool_ptr,
-        state_pool_guard,
-        state_pool_storage,
-        state_pool_layout,
-        state_pool,
-        f32,
-        "state_pool"
-    );
+    let (state_pool_storage,state_pool_layout)=state_pool.storage_and_layout();
+    let (state_pool_ptr,state_pool_guard)=cuda_inplace_ptr_with_guard::<f32>(&state_pool_storage,state_pool_layout,&stream,"deferred state_pool")?;
     cuda_read_ptr!(
         active_slots_ptr,
         active_slots_guard,
@@ -4831,7 +4826,7 @@ pub fn deferred_recurrence_rmsnorm_gate_cuda(
         "norm_weight"
     );
     use float8::F8E4M3;
-    let output_elements = batch_size * num_v_heads * head_v_dim;
+    let output_elements = batch_size.checked_mul(num_v_heads).and_then(|v|v.checked_mul(head_v_dim)).ok_or_else(||candle::Error::msg("GDN deferred output overflow"))?;
     let mut output = fp8_layout
         .is_none()
         .then(|| unsafe { dev.alloc::<half::bf16>(output_elements) })
@@ -4870,6 +4865,36 @@ pub fn deferred_recurrence_rmsnorm_gate_cuda(
                     &stream,
                     "deferred_cursor",
                     |cursor_ptr| {
+                        #[cfg(feature = "dkr-static-closure-probe")]
+                        {
+                            use speculative_dynamic as d;
+                            use preparation_dynamic as p;
+                            let mut ptrs=vec![
+                                d::Bound::new(mixed_qkv_ptr,mixed_qkv.elem_count(),p::E::Bf16,false),
+                                d::Bound::new(b_ptr,p::span(b_layout)?,p::E::Bf16,false),
+                                d::Bound::new(a_ptr,p::span(a_layout)?,p::E::Bf16,false),
+                                d::Bound::new(a_log_ptr,num_v_heads,p::E::F32,false),
+                                d::Bound::new(dt_bias_ptr,num_v_heads,p::E::F32,false),
+                                d::Bound::new(state_pool_ptr,state_pool.elem_count(),p::E::F32,true),
+                                d::Bound::new(active_slots_ptr,batch_size,p::E::U32,false),
+                                d::Bound::new(gate_ptr,p::span(gate_layout)?,p::E::Bf16,false),
+                                d::Bound::new(norm_weight_ptr,head_v_dim,p::E::Bf16,false),
+                                d::Bound::new(key_ptr,deferred_key.elem_count(),p::E::F32,true),
+                                d::Bound::new(delta_ptr,deferred_delta.elem_count(),p::E::F32,true),
+                                d::Bound::new(decay_ptr,deferred_decay.elem_count(),p::E::F32,true),
+                                d::Bound::new(cursor_ptr,deferred_cursor.elem_count(),p::E::U32,true),
+                            ];
+                            if let Some(l)=fp8_layout{
+                                ptrs.push(d::Bound::new(quantized_output_ptr as u64,l.quantized_elements(),p::E::Fp8E4m3,true));
+                                ptrs.push(d::Bound::new(output_scales_ptr as u64,l.scale_elements,p::E::F32,true));
+                            }else{ptrs.push(d::Bound::new(output_ptr as u64,output_elements,p::E::Bf16,true));}
+                            let g=d::Geometry{batch:batch_size,seq:1,kh:num_k_heads,vh:num_v_heads,kd:head_k_dim,vd:head_v_dim,
+                                lanes:1,cap:capacity,tiled:tiled_v_heads,vm:true};
+                            d::launch_deferred(device,&stream,&ptrs,g,[b_strides[0],b_strides[1],a_strides[0],a_strides[1],
+                                gate_strides[0],gate_strides[1],gate_strides[2]],norm_eps as f32,gate_activation.sigmoid_flag()!=0,
+                                fp8_layout.map(|l|(l.scale_stride_m,l.scale_layout_code)))?;
+                        }
+                        #[cfg(not(feature = "dkr-static-closure-probe"))]
                         unsafe {
                             crate::cuda::ffi::gdn_deferred_recurrence_rmsnorm_gate_value_major_128(
                                 mixed_qkv_ptr as *const c_void,
@@ -5125,6 +5150,23 @@ fn launch_deferred_state_cuda(
             stream,
             "deferred_cursor",
             |deferred_cursor_ptr| {
+                #[cfg(feature = "dkr-static-closure-probe")]
+                {
+                    use speculative_dynamic as d;
+                    use preparation_dynamic as p;
+                    let ptrs=[
+                        d::Bound::new(state_pool_ptr,state_pool.elem_count(),p::E::F32,true),
+                        d::Bound::new(active_slots_ptr,batch_size,p::E::U32,false),
+                        d::Bound::new(deferred_key_ptr,deferred_key.elem_count(),p::E::F32,false),
+                        d::Bound::new(deferred_delta_ptr,deferred_delta.elem_count(),p::E::F32,false),
+                        d::Bound::new(deferred_decay_ptr,deferred_decay.elem_count(),p::E::F32,false),
+                        d::Bound::new(deferred_cursor_ptr,deferred_cursor.elem_count(),p::E::U32,true),
+                    ];
+                    let g=d::Geometry{batch:batch_size,seq:1,kh:num_k_heads,vh:num_v_heads,kd:head_k_dim,vd:head_v_dim,
+                        lanes:1,cap:capacity,tiled:tiled_v_heads,vm:true};
+                    d::launch_flush(device,stream,&ptrs,g)?;
+                }
+                #[cfg(not(feature = "dkr-static-closure-probe"))]
                 unsafe {
                     crate::cuda::ffi::gdn_flush_deferred_state_value_major_128(
                         state_pool_ptr as *mut f32,
