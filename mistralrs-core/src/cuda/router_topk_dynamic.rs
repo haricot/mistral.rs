@@ -316,6 +316,11 @@ mod tests{
                 let data:Vec<f32>=(0..width).map(|i| (i%37) as f32-18.).collect();
                 let input=Tensor::from_vec(data.clone(),width,&device)?.to_dtype(dt)?;
                 let got=small_topk(&input,4)?;
+                // A contiguous nonzero-offset view must not read the allocation base.
+                let padded=Tensor::cat(&[&Tensor::zeros(3,dt,&device)?,&input],0)?;
+                let offset=padded.narrow(0,3,width)?;
+                let offset_got=small_topk(&offset,4)?;
+                assert_eq!(offset_got.indices.to_vec1::<u32>()?,got.indices.to_vec1::<u32>()?);
                 let mut expected:Vec<usize>=(0..width).collect();
                 expected.sort_by(|&a,&b|data[b].total_cmp(&data[a]).then(a.cmp(&b)));
                 assert_eq!(got.indices.to_vec1::<u32>()?,expected[..4].iter().map(|&i|u32::try_from(i).unwrap()).collect::<Vec<_>>());
@@ -323,21 +328,41 @@ mod tests{
                 assert_eq!(got.values.to_dtype(DType::F32)?.to_vec1::<f32>()?,expected_values);
             }
             for e in EXPERTS{
-                let data:Vec<f32>=(0..3*e).map(|i| (i%e) as f32/(e as f32)).collect();
+                let data:Vec<f32>=(0..3*e).map(|i| ((i%e) as f32)/(e as f32)).collect();
                 let cpu=Tensor::from_vec(data,(3,e),&Device::Cpu)?.to_dtype(dt)?;
                 let gpu=cpu.to_device(&device)?;
-                let bias=Tensor::zeros(e,DType::F32,&device)?;
-                let scale=Tensor::ones(e,DType::F32,&device)?;
+                let bias=Tensor::from_vec(vec![-2.0f32;e],e,&device)?;
+                let scale=Tensor::from_vec(vec![1.5f32;e],e,&device)?;
+                let rounded=cpu.to_dtype(DType::F32)?.to_vec2::<f32>()?;
                 for b in [None,Some(&bias)]{
                     for s in [None,Some(&scale)]{
-                        let cfg=MoeRouterTopKConfig{top_k:e.min(3),score_function:MoeRouterScoreFunction::Raw,
-                            selected_weight:MoeRouterSelectedWeight::Score,renormalize:false,norm_min:0.,output_scale:1.,logit_clip:None};
-                        let got=moe_router_topk(&gpu,cfg,b,s)?;
-                        let expected=crate::ops::moe_router_topk(&cpu,cfg,None,None)?;
-                        assert_eq!(got.indices.to_vec2::<u32>()?,expected.indices.to_vec2::<u32>()?);
-                        let a=got.values.flatten_all()?.to_vec1::<f32>()?;
-                        let b=expected.values.flatten_all()?.to_vec1::<f32>()?;
-                        for (a,b) in a.into_iter().zip(b){assert!((a-b).abs()<1e-5);}
+                        for score_function in [MoeRouterScoreFunction::Raw,MoeRouterScoreFunction::Sigmoid,MoeRouterScoreFunction::Softmax]{
+                            let cfg=MoeRouterTopKConfig{top_k:e.min(3),score_function,
+                                selected_weight:MoeRouterSelectedWeight::Score,renormalize:false,norm_min:0.,output_scale:1.,logit_clip:None};
+                            let got=moe_router_topk(&gpu,cfg,b,s)?;
+                            let indices=got.indices.to_vec2::<u32>()?;
+                            let weights=got.values.to_vec2::<f32>()?;
+                            for (row,(ids,values)) in rounded.iter().zip(indices.iter().zip(&weights)){
+                                let max=row.iter().copied().fold(f32::NEG_INFINITY,f32::max);
+                                let denom: f32=row.iter().map(|x| (x-max).exp()).sum();
+                                let scores:Vec<f32>=row.iter().map(|x|match score_function{
+                                    MoeRouterScoreFunction::Raw=>*x,
+                                    MoeRouterScoreFunction::Sigmoid=>1./(1.+(-x).exp()),
+                                    MoeRouterScoreFunction::Softmax=>(x-max).exp()/denom,
+                                }).collect();
+                                let mut order:Vec<usize>=(0..e).collect();
+                                order.sort_by(|&a,&b|row[b].total_cmp(&row[a]).then(a.cmp(&b)));
+                                // Constant bias does not change order, but negative bias on
+                                // sub-warp routers catches padded-lane selection.
+                                for (j,&expected) in order[..cfg.top_k].iter().enumerate(){
+                                    let actual=usize::try_from(ids[j]).unwrap();
+                                    assert!(actual<e,"padded expert selected");
+                                    assert!((row[actual]-row[expected]).abs()<1e-6);
+                                    let expected_weight=scores[actual]*if s.is_some(){1.5}else{1.};
+                                    assert!((values[j]-expected_weight).abs()<2e-5);
+                                }
+                            }
+                        }
                     }
                 }
             }
