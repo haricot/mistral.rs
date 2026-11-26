@@ -198,6 +198,42 @@ mod tests{
     }
 
     #[test]
+    #[ignore="requires CUDA and GDN typed catalogue"]
+    fn dkr_gdn_transaction_stage_prefix_gpu()->Result<()>{
+        use super::super::{GdnSpeculativeTransitionStage,GdnSpeculativeTransitionStageLayer,
+            speculative_transition_stage_batched_cuda};
+        let device=Device::new_cuda(0)?;
+        let (batch,seq,capacity,max_rows,cd,kd,vd)=(3usize,2usize,3usize,3usize,129usize,128usize,128usize);
+        for activation in [DType::F16,DType::BF16]{
+            let conv=Tensor::ones((batch,seq,cd),activation,&device)?;
+            let key=Tensor::ones((batch,seq,1,kd),DType::F32,&device)?.affine(2.,0.)?;
+            let delta=Tensor::ones((batch,seq,1,vd),DType::F32,&device)?.affine(3.,0.)?;
+            let decay=Tensor::ones((batch,seq,1),DType::F32,&device)?.affine(0.5,0.)?;
+            let pending_conv=Tensor::zeros((capacity,max_rows,cd),activation,&device)?;
+            let pending_key=Tensor::zeros((capacity,max_rows,1,kd),DType::F32,&device)?;
+            let pending_delta=Tensor::zeros((capacity,max_rows,1,vd),DType::F32,&device)?;
+            let pending_decay=Tensor::zeros((capacity,max_rows,1),DType::F32,&device)?;
+            let pending_keep=Tensor::from_vec(vec![2u32,2,2],capacity,&device)?;
+            let pending_epoch=Tensor::from_vec(vec![5u32,u32::MAX,7],capacity,&device)?;
+            let keep=Tensor::from_vec(vec![1u32,3,2],batch,&device)?;
+            let slots=Tensor::from_vec(vec![0u32,1,u32::MAX],batch,&device)?;
+            speculative_transition_stage_batched_cuda(GdnSpeculativeTransitionStage{
+                layers:&[GdnSpeculativeTransitionStageLayer{conv_input:&conv,key:&key,delta:&delta,decay:&decay,
+                    pending_conv_input:&pending_conv,pending_key:&pending_key,pending_delta:&pending_delta,
+                    pending_decay:&pending_decay,pending_keep_rows:&pending_keep,pending_epochs:&pending_epoch}],
+                keep_rows:&keep,destination_slots:&slots,num_k_heads:1,num_v_heads:1,head_k_dim:kd,head_v_dim:vd,conv_dim:cd})?;
+            assert_eq!(pending_keep.to_vec1::<u32>()?,vec![1,0,2]);
+            assert_eq!(pending_epoch.to_vec1::<u32>()?,vec![6,1,7]);
+            for (tensor,width,want) in [(&pending_conv,cd,1.),(&pending_key,kd,2.),(&pending_delta,vd,3.),(&pending_decay,1,0.5)]{
+                let data=tensor.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+                assert!(data[..width].iter().all(|&v|v==want));
+                assert!(data[width..].iter().all(|&v|v==0.));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn dkr_gdn_transaction_geometry(){
         assert_eq!(geometry(Kind::Commit,&[2,3,8,1,4,128,128,768,4,0,1,16]).unwrap(),([7,3,2],[256,1,1]));
         assert_eq!(geometry(Kind::Apply,&[2,3,8,16,1,4,128,128,768,4,0,3]).unwrap(),([7,3,2],[256,1,1]));
