@@ -267,6 +267,92 @@ pub(super) fn convolution(x:&Tensor,weight:&Tensor,state:&Tensor,width:usize,upd
 mod tests{
     use super::*;
     #[test]
+    #[ignore="requires CUDA and GDN typed catalogue"]
+    fn dkr_gdn_partial_tiles_recurrence_gpu()->Result<()>{
+        let _evidence=mistralrs_kernel_runtime::RuntimeEvidenceGuard;
+        let dev=Device::new_cuda(0)?;
+        let seq=65usize;
+        for kd in [17usize,64,128]{
+            let q=Tensor::from_vec((0..seq*kd).map(|i|if i%kd==kd-1{1f32}else{0f32}).collect::<Vec<_>>(),(1,seq,kd),&dev)?;
+            let v=Tensor::ones((1,seq,65),DType::F32,&dev)?;
+            let g=Tensor::zeros((1,seq),DType::F32,&dev)?;
+            let beta=Tensor::ones((1,seq),DType::F32,&dev)?.affine(0.5,0.)?;
+            let inputs=RecurrenceInputs{q:&q,k:&q,v:&v,g:&g,beta:&beta};
+            for kernel in [RecurrenceKernel::Scalar,RecurrenceKernel::Warp,RecurrenceKernel::Chunked]{
+                for dt in [DType::F16,DType::BF16,DType::F32]{
+                    let mut state=Tensor::zeros((1,kd,65),dt,&dev)?;
+                    let out=recurrence(kernel,inputs,&mut state,GdnStateSlots::Gathered)?;
+                    let rows=out.to_vec3::<f32>()?;
+                    for (t,row) in rows[0].iter().enumerate(){
+                        let want=1.0-0.5f32.powi((t+1) as i32);
+                        assert!(row.iter().all(|&x|(x-want).abs()<2e-4),"{kernel:?} kd={kd} t={t}");
+                    }
+                    let data=state.to_dtype(DType::F32)?.to_vec3::<f32>()?;
+                    for (k,row) in data[0].iter().enumerate(){
+                        let want=if k==kd-1{1.0}else{0.0};
+                        assert!(row.iter().all(|&x|(x-want).abs()<2e-4),"{kernel:?} state kd={kd}");
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore="requires CUDA and GDN typed catalogue"]
+    fn dkr_gdn_pooled_padding_gpu()->Result<()>{
+        let _evidence=mistralrs_kernel_runtime::RuntimeEvidenceGuard;
+        let dev=Device::new_cuda(0)?;
+        let q=Tensor::from_vec((0..3*17).map(|i|if i%17==16{1f32}else{0f32}).collect::<Vec<_>>(),(3,1,17),&dev)?;
+        let v=Tensor::ones((3,1,65),DType::F32,&dev)?;
+        let g=Tensor::zeros((3,1),DType::F32,&dev)?;
+        let beta=Tensor::ones((3,1),DType::F32,&dev)?;
+        let slots=Tensor::from_vec(vec![1u32,u32::MAX,0],3,&dev)?;
+        let mut state=Tensor::zeros((3,1,17,65),DType::F32,&dev)?;
+        let inputs=RecurrenceInputs{q:&q,k:&q,v:&v,g:&g,beta:&beta};
+        let out=recurrence(RecurrenceKernel::Scalar,inputs,&mut state,GdnStateSlots::Pooled(&slots))?;
+        let rows=out.to_vec3::<f32>()?;
+        assert!(rows[0][0].iter().all(|&x|x==1.));
+        assert!(rows[1][0].iter().all(|&x|x==0.));
+        assert!(rows[2][0].iter().all(|&x|x==1.));
+        let state=state.reshape((3,17,65))?.to_vec3::<f32>()?;
+        assert!(state[0][16].iter().all(|&x|x==1.));
+        assert!(state[1][16].iter().all(|&x|x==1.));
+        assert!(state[2].iter().flatten().all(|&x|x==0.));
+        Ok(())
+    }
+
+    #[test]
+    #[ignore="requires CUDA and GDN typed catalogue"]
+    fn dkr_gdn_causal_conv_full_vs_update_gpu()->Result<()>{
+        let _evidence=mistralrs_kernel_runtime::RuntimeEvidenceGuard;
+        let dev=Device::new_cuda(0)?;
+        for dt in [DType::F16,DType::BF16]{
+            for width in [3usize,4]{
+                for seq in [2usize,65]{
+                    let x=Tensor::from_vec((0..2*seq*9).map(|i|((i%11)as f32-5.)/16.).collect::<Vec<_>>(),(2,seq,9),&dev)?.to_dtype(dt)?;
+                    let w=Tensor::ones((9,width),dt,&dev)?.affine(0.25,0.)?;
+                    let initial=Tensor::zeros((2,9,width),dt,&dev)?;
+                    let (full,final_state)=convolution(&x,&w,&initial,width,false,GdnStateSlots::Gathered)?;
+                    let mut state=Tensor::zeros((2,9,width),dt,&dev)?;
+                    let mut outputs=Vec::new();
+                    for t in 0..seq{
+                        let (o,next)=convolution(&x.narrow(1,t,1)?,&w,&state,width,true,GdnStateSlots::Gathered)?;
+                        outputs.push(o);state=next;
+                    }
+                    let refs=outputs.iter().collect::<Vec<_>>();
+                    let step=Tensor::cat(&refs,1)?;
+                    let err=(full.to_dtype(DType::F32)?-step.to_dtype(DType::F32)?)?.abs()?.max_all()?.to_scalar::<f32>()?;
+                    assert!(err<0.004,"dt={dt:?} width={width} seq={seq} err={err}");
+                    let err=(state.to_dtype(DType::F32)?-final_state.to_dtype(DType::F32)?)?.abs()?.max_all()?.to_scalar::<f32>()?;
+                    assert_eq!(err,0.);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn dkr_gdn_resource_policy(){
         let a=recurrence_variant(RecurrenceKernel::Chunked,128,65,49152).unwrap();
         assert_eq!((a.0,a.2),("chunk32k128",21248));
