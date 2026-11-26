@@ -9,6 +9,9 @@ use mistralrs_quant::{ActivationQuantizationScheme, ActivationScaleLayout};
 #[cfg(feature = "dkr-static-closure-probe")]
 #[path = "gdn_recurrence_dynamic.rs"]
 mod recurrence_dynamic;
+#[cfg(feature = "dkr-static-closure-probe")]
+#[path = "gdn_preparation_dynamic.rs"]
+mod preparation_dynamic;
 
 use crate::gdn::GdnGateActivation;
 use crate::kv_cache::RecurrentStateLayout;
@@ -982,6 +985,17 @@ pub(crate) fn try_gdn_packed_to_padded_cuda(
         )?;
         let mut output = unsafe { dev.alloc::<T>(output_elements) }?;
         let (output_ptr, output_guard) = output.device_ptr_mut(&stream);
+        #[cfg(feature = "dkr-static-closure-probe")]
+        {
+            use preparation_dynamic as p;
+            let dt=p::dt(source.dtype())?;
+            unsafe{p::launch(source.device(),"gdn.ragged.pack.v1",
+                &[(source_ptr,p::span(source_layout)?,dt),(output_ptr,output_elements,dt),
+                  (seqlens_ptr,cu_seqlens.elem_count(),p::E::U32)],
+                &[p::S::U64(output_elements as u64),p::n(padded_len)?,p::n(width)?,p::stride(token_stride)?,p::S::F32(padding_value)],
+                p::grid(p::blocks(output_elements),1)?,[256,1,1])?;}
+        }
+        #[cfg(not(feature = "dkr-static-closure-probe"))]
         unsafe {
             crate::cuda::ffi::gdn_packed_to_padded(
                 source_ptr as *const core::ffi::c_void,
@@ -1106,6 +1120,18 @@ pub(crate) fn try_gdn_padded_to_packed_cuda(
         )?;
         let mut output = unsafe { dev.alloc::<T>(output_elements) }?;
         let (output_ptr, output_guard) = output.device_ptr_mut(&stream);
+        #[cfg(feature = "dkr-static-closure-probe")]
+        {
+            use preparation_dynamic as p;
+            let dt=p::dt(source.dtype())?;
+            let row_elements=p::mul(padded_len,width)?;
+            unsafe{p::launch(source.device(),"gdn.ragged.unpack.v1",
+                &[(source_ptr,p::span(source_layout)?,dt),(output_ptr,output_elements,dt),
+                  (seqlens_ptr,cu_seqlens.elem_count(),p::E::U32)],
+                &[p::n(width)?,p::stride(batch_stride)?,p::stride(token_stride)?,p::stride(feature_stride)?,p::n(feature_inner_width)?],
+                p::grid(batch_size,p::blocks(row_elements))?,[256,1,1])?;}
+        }
+        #[cfg(not(feature = "dkr-static-closure-probe"))]
         unsafe {
             crate::cuda::ffi::gdn_padded_to_packed(
                 source_ptr as *const core::ffi::c_void,
@@ -1217,6 +1243,18 @@ pub(crate) fn try_gdn_extract_ragged_conv_state_cuda(
         )?;
         let mut output = unsafe { dev.alloc::<T>(output_elements) }?;
         let (output_ptr, output_guard) = output.device_ptr_mut(&stream);
+        #[cfg(feature = "dkr-static-closure-probe")]
+        {
+            use preparation_dynamic as p;
+            let dt=p::dt(padded_input.dtype())?;
+            unsafe{p::launch(padded_input.device(),"gdn.ragged.extract.v1",
+                &[(input_ptr,p::span(input_layout)?,dt),(state_ptr,initial_state.elem_count(),dt),
+                  (output_ptr,output_elements,dt),(seqlens_ptr,cu_seqlens.elem_count(),p::E::U32)],
+                &[p::S::U64(output_elements as u64),p::n(padded_len)?,p::n(channels)?,p::n(state_width)?,
+                  p::stride(input_batch_stride)?,p::stride(input_token_stride)?],
+                p::grid(p::blocks(output_elements),1)?,[256,1,1])?;}
+        }
+        #[cfg(not(feature = "dkr-static-closure-probe"))]
         unsafe {
             crate::cuda::ffi::gdn_extract_ragged_conv_state(
                 input_ptr as *const core::ffi::c_void,
@@ -2044,6 +2082,28 @@ pub fn prepare_recurrence_inputs_cuda_typed(
         };
         let dtb_offset = dtb_l.start_offset();
 
+        #[cfg(feature = "dkr-static-closure-probe")]
+        {
+            use preparation_dynamic as p;
+            if batch_size==0||seq_len==0||num_k_heads==0||num_v_heads==0||head_k_dim==0||head_v_dim==0||num_v_heads%num_k_heads!=0{
+                candle::bail!("invalid GDN prepare dimensions");
+            }
+            let tokens=p::mul(batch_size,seq_len)?;
+            let k_width=p::mul(num_k_heads,head_k_dim)?;
+            let v_width=p::mul(num_v_heads,head_v_dim)?;
+            let conv=p::mul(k_width,2)?.checked_add(v_width).ok_or_else(||candle::Error::msg("GDN prepare width overflow"))?;
+            p::n(conv)?;
+            let heads=p::mul(tokens,num_v_heads)?;
+            p::n(heads)?;
+            let padded=p::mul(p::mul(batch_size,num_v_heads)?,token_stride)?;
+            p::mul(padded,head_k_dim)?;p::mul(padded,head_v_dim)?;
+            for (t,count,dt) in [(mixed_qkv,p::mul(tokens,conv)?,mixed_qkv.dtype()),(b,heads,mixed_qkv.dtype()),(a,heads,mixed_qkv.dtype()),
+                (a_log,num_v_heads,DType::F32),(dt_bias,num_v_heads,DType::F32)]{
+                if !t.is_contiguous()||t.elem_count()!=count||t.dtype()!=dt||!t.device().same_device(mixed_qkv.device()){
+                    candle::bail!("GDN prepare tensor geometry mismatch");
+                }
+            }
+        }
         let bh = batch_size * num_v_heads;
         let padded = token_stride > seq_len;
         macro_rules! alloc_rows {
@@ -2055,8 +2115,8 @@ pub fn prepare_recurrence_inputs_cuda_typed(
                 }
             };
         }
-        let g_buf = alloc_rows!(f32, bh * token_stride);
-        let beta_buf = alloc_rows!(f32, bh * token_stride);
+        let mut g_buf = alloc_rows!(f32, bh * token_stride);
+        let mut beta_buf = alloc_rows!(f32, bh * token_stride);
         let out_bf16 = match output_dtype {
             DType::F32 => false,
             DType::BF16 => true,
@@ -2065,9 +2125,40 @@ pub fn prepare_recurrence_inputs_cuda_typed(
         let stream = dev.cuda_stream().cu_stream() as i64;
         macro_rules! prepare_with {
             ($out:ty) => {{
-                let q_buf = alloc_rows!($out, bh * token_stride * head_k_dim);
-                let k_buf = alloc_rows!($out, bh * token_stride * head_k_dim);
-                let v_buf = alloc_rows!($out, bh * token_stride * head_v_dim);
+                let mut q_buf = alloc_rows!($out, bh * token_stride * head_k_dim);
+                let mut k_buf = alloc_rows!($out, bh * token_stride * head_k_dim);
+                let mut v_buf = alloc_rows!($out, bh * token_stride * head_v_dim);
+                #[cfg(feature = "dkr-static-closure-probe")]
+                {
+                    use preparation_dynamic as p;
+                    use candle::cuda_backend::cudarc::driver::DevicePtrMut;
+                    let stream=dev.cuda_stream();
+                    let dt=p::dt(mixed_qkv.dtype())?;
+                    let out=p::dt(output_dtype)?;
+                    let (mp,_mg)=mixed_s.device_ptr(&stream);
+                    let (bp,_bg)=b_s.device_ptr(&stream);
+                    let (ap,_ag)=a_s.device_ptr(&stream);
+                    let (lp,_lg)=alog_s.device_ptr(&stream);
+                    let (dp,_dg)=dtb_s.device_ptr(&stream);
+                    let (qp,_qg)=q_buf.device_ptr_mut(&stream);
+                    let (kp,_kg)=k_buf.device_ptr_mut(&stream);
+                    let (vp,_vg)=v_buf.device_ptr_mut(&stream);
+                    let (gp,_gg)=g_buf.device_ptr_mut(&stream);
+                    let (betap,_betag)=beta_buf.device_ptr_mut(&stream);
+                    let size=std::mem::size_of::<T>();
+                    let gcount=p::mul(bh,token_stride)?;
+                    unsafe{p::launch(mixed_qkv.device(),"gdn.prepare.v1",
+                        &[(p::shifted(mp,mixed_l,size)?,mixed_qkv.elem_count(),dt),
+                          (p::shifted(bp,b_l,size)?,b.elem_count(),dt),(p::shifted(ap,a_l,size)?,a.elem_count(),dt),
+                          (p::shifted(lp,alog_l,4)?,a_log.elem_count(),p::E::F32),
+                          (p::shifted(dp,dtb_l,4)?,dt_bias.elem_count(),p::E::F32),
+                          (qp,p::mul(gcount,head_k_dim)?,out),(kp,p::mul(gcount,head_k_dim)?,out),
+                          (vp,p::mul(gcount,head_v_dim)?,out),(gp,gcount,p::E::F32),(betap,gcount,p::E::F32)],
+                        &[p::n(batch_size)?,p::n(seq_len)?,p::n(token_stride)?,p::n(num_k_heads)?,p::n(num_v_heads)?,
+                          p::n(head_k_dim)?,p::n(head_v_dim)?,p::S::I32(i32::from(tiled_v_heads))],
+                        p::grid(p::mul(bh,seq_len)?,1)?,[256,1,1])?;}
+                }
+                #[cfg(not(feature = "dkr-static-closure-probe"))]
                 unsafe {
                     crate::cuda::ffi::gdn_prepare_recurrence(
                         mixed_s.slice(mixed_offset..).device_ptr(mixed_s.stream()).0
@@ -6162,10 +6253,35 @@ pub(crate) fn rmsnorm_gated_quantized_cuda(
     };
     let weight_storage = weight_storage.as_cuda_slice::<half::bf16>()?;
     let dev = x.device().as_cuda_device()?;
-    let output = unsafe { dev.alloc::<F8E4M3>(layout.quantized_elements()) }?;
-    let scales = unsafe { dev.alloc::<f32>(layout.scale_elements) }?;
+    let mut output = unsafe { dev.alloc::<F8E4M3>(layout.quantized_elements()) }?;
+    let mut scales = unsafe { dev.alloc::<f32>(layout.scale_elements) }?;
     let stream = dev.cuda_stream().cu_stream() as i64;
 
+    #[cfg(feature = "dkr-static-closure-probe")]
+    {
+        use preparation_dynamic as p;
+        use candle::cuda_backend::cudarc::driver::DevicePtrMut;
+        let stream=dev.cuda_stream();
+        let (xp,_xg)=x_storage.device_ptr(&stream);
+        let (gp,_gg)=gate_storage.device_ptr(&stream);
+        let (wp,_wg)=weight_storage.device_ptr(&stream);
+        let (op,_og)=output.device_ptr_mut(&stream);
+        let (sp,_sg)=scales.device_ptr_mut(&stream);
+        let (xp,gp,wp)=(p::shifted(xp,x_layout,2)?,p::shifted(gp,gate_layout,2)?,p::shifted(wp,weight_layout,2)?);
+        let rows4=normalized_rows>=1024&&p::dense_rows(normalized_rows,dims,x_stride)
+            &&p::dense_rows(normalized_rows,dims,gate_stride)&&xp%16==0&&gp%16==0&&wp%16==0;
+        let pointers=[(xp,p::span(x_layout)?,p::E::Bf16),(gp,p::span(gate_layout)?,p::E::Bf16),
+            (wp,head_v_dim,p::E::Bf16),(op,layout.quantized_elements(),p::E::Fp8E4m3),(sp,layout.scale_elements,p::E::F32)];
+        let mut args=vec![p::n(normalized_rows)?,p::n(layout.groups)?,p::n(layout.scale_stride_m)?,p::S::I32(layout.scale_layout_code)];
+        if !rows4{
+            args.extend([p::n(dims[1])?,p::n(dims[2])?]);
+            for v in x_stride.into_iter().chain(gate_stride){args.push(p::stride(v)?);}
+        }
+        args.extend([p::S::F32(eps as f32),p::S::I32(activation.sigmoid_flag())]);
+        let (op,block,tile)=if rows4{("gdn.fp8.rows4.v1",[32,1,1],4)}else{("gdn.fp8.warp.v1",[32,8,1],8)};
+        unsafe{p::launch(x.device(),op,&pointers,&args,p::grid(normalized_rows.div_ceil(tile),1)?,block)?;}
+    }
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     unsafe {
         crate::cuda::ffi::gdn_rmsnorm_gated_quantized_bf16(
             x_storage
@@ -6263,6 +6379,18 @@ pub fn fused_gdn_gating_cuda(
     ) -> Result<(Tensor, Tensor)> {
         let total_elements = b.elem_count();
         let num_heads = a_log.elem_count();
+        #[cfg(feature = "dkr-static-closure-probe")]
+        {
+            if total_elements==0||num_heads==0||total_elements%num_heads!=0||total_elements>i32::MAX as usize||
+                a.dims()!=b.dims()||dt_bias.elem_count()!=num_heads{
+                candle::bail!("invalid GDN gating dimensions");
+            }
+            for (t,dt) in [(b,b.dtype()),(a,b.dtype()),(a_log,DType::F32),(dt_bias,DType::F32)]{
+                if !t.is_contiguous()||t.dtype()!=dt||!t.device().same_device(b.device()){
+                    candle::bail!("GDN gating requires contiguous compatible tensors");
+                }
+            }
+        }
         let shape = b.shape().clone();
         let dev = b.device().as_cuda_device()?;
 
@@ -6294,11 +6422,31 @@ pub fn fused_gdn_gating_cuda(
         };
         let dtb_offset = dtb_l.start_offset();
 
-        let beta_buf = unsafe { dev.alloc::<T>(total_elements) }?;
-        let g_buf = unsafe { dev.alloc::<T>(total_elements) }?;
+        let mut beta_buf = unsafe { dev.alloc::<T>(total_elements) }?;
+        let mut g_buf = unsafe { dev.alloc::<T>(total_elements) }?;
 
         let stream = dev.cuda_stream().cu_stream() as i64;
 
+        #[cfg(feature = "dkr-static-closure-probe")]
+        {
+            use preparation_dynamic as p;
+            use candle::cuda_backend::cudarc::driver::DevicePtrMut;
+            let stream=dev.cuda_stream();
+            let dt=p::dt(b.dtype())?;
+            let (bp,_bg)=b_s.device_ptr(&stream);
+            let (ap,_ag)=a_s.device_ptr(&stream);
+            let (lp,_lg)=alog_s.device_ptr(&stream);
+            let (dp,_dg)=dtb_s.device_ptr(&stream);
+            let (betap,_betag)=beta_buf.device_ptr_mut(&stream);
+            let (gp,_gg)=g_buf.device_ptr_mut(&stream);
+            let size=std::mem::size_of::<T>();
+            unsafe{p::launch(b.device(),"gdn.gating.v1",
+                &[(p::shifted(bp,b_l,size)?,total_elements,dt),(p::shifted(ap,a_l,size)?,total_elements,dt),
+                  (p::shifted(lp,alog_l,4)?,num_heads,p::E::F32),(p::shifted(dp,dtb_l,4)?,num_heads,p::E::F32),
+                  (betap,total_elements,dt),(gp,total_elements,dt)],
+                &[p::n(total_elements)?,p::n(num_heads)?],p::grid(total_elements.div_ceil(256),1)?,[256,1,1])?;}
+        }
+        #[cfg(not(feature = "dkr-static-closure-probe"))]
         unsafe {
             crate::cuda::ffi::fused_gdn_gating(
                 b_s.slice(b_offset..).device_ptr(b_s.stream()).0 as *const c_void,
