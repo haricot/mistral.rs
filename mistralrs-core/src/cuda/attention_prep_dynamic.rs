@@ -235,7 +235,7 @@ mod gpu_tests{
         let w=Tensor::ones(64,DType::F32,&dev)?;
         let x=Tensor::from_vec((0..2*2*3*64).map(|i|((i%13)as f32-6.)/8.).collect::<Vec<_>>(),(2,2,3,64),&dev)?.transpose(1,2)?;
         let y=crate::ops::try_cuda_qk_rms_norm_rope_positions(&x,None,&w,None,1e-5,1e-5,
-            &cos,&sin,&positions,true,crate::ops::QkRopeOutputLayout::HeadsFirst)?.unwrap().0;
+            &cos,&sin,&positions,true)?.unwrap().0;
         let expected=x.broadcast_div(&(x.sqr()?.mean_keepdim(D::Minus1)?+1e-5f64)?.sqrt()?)?;
         let delta=(y-expected)?.abs()?.max_all()?.to_scalar::<f32>()?;
         assert!(delta<2e-5,"indexed Q-only delta {delta}");
