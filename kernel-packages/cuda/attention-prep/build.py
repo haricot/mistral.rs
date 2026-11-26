@@ -38,6 +38,9 @@ def plan(cc):
             r=profile(cc,op,"cuda."+entry+".v1",entry,[block,1,1],args)
             r["artifact"]=f"attention_prep_{image}.ptx";rows.append(r)
         for b in (32,64,128,256,512,1024):
+            add(f"attention.prep.norm.b{b}.v1",f"dkr_ap_norm_{dt}_b{b}",b,
+                [t("input"),t("weight"),t("output","write"),s("stride_bh","u64"),s("stride_sd","u64")]+
+                [s(n) for n in ("batch","heads","seq","head")]+[s("eps","f32")])
             for kind in ("qk","qk_pos","qkv_pos"):
                 triple=kind=="qkv_pos";indexed=kind!="qk"
                 names=("q","k","v") if triple else ("q","k")
@@ -60,7 +63,12 @@ def plan(cc):
             if indexed:args.append(s("cache_rows"))
             suffix="rotary_pos" if indexed else "rotary"
             add(f"attention.prep.{suffix}.v1",f"dkr_{suffix}_{dt}",256,args)
-        assert len(rows)==21 and len({r["entry"] for r in rows})==21
+        if image==1:
+            add("layout.pack_completion_u32.v1","dkr_pack_completion_u32",256,
+                [t("host",dtype="u32")]+[t(f"row{i}",dtype="u32") for i in range(24)]+
+                [t("output","write","u32")]+[s(n) for n in ("rows","host_width","staged_width")])
+        expected=28 if image==1 else 27
+        assert len(rows)==expected and len({r["entry"] for r in rows})==expected
         assert all(len(r["arguments"])<=32 for r in rows)
         images[image]=rows
     return images
@@ -137,7 +145,7 @@ def self_test(cc,images):
                 else:
                     raise AssertionError("invalid PTX accepted")
         assert len(list(root.rglob("manifest.json")))==3
-    print(f"DKR_R126_S9C2C_ATTENTION_PREP_SELF_TEST=PASS cc={cc} images=3 profiles=63 synthetic_ptx=true")
+    print(f"DKR_R126_S9C2C_ATTENTION_PREP_SELF_TEST=PASS cc={cc} images=3 profiles=82 synthetic_ptx=true")
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
@@ -156,12 +164,12 @@ def main():
     elif a.json_out:
         # The SM61 base is the previously audited upper bound, not a new real inventory.
         report=dict(schema="dkr.r126.attention.prep.plan.v1",cc=a.cc,images=images,
-                    profiles=63,physical_manifests=3,compilation=False,link_qualified=False)
+                    profiles=82,physical_manifests=3,compilation=False,link_qualified=False)
         if a.cc==61:
-            report.update(prospective_physical_upper=526,prospective_logical=3824)
+            report.update(prospective_physical_upper=526,prospective_logical=3843)
         a.json_out.parent.mkdir(parents=True,exist_ok=True)
         a.json_out.write_text(json.dumps(report,indent=2)+"\n")
-        print(f"DKR_R126_S9C2C_ATTENTION_PREP_PLAN=COMPLETE cc={a.cc} images=3 profiles=63 compilation=false")
+        print(f"DKR_R126_S9C2C_ATTENTION_PREP_PLAN=COMPLETE cc={a.cc} images=3 profiles=82 compilation=false")
     elif a.image in images and a.output is not None and a.ptx_file is not None:
         package(a.output,a.cc,a.image,images[a.image],a.ptx_file.read_bytes())
         print(f"DKR_GGUF_MMVQ_SHARD=STAGED cc={a.cc} image={a.image} profiles={len(images[a.image])}")

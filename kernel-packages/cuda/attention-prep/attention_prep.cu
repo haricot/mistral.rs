@@ -27,7 +27,16 @@ extern "C" __global__ __launch_bounds__(B) void dkr_ap_qkv_pos_##tag##_b##B(QKV_
     if(neox)qkv_rms_norm_rope_positions_kernel<T,true>(QKV_CALL); \
     else qkv_rms_norm_rope_positions_kernel<T,false>(QKV_CALL); \
 }
+#define NORM_BLOCK(tag,T,B) \
+extern "C" __global__ __launch_bounds__(B) void dkr_ap_norm_##tag##_b##B(const T* x,const T* w,T* y,STRIDES(x),int batch,int heads,int seq,int head,float eps){ \
+    __shared__ float reduce[1024]; \
+    int row=blockIdx.x;int s=row%seq;int h=(row/seq)%heads;int b=row/seq/heads; \
+    int64_t base=int64_t(b)*uint32_t(x_bh)+int64_t(h)*(x_bh>>32)+int64_t(s)*uint32_t(x_sd); \
+    write_norm_row<T>(x,w,y+int64_t(row)*head,base,int64_t(x_sd>>32),head,eps,reduce); \
+}
 #define DTYPE(tag,T) \
+NORM_BLOCK(tag,T,32) NORM_BLOCK(tag,T,64) NORM_BLOCK(tag,T,128) \
+NORM_BLOCK(tag,T,256) NORM_BLOCK(tag,T,512) NORM_BLOCK(tag,T,1024) \
 AP_BLOCK(tag,T,32) AP_BLOCK(tag,T,64) AP_BLOCK(tag,T,128) \
 AP_BLOCK(tag,T,256) AP_BLOCK(tag,T,512) AP_BLOCK(tag,T,1024) \
 extern "C" __global__ void dkr_ap_sincos_##tag(const uint32_t* pos,const float* freq,T* cos,T* sin,int rows,int width){ \
@@ -49,4 +58,44 @@ DTYPE(bf16,__nv_bfloat16)
 DTYPE(f32,float)
 #else
 #error "select DKR_AP_DTYPE"
+#endif
+
+#if DKR_AP_DTYPE==1
+__device__ __forceinline__ uint32_t dkr_staged_token(int row,int column,const uint32_t* r0,const uint32_t* r1,const uint32_t* r2,const uint32_t* r3,const uint32_t* r4,const uint32_t* r5,const uint32_t* r6,const uint32_t* r7,const uint32_t* r8,const uint32_t* r9,const uint32_t* r10,const uint32_t* r11,const uint32_t* r12,const uint32_t* r13,const uint32_t* r14,const uint32_t* r15,const uint32_t* r16,const uint32_t* r17,const uint32_t* r18,const uint32_t* r19,const uint32_t* r20,const uint32_t* r21,const uint32_t* r22,const uint32_t* r23){
+    switch(row){
+        case 0: return r0[column];
+        case 1: return r1[column];
+        case 2: return r2[column];
+        case 3: return r3[column];
+        case 4: return r4[column];
+        case 5: return r5[column];
+        case 6: return r6[column];
+        case 7: return r7[column];
+        case 8: return r8[column];
+        case 9: return r9[column];
+        case 10: return r10[column];
+        case 11: return r11[column];
+        case 12: return r12[column];
+        case 13: return r13[column];
+        case 14: return r14[column];
+        case 15: return r15[column];
+        case 16: return r16[column];
+        case 17: return r17[column];
+        case 18: return r18[column];
+        case 19: return r19[column];
+        case 20: return r20[column];
+        case 21: return r21[column];
+        case 22: return r22[column];
+        case 23: return r23[column];
+        default:return 0;
+    }
+}
+extern "C" __global__ void dkr_pack_completion_u32(const uint32_t* host,const uint32_t* r0,const uint32_t* r1,const uint32_t* r2,const uint32_t* r3,const uint32_t* r4,const uint32_t* r5,const uint32_t* r6,const uint32_t* r7,const uint32_t* r8,const uint32_t* r9,const uint32_t* r10,const uint32_t* r11,const uint32_t* r12,const uint32_t* r13,const uint32_t* r14,const uint32_t* r15,const uint32_t* r16,const uint32_t* r17,const uint32_t* r18,const uint32_t* r19,const uint32_t* r20,const uint32_t* r21,const uint32_t* r22,const uint32_t* r23,uint32_t* out,int rows,int host_width,int staged_width){
+    int64_t width=int64_t(host_width)+staged_width;
+    int64_t i=int64_t(blockIdx.x)*blockDim.x+threadIdx.x;
+    if(i>=int64_t(rows)*width)return;
+    int row=i/width,col=i%width;
+    out[i]=col<host_width?host[int64_t(row)*host_width+col]:
+        dkr_staged_token(row,col-host_width,r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11,r12,r13,r14,r15,r16,r17,r18,r19,r20,r21,r22,r23);
+}
 #endif

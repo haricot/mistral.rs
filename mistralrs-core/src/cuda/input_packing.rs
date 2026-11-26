@@ -3,7 +3,6 @@ use candle_core::{
     Storage, Tensor,
 };
 
-#[cfg(not(feature = "dkr-static-closure-probe"))]
 struct CompletionInputPackOp {
     staged_rows: Vec<Tensor>,
     batch: usize,
@@ -11,7 +10,6 @@ struct CompletionInputPackOp {
     staged_width: usize,
 }
 
-#[cfg(not(feature = "dkr-static-closure-probe"))]
 impl CustomOp1 for CompletionInputPackOp {
     fn name(&self) -> &'static str {
         "completion-input-pack"
@@ -79,6 +77,13 @@ impl CustomOp1 for CompletionInputPackOp {
         let batch = i32::try_from(self.batch).map_err(candle_core::Error::wrap)?;
         let host_width = i32::try_from(self.host_width).map_err(candle_core::Error::wrap)?;
         let staged_width = i32::try_from(self.staged_width).map_err(candle_core::Error::wrap)?;
+        #[cfg(feature = "dkr-static-closure-probe")]
+        {
+            super::attention_prep_dynamic::pack_completion(&candle_core::Device::Cuda(device.clone()),
+                host_ptr,&staged_ptrs.iter().map(|&p|p as u64).collect::<Vec<_>>(),output_ptr,
+                self.host_width,self.staged_width)?;
+        }
+        #[cfg(not(feature = "dkr-static-closure-probe"))]
         let status = unsafe {
             super::ffi::pack_completion_input_u32(
                 host_ptr as *const core::ffi::c_void,
@@ -93,6 +98,7 @@ impl CustomOp1 for CompletionInputPackOp {
         drop(output_guard);
         drop(staged_guards);
         drop(host_guard);
+        #[cfg(not(feature = "dkr-static-closure-probe"))]
         if status != 0 {
             candle_core::bail!("pack_completion_input_u32 failed with status {status}")
         }
@@ -227,15 +233,9 @@ pub(crate) fn pack_completion_input(host: &Tensor, staged_rows: &[Tensor]) -> Re
             candle_core::bail!("completion input staged rows must be contiguous CUDA U32 rows")
         }
     }
-    #[cfg(feature = "dkr-static-closure-probe")]
-    {
-        if batch == 0 || host_width == 0 {
-            candle_core::bail!("invalid completion input packing dimensions");
-        }
-        let staged = Tensor::stack(staged_rows, 0)?;
-        return Tensor::cat(&[host, &staged], 1);
+    if batch == 0 || host_width == 0 {
+        candle_core::bail!("invalid completion input packing dimensions");
     }
-    #[cfg(not(feature = "dkr-static-closure-probe"))]
     host.apply_op1_no_bwd(&CompletionInputPackOp {
         staged_rows: staged_rows.to_vec(),
         batch,

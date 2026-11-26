@@ -5,7 +5,7 @@ use crate::cuda::kernel_runtime::{kernel_cache,LaunchPlanCache};
 use mistralrs_kernel_runtime::{universal::{Argument,ElementType,LaunchRequest},universal_cuda::PrevalidatedLaunchPlan};
 use std::cell::RefCell;
 #[derive(Clone,Copy,Eq,PartialEq)]
-pub(crate) enum Kind{Qk,QkPos,QkvPos,Sincos}
+pub(crate) enum Kind{Qk,QkPos,QkvPos,Sincos,Norm}
 #[derive(Clone,Copy,Eq,PartialEq)]
 struct Key{kind:Kind,dtype:ElementType,spans:[usize;12],grid:u32,block:u32}
 thread_local!{static PLANS:RefCell<LaunchPlanCache<Key,PrevalidatedLaunchPlan>>=RefCell::new(LaunchPlanCache::new());}
@@ -29,11 +29,15 @@ pub(crate) fn geometry(batch:usize,q:usize,k:usize,seq:usize,head:usize,triple:b
 }
 fn prepare(key:Key,device:&Device)->Result<PrevalidatedLaunchPlan>{
     let (kind,n,positions)=match key.kind{Kind::Qk=>("qk",2,false),Kind::QkPos=>("qk_pos",2,true),
-        Kind::QkvPos=>("qkv_pos",3,true),Kind::Sincos=>("sincos",0,true)};
+        Kind::QkvPos=>("qkv_pos",3,true),Kind::Sincos=>("sincos",0,true),Kind::Norm=>("norm",0,false)};
     let t=|i:usize,dt|Argument::Tensor{dtype:dt,shape:vec![key.spans[i]],contiguous:true,start_offset:0,representation:None};
     let s=|dtype|Argument::Scalar{dtype};
     let mut args=Vec::new();
-    let op=if key.kind==Kind::Sincos{
+    let op=if key.kind==Kind::Norm{
+        args.extend([t(0,key.dtype),t(1,key.dtype),t(2,key.dtype),s(ElementType::U64),s(ElementType::U64),
+            s(ElementType::I32),s(ElementType::I32),s(ElementType::I32),s(ElementType::I32),s(ElementType::F32)]);
+        format!("attention.prep.norm.b{}.v1",key.block)
+    }else if key.kind==Kind::Sincos{
         args.extend([t(0,ElementType::U32),t(1,ElementType::F32),t(2,key.dtype),t(3,key.dtype),
             s(ElementType::I32),s(ElementType::I32)]);
         "attention.prep.sincos.v1".to_string()
@@ -76,4 +80,50 @@ mod tests{
         assert!(strides(&[usize::MAX,1,1,1]).is_err());
         assert!(geometry(usize::MAX,8,2,3,80,true).is_err());
     }
+}
+
+const PACK_ROWS:usize=24;
+#[derive(Clone,Copy,Eq,PartialEq)]
+struct PackKey{rows:usize,host:usize,staged:usize}
+thread_local!{static PACK:RefCell<LaunchPlanCache<PackKey,PrevalidatedLaunchPlan>>=RefCell::new(LaunchPlanCache::new());}
+fn pack_plan(key:PackKey,dev:&Device)->Result<PrevalidatedLaunchPlan>{
+    let t=|n|Argument::Tensor{dtype:ElementType::U32,shape:vec![n],contiguous:true,start_offset:0,representation:None};
+    let elements=key.rows*(key.host+key.staged);
+    let mut args=vec![t(key.rows*key.host)];
+    args.extend((0..PACK_ROWS).map(|_|t(key.staged)));
+    args.push(t(elements));
+    args.extend((0..3).map(|_|Argument::Scalar{dtype:ElementType::I32}));
+    let mut req=LaunchRequest{operation:"layout.pack_completion_u32.v1".into(),cc:0,args,
+        grid:[u32::try_from(elements.div_ceil(256)).map_err(candle_core::Error::wrap)?,1,1],max_dynamic_shared_mem_bytes:0};
+    let p=kernel_cache()?.prepare_for_device(&mut req,dev).map_err(|e|candle_core::Error::msg(e.to_string()))?;
+    if p.manifest.block!=[256,1,1]||p.manifest.shared_mem_bytes!=0{candle_core::bail!("pack block mismatch");}
+    p.prevalidate_launch(&req,dev).map_err(|e|candle_core::Error::msg(e.to_string()))
+}
+// Called only while original host/output/row allocation guards are held.
+pub(crate) fn pack_completion(device:&Device,host:u64,rows:&[u64],out:u64,hw:usize,sw:usize)->Result<()>{
+    use candle_core::cuda::cudarc::driver::PushKernelArg;
+    let width=hw.checked_add(sw).filter(|&v|v<=i32::MAX as usize).ok_or_else(||candle_core::Error::msg("pack width overflow"))?;
+    let total=rows.len().checked_mul(width).and_then(|v|v.checked_mul(4)).ok_or_else(||candle_core::Error::msg("pack span overflow"))?;
+    if rows.is_empty()||hw==0||sw==0||host.checked_add(total as u64).is_none()||out.checked_add(total as u64).is_none(){
+        candle_core::bail!("invalid pack span");
+    }
+    let dev=device.as_cuda_device()?;let stream=dev.cuda_stream();
+    let hi=hw as i32;let si=sw as i32;
+    for (chunk,staged) in rows.chunks(PACK_ROWS).enumerate(){
+        let start=chunk*PACK_ROWS;
+        let hp=host+(start*hw*4) as u64;
+        let op=out+(start*width*4) as u64;
+        let mut ptrs=[staged[0];PACK_ROWS];
+        ptrs[..staged.len()].copy_from_slice(staged);
+        let ri=staged.len() as i32;
+        let key=PackKey{rows:staged.len(),host:hw,staged:sw};
+        PACK.with(|cache|cache.borrow_mut().with_plan(key,device,||pack_plan(key,device),|p|{
+            unsafe{p.with_prevalidated_launch(|fun,cfg|{
+                let mut b=stream.launch_builder(fun);b.arg(&hp);
+                for ptr in &ptrs{b.arg(ptr);}
+                b.arg(&op).arg(&ri).arg(&hi).arg(&si);b.launch(cfg)?;Ok(())
+            })}.map_err(|e|candle_core::Error::msg(e.to_string()))
+        }))?;
+    }
+    Ok(())
 }

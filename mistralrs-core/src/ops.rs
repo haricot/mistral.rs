@@ -4406,13 +4406,7 @@ pub(crate) fn try_cuda_rms_norm_strided_4d(
         }
     }
 
-    #[cfg(feature = "dkr-static-closure-probe")]
-    {
-        if input.is_contiguous(){return Ok(None);}
-        return Ok(Some(candle_nn::ops::rms_norm(&input.contiguous()?,&weight.contiguous()?,eps)?));
-    }
-    #[cfg(not(feature = "dkr-static-closure-probe"))]
-    {
+
     let (input_storage, input_layout) = input.storage_and_layout();
     if input_layout.is_contiguous() {
         return Ok(None);
@@ -4455,6 +4449,24 @@ pub(crate) fn try_cuda_rms_norm_strided_4d(
             let weight_ptr =
                 unsafe { (weight_ptr as *const $ty).add(weight_layout.start_offset()) };
 
+            #[cfg(feature = "dkr-static-closure-probe")]
+            {
+                use crate::cuda::attention_prep_dynamic as ap;
+                use candle_core::cuda_backend::cudarc::driver::PushKernelArg;
+                let (grid,block)=ap::geometry(batch,heads,0,seq_len,head_dim,false)?;
+                let packed=ap::strides(stride)?;
+                let spans=[ap::span(input_layout)?,head_dim,elem_count];
+                let xp=src_ptr as u64;let wp=weight_ptr as u64;let yp=out_ptr as u64;
+                ap::with_plan(ap::Kind::Norm,dtype,&spans,grid,block,input.device(),|plan|{
+                    unsafe{plan.with_prevalidated_launch(|fun,cfg|{
+                        let mut b=stream.launch_builder(fun);
+                        b.arg(&xp).arg(&wp).arg(&yp).arg(&packed[0]).arg(&packed[1])
+                            .arg(&batch_i32).arg(&heads_i32).arg(&seq_len_i32).arg(&head_dim_i32).arg(&eps);
+                        b.launch(cfg)?;Ok(())
+                    })}.map_err(|e|candle_core::Error::msg(e.to_string()))
+                })?;
+            }
+            #[cfg(not(feature = "dkr-static-closure-probe"))]
             unsafe {
                 ffi::$ffi_fn(
                     src_ptr as *const c_void,
@@ -4493,7 +4505,6 @@ pub(crate) fn try_cuda_rms_norm_strided_4d(
         DType::F16 => launch!(F16, half::f16, rms_norm_strided_4d_f16),
         DType::F32 => launch!(F32, f32, rms_norm_strided_4d_f32),
         _ => Ok(None),
-    }
     }
 }
 
