@@ -1,94 +1,51 @@
 #!/usr/bin/env python3
-"""Build external F32 selective-scan entry points for one CUDA target."""
-
+"""Single-image F32 selective scan packaging; no device compilation."""
 import argparse
-import hashlib
 import json
-import shutil
-import subprocess
+import sys
 from pathlib import Path
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+from dkr_s9c2d_shard import tensor,scalar,profile,stage,self_test
 
-SOURCE = Path(__file__).with_name("ssm.cu")
-
-
-def digest(data):
-    return hashlib.sha256(data).hexdigest()
-
-
-def tensor(name, rank, access):
-    return {"kind": "tensor", "name": name, "dtype": "f32",
-            "rank": rank, "access": access}
-
-
-def scalar(name, dtype):
-    return {"kind": "scalar", "name": name, "dtype": dtype}
-
+def plan(cc):
+    args=[tensor("x","f32",4,"read"),tensor("dt","f32",3,"read"),
+          tensor("a","f32",1,"read"),tensor("b","f32",4,"read"),
+          tensor("c","f32",4,"read"),tensor("d","f32",1,"read"),
+          tensor("dt_bias","f32",1,"read"),tensor("state","f32",4,"read_write"),
+          tensor("output","f32",4,"write")]
+    args += [scalar(n,"i32") for n in ("heads","head_dim","d_state","seq_len")]
+    args += [scalar(n,"f32") for n in ("dt_min","dt_max")]
+    return [profile(cc,f"state_space.ssm_scan_f32.cf{cf}.v1",
+                    f"cuda.ssm_scan.f32.cf{cf}.v1",f"dkr_ssm_scan_cf{cf}",
+                    [32,1,1],args,"ssm.ptx",max_cc=120) for cf in (1,2,4,8)]
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--cc", type=int, required=True)
-    parser.add_argument("--output", type=Path, default=Path("kernel-packages/build/cuda"))
-    parser.add_argument("--nvcc", default="nvcc")
-    parser.add_argument("--ptx-file", type=Path, help="PTX already built by cudaforge")
-    args = parser.parse_args()
-    if not 50 <= args.cc <= 120:
-        parser.error("unsupported CUDA compute capability")
-
-    root = args.output / f"sm{args.cc}" / "ssm"
-    artifact = root / "cf1" / "ssm.ptx"
-    stamp = root / "source.sha256"
-    artifact.parent.mkdir(parents=True, exist_ok=True)
-    cmd = [
-        args.nvcc, "-ptx", f"-arch=compute_{args.cc}",
-        f"-code=compute_{args.cc}", "-std=c++17", "-O3", "--use_fast_math",
-        "-o", str(artifact), str(SOURCE),
-    ]
-    identity = digest(SOURCE.read_bytes() + (b"cudaforge:" + hashlib.sha256(args.ptx_file.read_bytes()).digest() if args.ptx_file else subprocess.check_output([args.nvcc, "--version"])) + "\0".join(cmd).encode())
-    variants = (1, 2, 4, 8)
-    if stamp.is_file() and stamp.read_text().strip() == identity and all(
-        (root / f"cf{cf}" / "manifest.json").is_file()
-        and (root / f"cf{cf}" / artifact.name).is_file()
-        and json.loads((root / f"cf{cf}" / "manifest.json").read_text())["sha256"]
-        == digest((root / f"cf{cf}" / artifact.name).read_bytes())
-        for cf in variants
-    ):
-        print(f"DKR_SSM_REUSED=PASS target_cc={args.cc}")
-        return
-    if args.ptx_file is not None:
-        shutil.copyfile(args.ptx_file, artifact)
+    p=argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--cc",type=int,required=True)
+    p.add_argument("--output",type=Path,default=Path("kernel-packages/build/cuda"))
+    m=p.add_mutually_exclusive_group(required=True)
+    m.add_argument("--ptx-file",type=Path)
+    m.add_argument("--json-out",type=Path)
+    m.add_argument("--self-test",action="store_true")
+    a=p.parse_args()
+    if not 50<=a.cc<=120:
+        p.error("unsupported CUDA compute capability")
+    rows=plan(a.cc)
+    if a.self_test:
+        self_test(a.cc,rows)
+        print(f"DKR_R126_S9C2D_SSM_SELF_TEST=PASS cc={a.cc} images=1 profiles=4 synthetic_ptx=true")
+    elif a.json_out:
+        a.json_out.parent.mkdir(parents=True,exist_ok=True)
+        a.json_out.write_text(json.dumps(dict(profiles=rows,physical_manifests=1,
+            compilation=False,link_qualified=False),indent=2)+"\n")
+        print(f"DKR_R126_S9C2D_SSM_PLAN=COMPLETE cc={a.cc} images=1 profiles=4 compilation=false")
     else:
-        subprocess.run(cmd, check=True)
-    sha = digest(artifact.read_bytes())
-    signature = [
-        tensor("x", 4, "read"), tensor("dt", 3, "read"),
-        tensor("a", 1, "read"), tensor("b", 4, "read"),
-        tensor("c", 4, "read"), tensor("d", 1, "read"),
-        tensor("dt_bias", 1, "read"), tensor("state", 4, "read_write"),
-        tensor("output", 4, "write"),
-        scalar("heads", "i32"), scalar("head_dim", "i32"),
-        scalar("d_state", "i32"), scalar("seq_len", "i32"),
-        scalar("dt_min", "f32"), scalar("dt_max", "f32"),
-    ]
-    for cf in variants:
-        folder = root / f"cf{cf}"
-        folder.mkdir(parents=True, exist_ok=True)
-        output = folder / artifact.name
-        if output != artifact:
-            shutil.copyfile(artifact, output)
-        manifest = {
-            "schema": "DKR-KERNEL-MODULE-V1", "abi": "dkr.typed.v1",
-            "operation": f"state_space.ssm_scan_f32.cf{cf}.v1",
-            "implementation_id": f"cuda.ssm_scan.f32.cf{cf}.v1",
-            "artifact": output.name, "sha256": sha,
-            "entry": f"dkr_ssm_scan_cf{cf}",
-            "target_cc": args.cc, "min_cc": args.cc, "max_cc": 120,
-            "block": [32, 1, 1], "shared_mem_bytes": 0,
-            "arguments": signature,
-        }
-        (folder / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-    stamp.write_text(identity + "\n")
-    print(f"DKR_SSM_PACKAGES=PASS target_cc={args.cc} variants={len(variants)}")
+        root=a.output/f"sm{a.cc}"/"ssm"
+        # Never silently coexist with old cf1/cf2/cf4/cf8 manifests.
+        if any((root/f"cf{cf}").exists() for cf in (1,2,4,8)):
+            raise SystemExit("legacy SSM images present; use fresh catalogue staging root")
+        stage(root/"image-01",a.cc,rows,a.ptx_file.read_bytes())
+        print(f"DKR_SSM_PACKAGES=PASS target_cc={a.cc} variants=4 images=1")
 
-
-if __name__ == "__main__":
+if __name__=="__main__":
     main()
