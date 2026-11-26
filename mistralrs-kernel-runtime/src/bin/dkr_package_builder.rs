@@ -37,6 +37,7 @@ const PACKAGES: &[Package] = &[
     Package { name: "gdn-checkpoint", source: "gdn_checkpoint.cu", fast_math: true },
     Package { name: "gdn-speculative", source: "gdn_speculative.cu", fast_math: true },
     Package { name: "dynamic-conv", source: "dynamic_conv.cu", fast_math: false },
+    Package { name: "lfm3-conv", source: "lfm3_conv.cu", fast_math: true },
     Package { name: "rounded-rope", source: "rounded_rope.cu", fast_math: true },
     Package { name: "dense-gemv", source: "dense_gemv.cu", fast_math: false },
     Package { name: "kv-scales", source: "kv_scales.cu", fast_math: false },
@@ -476,6 +477,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     .arg("--output").arg(&output).arg("--ptx-file").arg(&compiled).current_dir(root).status()?;
                 if !status.success(){return Err(format!("GDN recurrence packaging failed: {status}").into());}
             }
+        } else if pkg.name == "lfm3-conv" {
+            let watched=["lfm3_conv_device.cuh","lfm3_spatial_conv_device.cuh"]
+                .map(|name|root.join("mistralrs-quant/kernels/ops").join(name));
+            let compiled=compile_ptx(&source,&work.join(pkg.name),cc,pkg.fast_math,None,&watched)?;
+            package(&python,&script,cc,&output,&compiled,false,root)?;
         } else if pkg.name == "dynamic-conv" {
             let watched=[root.join("mistralrs-core/src/cuda/dynamic_conv_device.cuh")];
             let compiled=compile_ptx(&source,&work.join(pkg.name),cc,pkg.fast_math,None,&watched)?;
