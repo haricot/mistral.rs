@@ -19,6 +19,9 @@ mod transaction_dynamic;
 #[path = "gdn_checkpoint_dynamic.rs"]
 mod checkpoint_dynamic;
 #[cfg(feature = "dkr-static-closure-probe")]
+#[path = "gdn_speculative_dynamic.rs"]
+mod speculative_dynamic;
+#[cfg(feature = "dkr-static-closure-probe")]
 #[path = "gdn_decode_dynamic.rs"]
 mod decode_dynamic;
 
@@ -4015,7 +4018,9 @@ pub fn speculative_recurrence_checkpoints_cuda(
         if head_v_dim == 0 || !num_v_heads.is_multiple_of(num_k_heads) {
             candle::bail!("GDN speculative recurrence has incompatible head dimensions");
         }
-        let expected_conv_dim = 2 * num_k_heads * head_k_dim + num_v_heads * head_v_dim;
+        let expected_conv_dim = num_k_heads.checked_mul(head_k_dim).and_then(|v|v.checked_mul(2))
+            .and_then(|v|num_v_heads.checked_mul(head_v_dim).and_then(|w|v.checked_add(w)))
+            .ok_or_else(||candle::Error::msg("GDN speculative recurrence width overflow"))?;
         if conv_dim != expected_conv_dim {
             candle::bail!(
                 "GDN speculative recurrence input width is {conv_dim}, expected {expected_conv_dim}"
@@ -4228,6 +4233,85 @@ pub fn speculative_recurrence_checkpoints_cuda(
         let dt_bias = dt_bias.to_dtype(DType::F32)?.contiguous()?;
         let dev = mixed_qkv.device().as_cuda_device()?;
 
+        let output_elements = batch_size.checked_mul(num_v_heads).and_then(|v|v.checked_mul(seq_len)).and_then(|v|v.checked_mul(head_v_dim)).ok_or_else(||candle::Error::msg("GDN speculative output size overflow"))?;
+        let mut output = fp8_layout
+            .is_none()
+            .then(|| unsafe { dev.alloc::<T>(output_elements) })
+            .transpose()?;
+        let mut quantized_output = fp8_layout
+            .map(|layout| unsafe { dev.alloc::<F8E4M3>(layout.quantized_elements()) })
+            .transpose()?;
+        let mut output_scales = fp8_layout
+            .map(|layout| unsafe { dev.alloc::<f32>(layout.scale_elements) })
+            .transpose()?;
+        let key_elements=batch_size.checked_mul(seq_len).and_then(|v|v.checked_mul(num_k_heads))
+            .and_then(|v|v.checked_mul(head_k_dim)).ok_or_else(||candle::Error::msg("GDN key journal size overflow"))?;
+        let decay_elements=batch_size.checked_mul(seq_len).and_then(|v|v.checked_mul(num_v_heads))
+            .ok_or_else(||candle::Error::msg("GDN decay journal size overflow"))?;
+        let direct_transitions = record_transitions && pending.is_some();
+        let mut transition_key = (record_transitions && !direct_transitions)
+            .then(|| unsafe { dev.alloc::<f32>(key_elements) })
+            .transpose()?;
+        let mut transition_delta = (record_transitions && !direct_transitions)
+            .then(|| unsafe { dev.alloc::<f32>(output_elements) })
+            .transpose()?;
+        let mut transition_decay = (record_transitions && !direct_transitions)
+            .then(|| unsafe { dev.alloc::<f32>(decay_elements) })
+            .transpose()?;
+        #[cfg(feature = "dkr-static-closure-probe")]
+        {
+            use speculative_dynamic as d;
+            use preparation_dynamic as p;
+            use candle::cuda_backend::cudarc::driver::DevicePtrMut;
+            let device=mixed_qkv.device();
+            let stream=dev.cuda_stream();
+            let dtype=p::dt(mixed_qkv.dtype())?;
+            let geometry=d::Geometry{batch:batch_size,seq:seq_len,kh:num_k_heads,vh:num_v_heads,kd:head_k_dim,vd:head_v_dim,
+                lanes:checkpoint_lanes,cap:capacity,tiled:tiled_v_heads,vm:value_major};
+            let norm_weight=post_op.as_ref().map(|(op,_,_)|op.weight.contiguous()).transpose()?;
+            let mut tensors=vec![(&mixed_qkv,false),(b,false),(a,false),(&a_log,false),(&dt_bias,false),(state_pool,true),(active_slots,false)];
+            let post=if let Some((op,gate_strides,_))=post_op.as_ref(){
+                tensors.extend([(op.gate,false),(norm_weight.as_ref().expect("weight"),false)]);
+                let mode=if direct_transitions{d::Mode::Direct}else if record_transitions{d::Mode::Batch}else{d::Mode::Checkpoint};
+                Some(d::Post{mode,gate_strides:*gate_strides,eps:op.eps as f32,sigmoid:op.sigmoid_gate,
+                    fp8:fp8_layout.map(|l|(l.scale_stride_m,l.scale_layout_code)),
+                    pending:pending.as_ref().map(|(_,rows,cap)|(*rows,*cap))})
+            }else{None};
+            let base_count=tensors.len();
+            if let Some((pending,_,_))=pending.as_ref(){
+                tensors.extend([(pending.key_banks,true),(pending.key_bank,false),(pending.delta,true),
+                    (pending.decay,true),(pending.keep_rows,false),(pending.pending_epochs,false),(pending.applied_epochs,true)]);
+            }
+            d::with_bindings(device,&stream,&tensors,|bound|{
+                let mut ptrs=bound[..base_count].to_vec();
+                let mut out_guards=Vec::new();
+                if let Some(buffer)=output.as_mut(){
+                    let (ptr,guard)=buffer.device_ptr_mut(&stream);
+                    ptrs.push(d::Bound::new(ptr,output_elements,dtype,true));
+                    out_guards.push(guard);
+                }else if let (Some(buffer),Some(scales),Some(layout))=(quantized_output.as_mut(),output_scales.as_mut(),fp8_layout){
+                    let (ptr,guard)=buffer.device_ptr_mut(&stream);
+                    let (scale,sg)=scales.device_ptr_mut(&stream);
+                    ptrs.push(d::Bound::new(ptr,layout.quantized_elements(),p::E::Fp8E4m3,true));
+                    ptrs.push(d::Bound::new(scale,layout.scale_elements,p::E::F32,true));
+                    out_guards.push(guard);out_guards.push(sg);
+                }else{candle::bail!("missing GDN speculative output allocation");}
+                if let (Some(key),Some(delta),Some(decay))=(transition_key.as_mut(),transition_delta.as_mut(),transition_decay.as_mut()){
+                    let (kp,kg)=key.device_ptr_mut(&stream);let (dp,dg)=delta.device_ptr_mut(&stream);
+                    let (rp,rg)=decay.device_ptr_mut(&stream);
+                    ptrs.extend([d::Bound::new(kp,key_elements,p::E::F32,true),d::Bound::new(dp,output_elements,p::E::F32,true),
+                        d::Bound::new(rp,decay_elements,p::E::F32,true)]);
+                    out_guards.extend([kg,dg,rg]);
+                }
+                ptrs.extend_from_slice(&bound[base_count..]);
+                let bs=b.stride();let as_=a.stride();
+                let result=d::launch_recurrence(device,&stream,geometry,[bs[0],bs[1],bs[2]],[as_[0],as_[1],as_[2]],post,&ptrs);
+                drop(out_guards);
+                result
+            })?;
+        }
+        #[cfg(not(feature = "dkr-static-closure-probe"))]
+        {
         macro_rules! cuda_ptr {
             ($tensor:expr, $ty:ty, $name:literal) => {{
                 let (storage, layout) = $tensor.storage_and_layout();
@@ -4269,27 +4353,6 @@ pub fn speculative_recurrence_checkpoints_cuda(
         } else {
             std::ptr::null()
         };
-        let output_elements = batch_size * num_v_heads * seq_len * head_v_dim;
-        let mut output = fp8_layout
-            .is_none()
-            .then(|| unsafe { dev.alloc::<T>(output_elements) })
-            .transpose()?;
-        let mut quantized_output = fp8_layout
-            .map(|layout| unsafe { dev.alloc::<F8E4M3>(layout.quantized_elements()) })
-            .transpose()?;
-        let mut output_scales = fp8_layout
-            .map(|layout| unsafe { dev.alloc::<f32>(layout.scale_elements) })
-            .transpose()?;
-        let direct_transitions = record_transitions && pending.is_some();
-        let mut transition_key = (record_transitions && !direct_transitions)
-            .then(|| unsafe { dev.alloc::<f32>(batch_size * seq_len * num_k_heads * head_k_dim) })
-            .transpose()?;
-        let mut transition_delta = (record_transitions && !direct_transitions)
-            .then(|| unsafe { dev.alloc::<f32>(batch_size * seq_len * num_v_heads * head_v_dim) })
-            .transpose()?;
-        let mut transition_decay = (record_transitions && !direct_transitions)
-            .then(|| unsafe { dev.alloc::<f32>(batch_size * seq_len * num_v_heads) })
-            .transpose()?;
         let (
             pending_key_banks,
             pending_key_bank,
@@ -4409,6 +4472,7 @@ pub fn speculative_recurrence_checkpoints_cuda(
                 state_dtype,
                 stream,
             );
+        }
         }
 
         let output = if let (Some(spec), Some(layout)) = (fp8_spec, fp8_layout) {
