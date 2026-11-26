@@ -5,6 +5,7 @@ use candle_core::{backend::BackendStorage, cuda::cudarc::driver::sys::CUstream, 
 use super::*;
 use crate::utils::{slice_ptr_mut_on_stream, slice_ptr_on_stream};
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 extern "C" {
     fn lfm3_conv_f32(
         x: *const c_void,
@@ -45,6 +46,7 @@ fn cuda_storage(storage: &Storage) -> Result<&CudaStorage> {
     }
 }
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 impl ConvInputs<'_> {
     pub(super) fn cuda(&self) -> Result<(Tensor, Tensor)> {
         let (projected, projected_layout) = self.projected.storage_and_layout();
@@ -113,6 +115,66 @@ impl ConvInputs<'_> {
             DType::F16 => run!(half::f16, lfm3_conv_f16),
             DType::BF16 => run!(half::bf16, lfm3_conv_bf16),
             dtype => candle_core::bail!("Unsupported LFM3 convolution dtype {dtype:?}"),
+        })
+    }
+}
+
+#[cfg(feature = "dkr-static-closure-probe")]
+impl ConvInputs<'_> {
+    pub(super) fn cuda(&self) -> Result<(Tensor, Tensor)> {
+        use crate::lfm3_dynamic as dkr;
+        use candle_core::cuda::cudarc::driver::DeviceSlice;
+        let (projected, projected_layout)=self.projected.storage_and_layout();
+        let (weight, weight_layout)=self.weight.storage_and_layout();
+        let (state, state_layout)=self.state.storage_and_layout();
+        let bias=self.bias.map(Tensor::storage_and_layout);
+        let projected=cuda_storage(&projected)?;
+        let weight=cuda_storage(&weight)?;
+        let state=cuda_storage(&state)?;
+        let bias=bias.as_ref().map(|(s,l)|->Result<_>{Ok((cuda_storage(s)?,*l))}).transpose()?;
+        let device=projected.device();
+        let stream=device.cuda_stream();
+        let out_len=dkr::checked_product(&[self.batch,self.seq,self.hidden])?;
+        let state_len=dkr::checked_product(&[self.batch,self.hidden,self.width])?;
+        macro_rules! run {
+            ($ty:ty) => {{
+                let x=projected.as_cuda_slice::<$ty>()?;
+                let w=weight.as_cuda_slice::<$ty>()?;
+                let st=state.as_cuda_slice::<$ty>()?;
+                let mut spans=vec![dkr::span(projected_layout,x.len())?,
+                                   dkr::span(weight_layout,w.len())?,
+                                   dkr::span(state_layout,st.len())?];
+                let (xp,xg)=slice_ptr_on_stream(x,projected_layout.start_offset(),&stream);
+                let (wp,wg)=slice_ptr_on_stream(w,weight_layout.start_offset(),&stream);
+                let (sp,sg)=slice_ptr_on_stream(st,state_layout.start_offset(),&stream);
+                let mut pointers=vec![xp,wp,sp];
+                let bias_guard=if let Some((bias,layout))=bias{
+                    let values=bias.as_cuda_slice::<$ty>()?;
+                    spans.push(dkr::span(layout,values.len())?);
+                    let (ptr,guard)=slice_ptr_on_stream(values,layout.start_offset(),&stream);
+                    pointers.push(ptr);
+                    Some(guard)
+                }else{None};
+                spans.extend([out_len,state_len]);
+                let key=dkr::Key::causal(self.projected.dtype(),&spans,out_len,self.width,bias.is_some())?;
+                let mut output=unsafe{device.alloc::<$ty>(out_len)}?;
+                let mut next_state=unsafe{device.alloc::<$ty>(state_len)}?;
+                let (op,og)=slice_ptr_mut_on_stream(&mut output,0,&stream);
+                let (np,ng)=slice_ptr_mut_on_stream(&mut next_state,0,&stream);
+                pointers.extend([op,np]);
+                unsafe{dkr::causal(key,device,&pointers,&self.params)?;}
+                drop((xg,wg,sg,bias_guard,og,ng));
+                self.tensors(
+                    Storage::Cuda(CudaStorage::wrap_cuda_slice(output,device.clone())),
+                    Storage::Cuda(CudaStorage::wrap_cuda_slice(next_state,device.clone())),
+                )
+            }};
+        }
+        Ok(match self.projected.dtype(){
+            DType::F32=>run!(f32),
+            DType::F16=>run!(half::f16),
+            DType::BF16=>run!(half::bf16),
+            dtype=>candle_core::bail!("Unsupported LFM3 convolution dtype {dtype:?}"),
         })
     }
 }
