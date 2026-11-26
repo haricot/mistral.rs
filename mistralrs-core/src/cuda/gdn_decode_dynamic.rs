@@ -106,6 +106,40 @@ pub(super) fn decode(launch:GdnDecodeLaunch<'_>)->Result<Tensor>{
 mod tests{
     use super::*;
     #[test]
+    #[ignore="requires CUDA and GDN typed catalogue"]
+    fn dkr_gdn_decode_partial_tiles_gpu()->Result<()>{
+        let device=Device::new_cuda(0)?;
+        let vd=65usize;
+        for kd in [17usize,64,128]{
+            for dtype in [DType::F16,DType::BF16]{
+                let mut qkv=vec![0f32;2*kd+vd];
+                qkv[kd-1]=1.;
+                qkv[2*kd-1]=1.;
+                qkv[2*kd..].fill(1.);
+                let qkv=Tensor::from_vec(qkv,(1,1,2*kd+vd),&device)?.to_dtype(dtype)?;
+                let b=Tensor::zeros((1,1,1),dtype,&device)?;
+                let al=Tensor::zeros(1,DType::F32,&device)?;
+                for sd in [DType::F16,DType::BF16,DType::F32]{
+                    let mut state=Tensor::zeros((1,1,kd,vd),sd,&device)?;
+                    let out=decode(GdnDecodeLaunch{mixed_qkv:&qkv,b:&b,a:&b,a_log:&al,dt_bias:&al,state:&mut state,
+                        batch_size:1,num_k_heads:1,num_v_heads:1,head_k_dim:kd,head_v_dim:vd,tiled_v_heads:false,
+                        state_layout:RecurrentStateLayout::GdnKeyMajor,slots:GdnStateSlots::Gathered,
+                        requested_kernel:Some(GdnDecodeKernel::Baseline)})?;
+                    let want=0.5/(kd as f32).sqrt()/1.000001;
+                    let data=out.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+                    assert!(data.iter().all(|&x|(x-want).abs()<0.001),"decode dtype={dtype:?} state={sd:?} K={kd}");
+                    let data=state.to_dtype(DType::F32)?.reshape((kd,vd))?.to_vec2::<f32>()?;
+                    for (k,row) in data.iter().enumerate(){
+                        let want=if k==kd-1{0.5}else{0.};
+                        assert!(row.iter().all(|&x|(x-want).abs()<0.002),"decode state K={kd}");
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn dkr_gdn_decode_geometry(){
         let a=variant(GdnDecodeKernel::Baseline,17,65,3).unwrap();
         assert_eq!((a.0,a.1,a.3,a.4),("gdn.decode.fallback.v1",[2,3,1],648,2560));
