@@ -16,6 +16,9 @@ mod preparation_dynamic;
 #[path = "gdn_transaction_dynamic.rs"]
 mod transaction_dynamic;
 #[cfg(feature = "dkr-static-closure-probe")]
+#[path = "gdn_checkpoint_dynamic.rs"]
+mod checkpoint_dynamic;
+#[cfg(feature = "dkr-static-closure-probe")]
 #[path = "gdn_decode_dynamic.rs"]
 mod decode_dynamic;
 
@@ -3472,7 +3475,12 @@ pub fn speculative_state_commit_cuda(commit: GdnSpeculativeStateCommit<'_>) -> R
             state_layout,
         } = commit;
         let (batch_size, seq_len, conv_dim) = mixed_qkv.dims3()?;
-        let expected_conv_dim = 2 * num_k_heads * head_k_dim + num_v_heads * head_v_dim;
+        if batch_size==0||seq_len==0||num_k_heads==0||num_v_heads==0||num_v_heads%num_k_heads!=0||head_v_dim==0{
+            candle::bail!("invalid GDN speculative commit dimensions");
+        }
+        let expected_conv_dim = num_k_heads.checked_mul(head_k_dim).and_then(|v|v.checked_mul(2))
+            .and_then(|v|num_v_heads.checked_mul(head_v_dim).and_then(|w|v.checked_add(w)))
+            .ok_or_else(||candle::Error::msg("GDN speculative commit width overflow"))?;
         if conv_dim != expected_conv_dim {
             candle::bail!(
                 "GDN speculative commit has conv dim {conv_dim}, expected {expected_conv_dim}"
@@ -3509,7 +3517,8 @@ pub fn speculative_state_commit_cuda(commit: GdnSpeculativeStateCommit<'_>) -> R
         {
             candle::bail!("GDN speculative commit activation tensors must share one dtype");
         }
-        let expected_state_elements = batch_size * num_v_heads * head_k_dim * head_v_dim;
+        let expected_state_elements = batch_size.checked_mul(num_v_heads).and_then(|v|v.checked_mul(head_k_dim))
+            .and_then(|v|v.checked_mul(head_v_dim)).ok_or_else(||candle::Error::msg("GDN speculative state size overflow"))?;
         if initial_recurrent_state.elem_count() != expected_state_elements {
             candle::bail!("GDN speculative commit recurrent state has an incompatible shape");
         }
@@ -3538,6 +3547,14 @@ pub fn speculative_state_commit_cuda(commit: GdnSpeculativeStateCommit<'_>) -> R
             candle::bail!("GDN speculative commit state pools must be contiguous");
         }
 
+        #[cfg(feature = "dkr-static-closure-probe")]
+        {
+            checkpoint_dynamic::commit::<T>(&mixed_qkv,&convolved_qkv,&b,&a,&initial_conv_state,&initial_recurrent_state,
+                &a_log,&dt_bias,conv_state_pool,recurrent_state_pool,keep_rows,slot_indices,
+                num_k_heads,num_v_heads,head_k_dim,head_v_dim,tiled_v_heads,value_major)
+        }
+        #[cfg(not(feature = "dkr-static-closure-probe"))]
+        {
         macro_rules! typed_ptr {
             ($tensor:expr, $ty:ty, $name:literal) => {{
                 let (storage, layout) = $tensor.storage_and_layout();
@@ -3603,6 +3620,7 @@ pub fn speculative_state_commit_cuda(commit: GdnSpeculativeStateCommit<'_>) -> R
             );
         }
         Ok(())
+        }
     }
 
     match commit.mixed_qkv.dtype() {
@@ -3752,6 +3770,12 @@ pub fn speculative_conv_checkpoints_cuda(
             );
         }
 
+        #[cfg(feature = "dkr-static-closure-probe")]
+        {
+            checkpoint_dynamic::conv::<T>(x,weight,state_pool,active_slots,checkpoint_lanes,write_checkpoints,pending)
+        }
+        #[cfg(not(feature = "dkr-static-closure-probe"))]
+        {
         let dev = x.device().as_cuda_device()?;
         let (x_storage, x_layout) = x.storage_and_layout();
         let x_storage = match &*x_storage {
@@ -3865,6 +3889,7 @@ pub fn speculative_conv_checkpoints_cuda(
             candle::Storage::Cuda(candle::CudaStorage::wrap_cuda_slice(output, dev.clone())),
             (batch_size, seq_len, conv_dim),
         )))
+        }
     }
 
     match context.x.dtype() {
