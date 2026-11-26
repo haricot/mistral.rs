@@ -67,7 +67,16 @@ def plan(cc):
             add("layout.pack_completion_u32.v1","dkr_pack_completion_u32",256,
                 [t("host",dtype="u32")]+[t(f"row{i}",dtype="u32") for i in range(24)]+
                 [t("output","write","u32")]+[s(n) for n in ("rows","host_width","staged_width")])
-        expected=28 if image==1 else 27
+        if image<=2:
+            for mode in ("generic","warp","rows4"):
+                args=[t("x"),t("gate"),t("weight"),t("output","write"),s("rows")]
+                if mode=="generic":args.append(s("hidden"))
+                if mode!="rows4":
+                    args += [s("outer1"),s("outer2")]+[s(n,"u64") for n in ("x_bh","x_sd","gate_bh","gate_sd")]
+                args += [s("eps","f32"),s("sigmoid")]
+                add(f"attention.prep.gdn_norm.{mode}.v1",f"dkr_gdn_norm_{dt}_{mode}",128 if mode=="generic" else 32,args)
+                if mode=="warp":rows[-1]["block"]=[32,8,1]
+        expected={1:31,2:30,3:27}[image]
         assert len(rows)==expected and len({r["entry"] for r in rows})==expected
         assert all(len(r["arguments"])<=32 for r in rows)
         images[image]=rows
@@ -145,7 +154,7 @@ def self_test(cc,images):
                 else:
                     raise AssertionError("invalid PTX accepted")
         assert len(list(root.rglob("manifest.json")))==3
-    print(f"DKR_R126_S9C2C_ATTENTION_PREP_SELF_TEST=PASS cc={cc} images=3 profiles=82 synthetic_ptx=true")
+    print(f"DKR_R126_S9C2C_ATTENTION_PREP_SELF_TEST=PASS cc={cc} images=3 profiles=88 synthetic_ptx=true")
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
@@ -164,12 +173,12 @@ def main():
     elif a.json_out:
         # The SM61 base is the previously audited upper bound, not a new real inventory.
         report=dict(schema="dkr.r126.attention.prep.plan.v1",cc=a.cc,images=images,
-                    profiles=82,physical_manifests=3,compilation=False,link_qualified=False)
+                    profiles=88,physical_manifests=3,compilation=False,link_qualified=False)
         if a.cc==61:
-            report.update(prospective_physical_upper=526,prospective_logical=3843)
+            report.update(prospective_physical_upper=526,prospective_logical=3849)
         a.json_out.parent.mkdir(parents=True,exist_ok=True)
         a.json_out.write_text(json.dumps(report,indent=2)+"\n")
-        print(f"DKR_R126_S9C2C_ATTENTION_PREP_PLAN=COMPLETE cc={a.cc} images=3 profiles=82 compilation=false")
+        print(f"DKR_R126_S9C2C_ATTENTION_PREP_PLAN=COMPLETE cc={a.cc} images=3 profiles=88 compilation=false")
     elif a.image in images and a.output is not None and a.ptx_file is not None:
         package(a.output,a.cc,a.image,images[a.image],a.ptx_file.read_bytes())
         print(f"DKR_GGUF_MMVQ_SHARD=STAGED cc={a.cc} image={a.image} profiles={len(images[a.image])}")

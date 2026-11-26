@@ -380,7 +380,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
            } else if pkg.name=="attention-prep" {
             let watched=[root.join("mistralrs-core/src/cuda/attention_prep.cu"),
                 root.join("mistralrs-quant/kernels/rotary/rotary.cu"),
-                root.join("mistralrs-quant/kernels/rotary/cuda_compat.h")];
+                root.join("mistralrs-quant/kernels/rotary/cuda_compat.h"),
+                root.join("mistralrs-core/src/cuda/gdn_norm_device.cuh")];
             for id in 1..=3 {
                 let define=format!("-DDKR_AP_DTYPE={id}");
                 let compiled=compile_ptx(&source,&work.join(pkg.name).join(format!("dtype-{id}")),cc,pkg.fast_math,Some(&define),&watched)?;

@@ -5946,7 +5946,7 @@ pub fn rmsnorm_gated_cuda(
     eps: f64,
     activation: GdnGateActivation,
 ) -> Result<Tensor> {
-    use candle::cuda_backend::cudarc::driver::DevicePtr;
+    use candle::cuda_backend::cudarc::driver::{DevicePtr,DevicePtrMut};
     use candle_core as candle;
     use core::ffi::c_void;
 
@@ -5962,6 +5962,10 @@ pub fn rmsnorm_gated_cuda(
     ) -> Result<Tensor> {
         let weight = weight.contiguous()?;
         let hidden_dim = weight.dims1()?;
+        if hidden_dim==0||x.dtype()!=gate.dtype()||x.dtype()!=weight.dtype()
+            ||!x.device().same_device(gate.device())||!x.device().same_device(weight.device()){
+            candle_core::bail!("GDN gated norm dtype/device contract");
+        }
         let dev = x.device().as_cuda_device()?;
 
         let (x_s, x_l) = x.storage_and_layout();
@@ -5991,10 +5995,31 @@ pub fn rmsnorm_gated_cuda(
         };
         let weight_offset = weight_l.start_offset();
 
-        let rows = dims[0] * dims[1] * dims[2];
-        let output_buf = unsafe { dev.alloc::<T>(rows * hidden_dim) }?;
+        let rows = dims[0].checked_mul(dims[1]).and_then(|v|v.checked_mul(dims[2]))
+            .ok_or_else(||candle_core::Error::msg("GDN norm rows overflow"))?;
+        let count=rows.checked_mul(hidden_dim).ok_or_else(||candle_core::Error::msg("GDN norm size overflow"))?;
+        if rows==0{return Tensor::zeros(x.shape(),x.dtype(),x.device());}
+        let mut output_buf = unsafe { dev.alloc::<T>(count) }?;
+        #[cfg(feature = "dkr-static-closure-probe")]
+        {
+            use crate::cuda::attention_prep_dynamic as ap;
+            let stream=dev.cuda_stream();
+            let (xp,_xg)=x_s.device_ptr(&stream);
+            let (gp,_gg)=gate_s.device_ptr(&stream);
+            let (wp,_wg)=weight_s.device_ptr(&stream);
+            let (yp,_yg)=output_buf.device_ptr_mut(&stream);
+            let size=std::mem::size_of::<T>();
+            let shifted=|p:u64,o:usize|->Result<u64>{
+                o.checked_mul(size).and_then(|v|p.checked_add(v as u64))
+                    .ok_or_else(||candle_core::Error::msg("GDN norm pointer overflow"))
+            };
+            ap::gdn_norm(x.device(),x.dtype(),[ap::span(x_l)?,ap::span(gate_l)?,hidden_dim,count],
+                [shifted(xp,x_offset)?,shifted(gp,gate_offset)?,shifted(wp,weight_offset)?,yp],
+                dims,x_stride,gate_stride,eps as f32,activation.sigmoid_flag())?;
+        }
+        #[cfg(not(feature = "dkr-static-closure-probe"))]
+        {
         let stream = dev.cuda_stream().cu_stream() as i64;
-
         unsafe {
             crate::cuda::ffi::gdn_rmsnorm_gated(
                 x_s.slice(x_offset..).device_ptr(x_s.stream()).0 as *const c_void,
@@ -6023,6 +6048,7 @@ pub fn rmsnorm_gated_cuda(
             );
         }
 
+        }
         let output_storage = candle::CudaStorage::wrap_cuda_slice(output_buf, dev.clone());
         Ok(Tensor::from((
             candle::Storage::Cuda(output_storage),

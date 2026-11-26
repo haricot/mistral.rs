@@ -99,3 +99,21 @@ extern "C" __global__ void dkr_pack_completion_u32(const uint32_t* host,const ui
         dkr_staged_token(row,col-host_width,r0,r1,r2,r3,r4,r5,r6,r7,r8,r9,r10,r11,r12,r13,r14,r15,r16,r17,r18,r19,r20,r21,r22,r23);
 }
 #endif
+
+#define DKR_GDN_NORM_IMAGE 1
+#include "../../../mistralrs-core/src/cuda/gdn_norm_device.cuh"
+#define GDN_NORM(tag,T) \
+extern "C" __global__ void dkr_gdn_norm_##tag##_generic(const T*x,const T*g,const T*w,T*y,int rows,int hidden,int o1,int o2,STRIDES(x),STRIDES(g),float eps,int sigmoid){ \
+    gdn_rmsnorm_gated_kernel<T>(x,g,w,y,rows,hidden,o1,o2,S(x),S(g),eps,sigmoid); \
+} \
+extern "C" __global__ void dkr_gdn_norm_##tag##_warp(const T*x,const T*g,const T*w,T*y,int rows,int o1,int o2,STRIDES(x),STRIDES(g),float eps,int sigmoid){ \
+    gdn_rmsnorm_gated_warp_kernel<T,128,8>(x,g,w,y,rows,o1,o2,uint32_t(x_bh),x_bh>>32,uint32_t(x_sd),uint32_t(g_bh),g_bh>>32,uint32_t(g_sd),eps,sigmoid); \
+} \
+extern "C" __global__ void dkr_gdn_norm_##tag##_rows4(const T*x,const T*g,const T*w,T*y,int rows,float eps,int sigmoid){ \
+    gdn_rmsnorm_gated_rows4_kernel<T>(x,g,w,y,rows,eps,sigmoid); \
+}
+#if DKR_AP_DTYPE==1
+GDN_NORM(f16,half)
+#elif DKR_AP_DTYPE==2
+GDN_NORM(bf16,__nv_bfloat16)
+#endif

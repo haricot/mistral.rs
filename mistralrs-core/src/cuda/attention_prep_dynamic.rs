@@ -127,3 +127,60 @@ pub(crate) fn pack_completion(device:&Device,host:u64,rows:&[u64],out:u64,hw:usi
     }
     Ok(())
 }
+
+#[derive(Clone,Copy,Debug,Eq,PartialEq)]
+enum GdnMode{Generic,Warp,Rows4}
+#[derive(Clone,Copy,Eq,PartialEq)]
+struct GdnKey{dtype:ElementType,mode:GdnMode,spans:[usize;4],rows:u32}
+thread_local!{static GDN:RefCell<LaunchPlanCache<GdnKey,PrevalidatedLaunchPlan>>=RefCell::new(LaunchPlanCache::new());}
+fn gdn_geometry(mode:GdnMode,rows:u32)->([u32;3],u32){
+    match mode{GdnMode::Generic=>([128,1,1],rows),GdnMode::Warp=>([32,8,1],rows.div_ceil(8)),
+        GdnMode::Rows4=>([32,1,1],rows.div_ceil(4))}
+}
+fn gdn_plan(key:GdnKey,dev:&Device)->Result<PrevalidatedLaunchPlan>{
+    let tag=match key.mode{GdnMode::Generic=>"generic",GdnMode::Warp=>"warp",GdnMode::Rows4=>"rows4"};
+    let mut args=key.spans.iter().map(|&n|Argument::Tensor{dtype:key.dtype,shape:vec![n],contiguous:true,start_offset:0,representation:None}).collect::<Vec<_>>();
+    let s=|dtype|Argument::Scalar{dtype};
+    args.push(s(ElementType::I32));
+    if key.mode==GdnMode::Generic{args.push(s(ElementType::I32));}
+    if key.mode!=GdnMode::Rows4{
+        args.extend([s(ElementType::I32),s(ElementType::I32)]);
+        args.extend((0..4).map(|_|s(ElementType::U64)));
+    }
+    args.extend([s(ElementType::F32),s(ElementType::I32)]);
+    let (block,grid)=gdn_geometry(key.mode,key.rows);
+    let mut req=LaunchRequest{operation:format!("attention.prep.gdn_norm.{tag}.v1"),cc:0,args,grid:[grid,1,1],max_dynamic_shared_mem_bytes:0};
+    let p=kernel_cache()?.prepare_for_device(&mut req,dev).map_err(|e|candle_core::Error::msg(e.to_string()))?;
+    if p.manifest.block!=block||p.manifest.shared_mem_bytes!=0{candle_core::bail!("GDN norm block mismatch");}
+    p.prevalidate_launch(&req,dev).map_err(|e|candle_core::Error::msg(e.to_string()))
+}
+pub(crate) fn gdn_norm(device:&Device,dt:DType,spans:[usize;4],pointers:[u64;4],dims:[usize;4],xs:[usize;4],gs:[usize;4],eps:f32,sigmoid:i32)->Result<()>{
+    use candle_core::cuda::cudarc::driver::PushKernelArg;
+    let [o0,o1,o2,hidden]=dims;
+    let rows=o0.checked_mul(o1).and_then(|v|v.checked_mul(o2)).filter(|&v|v>0&&v<=i32::MAX as usize)
+        .ok_or_else(||candle_core::Error::msg("GDN norm rows overflow"))?;
+    let elements=rows.checked_mul(hidden).ok_or_else(||candle_core::Error::msg("GDN norm size overflow"))?;
+    if hidden==0||spans.contains(&0)||spans[3]!=elements||spans[2]!=hidden||pointers.contains(&0){
+        candle_core::bail!("GDN norm span mismatch");
+    }
+    let (ri,hi,oi1,oi2)=(rows as i32,i32::try_from(hidden).map_err(candle_core::Error::wrap)?,
+        i32::try_from(o1).map_err(candle_core::Error::wrap)?,i32::try_from(o2).map_err(candle_core::Error::wrap)?);
+    let xp=strides(&xs)?;let gp=strides(&gs)?;
+    let dense=|s:[usize;4]|s[3]==1&&(o2<=1||s[2]==128)&&(o1<=1||s[1]==o2*128)&&(o0<=1||s[0]==o1*o2*128);
+    let mode=if hidden==128&&xs[3]==1&&gs[3]==1{
+        if rows>=1024&&dense(xs)&&dense(gs)&&pointers.iter().all(|p|p%16==0){GdnMode::Rows4}else{GdnMode::Warp}
+    }else{GdnMode::Generic};
+    let dtype=match dt{DType::F16=>ElementType::F16,DType::BF16=>ElementType::Bf16,_=>candle_core::bail!("GDN norm dtype")};
+    let key=GdnKey{dtype,mode,spans,rows:rows as u32};
+    let stream=device.as_cuda_device()?.cuda_stream();
+    GDN.with(|cache|cache.borrow_mut().with_plan(key,device,||gdn_plan(key,device),|p|{
+        unsafe{p.with_prevalidated_launch(|fun,cfg|{
+            let mut b=stream.launch_builder(fun);
+            for ptr in &pointers{b.arg(ptr);}
+            b.arg(&ri);
+            if mode==GdnMode::Generic{b.arg(&hi);}
+            if mode!=GdnMode::Rows4{b.arg(&oi1).arg(&oi2).arg(&xp[0]).arg(&xp[1]).arg(&gp[0]).arg(&gp[1]);}
+            b.arg(&eps).arg(&sigmoid);b.launch(cfg)?;Ok(())
+        })}.map_err(|e|candle_core::Error::msg(e.to_string()))
+    }))
+}
