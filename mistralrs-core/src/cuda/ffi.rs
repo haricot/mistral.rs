@@ -730,6 +730,7 @@ extern "C" {
         stream: i64,
     );
 
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn topk_large_f32(
         input: *const f32,
         block_values: *mut f32,
@@ -746,6 +747,7 @@ extern "C" {
         inv_temperature: f32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn topk_large_f32_packed(
         input: *const f32,
         block_values: *mut f32,
@@ -760,6 +762,7 @@ extern "C" {
         inv_temperature: f32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn topk_large_f32_packed_batched(
         input: *const f32,
         inv_temperatures: *const f32,
@@ -775,6 +778,7 @@ extern "C" {
         nblocks: i32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn topk_large_bf16_packed_batched(
         input: *const c_void,
         inv_temperatures: *const f32,
@@ -790,6 +794,7 @@ extern "C" {
         nblocks: i32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn topk_large_f16_packed_batched(
         input: *const c_void,
         inv_temperatures: *const f32,
@@ -805,6 +810,7 @@ extern "C" {
         nblocks: i32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn topk_large_ranked_f32_packed_batched(
         input: *const f32,
         block_values: *mut f32,
@@ -818,7 +824,9 @@ extern "C" {
         nblocks: i32,
         stream: i64,
     ) -> i32;
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn topk_large_ranked_state_words_per_row() -> usize;
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn topk_large_ranked_bf16_packed_batched(
         input: *const c_void,
         block_values: *mut f32,
@@ -832,6 +840,7 @@ extern "C" {
         nblocks: i32,
         stream: i64,
     ) -> i32;
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn topk_large_ranked_f16_packed_batched(
         input: *const c_void,
         block_values: *mut f32,
