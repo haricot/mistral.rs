@@ -199,6 +199,7 @@ pub fn lfm3_causal_conv1d(
         || seq.checked_add(width).is_none()
         || batch.checked_mul(seq).and_then(|n|n.checked_mul(hidden)).is_none()
         || batch.checked_mul(hidden).and_then(|n|n.checked_mul(width)).is_none()
+        || seq.checked_add(width).and_then(|n|n.checked_mul(hidden)).and_then(|n|n.checked_mul(batch)).is_none()
         || groups != 1
         || width == 0
         || seq == 0
