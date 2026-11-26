@@ -1319,6 +1319,7 @@ extern "C" {
         state_dtype: i32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn gdn_speculative_state_commit(
         mixed_qkv: *const c_void,
         convolved_qkv: *const c_void,
@@ -1345,6 +1346,7 @@ extern "C" {
         state_dtype: i32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn gdn_speculative_conv_checkpoints(
         x: *const c_void,
         weight: *const c_void,
