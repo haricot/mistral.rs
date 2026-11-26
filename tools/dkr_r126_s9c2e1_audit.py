@@ -147,14 +147,14 @@ def capability_audit(root):
 
 def audit(root):
     prior=previous(root)
-    require(set(prior["closed_reuse_declarations"])==NAMES and prior["remaining_core_ffi_count"] in (43,37,28,16),
+    require(set(prior["closed_reuse_declarations"])==NAMES and prior["remaining_core_ffi_count"] in (43,37,28,16,2),
             "historical guard inventory not closed")
     guards=guard_audit(root)
     capabilities=capability_audit(root)
     return dict(schema="dkr.r126.s9c2e1.source.v1",status="SOURCE_COMPLETE",
                 guards=guards,capabilities=capabilities,residual_declarations=prior["remaining_core_ffi_count"],
                 closed_router_declarations=prior["closed_router_declarations"],
-                closed_large_topk_declarations=prior["closed_large_topk_declarations"],closed_sampling_declarations=prior["closed_sampling_declarations"],
+                closed_large_topk_declarations=prior["closed_large_topk_declarations"],closed_sampling_declarations=prior["closed_sampling_declarations"],closed_argsort_declarations=prior["closed_argsort_declarations"],
                 profiles_added=0,images_added=0,projected_logical=prior["current_projected_logical"],
                 projected_physical_upper=prior["current_projected_physical_upper"],
                 compilation=False,link_qualified=False,full_closure=False,model_scope_fit_proven=False)

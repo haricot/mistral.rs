@@ -3104,3 +3104,6 @@ mod dkr_s683;
 
 #[cfg(feature = "dkr-static-closure-probe")]
 pub use cuda::sampling_dynamic::{dkr_sampling_requirements, DkrSamplingMode};
+
+#[cfg(feature = "dkr-static-closure-probe")]
+pub use cuda::argsort_dynamic::dkr_argsort_requirements;

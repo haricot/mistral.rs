@@ -1,4 +1,6 @@
 #[cfg(feature = "dkr-static-closure-probe")]
+pub(crate) mod argsort_dynamic;
+#[cfg(feature = "dkr-static-closure-probe")]
 pub(crate) mod sampling_dynamic;
 #[cfg(feature = "dkr-static-closure-probe")]
 pub(crate) mod large_topk_dynamic;

@@ -3820,6 +3820,13 @@ impl candle_core::CustomOp1 for ArgSort {
         storage: &candle_core::CudaStorage,
         layout: &candle_core::Layout,
     ) -> Result<(candle_core::CudaStorage, candle_core::Shape)> {
+        #[cfg(feature = "dkr-static-closure-probe")]
+        {
+            if self.inplace { candle_core::bail!("DKR argsort does not mutate an input"); }
+            return crate::cuda::argsort_dynamic::indices(storage, layout, self.last_dim, self.asc);
+        }
+        #[cfg(not(feature = "dkr-static-closure-probe"))]
+        {
         use candle_core::backend::BackendStorage;
         use candle_core::cuda_backend::cudarc::driver::DevicePtr;
         use candle_core::cuda_backend::CudaStorageSlice;
@@ -3905,6 +3912,7 @@ impl candle_core::CustomOp1 for ArgSort {
             device: dev.clone(),
         };
         Ok((dst_ret, layout.shape().clone()))
+        }
     }
 }
 
@@ -3950,6 +3958,12 @@ impl ArgSortOp for Tensor {
             Some(last_dim) => *last_dim,
             None => candle_core::bail!("empty last-dim in arg-sort"),
         };
+        #[cfg(feature = "dkr-static-closure-probe")]
+        if self.device().is_cuda() {
+            let asort = self.arg_sort(asc)?;
+            let sorted = self.apply_op2_no_bwd(&asort, &crate::cuda::argsort_dynamic::ArgsortGather { cols: last_dim })?;
+            return Ok((sorted, asort));
+        }
         let sorted = self.copy()?;
 
         let asort = sorted.apply_op1_no_bwd(&ArgSort {

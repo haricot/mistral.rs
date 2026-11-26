@@ -154,7 +154,7 @@ def guard_audit(root):
 
 def audit(root):
     prev=previous(root)
-    require(prev["residual_declarations"] in (37,28,16) and set(prev["closed_router_declarations"])==NAMES,
+    require(prev["residual_declarations"] in (37,28,16,2) and set(prev["closed_router_declarations"])==NAMES,
             "cumulative residual closure")
     module,groups=plans(root)
     guards=guard_audit(root)
@@ -195,7 +195,7 @@ def audit(root):
     require(logical==4186 and physical==546,"projected master budget")
     return dict(schema="dkr.r126.s9c2e2.source.v1",status="SOURCE_COMPLETE",guards=guards,
                 router_profiles=132,small_topk_profiles=12,profiles_added=144,images_added=12,max_args=15,
-                residual_declarations=prev["residual_declarations"],closed_large_topk_declarations=prev["closed_large_topk_declarations"],closed_sampling_declarations=prev["closed_sampling_declarations"],
+                residual_declarations=prev["residual_declarations"],closed_large_topk_declarations=prev["closed_large_topk_declarations"],closed_sampling_declarations=prev["closed_sampling_declarations"],closed_argsort_declarations=prev["closed_argsort_declarations"],
                 projected_master_logical=logical,projected_master_physical_upper=physical,
                 active_limits_unchanged=True,master_is_not_runtime_catalogue=True,scope_example=scoped,
                 shared_body_preserved_except_padded_lane_safety=True,

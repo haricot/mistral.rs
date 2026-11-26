@@ -21,7 +21,7 @@ def require(ok,msg):
 
 def audit(root):
     p=previous(root)
-    require(p["residual_declarations"]==16 and set(p["closed_sampling_declarations"])==NAMES,"cumulative closure")
+    require(p["residual_declarations"] in (16,2) and set(p["closed_sampling_declarations"])==NAMES,"cumulative closure")
     result=producer(root)
     check_declarations((root/CORE/"cuda/ffi.rs").read_text(),NAMES)
     found=set()
@@ -51,7 +51,7 @@ def audit(root):
         require(marker in adapter,"adapter contract "+marker)
     require("pub use cuda::sampling_dynamic::{dkr_sampling_requirements, DkrSamplingMode};" in (root/CORE/"lib.rs").read_text(),"capability export")
     require(p["projected_master_logical"]+32==4245 and p["projected_master_physical_upper"]+3==551,"budget")
-    return dict(result,status="SOURCE_COMPLETE",guarded_ffi=12,residual_ffi=16,
+    return dict(result,status="SOURCE_COMPLETE",guarded_ffi=12,residual_ffi=p["residual_declarations"],closed_argsort_declarations=p["closed_argsort_declarations"],
                 ffi_closed=True,model_scope_fit_proven=False,compilation=False,link_qualified=False,
                 numeric_qualified=False,full_closure=False)
 
@@ -74,6 +74,6 @@ def main():
         a.json_out.parent.mkdir(parents=True,exist_ok=True)
         with a.json_out.open("x") as f:
             json.dump(r,f,indent=2,sort_keys=True);f.write("\n")
-    print("DKR_R126_S9C2E4_SOURCE=COMPLETE guarded_ffi=12 residual=16 profiles=32 images=3 max_args=16 projected_master_logical=4245 projected_master_physical=551 model_scope_fit=UNPROVEN compilation=false link_qualified=false full_closure=false")
+    print(f"DKR_R126_S9C2E4_SOURCE=COMPLETE guarded_ffi=12 residual={r[\'residual_ffi\']} profiles=32 images=3 max_args=16 projected_master_logical=4245 projected_master_physical=551 model_scope_fit=UNPROVEN compilation=false link_qualified=false full_closure=false")
 if __name__=="__main__":
     main()
