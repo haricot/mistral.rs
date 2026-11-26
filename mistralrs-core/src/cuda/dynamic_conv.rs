@@ -5,6 +5,87 @@ use candle_core::{
 
 pub(crate) const MAX_DYNAMIC_CONV_KERNEL_SIZE: usize = 8;
 
+#[cfg(feature = "dkr-static-closure-probe")]
+mod typed {
+    use super::*;
+    use crate::cuda::{attention_prep_dynamic::span, kernel_runtime::{kernel_cache, LaunchPlanCache}};
+    use candle_core::{Device, cuda::cudarc::driver::PushKernelArg};
+    use mistralrs_kernel_runtime::{universal::{Argument,ElementType,LaunchRequest},
+        universal_cuda::PrevalidatedLaunchPlan};
+    use std::cell::RefCell;
+
+    #[derive(Clone, Copy, Eq, PartialEq)]
+    struct Key {
+        dtype: ElementType,
+        spans: [usize;4],
+        grid: u32,
+        k2: bool,
+    }
+    thread_local! {
+        static PLANS: RefCell<LaunchPlanCache<Key,PrevalidatedLaunchPlan>> =
+            RefCell::new(LaunchPlanCache::new());
+    }
+
+    fn prepare(key: Key, device: &Device) -> Result<PrevalidatedLaunchPlan> {
+        let mut args=key.spans.iter().map(|&n| Argument::Tensor {
+            dtype:key.dtype, shape:vec![n], contiguous:true, start_offset:0,
+            representation:None,
+        }).collect::<Vec<_>>();
+        args.extend((0..5).map(|_|Argument::Scalar{dtype:ElementType::I32}));
+        args.extend((0..9).map(|_|Argument::Scalar{dtype:ElementType::I64}));
+        let variant=if key.k2 {"k2"} else {"generic"};
+        let mut request=LaunchRequest {
+            operation:format!("convolution.dynamic.{variant}.v1"), cc:0,args,
+            grid:[key.grid,1,1], max_dynamic_shared_mem_bytes:0,
+        };
+        let p=kernel_cache()?.prepare_for_device(&mut request,device)
+            .map_err(|e|candle_core::Error::msg(e.to_string()))?;
+        if p.manifest.block!=[256,1,1] || p.manifest.shared_mem_bytes!=0 {
+            candle_core::bail!("dynamic convolution typed launch geometry mismatch");
+        }
+        p.prevalidate_launch(&request,device).map_err(|e|candle_core::Error::msg(e.to_string()))
+    }
+
+    // Caller retains all device pointer guards through launch.
+    pub(super) fn launch(op:&DynamicConvOp, device:&Device, dtype:DType,
+        layouts:[&Layout;3], pointers:[u64;4], elements:usize) -> Result<()> {
+        if pointers.contains(&0) || elements==0 || elements>i64::MAX as usize ||
+            op.batch<=0 || op.sequence_length<=0 || op.hidden_size<=0 ||
+            op.group_size<=0 || op.hidden_size%op.group_size!=0 ||
+            op.kernel_size<=0 || op.kernel_size as usize>MAX_DYNAMIC_CONV_KERNEL_SIZE {
+            candle_core::bail!("dynamic convolution typed invalid geometry");
+        }
+        let spans=[span(layouts[0])?,span(layouts[1])?,span(layouts[2])?,elements];
+        let mut strides=[0i64;9];
+        for (dst, &src) in strides.iter_mut().zip(layouts.iter().flat_map(|l|l.stride())) {
+            *dst=i64::try_from(src).map_err(candle_core::Error::wrap)?;
+        }
+        let grid=u32::try_from(elements.div_ceil(256)).map_err(candle_core::Error::wrap)?;
+        if grid>i32::MAX as u32 {
+            candle_core::bail!("dynamic convolution grid overflow");
+        }
+        let dtype=match dtype {
+            DType::F16=>ElementType::F16, DType::BF16=>ElementType::Bf16,
+            DType::F32=>ElementType::F32,
+            _=>candle_core::bail!("dynamic convolution typed dtype unsupported"),
+        };
+        let key=Key{dtype,spans,grid,k2:op.kernel_size==2};
+        let stream=device.as_cuda_device()?.cuda_stream();
+        PLANS.with(|cache|cache.borrow_mut().with_plan(key,device,||prepare(key,device),|p|{
+            unsafe { p.with_prevalidated_launch(|fun,cfg|{
+                let mut b=stream.launch_builder(fun);
+                for ptr in &pointers { b.arg(ptr); }
+                b.arg(&op.batch).arg(&op.sequence_length).arg(&op.hidden_size)
+                    .arg(&op.group_size).arg(&op.kernel_size);
+                for stride in &strides { b.arg(stride); }
+                b.launch(cfg)?;
+                Ok(())
+            }) }.map_err(|e|candle_core::Error::msg(e.to_string()))
+        }))
+    }
+}
+
+
 #[derive(Clone, Copy)]
 struct DynamicConvOp {
     batch: i32,
@@ -38,6 +119,10 @@ impl DynamicConvOp {
         let hidden_size = usize::try_from(self.hidden_size).map_err(candle_core::Error::wrap)?;
         let group_size = usize::try_from(self.group_size).map_err(candle_core::Error::wrap)?;
         let kernel_size = usize::try_from(self.kernel_size).map_err(candle_core::Error::wrap)?;
+        if batch == 0 || sequence_length == 0 || hidden_size == 0 ||
+            kernel_size == 0 || kernel_size > MAX_DYNAMIC_CONV_KERNEL_SIZE {
+            candle_core::bail!("dynamic convolution invalid geometry");
+        }
         if group_size == 0 || hidden_size % group_size != 0 {
             candle_core::bail!("dynamic convolution group size must divide hidden size");
         }
@@ -96,8 +181,11 @@ impl CustomOp3 for DynamicConvOp {
         let device = hidden.device();
         let stream = device.cuda_stream();
         let elements = hidden_layout.shape().elem_count();
+        #[cfg(not(feature = "dkr-static-closure-probe"))]
         let hidden_stride = hidden_layout.stride();
+        #[cfg(not(feature = "dkr-static-closure-probe"))]
         let dynamic_stride = dynamic_layout.stride();
+        #[cfg(not(feature = "dkr-static-closure-probe"))]
         let base_stride = base_layout.stride();
 
         macro_rules! launch {
@@ -113,6 +201,12 @@ impl CustomOp3 for DynamicConvOp {
                 let (dynamic_ptr, dynamic_guard) = dynamic_view.device_ptr(&stream);
                 let (base_ptr, base_guard) = base_view.device_ptr(&stream);
                 let (output_ptr, output_guard) = output.device_ptr_mut(&stream);
+                #[cfg(feature = "dkr-static-closure-probe")]
+                typed::launch(self,&candle_core::Device::Cuda(device.clone()),hidden.dtype(),
+                    [hidden_layout,dynamic_layout,base_layout],
+                    [hidden_ptr as u64,dynamic_ptr as u64,base_ptr as u64,output_ptr as u64],
+                    elements)?;
+                #[cfg(not(feature = "dkr-static-closure-probe"))]
                 let status = unsafe {
                     crate::cuda::ffi::$ffi(
                         hidden_ptr as *const core::ffi::c_void,
@@ -140,6 +234,7 @@ impl CustomOp3 for DynamicConvOp {
                 drop(base_guard);
                 drop(dynamic_guard);
                 drop(hidden_guard);
+                #[cfg(not(feature = "dkr-static-closure-probe"))]
                 if status != 0 {
                     candle_core::bail!(concat!(stringify!($ffi), " failed with status {}"), status);
                 }
@@ -181,6 +276,27 @@ pub(crate) fn dynamic_conv(
 mod tests {
     use super::*;
     use candle_core::{Device, IndexOp};
+
+    #[test]
+    #[ignore = "requires CUDA and typed catalogue under closure probe"]
+    fn dkr_dynamic_conv_all_dtypes_and_taps_gpu() -> Result<()> {
+        let device = Device::new_cuda(0)?;
+        for dtype in [DType::F16,DType::BF16,DType::F32] {
+            for taps in [1usize,2,3,8] {
+                let hidden=Tensor::ones((2,5,8),dtype,&device)?;
+                let dynamic=Tensor::ones((2,5,taps,4),dtype,&device)?;
+                let base=Tensor::ones((taps,8),dtype,&device)?;
+                let output=dynamic_conv(&hidden,&dynamic,&base,taps,2)?;
+                let actual=output.to_dtype(DType::F32)?.to_vec3::<f32>()?;
+                for batch in actual {
+                    for (position,row) in batch.iter().enumerate() {
+                        assert!(row.iter().all(|&x|x==2.0*(position+1).min(taps) as f32));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     #[ignore = "requires CUDA"]
