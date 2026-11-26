@@ -223,6 +223,109 @@ pub(super) fn launch_flush(device:&Device,stream:&Arc<CudaStream>,bindings:&[Bou
 mod tests{
     use super::*;
     #[test]
+    #[ignore="requires CUDA and GDN typed catalogue"]
+    fn dkr_gdn_speculative_plain_partial_tile_gpu()->Result<()>{
+        let device=Device::new_cuda(0)?;
+        let (batch,seq,kd,vd,capacity)=(3usize,2usize,17usize,35usize,4usize);
+        let cd=2*kd+vd;
+        let mut qkv=vec![0f32;batch*seq*cd];
+        for row in qkv.chunks_mut(cd){row[0]=1.;row[kd]=1.;row[2*kd..].fill(1.);}
+        let slots=Tensor::from_vec(vec![1u32,4,u32::MAX],batch,&device)?;
+        let bias=Tensor::zeros(1,DType::F32,&device)?;
+        for dt in [DType::F16,DType::BF16]{
+            let mixed=Tensor::from_vec(qkv.clone(),(batch,seq,cd),&device)?.to_dtype(dt)?;
+            let gates=Tensor::zeros((batch,seq,1),dt,&device)?;
+            for sd in [DType::F16,DType::BF16,DType::F32]{
+                let state=Tensor::zeros((capacity,1,kd,vd),sd,&device)?;
+                let got=speculative_recurrence_checkpoints_cuda(GdnSpeculativeRecurrenceCheckpoints{
+                    mixed_qkv:&mixed,b:&gates,a:&gates,a_log:&bias,dt_bias:&bias,state_pool:&state,
+                    active_slots:&slots,checkpoint_lanes:2,num_k_heads:1,num_v_heads:1,head_k_dim:kd,head_v_dim:vd,
+                    tiled_v_heads:false,state_layout:RecurrentStateLayout::GdnKeyMajor,post_op:None,
+                    record_transitions:false,pending:None})?;
+                assert!(got.transitions.is_none());
+                let GdnPostOpOutput::Tensor(out)=got.output else{panic!("unexpected quantized output")};
+                let values=out.to_dtype(DType::F32)?.reshape((batch*seq,vd))?.to_vec2::<f32>()?;
+                for (r,want) in [(0,0.5/(kd as f32).sqrt()),(1,0.625/(kd as f32).sqrt())]{
+                    assert!(values[r].iter().all(|&v|(v-want).abs()<0.002));
+                }
+                assert!(values[2..].iter().flatten().all(|&v|v==0.));
+                let data=state.to_dtype(DType::F32)?.reshape((capacity,kd*vd))?.to_vec2::<f32>()?;
+                assert!(data[0][..vd].iter().all(|&v|(v-0.5).abs()<0.002));
+                assert!(data[1][..vd].iter().all(|&v|(v-0.625).abs()<0.002));
+                assert!(data[2..].iter().flatten().all(|&v|v==0.));
+            }
+        }
+        Ok(())
+    }
+    #[test]
+    #[ignore="requires CUDA and GDN typed catalogue"]
+    fn dkr_gdn_speculative_fused_batch_gpu()->Result<()>{
+        let device=Device::new_cuda(0)?;
+        let (batch,seq,kd,vd,cd)=(1usize,2usize,128usize,128usize,384usize);
+        let mut qkv=vec![0f32;batch*seq*cd];
+        for row in qkv.chunks_mut(cd){row[0]=1.;row[kd]=1.;row[2*kd..].fill(1.);}
+        let bias=Tensor::zeros(1,DType::F32,&device)?;
+        let slots=Tensor::from_vec(vec![1u32],1,&device)?;
+        for dt in [DType::F16,DType::BF16]{
+            let mixed=Tensor::from_vec(qkv.clone(),(batch,seq,cd),&device)?.to_dtype(dt)?;
+            let gates=Tensor::zeros((batch,seq,1),dt,&device)?;
+            let gate=Tensor::ones((batch,seq,1,vd),dt,&device)?;
+            let weight=Tensor::ones(vd,dt,&device)?;
+            for sd in [DType::F16,DType::BF16,DType::F32]{
+                let checkpoint=Tensor::zeros((2,1,vd,kd),sd,&device)?;
+                let journal=Tensor::zeros((2,1,vd,kd),sd,&device)?;
+                let run=|state:&Tensor,record:bool|speculative_recurrence_checkpoints_cuda(GdnSpeculativeRecurrenceCheckpoints{
+                    mixed_qkv:&mixed,b:&gates,a:&gates,a_log:&bias,dt_bias:&bias,state_pool:state,active_slots:&slots,
+                    checkpoint_lanes:2,num_k_heads:1,num_v_heads:1,head_k_dim:kd,head_v_dim:vd,tiled_v_heads:false,
+                    state_layout:RecurrentStateLayout::GdnValueMajor,
+                    post_op:Some(GdnSpeculativeRmsNormGate{gate:&gate,weight:&weight,eps:1e-6,sigmoid_gate:true,quantization:None}),
+                    record_transitions:record,pending:None});
+                let first=run(&checkpoint,false)?;
+                let second=run(&journal,true)?;
+                assert!(first.transitions.is_none());
+                let GdnPostOpOutput::Tensor(a)=first.output else{panic!("unexpected quantized output")};
+                let GdnPostOpOutput::Tensor(b)=second.output else{panic!("unexpected quantized output")};
+                let a=a.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+                let b=b.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+                assert!(a.iter().zip(b).all(|(&a,b)|(a-b).abs()<0.002));
+                let logs=second.transitions.expect("batch transition log");
+                let keys=logs.key.flatten_all()?.to_vec1::<f32>()?;
+                assert!((keys[0]-1.).abs()<0.001&&(keys[kd]-1.).abs()<0.001);
+                let delta=logs.delta.reshape((seq,vd))?.to_vec2::<f32>()?;
+                assert!(delta[0].iter().all(|&v|(v-0.5).abs()<0.002));
+                assert!(delta[1].iter().all(|&v|(v-0.375).abs()<0.002));
+                assert!(logs.decay.flatten_all()?.to_vec1::<f32>()?.iter().all(|&v|(v-0.5).abs()<0.001));
+                assert!(journal.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?.iter().all(|&v|v==0.));
+            }
+        }
+        Ok(())
+    }
+    #[test]
+    #[ignore="requires SM80+ and GDN typed deferred catalogue"]
+    fn dkr_gdn_deferred_flush_cursor_gpu()->Result<()>{
+        let device=Device::new_cuda(0)?;
+        let cap=4usize;
+        let state=Tensor::ones((cap,1,128,128),DType::F32,&device)?;
+        let key=Tensor::ones((cap,4,1,128),DType::F32,&device)?;
+        let delta=Tensor::ones((cap,4,1,128),DType::F32,&device)?.affine(2.,0.)?;
+        let decay=Tensor::ones((cap,4,1),DType::F32,&device)?.affine(0.5,0.)?;
+        let cursor=Tensor::from_vec(vec![1u32,3,4,0],cap,&device)?;
+        let slots=Tensor::from_vec(vec![0u32,1,2,3,u32::MAX,4],6,&device)?;
+        let run=||flush_deferred_state_cuda(GdnDeferredStateFlush{state_pool:&state,active_slots:&slots,
+            deferred_key:&key,deferred_delta:&delta,deferred_decay:&decay,deferred_cursor:&cursor,num_k_heads:1,num_v_heads:1,
+            head_k_dim:128,head_v_dim:128,tiled_v_heads:false,state_layout:RecurrentStateLayout::GdnValueMajor});
+        for _ in 0..2{
+            run()?;
+            assert_eq!(cursor.to_vec1::<u32>()?,vec![0,0,4,0]);
+            let data=state.reshape((cap,128*128))?.to_vec2::<f32>()?;
+            for (r,want) in [2.5,3.625,1.,1.].into_iter().enumerate(){
+                assert!(data[r].iter().all(|&v|(v-want).abs()<0.0001));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn dkr_gdn_speculative_scalar_pairs(){
         match pack(0x12345678,0xfedcba98).unwrap(){
             p::S::U64(v)=>assert_eq!(v,0xfedcba9812345678),_=>panic!("wrong scalar type"),
