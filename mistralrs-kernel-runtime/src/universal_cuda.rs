@@ -251,6 +251,24 @@ impl PreparedKernel {
         Ok(PrevalidatedLaunchPlan {kernel:Arc::clone(self),config})
     }
 
+    /// Shape-derived shared memory using the ordinary (non-opt-in) launch
+    /// budget, including the function's static allocation. Checked on plan
+    /// miss only. The caller must prove the device accesses fit in bytes.
+    pub unsafe fn prevalidate_launch_with_default_shared(
+        self: &Arc<Self>, request: &LaunchRequest, device: &Device, bytes: u32,
+    ) -> Result<PrevalidatedLaunchPlan> {
+        use candle_core::cuda_backend::cudarc::driver::sys::{CUdevice_attribute, CUfunction_attribute};
+        let plan = unsafe { self.prevalidate_launch_with_shared(request, device, bytes)? };
+        let stream = device.as_cuda_device()?.cuda_stream();
+        let context = stream.context();
+        context.bind_to_thread()?;
+        let limit = context.attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK)?;
+        let static_bytes = self.function.get_attribute(CUfunction_attribute::CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES)?;
+        let total = static_bytes.checked_add(i32::try_from(bytes)?).context("shared memory overflow")?;
+        ensure!(static_bytes >= 0 && total <= limit, "kernel shared memory exceeds default device limit");
+        Ok(plan)
+    }
+
     /// Resource-safe fixed dynamic shared-memory plan. Opt-in is performed
     /// only on a plan miss, before graph capture; no architecture-specific policy.
     pub fn prevalidate_launch_with_optin(
