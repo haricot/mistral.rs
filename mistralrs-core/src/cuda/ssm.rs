@@ -17,6 +17,7 @@
 ///
 /// Returns:
 /// - `y`:       (batch, seq_len, n_heads, head_dim) - output, f32
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 #[cfg(all(feature = "cuda", not(feature = "dkr-ssm")))]
 #[allow(clippy::too_many_arguments)]
 pub fn selective_scan_cuda(
