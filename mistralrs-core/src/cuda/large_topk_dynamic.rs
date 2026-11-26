@@ -104,7 +104,7 @@ impl Geometry{
     fn k(self)->usize{self.k as usize}
     fn blocks(self)->usize{self.blocks as usize}
     fn candidates(self)->usize{self.blocks()*self.k()}
-    fn width(self,soft:bool)->usize{2*self.k()+2*usize::from(soft)}
+    fn width(self,soft:bool)->usize{2*self.k()+if soft {2} else {0}}
     fn grid1(self)->[u32;3]{[self.blocks as u32,self.rows as u32,1]}
     fn grid2(self)->[u32;3]{[self.rows as u32,1,1]}
 }
@@ -136,9 +136,8 @@ fn ordinary(device:&Device,r:OperationRequirement,args:Vec<Argument>,grid:[u32;3
         r.implementations.as_ref().is_none_or(|v|v.len()!=1 || v[0]!=p.manifest.implementation_id){
         candle_core::bail!("large top-k selected profile differs from exact launch contract");
     }
-    // Zero-dynamic CUB stages have no shape-derived shared allocation.
-    if ceiling==0 {p.prevalidate_launch(&request,device).map_err(err)}
-    else {unsafe{p.prevalidate_launch_with_default_shared(&request,device,shared)}.map_err(err)}
+    // Even a zero-dynamic CUB stage must fit its static shared allocation.
+    unsafe{p.prevalidate_launch_with_default_shared(&request,device,shared)}.map_err(err)
 }
 fn ceil_div(a:u32,b:u32)->u32{a.div_ceil(b)}
 fn gcd(mut a:u32,mut b:u32)->u32{while b!=0{let r=a%b;a=b;b=r;}a}
@@ -284,7 +283,7 @@ pub(crate) unsafe fn launch(
         }
         _=>candle_core::bail!("large top-k binding mode mismatch"),
     }
-    let vec=if mode==DkrLargeTopKMode::Ranked{vector_width(cols as u32,work.input,dt.size_bytes() as u32)}else{0};
+    let vec=if mode==DkrLargeTopKMode::Ranked{vector_width(cols as u32,work.input,u32::try_from(dt.size_bytes()).map_err(err)?)}else{0};
     let key=Key{g,mode,dt,vec};
     PLANS.with(|cache|cache.borrow_mut().with_plan(key,device,||prepare(key,device),|p|{
         // Every stage has been admitted before any CUDA work is submitted.
@@ -352,6 +351,46 @@ mod tests{
         assert!(Geometry::new(5,131072,16,2048,63).is_err());
         assert_eq!(dkr_large_topk_requirements(DType::F32,DkrLargeTopKMode::Ranked)?.len(),8);
         assert_eq!(dkr_large_topk_requirements(DType::BF16,DkrLargeTopKMode::Ranked)?.len(),9);
+        Ok(())
+    }
+
+    #[test]
+    #[ignore="requires CUDA cooperative launch support and external large-topk catalogue"]
+    #[allow(clippy::cast_precision_loss)]
+    fn dkr_large_topk_cooperative_contract_gpu()->Result<()>{
+        use candle_core::Tensor;
+        let device=Device::new_cuda(0)?;
+        let g=Geometry::new(2,4096,8,2048,2)?;
+        let dt=ElementType::F32;
+        let key=Key{g,mode:DkrLargeTopKMode::Ranked,dt,vec:4};
+        let plan=prepare(key,&device)?;
+        assert!(matches!(plan.first,First::Cooperative{..}),
+            "this qualification requires actual cooperative selection, not numerical fallback");
+        let mut args=vec![tensor(dt,g.rows()*g.cols()),tensor(ElementType::F32,g.rows()*g.width(false))];
+        args.extend(std::iter::repeat_n(scalar(ElementType::I32),3));
+        args.push(tensor(ElementType::U32,g.rows()*RADIX_STATE_WORDS_PER_ROW));
+        args.extend(std::iter::repeat_n(scalar(ElementType::U32),2));
+        let mut request=request(&coop(dt,4),args,[1,1,1],COOP_CEILING);
+        let kernel=kernel_cache()?.prepare_for_device(&mut request,&device).map_err(err)?;
+        assert!(kernel.launch_config(&request,&device).is_err());
+        assert!(kernel.prevalidate_launch(&request,&device).is_err());
+        assert!(unsafe{kernel.prevalidate_launch_with_shared(&request,&device,0)}.is_err());
+        let cub=Key{g:Geometry::new(2,8,8,2048,1)?,..key};
+        assert!(matches!(prepare(cub,&device)?.first,First::Cub(_)));
+        let iterative=Key{g:Geometry::new(2,4096,7,2048,2)?,..key};
+        assert!(matches!(prepare(iterative,&device)?.first,First::Iterative(_)));
+        let input=Tensor::from_vec((0..8192).map(|i|(i%4096) as f32).collect::<Vec<_>>(),(2,4096),&device)?;
+        let mut workspace=None;
+        // A second launch on the same workspace checks the historical state
+        // cleanup and the cached cooperative plan, not just first-use parity.
+        for _ in 0..2 {
+            let got=crate::ops::cuda_topk_ranked_packed_batched_with_workspace(&input,8,&mut workspace)?;
+            let expected:Vec<f32>=(4088..4096).rev().map(|i|i as f32).collect();
+            for row in got.packed.to_vec2::<f32>()?{
+                assert_eq!(&row[..8],expected.as_slice());
+                assert_eq!(&row[8..],expected.as_slice());
+            }
+        }
         Ok(())
     }
 }
