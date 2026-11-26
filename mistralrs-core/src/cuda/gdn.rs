@@ -457,7 +457,11 @@ fn prefill_kernel_override() -> Result<Option<GdnPrefillKernel>> {
     match OVERRIDE.get_or_init(|| {
         std::env::var(GDN_PREFILL_KERNEL_ENV).map_or(Ok(None), |value| parse_prefill_kernel(&value))
     }) {
-        Ok(kernel) => Ok(*kernel),
+        Ok(kernel) => {
+            #[cfg(feature = "dkr-static-closure-probe")]
+            validate_closure_prefill_request(*kernel)?;
+            Ok(*kernel)
+        }
         Err(error) => Err(candle_core::Error::msg(error.clone())),
     }
 }
@@ -2709,76 +2713,75 @@ pub fn try_fused_vmajor_prefill_recurrence_cuda(
     let requested = prefill_kernel_override()?;
     #[cfg(feature = "dkr-static-closure-probe")]
     {
-        validate_closure_prefill_request(requested)?;
         // No specialized static provider is linked in this build. The caller
         // proceeds with the ordinary typed recurrence catalogue.
-        let _ = launch;
+        let _ = (launch, requested);
         return Ok(None);
     }
     #[cfg(not(feature = "dkr-static-closure-probe"))]
     {
-    if matches!(
-        requested,
-        Some(GdnPrefillKernel::Mma | GdnPrefillKernel::MmaFused)
-    ) {
-        if !mma_prefill_supported(&launch)? {
-            candle_core::bail!("GDN MMA prefill requires BF16 projections and FP32 value-major 128x128 state on CUDA SM80+");
+        if matches!(
+            requested,
+            Some(GdnPrefillKernel::Mma | GdnPrefillKernel::MmaFused)
+        ) {
+            if !mma_prefill_supported(&launch)? {
+                candle_core::bail!("GDN MMA prefill requires BF16 projections and FP32 value-major 128x128 state on CUDA SM80+");
+            }
+            return if requested == Some(GdnPrefillKernel::MmaFused) {
+                mma_fused_prefill(launch).map(Some)
+            } else {
+                mma_prefill(launch).map(Some)
+            };
         }
-        return if requested == Some(GdnPrefillKernel::MmaFused) {
-            mma_fused_prefill(launch).map(Some)
-        } else {
-            mma_prefill(launch).map(Some)
-        };
-    }
-    let flashinfer_supported = flashinfer_sm90_prefill_supported(&launch)?;
-    if requested == Some(GdnPrefillKernel::FlashInferSm90) {
-        if !flashinfer_supported {
-            candle_core::bail!(
-                "FlashInfer GDN SM90 prefill does not support this device, layout, dtype, or shape"
-            );
-        }
-        return flashinfer_sm90_prefill_dispatch(launch).map(Some);
-    }
-    if requested.is_none() && flashinfer_supported {
-        return flashinfer_sm90_prefill_dispatch(launch).map(Some);
-    }
-    if requested.is_none() && launch.batch_size == 1 {
-        let (_, seq_len, _) = launch.mixed_qkv.dims3()?;
-        let properties = gdn_cuda_device_properties(launch.mixed_qkv.device().as_cuda_device()?)?;
-        // Whole-head blocks need enough independent heads to occupy the GPU.
-        if seq_len >= GDN_MMA_AUTO_MIN_SEQ_LEN
-            && properties.compute_major == GDN_MMA_AUTO_COMPUTE_MAJOR
-            && launch.num_v_heads.saturating_mul(2) > properties.multiprocessor_count
-            && mma_prefill_supported(&launch)?
-        {
-            return mma_fused_prefill(launch).map(Some);
-        }
-    }
-    #[cfg(feature = "cutile")]
-    {
-        let cutile_supported = cutile_prefill_supported(&launch)?;
-        // prompt tails shorter than a chunk stay on the value-major kernel even when forced
-        let (_, seq_len, _) = launch.mixed_qkv.dims3()?;
-        let long_enough = seq_len >= CUTILE_GDN_MIN_SEQ_LEN;
-        if requested == Some(GdnPrefillKernel::Cutile) {
-            if !cutile_supported {
+        let flashinfer_supported = flashinfer_sm90_prefill_supported(&launch)?;
+        if requested == Some(GdnPrefillKernel::FlashInferSm90) {
+            if !flashinfer_supported {
                 candle_core::bail!(
-                    "cuTile GDN prefill does not support this launch: {}",
-                    describe_prefill_launch(&launch)
+                    "FlashInfer GDN SM90 prefill does not support this device, layout, dtype, or shape"
                 );
             }
-            if long_enough {
+            return flashinfer_sm90_prefill_dispatch(launch).map(Some);
+        }
+        if requested.is_none() && flashinfer_supported {
+            return flashinfer_sm90_prefill_dispatch(launch).map(Some);
+        }
+        if requested.is_none() && launch.batch_size == 1 {
+            let (_, seq_len, _) = launch.mixed_qkv.dims3()?;
+            let properties = gdn_cuda_device_properties(launch.mixed_qkv.device().as_cuda_device()?)?;
+            // Whole-head blocks need enough independent heads to occupy the GPU.
+            if seq_len >= GDN_MMA_AUTO_MIN_SEQ_LEN
+                && properties.compute_major == GDN_MMA_AUTO_COMPUTE_MAJOR
+                && launch.num_v_heads.saturating_mul(2) > properties.multiprocessor_count
+                && mma_prefill_supported(&launch)?
+            {
+                return mma_fused_prefill(launch).map(Some);
+            }
+        }
+        #[cfg(feature = "cutile")]
+        {
+            let cutile_supported = cutile_prefill_supported(&launch)?;
+            // prompt tails shorter than a chunk stay on the value-major kernel even when forced
+            let (_, seq_len, _) = launch.mixed_qkv.dims3()?;
+            let long_enough = seq_len >= CUTILE_GDN_MIN_SEQ_LEN;
+            if requested == Some(GdnPrefillKernel::Cutile) {
+                if !cutile_supported {
+                    candle_core::bail!(
+                        "cuTile GDN prefill does not support this launch: {}",
+                        describe_prefill_launch(&launch)
+                    );
+                }
+                if long_enough {
+                    return cutile_prefill(launch).map(Some);
+                }
+            } else if requested.is_none() && cutile_supported && long_enough {
                 return cutile_prefill(launch).map(Some);
             }
-        } else if requested.is_none() && cutile_supported && long_enough {
-            return cutile_prefill(launch).map(Some);
         }
-    }
-    #[cfg(not(feature = "cutile"))]
-    if requested == Some(GdnPrefillKernel::Cutile) {
-        candle_core::bail!("cuTile GDN prefill requires the cutile feature");
-    }
-    Ok(None)
+        #[cfg(not(feature = "cutile"))]
+        if requested == Some(GdnPrefillKernel::Cutile) {
+            candle_core::bail!("cuTile GDN prefill requires the cutile feature");
+        }
+        Ok(None)
     }
 }
 
@@ -3122,9 +3125,11 @@ fn mma_fused_prefill(launch: FusedPrefillRecurrence<'_>) -> Result<FusedPrefillO
     .map(FusedPrefillOutput::TokenMajor)
 }
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 #[cfg(all(feature = "cuda", feature = "cutile"))]
 const CUTILE_GDN_MIN_SEQ_LEN: usize = 64;
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 #[cfg(all(feature = "cuda", feature = "cutile"))]
 fn describe_prefill_launch(launch: &FusedPrefillRecurrence<'_>) -> String {
     let describe = |tensor: &Tensor| {
@@ -3158,6 +3163,7 @@ fn describe_prefill_launch(launch: &FusedPrefillRecurrence<'_>) -> String {
     )
 }
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 #[cfg(all(feature = "cuda", feature = "cutile"))]
 fn cutile_prefill_supported(launch: &FusedPrefillRecurrence<'_>) -> Result<bool> {
     if launch.batch_size == 0
@@ -3190,6 +3196,7 @@ fn cutile_prefill_supported(launch: &FusedPrefillRecurrence<'_>) -> Result<bool>
     ))
 }
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 #[cfg(all(feature = "cuda", feature = "cutile"))]
 fn cutile_prefill(launch: FusedPrefillRecurrence<'_>) -> Result<FusedPrefillOutput> {
     let (_, seq_len, _) = launch.mixed_qkv.dims3()?;
