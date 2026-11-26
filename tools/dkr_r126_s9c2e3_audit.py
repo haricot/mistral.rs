@@ -242,7 +242,11 @@ def contract(root):
             "p.prevalidate_cooperative_grouped(&request,device,geo.shared,g.rows as u32,geo.ctas)",
             "plan.launch_cooperative(stream,|b|",
             "b.arg(&work.input).arg(&packed).arg(&rows).arg(&cols).arg(&k).arg(&state).arg(chunk).arg(ctas)",
-            "fn dkr_large_topk_geometry_and_requirements()"],
+            "fn dkr_large_topk_geometry_and_requirements()",
+            "fn dkr_large_topk_cooperative_contract_gpu()",
+            "this qualification requires actual cooperative selection, not numerical fallback",
+            "kernel.prevalidate_launch(&request,&device).is_err()",
+            "p.prevalidate_launch_with_default_shared(&request,device,shared)"],
         RUNTIME+"src/bin/dkr_package_builder.rs":[
             'name: "large-topk", source: "large_topk.cu", fast_math: true',
             'pkg.name == "large-topk"','"large_topk_device.cuh","router_topk_device.cuh","radix_topk.cuh"',
