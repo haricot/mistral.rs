@@ -90,6 +90,55 @@ pub(super) fn dense_rows(rows:usize,dims:[usize;4],strides:[usize;4])->bool{
 mod tests{
     use super::*;
     #[test]
+    #[ignore="requires CUDA and GDN typed catalogue"]
+    fn dkr_gdn_ragged_roundtrip_gpu()->Result<()>{
+        use super::super::{GdnPackedToPadded,GdnPaddedToPacked,GdnRaggedConvState,
+            try_gdn_packed_to_padded_cuda,try_gdn_padded_to_packed_cuda,try_gdn_extract_ragged_conv_state_cuda};
+        use candle_core::Tensor;
+        let device=Device::new_cuda(0)?;
+        let offsets=Tensor::from_vec(vec![0u32,1,3],3,&device)?;
+        for dt in [DType::BF16,DType::F32]{
+            let input=Tensor::from_vec(vec![1f32,2.,3.,4.,5.,6.],(1,3,2),&device)?.to_dtype(dt)?;
+            let padded=try_gdn_packed_to_padded_cuda(GdnPackedToPadded{source:&input,cu_seqlens:&offsets,
+                batch_size:2,token_count:3,padded_len:2,padding_value:-9.})?.unwrap();
+            assert_eq!(padded.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,vec![1.,2.,-9.,-9.,3.,4.,5.,6.]);
+            let packed=try_gdn_padded_to_packed_cuda(GdnPaddedToPacked{source:&padded,cu_seqlens:&offsets,batch_size:2,token_count:3})?.unwrap();
+            assert_eq!(packed.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,vec![1.,2.,3.,4.,5.,6.]);
+            let initial=Tensor::zeros((2,2,3),dt,&device)?;
+            let state=try_gdn_extract_ragged_conv_state_cuda(GdnRaggedConvState{padded_input:&padded,
+                initial_state:&initial,cu_seqlens:&offsets,batch_size:2})?.unwrap();
+            assert_eq!(state.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,vec![0.,0.,1.,0.,0.,2.,0.,3.,5.,0.,4.,6.]);
+        }
+        Ok(())
+    }
+    #[test]
+    #[ignore="requires CUDA and GDN typed catalogue"]
+    fn dkr_gdn_prepare_padded_stride_gpu()->Result<()>{
+        use super::super::{PrepareRecurrenceInputs,prepare_recurrence_inputs_cuda_typed};
+        use candle_core::Tensor;
+        let device=Device::new_cuda(0)?;
+        for dt in [DType::F16,DType::BF16]{
+            let qkv=Tensor::from_vec(vec![1f32,0.,1.,0.,3.,4.],(1,1,6),&device)?.to_dtype(dt)?;
+            let b=Tensor::zeros((1,1,1),dt,&device)?;
+            let bias=Tensor::zeros(1,DType::F32,&device)?;
+            for out in [DType::BF16,DType::F32]{
+                let (q,k,v,g,beta)=prepare_recurrence_inputs_cuda_typed(PrepareRecurrenceInputs{mixed_qkv:&qkv,
+                    b:&b,a:&b,a_log:&bias,dt_bias:&bias,batch_size:1,seq_len:1,token_stride:3,
+                    num_k_heads:1,num_v_heads:1,head_k_dim:2,head_v_dim:2,tiled_v_heads:false,output_dtype:out})?;
+                let q=q.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+                let k=k.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+                assert!((q[0]-1f32/2f32.sqrt()).abs()<0.003&&q[1..].iter().all(|&x|x==0.));
+                assert!((k[0]-1.).abs()<0.003&&k[1..].iter().all(|&x|x==0.));
+                assert_eq!(v.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,vec![3.,4.,0.,0.,0.,0.]);
+                assert_eq!(beta.flatten_all()?.to_vec1::<f32>()?,vec![0.5,0.,0.]);
+                let g=g.flatten_all()?.to_vec1::<f32>()?;
+                assert!((g[0]+2f32.ln()).abs()<0.0001&&g[1..]==[0.,0.]);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn dkr_gdn_prep_geometry(){
         assert_eq!(blocks(1),1);
         assert_eq!(blocks(usize::MAX),65535);
