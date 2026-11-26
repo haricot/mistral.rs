@@ -259,7 +259,18 @@ def self_test():
         (root/"symlink").unlink()
         put("duplicate",[row(1)])
         rejects(lambda:inventory(root))
-    print(f"DKR_R126_MODEL_SCOPE_SELF_TEST=PASS negative_cases={failures} synthetic=true")
+        # A real over-limit master must be inventory-able without weakening
+        # either production limit on the selected runtime view.
+        root=Path(tmp)/"large-master"
+        for shard in range(513):
+            put(f"shard-{shard:04}",[row(100+8*shard+i) for i in range(8)])
+        large,large_records,large_manifests=inventory(root)
+        assert len(large_records)==4104 and len(large_manifests)==513
+        large_spec=spec(identity(row(100)))
+        large_group=selection(large_spec,large_records,large_manifests)
+        large_report,_=report(large,large_records,large_manifests,large_spec,large_group)
+        assert large_report["active_profiles"]==1 and large_report["active_manifests"]==1
+    print(f"DKR_R126_MODEL_SCOPE_SELF_TEST=PASS negative_cases={failures} synthetic=true master_over_limits=true")
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
