@@ -139,13 +139,13 @@ fn indices(mode:DkrSamplingMode)->Result<(usize,Option<usize>)>{
                 (true,false,true)=>8,(true,true,true)=>9,(true,true,false)=>10,
                 _=>candle_core::bail!("invalid top1 output mode"),
             };
-            (top1_dtype(dtype)?*2+usize::from(batched),Some(second))
+            (top1_dtype(dtype)?*2+(batched as usize),Some(second))
         }
         DkrSamplingMode::Categorical=>(11,Some(12)),
         DkrSamplingMode::Ranked=>(13,None),
         DkrSamplingMode::DFlash{hidden,predecessor,successor,probabilistic}=>(
-            14+usize::from(probabilistic)*8+dflash_dtype(hidden)?*4+dflash_dtype(predecessor)?*2+dflash_dtype(successor)?,None),
-        DkrSamplingMode::Rejection{bounded}=>(30+usize::from(bounded),None),
+            14+(probabilistic as usize)*8+dflash_dtype(hidden)?*4+dflash_dtype(predecessor)?*2+dflash_dtype(successor)?,None),
+        DkrSamplingMode::Rejection{bounded}=>(30+(bounded as usize),None),
     })
 }
 /// Exact capability producer for the selected request route. The model
@@ -213,8 +213,8 @@ impl Stage{
             m.shared_mem_bytes!=spec.shared||m.arguments.len()!=spec.args.len()||
             !m.arguments.iter().zip(spec.args).all(|(actual,expected)|match (actual,expected){
                 (Parameter::Tensor{name,dtype,rank,access,representation},ArgSpec::Tensor(n,dt,a))=>
-                    name==n&&dtype==dt&&*rank==1&&access==a&&representation.is_none(),
-                (Parameter::Scalar{name,dtype},ArgSpec::Scalar(n))=>name==n&&*dtype==ElementType::I32,
+                    name.as_str()==*n&&dtype==dt&&*rank==1&&access==a&&representation.is_none(),
+                (Parameter::Scalar{name,dtype},ArgSpec::Scalar(n))=>name.as_str()==*n&&*dtype==ElementType::I32,
                 _=>false,
             }){
             candle_core::bail!("sampling exact profile/ABI mismatch");
@@ -308,7 +308,7 @@ pub(crate) unsafe fn launch_rejection(device:&Device,stream:&CudaStream,pointers
     let mut args=Bindings::new();for (ptr,count) in pointers.into_iter().zip(counts){args.push(T(ptr,count));}
     args.extend(&[S(batch),S(drafts),S(vocab),S(q_width)]);
     if let Some(k)=packed_k{args.push(S(k));}
-    let first=Stage::new(30+usize::from(packed_k.is_some()),[batch as u32,1,1],args.as_slice())?;
+    let first=Stage::new(30+(packed_k.is_some() as usize),[batch as u32,1,1],args.as_slice())?;
     unsafe{launch(device,stream,first,None)}
 }
 

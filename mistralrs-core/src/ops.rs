@@ -3143,10 +3143,10 @@ fn cuda_top1_logits_submit_inner(
         unreachable!("reserved token destination is U32")
     };
     let (token_ptr, token_guard) = token_slice.device_ptr(&stream);
-    let token_ptr = cuda_large_topk_address(token_ptr, token_layout.start_offset(), nrows, token_slice.len(), 4)? as *mut u32;
     let slot = &mut workspace.slots[slot_index];
 
     let result = (|| {
+        let token_ptr = cuda_large_topk_address(token_ptr, token_layout.start_offset(), nrows, token_slice.len(), 4)? as *mut u32;
         let (block_values_ptr, block_values_guard) = slot.block_values.device_ptr_mut(&stream);
         let (block_indices_ptr, block_indices_guard) = slot.block_indices.device_ptr_mut(&stream);
         let (packed_ptr, packed_guard) = if copy_packed {
@@ -3602,7 +3602,7 @@ fn cuda_topk_sampling_submit_inner(
     op: &'static str,
 ) -> Result<CudaTopKSamplingSubmission> {
     use candle_core::backend::{BackendDevice, BackendStorage};
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DeviceSlice};
     use candle_core::cuda_backend::CudaStorageSlice;
 
     if !matches!(input.dtype(), DType::BF16 | DType::F16 | DType::F32) {

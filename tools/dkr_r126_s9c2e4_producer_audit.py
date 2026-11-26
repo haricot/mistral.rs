@@ -5,7 +5,9 @@ import copy
 import importlib.util
 import json
 import re
+import tempfile
 from pathlib import Path
+import dkr_r126_model_catalog_scope as scope
 
 PKG=Path("kernel-packages/cuda/sampling")
 CORE=Path("mistralrs-core/src/cuda")
@@ -24,6 +26,39 @@ def load(root):
 def normalize(s):
     return re.sub(r"\s*\*\s*","* "," ".join(s.split()))
 
+def call_contract(row):
+    entry=row["entry"]
+    names=[a["name"] for a in row["arguments"]]
+    block,shared=256,0
+    if entry.startswith("dkr_top1_stage1_"):
+        mode,dt=entry.removeprefix("dkr_top1_stage1_").split("_")
+        call=f"top1_large_stage1<{TYPES[dt]}, {str(mode=='batch').lower()}, false>(input, block_values, block_indices, nullptr, ncols, chunk_size, nullptr)"
+    elif entry.startswith("dkr_top1_stage2_"):
+        mode,out=entry.removeprefix("dkr_top1_stage2_").split("_")
+        call=(f"top1_large_stage2_f32_packed<{str(mode=='batch').lower()}>(block_values, block_indices, "
+              f"{'packed_out' if out!='tokens' else 'nullptr'}, {'token_ids_out' if out!='packed' else 'nullptr'}, nblocks)")
+    elif entry=="dkr_categorical_stage1":
+        call="top1_large_stage1<float, true, true>(input, block_values, nullptr, block_sums, ncols, chunk_size, inv_temperatures)"
+    elif entry=="dkr_categorical_stage2":
+        shared=16384
+        call="categorical_large_stage2_f32_packed(input, inv_temperatures, uniforms, block_values, block_sums, packed_out, ncols, chunk_size, nblocks)"
+    elif entry=="dkr_sample_ranked_topk":
+        block=128
+        call="sample_ranked_topk_kernel(packed, params, tokens, nrows, packed_k)"
+    elif entry.startswith("dkr_dflash_"):
+        mode,h,p,s=entry.removeprefix("dkr_dflash_").split("_")
+        types=[{"f32":"DFLASH_SELECTOR_F32","bf16":"DFLASH_SELECTOR_BF16"}[dt] for dt in (h,p,s)]
+        require([a["dtype"] for a in row["arguments"][1:4]]==[h,p,s],"DFlash dtype identity")
+        call=f"dflash_{mode}_select_kernel("+", ".join(names+types)+")"
+    elif entry.startswith("dkr_sparse_rejection_"):
+        if entry=="dkr_sparse_rejection_topk_f32":
+            block=1
+        call=entry.removeprefix("dkr_")+"_kernel("+", ".join(names)+")"
+    else:
+        raise ValueError("unknown sampling entry")
+    require(row["block"]==[block,1,1] and row["shared_mem_bytes"]==shared,"launch geometry "+entry)
+    return call+";"
+
 def check(source,rows):
     entries=re.findall(r'extern "C" __global__ void (\w+)\((.*?)\)\s*\{(.*?)\}',source,re.S)
     found={name:(params,body) for name,params,body in entries}
@@ -40,7 +75,38 @@ def check(source,rows):
         require([normalize(p) for p in params.split(",")]==expected,"ABI "+row["entry"])
         require(row["implementation_id"]=="cuda."+row["entry"]+".v1","identity")
         require(len(row["arguments"])<=16,"argument budget")
-        require(all(re.search(r"\b"+a["name"]+r"\b",body) for a in row["arguments"]),"unused argument")
+        require(" ".join(body.split())==call_contract(row),"dispatch/argument order "+row["entry"])
+
+def scope_example(m):
+    # Synthetic capability union, not an actual model admission receipt.
+    chosen={"dkr_top1_stage1_batch_f32","dkr_top1_stage2_batch_both",
+            "dkr_top1_stage1_batch_bf16","dkr_top1_stage2_batch_tokens",
+            "dkr_categorical_stage1","dkr_categorical_stage2","dkr_sample_ranked_topk",
+            "dkr_dflash_greedy_f32_bf16_bf16","dkr_dflash_sample_f32_bf16_bf16",
+            "dkr_sparse_rejection_categorical_f32","dkr_sparse_rejection_topk_f32"}
+    with tempfile.TemporaryDirectory() as tmp:
+        root=Path(tmp)/"master"
+        for image in m.IMAGES:
+            rows=m.plan(61,image)
+            ptx=".version 8.0\n.target sm_61\n.address_size 64\n"
+            for row in rows:
+                params=",".join(f".param .b{64 if a['kind']=='tensor' else 32} a{j}"
+                                for j,a in enumerate(row["arguments"]))
+                ptx+=f".visible .entry {row['entry']}({params}) {{ret;}}\n"
+            m.stage(root/f"image-{image:02}",61,rows,ptx.encode())
+        root,records,manifests=scope.inventory(root)
+        keys=[key for key in records if key[1].removeprefix("cuda.").removesuffix(".v1") in chosen]
+        require(len(keys)==len(chosen)==11,"sampling scope inventory")
+        spec=dict(schema=scope.SELECTION,model="synthetic-sampling-target-draft",device_cc=61,
+                  profiles=[dict(zip(("operation","implementation_id","target_cc"),key)) for key in keys])
+        group=scope.selection(spec,records,manifests)
+        report,images=scope.report(root,records,manifests,spec,group)
+        dest=Path(tmp)/"active"
+        scope.materialize(root,dest,group,manifests,images,61)
+        _,selected,selected_manifests=scope.inventory(dest)
+        require(set(selected)==set(keys) and len(selected_manifests)==3,"sampling scope materialization")
+        require(report["scope_receipt"]==scope.decode((dest/scope.SCOPE_FILENAME).read_bytes()),"scope receipt")
+        return dict(master_profiles=32,master_manifests=3,union_profiles=11,union_manifests=3,synthetic_only=True)
 
 def audit(root,self_test=False):
     m=load(root)
@@ -68,13 +134,22 @@ def audit(root,self_test=False):
         rows=m.plan(61,1)
         bad=copy.deepcopy(rows)
         bad[0]["arguments"][0]["dtype"]="u32"
-        try:
-            check(groups[1],bad)
-        except ValueError:
-            pass
-        else:
-            raise AssertionError("incorrect ABI accepted")
-    return dict(status="PRODUCER_SOURCE_COMPLETE",profiles=32,images=3,max_args=16,
+        bad_block=copy.deepcopy(rows)
+        bad_block[0]["block"]=[128,1,1]
+        bad_shared=copy.deepcopy(rows)
+        bad_shared[12]["shared_mem_bytes"]=0
+        for source,manifest in ((groups[1],bad),(groups[1],bad_block),(groups[1],bad_shared),
+                               (groups[1].replace("block_values, block_indices, nullptr","block_indices, block_values, nullptr",1),rows),
+                               (groups[2].replace("DFLASH_SELECTOR_F32, DFLASH_SELECTOR_F32, DFLASH_SELECTOR_F32",
+                                                  "DFLASH_SELECTOR_BF16, DFLASH_SELECTOR_F32, DFLASH_SELECTOR_F32",1),m.plan(61,2))):
+            try:
+                check(source,manifest)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("incorrect sampling contract accepted")
+    scoped=scope_example(m)
+    return dict(status="PRODUCER_SOURCE_COMPLETE",profiles=32,images=3,max_args=16,scope_example=scoped,
         projected_master_logical=4245,projected_master_physical_upper=551,
         producer_only=True,compilation=False,link_qualified=False,
         numeric_qualified=False,full_closure=False)

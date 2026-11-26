@@ -425,11 +425,15 @@ impl InplaceOp1 for SparseRejectionKernelLaunch {
         #[cfg(feature = "dkr-static-closure-probe")]
         let device = candle_core::Device::Cuda(storage.device().clone());
         let outcomes = storage.as_cuda_slice_mut::<u32>()?;
+        let allocation_elems = outcomes.len();
         let (outcomes_ptr, outcomes_guard) = outcomes.device_ptr_mut(&stream);
         let count = usize::try_from(self.batch).map_err(candle_core::Error::wrap)?.checked_mul(3).ok_or_else(|| candle_core::Error::msg("rejection outcome span"))?;
-        let outcomes_ptr = crate::ops::cuda_large_topk_address(outcomes_ptr, layout.start_offset(), count, outcomes.len(), 4)? as *mut u32;
+        let outcomes_ptr = crate::ops::cuda_large_topk_address(outcomes_ptr, layout.start_offset(), count, allocation_elems, 4)? as *mut u32;
         #[cfg(feature = "dkr-static-closure-probe")]
         unsafe {
+            if matches!(self.mode, SparseRejectionMode::BoundedTopK { .. }) != self.packed_k.is_some() {
+                candle_core::bail!("rejection mode/packed width mismatch");
+            }
             super::sampling_dynamic::launch_rejection(&device, &stream, [self.target_ptr as u64, self.draft_ptr as u64, self.q_ids_ptr as u64, self.q_probs_ptr as u64,
                 self.temperature_ptr as u64, self.top_k_ptr as u64, self.top_p_ptr as u64, self.min_p_ptr as u64, self.accept_ptr as u64, self.sample_ptr as u64, outcomes_ptr as u64],
                 self.batch, self.drafts, self.vocab, self.q_width, self.packed_k)?;

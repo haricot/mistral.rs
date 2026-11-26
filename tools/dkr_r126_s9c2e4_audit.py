@@ -28,9 +28,9 @@ def audit(root):
     for path in (root/CORE).rglob("*.rs"):
         if path==root/CORE/"cuda/ffi.rs":
             continue
-        source=mask(strip_comments(path.read_text()))
+        source=strip_comments(path.read_text())
         spans=guarded_ranges(source)
-        for match in pattern.finditer(source):
+        for match in pattern.finditer(mask(source)):
             name=match.group(1)
             require(path in (root/CORE/"ops.rs",root/CORE/"cuda/speculative_rejection.rs"),"unexpected call site")
             require(any(a<=match.start()<b for a,b in spans),"unguarded call "+name)
