@@ -41,7 +41,7 @@ fn capacity(device:&Device)->Result<u32>{
         Ok(n)
     })
 }
-fn slot_tensor(device:&Device,slots:GdnStateSlots<'_>,batch:usize)->Result<(Tensor,i32)>{
+pub(super) fn slot_tensor(device:&Device,slots:GdnStateSlots<'_>,batch:usize)->Result<(Tensor,i32)>{
     match slots{
         GdnStateSlots::Pooled(t)=>{
             if t.dtype()!=DType::U32||!t.is_contiguous()||t.dims()!=[batch]||!t.device().same_device(device){
