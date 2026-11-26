@@ -25,10 +25,11 @@ fn disjoint(a:(u64,usize,usize),b:(u64,usize,usize))->Result<()>{
     let end=|(ptr,n,bytes):(u64,usize,usize)|->Result<u64>{
         ptr.checked_add(p::mul(n,bytes)? as u64).ok_or_else(||candle_core::Error::msg("GDN address range overflow"))
     };
-    if a.0<end(b)?&&b.0<end(a)?{candle_core::bail!("GDN commit snapshot overlaps mutable pool");}
+    let ae=end(a)?;let be=end(b)?;
+    if a.0<be&&b.0<ae{candle_core::bail!("GDN commit snapshot overlaps mutable pool");}
     Ok(())
 }
-pub(super) fn commit<T:candle_core::cuda_backend::CudaDType>(
+pub(super) fn commit<T:candle_core::cuda_backend::CudaDType+candle_core::cuda_backend::cudarc::driver::DeviceRepr>(
     mixed:&Tensor,convolved:&Tensor,b:&Tensor,a:&Tensor,initial_conv:&Tensor,initial_rec:&Tensor,
     a_log:&Tensor,dt_bias:&Tensor,conv_pool:&Tensor,rec_pool:&Tensor,keep:&Tensor,slots:&Tensor,
     kh:usize,vh:usize,kd:usize,vd:usize,tiled:bool,vm:bool,
@@ -96,7 +97,7 @@ pub(super) fn commit<T:candle_core::cuda_backend::CudaDType>(
         _=>candle_core::bail!("invalid GDN recurrent state dtype")}
 }
 
-pub(super) fn conv<T:candle_core::cuda_backend::CudaDType>(
+pub(super) fn conv<T:candle_core::cuda_backend::CudaDType+candle_core::cuda_backend::cudarc::driver::DeviceRepr>(
     x:&Tensor,weight:&Tensor,state:&Tensor,slots:&Tensor,lanes:usize,write:bool,
     pending:Option<(GdnPendingSpeculativeConv<'_>,usize,usize,usize)>,
 )->Result<Tensor>{
@@ -145,6 +146,61 @@ pub(super) fn conv<T:candle_core::cuda_backend::CudaDType>(
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    #[ignore="requires CUDA and GDN typed catalogue"]
+    fn dkr_gdn_snapshot_commit_fences_gpu()->Result<()>{
+        let device=Device::new_cuda(0)?;
+        let (batch,seq,kd,vd,cd,cw,cap)=(4usize,2usize,32usize,4usize,68usize,2usize,2usize);
+        let keep=Tensor::from_vec(vec![1u32,3,1,1],batch,&device)?;
+        let slots=Tensor::from_vec(vec![0u32,1,2,u32::MAX],batch,&device)?;
+        let bias=Tensor::zeros(1,DType::F32,&device)?;
+        for dt in [DType::F16,DType::BF16]{
+            let mixed=Tensor::ones((batch,seq,cd),dt,&device)?;
+            let mut qkv=vec![0f32;batch*seq*cd];
+            for row in qkv.chunks_mut(cd){row[kd]=1.;row[2*kd..].fill(1.);}
+            let qkv=Tensor::from_vec(qkv,(batch,seq,cd),&device)?.to_dtype(dt)?;
+            let gates=Tensor::zeros((batch,seq,1),dt,&device)?;
+            let initial_conv=Tensor::zeros((batch,cd,cw),dt,&device)?;
+            for sd in [DType::F16,DType::BF16,DType::F32]{
+                let initial=Tensor::zeros((batch,1,kd,vd),sd,&device)?;
+                let conv=Tensor::zeros((cap,cd,cw),dt,&device)?;
+                let state=Tensor::zeros((cap,1,kd,vd),sd,&device)?;
+                speculative_state_commit_cuda(GdnSpeculativeStateCommit{mixed_qkv:&mixed,convolved_qkv:&qkv,b:&gates,a:&gates,
+                    initial_conv_state:&initial_conv,initial_recurrent_state:&initial,a_log:&bias,dt_bias:&bias,
+                    conv_state_pool:&conv,recurrent_state_pool:&state,keep_rows:&keep,slot_indices:&slots,
+                    num_k_heads:1,num_v_heads:1,head_k_dim:kd,head_v_dim:vd,tiled_v_heads:false,
+                    state_layout:RecurrentStateLayout::GdnKeyMajor})?;
+                let cv=conv.to_dtype(DType::F32)?.reshape((cap,cd*cw))?.to_vec2::<f32>()?;
+                assert!(cv[0].chunks_exact(2).all(|v|v==[0.,1.]));
+                assert!(cv[1].iter().all(|&v|v==0.));
+                let r=state.to_dtype(DType::F32)?.reshape((cap,kd*vd))?.to_vec2::<f32>()?;
+                assert!(r[0][..vd].iter().all(|&v|(v-0.5).abs()<0.001));
+                assert!(r[0][vd..].iter().chain(&r[1]).all(|&v|v==0.));
+            }
+        }
+        Ok(())
+    }
+    #[test]
+    #[ignore="requires CUDA and GDN typed catalogue"]
+    fn dkr_gdn_conv_checkpoint_slot_fences_gpu()->Result<()>{
+        let device=Device::new_cuda(0)?;
+        let slots=Tensor::from_vec(vec![1u32,4,u32::MAX],3,&device)?;
+        for dt in [DType::F16,DType::BF16]{
+            for width in [3usize,4]{
+                let input=Tensor::ones((3,2,3),dt,&device)?;
+                let weight=Tensor::zeros((3,width),dt,&device)?;
+                let pool=Tensor::zeros((4,3,width),dt,&device)?;
+                let out=speculative_conv_checkpoints_cuda(GdnSpeculativeConvCheckpoints{x:&input,weight:&weight,
+                    state_pool:&pool,active_slots:&slots,checkpoint_lanes:2,write_checkpoints:true,pending:None})?;
+                assert!(out.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?.iter().all(|&v|v==0.));
+                let data=pool.to_dtype(DType::F32)?.reshape((4,3*width))?.to_vec2::<f32>()?;
+                for (row,ones) in [(0,1),(1,2),(2,0),(3,0)]{
+                    assert!(data[row].chunks_exact(width).all(|c|c[..width-ones].iter().all(|&v|v==0.)&&c[width-ones..].iter().all(|&v|v==1.)));
+                }
+            }
+        }
+        Ok(())
+    }
     #[test]
     fn dkr_gdn_checkpoint_geometry(){
         assert!(commit_geometry(1,2,1,1,32,5,69,4,2).is_err());
