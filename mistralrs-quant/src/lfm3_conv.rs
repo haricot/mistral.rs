@@ -193,7 +193,12 @@ pub fn lfm3_causal_conv1d(
 ) -> Result<(Tensor, Tensor)> {
     let (batch, seq, projected_hidden) = projected.dims3()?;
     let (hidden, groups, width) = weight.dims3()?;
-    if projected_hidden != PROJECTION_PARTS * hidden
+    if hidden.checked_mul(PROJECTION_PARTS) != Some(projected_hidden)
+        || batch == 0 || hidden == 0
+        || width > i32::MAX as usize
+        || seq.checked_add(width).is_none()
+        || batch.checked_mul(seq).and_then(|n|n.checked_mul(hidden)).is_none()
+        || batch.checked_mul(hidden).and_then(|n|n.checked_mul(width)).is_none()
         || groups != 1
         || width == 0
         || seq == 0
