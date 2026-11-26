@@ -1472,6 +1472,7 @@ extern "C" {
         tiled_v_heads: i32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn gdn_speculative_transition_commit_batched(
         pointer_table: *const u64,
         keep_rows: *const u32,
@@ -1491,6 +1492,7 @@ extern "C" {
         state_dtype: i32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn gdn_speculative_transition_stage_batched(
         pointer_table: *const u64,
         keep_rows: *const u32,
@@ -1508,6 +1510,7 @@ extern "C" {
         activation_dtype: i32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn gdn_pending_transition_publish_batched(
         pointer_table: *const u64,
         keep_rows: *const u32,
@@ -1518,6 +1521,7 @@ extern "C" {
         destination_capacity: i32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn gdn_pending_transition_apply_batched(
         pointer_table: *const u64,
         active_slots: *const u32,
