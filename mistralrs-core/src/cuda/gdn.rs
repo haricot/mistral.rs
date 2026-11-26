@@ -171,6 +171,7 @@ impl GdnFp8OutputSpec {
                 )
             }
         };
+        scale_stride_m.checked_mul(columns)?;
         Some(GdnFp8OutputLayout {
             rows,
             columns,
@@ -6260,6 +6261,15 @@ pub(crate) fn rmsnorm_gated_quantized_cuda(
         unreachable!()
     };
     let weight_storage = weight_storage.as_cuda_slice::<half::bf16>()?;
+    #[cfg(feature = "dkr-static-closure-probe")]
+    {
+        use preparation_dynamic as p;
+        p::n(normalized_rows)?;p::n(layout.groups)?;p::n(layout.scale_stride_m)?;
+        p::n(p::mul(dims[1],dims[2])?)?;
+        if normalized_rows==0||!((eps as f32).is_finite()) {
+            candle::bail!("invalid GDN FP8 launch geometry or epsilon");
+        }
+    }
     let dev = x.device().as_cuda_device()?;
     let mut output = unsafe { dev.alloc::<F8E4M3>(layout.quantized_elements()) }?;
     let mut scales = unsafe { dev.alloc::<f32>(layout.scale_elements) }?;
