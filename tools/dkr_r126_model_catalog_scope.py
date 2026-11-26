@@ -24,6 +24,8 @@ MAX_SELECTION_BYTES=8*1024*1024
 MODULE="DKR-KERNEL-MODULE-V1"
 SHARD="DKR-KERNEL-SHARD-V1"
 SELECTION="DKR-MODEL-SELECTION-V1"
+SCOPE_SCHEMA="DKR-ACTIVE-SCOPE-V1"
+SCOPE_FILENAME="dkr-active-scope.json"
 IDENT=re.compile(r"[A-Za-z0-9_.-]+\Z")
 HEX=re.compile(r"[A-Fa-f0-9]{64}\Z")
 
@@ -139,6 +141,31 @@ def selected_bytes(path,keys,manifests):
     require(len(data)<=MAX_MANIFEST,"active shard byte limit")
     return data,selected
 
+def manifest_row(row):
+    # Same canonical array encoding as model_scope.rs. The Rust admission
+    # remains authoritative for schema, ABI signatures and actual image target.
+    args=[]
+    for a in row["arguments"]:
+        if a["kind"]=="tensor":
+            args.append(["tensor",a["name"],a["dtype"],a["rank"],a["access"],a.get("representation")])
+        else:
+            require(a["kind"]=="scalar","unknown argument kind")
+            args.append(["scalar",a["name"],a["dtype"]])
+    return [row["schema"],row["abi"],row["operation"],row["implementation_id"],row["entry"],
+            row["artifact"],row["sha256"].lower(),row.get("cubin_artifact"),
+            row["cubin_sha256"].lower() if row.get("cubin_sha256") is not None else None,
+            row["target_cc"],row["min_cc"],row["max_cc"],row["block"],row["shared_mem_bytes"],args]
+
+def scope_receipt(grouped,manifests,cc):
+    rows=[]
+    for path,keys in grouped.items():
+        _,selected=selected_bytes(path,keys,manifests)
+        rows.extend(selected)
+    rows.sort(key=identity)
+    data=json.dumps([SCOPE_SCHEMA,cc,[manifest_row(r) for r in rows]],
+                    ensure_ascii=False,separators=(",",":"),allow_nan=False).encode()
+    return dict(schema=SCOPE_SCHEMA,device_cc=cc,scope_id=sha(data),profile_count=len(rows))
+
 def report(root,records,manifests,spec,grouped):
     images={}
     manifest_rows=[]
@@ -164,11 +191,12 @@ def report(root,records,manifests,spec,grouped):
                 master_profiles=len(records),master_manifests=len(manifests),
                 active_profiles=sum(len(keys) for keys in grouped.values()),active_manifests=len(grouped),
                 active_images=len(images),active_image_bytes=total,manifests=manifest_rows,
+                scope_receipt=scope_receipt(grouped,manifests,spec["device_cc"]),
                 selection_sha256=sha(json.dumps(spec,sort_keys=True,separators=(",",":")).encode()),
                 selection_complete_for_model=False,verified_image_hashes=True,
                 runtime_abi_qualified=False,compilation=False,link_qualified=False),images
 
-def materialize(root,dest,grouped,manifests,images):
+def materialize(root,dest,grouped,manifests,images,cc):
     dest=dest.resolve()
     require(dest!=root and root not in dest.parents and dest not in root.parents,
             "destination must be separate from master root")
@@ -188,6 +216,8 @@ def materialize(root,dest,grouped,manifests,images):
             data=read(path,MAX_IMAGE)
             require(sha(data)==expected,"master image changed")
             (stage/path.relative_to(root)).write_bytes(data)
+        receipt=scope_receipt(grouped,manifests,cc)
+        (stage/SCOPE_FILENAME).write_text(json.dumps(receipt,indent=2)+"\n")
         # Keep the selected root clean: no unselected manifests, no symlinks.
         require(not dest.exists(),"destination appeared during staging")
         stage.rename(dest)
@@ -199,6 +229,7 @@ def self_test():
             data=b"synthetic PTX only"
             return dict(schema=MODULE,abi="dkr.typed.v1",operation="test.op",implementation_id=f"impl.{n}",
                         target_cc=cc,min_cc=cc,max_cc=cc,artifact="image.ptx",sha256=sha(data),
+                        entry="synthetic",block=[256,1,1],shared_mem_bytes=0,
                         arguments=[dict(kind="scalar",name="n",dtype="u32")])
         def put(name,rows,shard=True):
             folder=root/name;folder.mkdir(parents=True)
@@ -223,11 +254,15 @@ def self_test():
         result,images=report(base,rec,man,chosen,group)
         assert result["master_profiles"]==5 and result["active_profiles"]==2
         dest=Path(tmp)/"active"
-        materialize(base,dest,group,man,images)
+        materialize(base,dest,group,man,images,61)
         _,selected,selected_manifests=inventory(dest)
         assert set(selected)=={key1,key3}
         assert (dest/"b/manifest.json").read_bytes()==(root/"b/manifest.json").read_bytes()
         assert len(selected_manifests)==2 and not (dest/"c").exists()
+        assert decode((dest/SCOPE_FILENAME).read_bytes())==result["scope_receipt"]
+        assert scope_receipt(group,man,61)==scope_receipt(dict(reversed(list(group.items()))),man,61)
+        assert scope_receipt(group,man,61)!=scope_receipt(group,man,80)
+        assert scope_receipt(group,man,61)["profile_count"]==2
         failures=0
         def rejects(fn):
             nonlocal failures
@@ -242,8 +277,8 @@ def self_test():
         rejects(lambda:selection(spec(key4),rec,man))
         rejects(lambda:selection(chosen,rec,man,(1,512)))
         rejects(lambda:selection(chosen,rec,man,(4096,1)))
-        rejects(lambda:materialize(base,dest,group,man,images))
-        rejects(lambda:materialize(base,root/"nested",group,man,images))
+        rejects(lambda:materialize(base,dest,group,man,images,61))
+        rejects(lambda:materialize(base,root/"nested",group,man,images,61))
         paired_spec=spec(identity(paired))
         paired_group=selection(paired_spec,rec,man)
         paired_report,_=report(base,rec,man,paired_spec,paired_group)
@@ -303,7 +338,7 @@ def main():
         grouped=selection(spec,records,manifests)
         result,images=report(root,records,manifests,spec,grouped)
         if a.materialize:
-            materialize(root,a.materialize,grouped,manifests,images)
+            materialize(root,a.materialize,grouped,manifests,images,spec["device_cc"])
         if a.json_out:
             with a.json_out.open("x") as f:
                 json.dump(result,f,indent=2);f.write("\n")
