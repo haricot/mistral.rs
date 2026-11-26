@@ -564,3 +564,182 @@ mod fused_tests{
         Ok(())
     }
 }
+
+// Historical four-stage fused decode: row quantize, gate/up/GLU, row
+// quantize again, fused down+weighted atomic reduction. The old workspace
+// map owns both scratch allocations for the duration of every launch.
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+enum DecodeMode{Direct,Prefetch,Stage16,Stage8,Stage4}
+impl DecodeMode{
+    fn tag(self)->&'static str{match self{
+        Self::Direct=>"direct",Self::Prefetch=>"prefetch",Self::Stage16=>"stage16",Self::Stage8=>"stage8",Self::Stage4=>"stage4"}}
+    fn staged(self)->bool{matches!(self,Self::Stage16|Self::Stage8|Self::Stage4)}
+    fn tile(self,gate:bool)->usize{match self{
+        Self::Direct=>if gate{8}else{16},Self::Stage16|Self::Stage8=>8,_=>16}}
+    fn warps(self)->u32{if self==Self::Direct{4}else{8}}
+}
+fn decode_mode(prefetch:bool,staging:bool,row_bytes:usize,align:u64,gate:bool,limit:usize)->(DecodeMode,usize){
+    if !prefetch{return(DecodeMode::Direct,0);}
+    if !staging{return(DecodeMode::Prefetch,0);}
+    let alignment=align | row_bytes as u64;
+    let m=if alignment&15==0{DecodeMode::Stage16}
+        else if alignment&7==0{DecodeMode::Stage8}
+        else if alignment&3==0{DecodeMode::Stage4}
+        else{return(DecodeMode::Prefetch,0);};
+    let Some(panel)=row_bytes.checked_mul(m.tile(gate))else{return(DecodeMode::Prefetch,0);};
+    if panel>24*1024{return(DecodeMode::Prefetch,0);}
+    let actual=if gate{panel.div_ceil(16)*16+panel}else{panel};
+    let ceiling=if gate{48*1024}else{24*1024};
+    if actual>ceiling || ceiling>limit{return(DecodeMode::Prefetch,0);}
+    (m,actual)
+}
+fn fmt_decode(dt:GgmlDType)->Option<&'static str>{if dt==GgmlDType::Q8_1{Some("q8_1")}else{format(dt)}}
+#[derive(Clone,Copy,PartialEq,Eq)]
+struct DecodeKey{
+    gate_fmt:&'static str,down_fmt:&'static str,dt:DType,e:usize,b:usize,t:usize,k:usize,n:usize,
+    kp:usize,np:usize,gpacked:usize,dpacked:usize,gm:DecodeMode,dm:DecodeMode,gs:usize,ds:usize,
+}
+struct DecodePlans{q1:PrevalidatedLaunchPlan,gate:PrevalidatedLaunchPlan,q2:PrevalidatedLaunchPlan,down:PrevalidatedLaunchPlan}
+thread_local!{static DECODE:RefCell<LaunchPlanCache<DecodeKey,DecodePlans>>=RefCell::new(LaunchPlanCache::new());}
+
+fn decode_plans(key:DecodeKey,dev:&Device)->Result<DecodePlans>{
+    let a=key.b*key.t;
+    let scratch=|rows,padded:usize|tensor(ElementType::U8,vec![rows,padded/32*36],Some("gguf.q8_1.row.v1"));
+    let enc=|rows,cols,padded:usize,dt|prepare_one(dev,"quant.gguf.q8_1.row.encode.v1".into(),
+        vec![tensor(dt,vec![rows,cols],None),scratch(rows,padded),scalar(),scalar()],
+        [padded.div_ceil(256) as u32,rows as u32,1],[256,1,1]);
+    let ids=||tensor(ElementType::U32,vec![key.b,key.t],None);
+    let intermediate=||tensor(ElementType::F32,vec![a,key.n],None);
+    let q1=enc(key.b,key.k,key.kp,dtype(key.dt)?)?;
+    let q2=enc(a,key.n,key.np,ElementType::F32)?;
+    let prepare=|gate:bool,mode:DecodeMode,shared:usize,args:Vec<Argument>|->Result<PrevalidatedLaunchPlan>{
+        let (kind,fmt,rows)=if gate{("gate",key.gate_fmt,key.n)}else{("down",key.down_fmt,key.k)};
+        let block=[32,mode.warps(),1];
+        let ceiling=if mode.staged(){if gate{49152}else{24576}}else{0};
+        let mut req=LaunchRequest{operation:format!("quant.gguf.moe.decode.{kind}.{fmt}.{}.v1",mode.tag()),
+            cc:0,args,grid:[rows.div_ceil(mode.tile(gate)) as u32,key.t as u32,key.b as u32],
+            max_dynamic_shared_mem_bytes:ceiling};
+        let p=catalog()?.prepare_for_device(&mut req,dev).map_err(|e|candle_core::Error::msg(e.to_string()))?;
+        if p.manifest.block!=block || p.manifest.shared_mem_bytes!=ceiling{
+            candle_core::bail!("DKR fused MoE decode geometry contract");
+        }
+        // decode_mode proved panel size, vector alignment, and shared ceiling
+        // from actual packed weight spans and current pointers.
+        unsafe{p.prevalidate_launch_with_shared(&req,dev,shared as u32)}
+            .map_err(|e|candle_core::Error::msg(e.to_string()))
+    };
+    let gr=format!("gguf.{}.packed.v1",key.gate_fmt);
+    let dr=format!("gguf.{}.packed.v1",key.down_fmt);
+    let gw=||tensor(ElementType::U8,vec![key.e,key.n,key.gpacked],Some(&gr));
+    let dw=tensor(ElementType::U8,vec![key.e,key.k,key.dpacked],Some(&dr));
+    let gate=prepare(true,key.gm,key.gs,vec![gw(),gw(),scratch(key.b,key.kp),ids(),intermediate(),
+        scalar(),scalar(),scalar(),scalar(),scalar(),scalar(),scalar()])?;
+    let down=prepare(false,key.dm,key.ds,vec![dw,scratch(a,key.np),ids(),
+        tensor(ElementType::F32,vec![key.b,key.t],None),tensor(ElementType::F32,vec![key.b,key.k],None),
+        scalar(),scalar(),scalar(),scalar(),scalar(),scalar()])?;
+    Ok(DecodePlans{q1,gate,q2,down})
+}
+pub(crate) fn fused_moe_decode(g:&QTensor,u:&QTensor,w:&QTensor,x:&Tensor,ids:&Tensor,routing:&Tensor,
+    activation:crate::GluActivationType,out_dtype:DType)->Result<Tensor>{
+    let act=match activation{crate::GluActivationType::Gelu=>0i32,crate::GluActivationType::Silu=>1,
+        _=>candle_core::bail!("DKR historical fused MoE decode activation unsupported")};
+    let (b,k)=x.dims2()?;let (ib,t)=ids.dims2()?;
+    let (e,n,gk)=g.shape().dims3()?;let (we,wn,wk)=w.shape().dims3()?;
+    let gf=fmt_decode(g.dtype()).ok_or_else(||candle_core::Error::msg("DKR fused MoE gate format"))?;
+    let df=fmt_decode(w.dtype()).ok_or_else(||candle_core::Error::msg("DKR fused MoE down format"))?;
+    let dev=x.device().as_cuda_device()?;
+    let info=crate::cuda_device::cuda_device_info(dev);
+    if info.capability()!=(6,1)||info.warp_size!=32||b==0||t==0||e==0||n==0||k==0||ib!=b||gk!=k||we!=e||wn!=k||wk!=n
+        || u.shape()!=g.shape()||u.dtype()!=g.dtype()||k%g.dtype().block_size()!=0||n%w.dtype().block_size()!=0
+        || ids.dtype()!=DType::U32||routing.shape()!=ids.shape()||!ids.device().same_device(x.device())
+        || !routing.device().same_device(x.device())||[g,u,w].iter().any(|w|!w.device().same_device(x.device())){
+        candle_core::bail!("DKR fused MoE decode contract");
+    }
+    dtype(x.dtype())?;dtype(out_dtype)?;
+    let a=prod(b,t)?;
+    if a>65535||b>65535||t>65535{candle_core::bail!("DKR fused MoE decode grid");}
+    let gp=prod(k/g.dtype().block_size(),g.dtype().type_size())?;
+    let dp=prod(n/w.dtype().block_size(),w.dtype().type_size())?;
+    let gb=checked_span(prod(prod(e,n)?,gp)?)?;
+    let db=checked_span(prod(prod(e,k)?,dp)?)?;
+    let padded=|v:usize|->Result<usize>{Ok(v.checked_add(511).ok_or_else(||candle_core::Error::msg("padding overflow"))?/512*512)};
+    let kp=padded(k)?;let np=padded(n)?;
+    checked_span(prod(b,kp)?)?;checked_span(prod(a,np)?)?;
+    let qbytes=checked_span(prod(prod(b,kp/32)?,36)?.max(prod(prod(a,np/32)?,36)?))?;
+    let inter=checked_span(prod(a,n)?)?;let out_count=checked_span(prod(b,k)?)?;
+    for v in [e,k,n,kp,np]{checked_span(v)?;}
+    let x=x.contiguous()?;let ids=ids.contiguous()?;let routing=routing.to_dtype(DType::F32)?.contiguous()?;
+    let (xs,xl)=x.storage_and_layout();let (is,il)=ids.storage_and_layout();let (rs,rl)=routing.storage_and_layout();
+    let (Storage::Cuda(xs),Storage::Cuda(is),Storage::Cuda(rs))=(&*xs,&*is,&*rs)else{candle_core::bail!("DKR MoE CUDA tensors");};
+    let stream=dev.cuda_stream();
+    let (gw,_gg)=g.device_ptr_with_guard(&stream)?;let (uw,_ug)=u.device_ptr_with_guard(&stream)?;
+    let (dw,_dg)=w.device_ptr_with_guard(&stream)?;
+    let prefetch=b<=2&&prefers_weight_prefetch(dev);
+    let (gm,gs)=decode_mode(prefetch,b==1&&gb.saturating_mul(2)>info.l2_bytes,gp,gw|uw,true,info.smem_optin);
+    let (dm,ds)=decode_mode(prefetch,b==1&&db>info.l2_bytes,dp,dw,false,info.smem_optin);
+    let key=DecodeKey{gate_fmt:gf,down_fmt:df,dt:x.dtype(),e,b,t,k,n,kp,np,gpacked:gp,dpacked:dp,gm,dm,gs,ds};
+    let (mut qws,mut fws)=super::super::cuda::typed_decode_workspaces(dev,qbytes,inter)?;
+    let (q,_qg)=slice_ptr_mut_on_stream(&mut qws.slice,0,&stream);
+    let (mid,_mg)=slice_ptr_mut_on_stream(&mut fws.slice,0,&stream);
+    let (ip,_ig)=slice_ptr_on_stream(is.as_cuda_slice::<u32>()?,il.start_offset(),&stream);
+    let (rp,_rg)=slice_ptr_on_stream(rs.as_cuda_slice::<f32>()?,rl.start_offset(),&stream);
+    let (bi,ti,ei,ki,ni,kpi,npi)=(b as i32,t as i32,e as i32,k as i32,n as i32,kp as i32,np as i32);
+    let mut out=dev.alloc_zeros::<f32>(out_count)?;
+    macro_rules! run{($t:ty)=>{{
+        let (xp,_xg)=slice_ptr_on_stream(xs.as_cuda_slice::<$t>()?,xl.start_offset(),&stream);
+        let (op,_og)=slice_ptr_mut_on_stream(&mut out,0,&stream);
+        DECODE.with(|cache|cache.borrow_mut().with_plan(key,x.device(),||decode_plans(key,x.device()),|p|{
+            macro_rules! launch{($plan:expr,$($arg:expr),+)=>{unsafe{$plan.with_prevalidated_launch(|fun,cfg|{
+                let mut b=stream.launch_builder(fun);$(b.arg(&$arg);)+ b.launch(cfg)?;Ok(())
+            })}.map_err(|e|candle_core::Error::msg(e.to_string()))?}}
+            launch!(p.q1,xp,q,ki,kpi);
+            launch!(p.gate,gw,uw,q,ip,mid,ni,ki,bi,ti,kpi,act,ei);
+            launch!(p.q2,mid,q,ni,npi);
+            launch!(p.down,dw,q,ip,rp,op,ki,ni,bi,ti,npi,ei);
+            Ok(())
+        }))?;
+    }}}
+    match x.dtype(){DType::F16=>run!(half::f16),DType::BF16=>run!(half::bf16),DType::F32=>run!(f32),_=>unreachable!()}
+    Tensor::from((Storage::Cuda(CudaStorage::wrap_cuda_slice(out,dev.clone())),(b,k))).to_dtype(out_dtype)
+}
+#[cfg(test)]
+mod decode_tests{
+    use super::*;
+    #[test]
+    fn dkr_s9c_moe_decode_stage_policy(){
+        assert_eq!(decode_mode(false,true,128,0,true,49152),(DecodeMode::Direct,0));
+        assert_eq!(decode_mode(true,false,128,0,true,49152),(DecodeMode::Prefetch,0));
+        assert_eq!(decode_mode(true,true,128,0,true,49152),(DecodeMode::Stage16,2048));
+        assert_eq!(decode_mode(true,true,136,0,false,49152),(DecodeMode::Stage8,1088));
+        assert_eq!(decode_mode(true,true,132,0,true,49152),(DecodeMode::Stage4,4224));
+        assert_eq!(decode_mode(true,true,130,0,true,49152),(DecodeMode::Prefetch,0));
+        assert_eq!(decode_mode(true,true,4096,0,true,49152),(DecodeMode::Prefetch,0));
+    }
+    #[test]
+    #[ignore="requires staged MoE decode catalogue and SM61"]
+    fn dkr_s9c_fused_moe_decode_gpu()->Result<()>{
+        let _evidence=mistralrs_kernel_runtime::RuntimeEvidenceGuard;
+        let dev=Device::new_cuda(0)?;
+        let make=|salt:usize,q|QTensor::quantize(&Tensor::from_vec(
+            (0..4*256*256).map(|i|(((i+salt)%17)as f32-8.)/256.).collect::<Vec<_>>(),(4,256,256),&dev)?,q);
+        let g=make(1,GgmlDType::Q4K)?;let u=make(2,GgmlDType::Q4K)?;let w=make(3,GgmlDType::Q8_0)?;
+        for b in [1usize,2,3,8]{
+            let x=Tensor::from_vec((0..b*256).map(|i|((i%9)as f32-4.)/8.).collect::<Vec<_>>(),(b,256),&dev)?;
+            let ids=Tensor::from_vec((0..b*2).map(|i|(i%4)as u32).collect::<Vec<_>>(),(b,2),&dev)?;
+            let routing=Tensor::full(0.5f32,(b,2),&dev)?;
+            for dt in [DType::F16,DType::BF16,DType::F32]{
+                let x=x.to_dtype(dt)?;let flat=x.reshape((b,1,256))?;
+                let gate=indexed(&g,&flat,&ids)?;let up=indexed(&u,&flat,&ids)?;
+                for act in [crate::GluActivationType::Gelu,crate::GluActivationType::Silu]{
+                    let mid=super::super::super::group::typed_glu(&gate,&up,act)?;
+                    let down=indexed(&w,&mid,&ids)?;
+                    let expected=down.broadcast_mul(&routing.unsqueeze(2)?)?.sum(1)?;
+                    let actual=fused_moe_decode(&g,&u,&w,&x,&ids,&routing,act,DType::F32)?;
+                    let delta=(actual-expected)?.abs()?.max_all()?.to_scalar::<f32>()?;
+                    assert!(delta<0.025,"{dt:?} {b} {act:?} {delta}");
+                }
+            }
+        }
+        Ok(())
+    }
+}

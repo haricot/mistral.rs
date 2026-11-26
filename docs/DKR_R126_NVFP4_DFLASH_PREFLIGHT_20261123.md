@@ -1487,3 +1487,30 @@ default stage/finalize unchanged. Synthetic 576->9 case added.
 Cache bytes not deleted; changed shared sources may invalidate
 fingerprints. Catalogue compacted paths need fresh manifest-bound
 qualification.
+
+
+### S9C.2B4e — historical fused decode recovery addendum
+
+Supersedes the earlier remaining gate/up/down item. Two additional
+bounded images (110 profiles) expose direct, L2-prefetch and staged
+gate/up/GLU and down+weighted-atomic kernels for 11 GGUF formats.
+Preserve historical prefetch <=2 tokens and one-token staging for
+expert banks larger than L2. Stage selection uses actual row/pointer
+alignment, 8/16 tile rows, 24 KiB per operand; 16/8/4-byte copy
+variants. New unsafe prevalidated runtime API binds the proven
+shape-derived dynamic shared size beneath the manifest ceiling
+(48 KiB gate, 24 KiB down). No other plan changes its shared-memory
+semantics. Expert bounds checked before weight access.
+Historical persistent decode workspace maps reused (Q8_1 scratch
+and F32 intermediate, same retirement policy). Actual launches:
+row encode, fused gate/up/activation, row encode, fused down/atomic
+aggregate; output zero-init precedes aggregation. Gate/up F32
+intermediate preserved. Atomic reduction is not bit-deterministic.
+High-level no-LoRA/no-bias typed dispatch restores historical
+grouped/per-assignment heuristic for admitted signatures. LoRA,
+mixed dense/quant pair and direct residual FFI still pending; grouped
+path uses the new Pascal compact implementation, not historical MMA.
+Total B4e additions 634 logical / 13 physical; cumulative conservative
+upper bound 519 physical / 3613 logical before compaction. Need at
+least seven physical manifests saved if upper bound realized.
+Prepared source + regression tests, no actual Rust/CUDA compilation.

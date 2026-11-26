@@ -53,14 +53,14 @@ type DispatchWsMap = Mutex<HashMap<WorkspaceKey, &'static Mutex<DispatchWorkspac
 
 static MOE_DISPATCH_WORKSPACE: OnceLock<DispatchWsMap> = OnceLock::new();
 
-struct U8WorkspaceSlot {
-    slice: CudaSlice<u8>,
+pub(super) struct U8WorkspaceSlot {
+    pub(super) slice: CudaSlice<u8>,
     cap: usize,
     retired: Vec<CudaSlice<u8>>,
 }
 
-struct F32WorkspaceSlot {
-    slice: CudaSlice<f32>,
+pub(super) struct F32WorkspaceSlot {
+    pub(super) slice: CudaSlice<f32>,
     cap: usize,
     retired: Vec<CudaSlice<f32>>,
 }
@@ -175,6 +175,17 @@ fn f32_workspace_ensure(
         slot.cap = len;
     }
     Ok(slot)
+}
+
+#[cfg(feature = "dkr-static-closure-probe")]
+pub(super) fn typed_decode_workspaces(dev:&CudaDevice,bytes:usize,elements:usize)->Result<(
+    std::sync::MutexGuard<'static,U8WorkspaceSlot>,
+    std::sync::MutexGuard<'static,F32WorkspaceSlot>,
+)>{
+    // Same lock order, device/stream key and retirement policy as the historical pipeline.
+    let q=u8_workspace_ensure(&MOE_DECODE_Q8_WORKSPACE,dev,bytes)?;
+    let f=f32_workspace_ensure(&MOE_DECODE_F32_WORKSPACE,dev,elements)?;
+    Ok((q,f))
 }
 
 fn ceil_div(p: usize, q: usize) -> usize {

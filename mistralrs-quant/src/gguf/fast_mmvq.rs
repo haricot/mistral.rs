@@ -395,6 +395,8 @@ mod dynamic;
 pub(crate) use dynamic::gated_mix as typed_gated_mix;
 #[cfg(feature = "dkr-static-closure-probe")]
 pub(crate) use dynamic::indexed as typed_indexed;
+#[cfg(feature = "dkr-static-closure-probe")]
+pub(crate) use dynamic::fused_moe_decode as typed_fused_moe_decode;
 
 #[cfg(feature = "dkr-static-closure-probe")]
 pub fn plain(w: &QTensor, xs: &Tensor) -> Result<Tensor> {

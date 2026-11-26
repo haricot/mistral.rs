@@ -36,6 +36,8 @@ CASES = {
     "gguf_indexed_mmvq": ("gguf/moe_dynamic.rs", "return super::super::fast_mmvq::typed_indexed(w,x,ids);"),
     "gguf_grouped_glu": ("gguf/fast_mmq.rs", "moe_dynamic::grouped_glu(run.weight"),
     "gguf_grouped_pipeline": ("routed_moe/mod.rs", "return crate::gguf::fast_mmq::typed_moe_pipeline("),
+    "gguf_fused_decode": ("routed_moe/mod.rs", "return crate::gguf::fast_mmvq::typed_fused_moe_decode("),
+    "gguf_fused_decode_stage": ("gguf/mmvq_dynamic.rs", "p.prevalidate_launch_with_shared(&req,dev,shared as u32)"),
 }
 FORCED = ("quantized_gemv_dynamic.rs", "quantized_gemm_dynamic.rs",
           "nvfp4/gemv_dynamic.rs", "routed_gemv/dynamic.rs")
@@ -58,7 +60,7 @@ def main():
                 status="SOURCE_MARKERS_PRESENT",compilation=False,
                 full_link_qualified=False,full_model_qualified=False,
                 unresolved=["blockwise_fp8_weight_quant_dequant","gguf_indexed_mmvq_prefetch_staged",
-                            "gguf_direct_mmq_mmvq","gguf_fused_decode_moe_gate_up_down","higher_level_routed_moe_glu",
+                            "gguf_direct_mmq_mmvq","gguf_lora_fused_decode","higher_level_routed_moe_glu",
                             "other_core_and_quant_ffi"])
     if a.json_out:
         a.json_out.parent.mkdir(parents=True,exist_ok=True)

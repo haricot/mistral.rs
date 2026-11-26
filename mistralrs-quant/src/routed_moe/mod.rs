@@ -119,18 +119,28 @@ impl RoutedExperts<'_> {
         #[cfg(all(feature = "cuda", feature = "dkr-static-closure-probe"))]
         if forward.xs_flat.device().is_cuda()
             && self.members().iter().all(|member| member.get_qtensor().is_some()) {
-            // Restore the grouped fused pipeline only for eligible, bias-free
-            // prefill without LoRA. Decode and other signatures stay on typed gather.
-            if forward.lora.is_none() && forward.shape.num_tokens>crate::gguf::fast_mmvq::MMVQ_MAX_BATCH
+            // Preserve the historical grouped/per-assignment policy for
+            // bias-free, non-LoRA fused GGUF execution.
+            if forward.lora.is_none() && forward.topk_ids.dtype()==DType::U32
                 && !self.members().iter().any(|m|m.has_bias())
                 && crate::group_allowed(forward.xs_flat,&self.members()){
                 if let (Some(gate),Some(up),Some(down),Some(act))=
                     (self.gate.get_qtensor(),self.up.get_qtensor(),self.down.get_qtensor(),forward.activation.fused){
+                    let supported=|q:&candle_core::quantized::QTensor|crate::supports_mmq(q.dtype())
+                        || q.dtype()==candle_core::quantized::GgmlDType::Q8_1;
                     if gate.shape().rank()==3 && down.shape().rank()==3 && gate.shape()==up.shape()
-                        && gate.dtype()==up.dtype() && crate::supports_mmq(gate.dtype()) && crate::supports_mmq(down.dtype())
-                        && gate.shape().dims()[2]%256==0 && down.shape().dims()[2]%256==0 {
-                        return crate::gguf::fast_mmq::typed_moe_pipeline(&gate,&up,&down,forward.xs_flat,forward.topk_ids,
-                            forward.topk_weights,act as i32,forward.original_dtype);
+                        && gate.dtype()==up.dtype() && supported(&gate) && supported(&down) {
+                        let grouped=matches!(self.select_cuda_fast_path(&forward),Some(cuda::CudaRoute::Grouped))
+                            && crate::supports_mmq(gate.dtype()) && crate::supports_mmq(down.dtype())
+                            && gate.shape().dims()[2]%256==0 && down.shape().dims()[2]%256==0;
+                        if grouped{
+                            return crate::gguf::fast_mmq::typed_moe_pipeline(&gate,&up,&down,forward.xs_flat,forward.topk_ids,
+                                forward.topk_weights,act as i32,forward.original_dtype);
+                        }
+                        if matches!(act,GluActivationType::Gelu|GluActivationType::Silu){
+                            return crate::gguf::fast_mmvq::typed_fused_moe_decode(&gate,&up,&down,forward.xs_flat,forward.topk_ids,
+                                forward.topk_weights,act,forward.original_dtype);
+                        }
                     }
                 }
             }
