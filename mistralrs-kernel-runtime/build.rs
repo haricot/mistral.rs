@@ -71,8 +71,8 @@ fn main() -> Result<()> {
         root_literal = format!("Some({:?})", root.to_str().unwrap());
         let catalog = KernelCatalog::discover(&root)?;
         let scope_path = root.join(model_scope::SCOPE_FILENAME);
-        println!("cargo:rerun-if-changed={}", scope_path.display());
         if let Some(receipt) = model_scope::read_scope_receipt(&root)? {
+            println!("cargo:rerun-if-changed={}", scope_path.display());
             receipt.verify(&catalog)?;
             scope_literal = format!("Some({:?})", serde_json::to_string(&receipt)?);
         }
