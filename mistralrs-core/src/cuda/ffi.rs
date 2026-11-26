@@ -1294,6 +1294,7 @@ extern "C" {
         stream: i64,
     );
 
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn gdn_decode_recurrence(
         mixed_qkv: *const c_void,
         b: *const c_void,
