@@ -25,6 +25,7 @@ extern "C" {
         dst_pitch: i64,
         stream: i64,
     ) -> i32;
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn indexed_row_copy_bf16(
         src: *const c_void,
         dst: *mut c_void,
@@ -33,6 +34,7 @@ extern "C" {
         row_elements: i64,
         stream: i64,
     ) -> i32;
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn indexed_row_copy_f16(
         src: *const c_void,
         dst: *mut c_void,
@@ -41,6 +43,7 @@ extern "C" {
         row_elements: i64,
         stream: i64,
     ) -> i32;
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn indexed_row_copy_f32(
         src: *const c_void,
         dst: *mut c_void,
@@ -59,6 +62,7 @@ extern "C" {
         staged_width: i32,
         stream: i64,
     ) -> i32;
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn pad_decode_input_u32(
         input: *const c_void,
         output: *mut c_void,
@@ -133,6 +137,7 @@ extern "C" {
         base_stride_h: i64,
         stream: i64,
     ) -> i32;
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn apply_sparse_penalties_f32(
         x: *const c_void,
         dst: *mut c_void,
@@ -145,6 +150,7 @@ extern "C" {
         repetition_penalty: f32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn apply_sparse_logits_bias_f32(
         x: *const c_void,
         dst: *mut c_void,
@@ -154,6 +160,7 @@ extern "C" {
         n_tokens: i32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn apply_causal_mask_f32(
         scores: *mut c_void,
         batch_heads: i32,
@@ -163,6 +170,7 @@ extern "C" {
         prefix_len: i32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn rms_norm_residual_f32(
         x: *const c_void,
         residual: *const c_void,
@@ -174,6 +182,7 @@ extern "C" {
         eps: f32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn rms_norm_residual_f16(
         x: *const c_void,
         residual: *const c_void,
@@ -185,6 +194,7 @@ extern "C" {
         eps: f32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn rms_norm_residual_bf16(
         x: *const c_void,
         residual: *const c_void,
@@ -196,6 +206,7 @@ extern "C" {
         eps: f32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn add_rms_norm_f32(
         x: *const c_void,
         residual: *const c_void,
@@ -207,6 +218,7 @@ extern "C" {
         eps: f32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn add_rms_norm_f16(
         x: *const c_void,
         residual: *const c_void,
@@ -218,6 +230,7 @@ extern "C" {
         eps: f32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn add_rms_norm_bf16(
         x: *const c_void,
         residual: *const c_void,
@@ -229,6 +242,7 @@ extern "C" {
         eps: f32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn rms_norm_residual_then_rms_norm_f32(
         x: *const c_void,
         residual: *const c_void,
@@ -243,6 +257,7 @@ extern "C" {
         norm_eps: f32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn rms_norm_residual_then_rms_norm_f16(
         x: *const c_void,
         residual: *const c_void,
@@ -257,6 +272,7 @@ extern "C" {
         norm_eps: f32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn rms_norm_residual_then_rms_norm_bf16(
         x: *const c_void,
         residual: *const c_void,
@@ -992,6 +1008,7 @@ extern "C" {
     );
     // Mamba SSM selective scan kernel
     #[cfg(not(feature = "dkr-ssm"))]
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn selective_scan_cuda(
         x: *const f32,       // (batch, seq_len, n_heads * head_dim)
         dt: *const f32,      // (batch, seq_len, n_heads)
