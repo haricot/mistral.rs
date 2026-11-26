@@ -152,7 +152,9 @@ pub(crate) fn indices(storage:&CudaStorage,layout:&Layout,cols:usize,asc:bool)->
         CudaStorageSlice::I64(s)=>read_ptr!(s),_=>candle_core::bail!("argsort storage dtype mismatch"),
     };
     let (dst_ptr,dst_guard)=dst.device_ptr_mut(&stream);
+    let dst_ptr=span(dst_ptr,0,g.elements,g.elements,ElementType::U32)?;
     let (work_ptr,work_guard)=work.device_ptr_mut(&stream);
+    let work_ptr=span(work_ptr,0,g.padded as usize,g.padded as usize,ElementType::U32)?;
     let key=SortKey{dt,asc,cols:g.cols,padded:g.padded};
     SORT.with(|cache|cache.borrow_mut().with_plan(key,&device,||sort_plan(&device,key),|plan|{
         for row in 0..g.rows{
@@ -213,6 +215,7 @@ impl candle_core::CustomOp2 for ArgsortGather{
                 let p=span(p,layout.start_offset(),g.elements,$src.len(),dt)?;
                 let mut out=unsafe{dev.alloc::<$ty>(g.elements)}?;
                 let (out_ptr,out_guard)=out.device_ptr_mut(&stream);
+                let out_ptr=span(out_ptr,0,g.elements,g.elements,dt)?;
                 GATHER.with(|cache|cache.borrow_mut().with_plan(key,&device,||gather_plan(&device,key),|plan|{
                     unsafe{plan.with_prevalidated_launch(|func,cfg|{
                         let mut b=stream.launch_builder(func);
@@ -259,6 +262,36 @@ mod tests{
         assert!(Geometry::new(MAX_TENSOR_BYTES,1,ElementType::F64).is_err());
         assert_eq!(span(8,1,3,4,ElementType::F64).unwrap(),16);
         assert!(span(8,2,3,4,ElementType::F64).is_err());
+    }
+    #[test]
+    #[ignore="requires CUDA and qualified Argsort catalogue"]
+    fn dkr_argsort_gpu_all_dtypes()->Result<()>{
+        let dev=Device::new_cuda(0)?;
+        macro_rules! exercise{
+            ($ty:ty,$a:expr,$b:expr,$c:expr)=>{{
+                let input=Tensor::from_vec(vec![$c,$a,$b,$a,$c,$b],(2,3),&dev)?;
+                for asc in [true,false]{
+                    let (values,ids)=ArgSortOp::sort(&input,asc)?;
+                    let (expected,permutation)=if asc{
+                        (vec![vec![$a,$b,$c];2],vec![vec![1,2,0],vec![0,2,1]])
+                    }else{
+                        (vec![vec![$c,$b,$a];2],vec![vec![0,2,1],vec![1,2,0]])
+                    };
+                    assert_eq!(values.to_vec2::<$ty>()?,expected);
+                    assert_eq!(ids.to_vec2::<u32>()?,permutation);
+                    assert_eq!(input.arg_sort(asc)?.to_vec2::<u32>()?,permutation);
+                }
+                assert_eq!(input.to_vec2::<$ty>()?,vec![vec![$c,$a,$b],vec![$a,$c,$b]]);
+            }};
+        }
+        exercise!(f32,-3f32,0f32,2f32);
+        exercise!(f64,-3f64,0f64,2f64);
+        exercise!(half::f16,half::f16::from_f32(-3.),half::f16::from_f32(0.),half::f16::from_f32(2.));
+        exercise!(half::bf16,half::bf16::from_f32(-3.),half::bf16::from_f32(0.),half::bf16::from_f32(2.));
+        exercise!(u8,0u8,2u8,u8::MAX);
+        exercise!(u32,0u32,2u32,u32::MAX);
+        exercise!(i64,i64::MIN,0i64,i64::MAX);
+        Ok(())
     }
     #[test]
     #[ignore="requires CUDA and qualified Argsort catalogue"]

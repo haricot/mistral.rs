@@ -74,6 +74,6 @@ def main():
         a.json_out.parent.mkdir(parents=True,exist_ok=True)
         with a.json_out.open("x") as f:
             json.dump(r,f,indent=2,sort_keys=True);f.write("\n")
-    print(f"DKR_R126_S9C2E4_SOURCE=COMPLETE guarded_ffi=12 residual={r[\'residual_ffi\']} profiles=32 images=3 max_args=16 projected_master_logical=4245 projected_master_physical=551 model_scope_fit=UNPROVEN compilation=false link_qualified=false full_closure=false")
+    print(f"DKR_R126_S9C2E4_SOURCE=COMPLETE guarded_ffi=12 residual={r['residual_ffi']} profiles=32 images=3 max_args=16 projected_master_logical=4245 projected_master_physical=551 model_scope_fit=UNPROVEN compilation=false link_qualified=false full_closure=false")
 if __name__=="__main__":
     main()

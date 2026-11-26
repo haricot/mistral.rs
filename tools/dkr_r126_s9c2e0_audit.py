@@ -228,6 +228,19 @@ def self_test():
             failures+=1
         else:
             raise AssertionError("inventory drift accepted")
+    # The final Argsort transition must close the entire family, never a subset.
+    closed=set().union(*REUSE.values())
+    router=SAMPLING_GROUPS["router"]|SAMPLING_GROUPS["small_topk"]
+    large=SAMPLING_GROUPS["large_topk"]|SAMPLING_GROUPS["ranked"]|SAMPLING_GROUPS["workspace_query"]
+    sampling=set().union(*(SAMPLING_GROUPS[k] for k in ("sample","dflash","rejection","top1","categorical")))
+    partition(sorted(GRAPH),closed,router,large,sampling,ARG_SORT)
+    one=next(iter(sorted(ARG_SORT)))
+    try:
+        partition(sorted(GRAPH|{one}),closed,router,large,sampling,ARG_SORT-{one})
+    except ValueError:
+        failures+=1
+    else:
+        raise AssertionError("partial Argsort closure accepted")
     print(f"DKR_R126_S9C2E0_SELF_TEST=PASS negative_cases={failures}")
 
 def main():
