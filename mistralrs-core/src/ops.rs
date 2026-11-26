@@ -564,6 +564,20 @@ pub fn cuda_moe_router_topk(
 }
 
 #[cfg(feature = "cuda")]
+fn cuda_large_topk_address(
+    base: u64, offset: usize, count: usize, allocation_elems: usize, element_bytes: usize,
+) -> Result<u64> {
+    if count == 0 || element_bytes == 0 ||
+        offset.checked_add(count).is_none_or(|end| end > allocation_elems) {
+        candle_core::bail!("large top-k binding exceeds CUDA allocation");
+    }
+    let bytes = offset.checked_mul(element_bytes)
+        .and_then(|n| u64::try_from(n).ok())
+        .ok_or_else(|| candle_core::Error::msg("large top-k offset overflow"))?;
+    base.checked_add(bytes).ok_or_else(|| candle_core::Error::msg("large top-k device address overflow"))
+}
+
+#[cfg(feature = "cuda")]
 #[allow(dead_code)]
 #[allow(clippy::cast_possible_truncation)]
 pub fn cuda_topk_logits_f32(
@@ -572,7 +586,7 @@ pub fn cuda_topk_logits_f32(
     temperature: f64,
 ) -> Result<TopKLogitsOutput> {
     use candle_core::backend::BackendStorage;
-    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
+    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut, DeviceSlice};
     use candle_core::cuda_backend::CudaStorageSlice;
 
     if temperature <= 0.0 || !temperature.is_finite() {
@@ -618,10 +632,13 @@ pub fn cuda_topk_logits_f32(
     let stream_raw = stream.cu_stream() as i64;
 
     let (src_ptr, _src_guard) = match &storage.slice {
-        CudaStorageSlice::F32(inp) => inp.device_ptr(&stream),
-        _ => candle_core::bail!("cuda_topk_logits_f32 only supports F32"),
+        CudaStorageSlice::F32(inp) => {
+            let (ptr, guard) = inp.device_ptr(&stream);
+            let ptr = cuda_large_topk_address(ptr, layout.start_offset(), ncols, inp.len(), 4)?;
+            (ptr as *const f32, guard)
+        }
+        _ => candle_core::bail!("large top-k only supports F32"),
     };
-    let src_ptr = unsafe { (src_ptr as *const f32).add(layout.start_offset()) };
 
     let workspace_elems = nblocks * k;
     let mut block_values = unsafe { dev.alloc::<f32>(workspace_elems) }?;
@@ -752,7 +769,7 @@ pub fn cuda_topk_logits_f32_packed(
     temperature: f64,
 ) -> Result<TopKLogitsPackedOutput> {
     use candle_core::backend::BackendStorage;
-    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
+    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut, DeviceSlice};
     use candle_core::cuda_backend::CudaStorageSlice;
 
     if temperature <= 0.0 || !temperature.is_finite() {
@@ -798,10 +815,13 @@ pub fn cuda_topk_logits_f32_packed(
     let stream_raw = stream.cu_stream() as i64;
 
     let (src_ptr, src_guard) = match &storage.slice {
-        CudaStorageSlice::F32(inp) => inp.device_ptr(&stream),
-        _ => candle_core::bail!("cuda_topk_logits_f32_packed only supports F32"),
+        CudaStorageSlice::F32(inp) => {
+            let (ptr, guard) = inp.device_ptr(&stream);
+            let ptr = cuda_large_topk_address(ptr, layout.start_offset(), ncols, inp.len(), 4)?;
+            (ptr as *const f32, guard)
+        }
+        _ => candle_core::bail!("large top-k only supports F32"),
     };
-    let src_ptr = unsafe { (src_ptr as *const f32).add(layout.start_offset()) };
 
     let workspace_elems = nblocks * k;
     let mut block_values = unsafe { dev.alloc::<f32>(workspace_elems) }?;
@@ -1108,7 +1128,7 @@ pub(crate) fn cuda_topk_logits_packed_batched_with_workspace(
     cache: &mut Option<CudaTopKLogitsPackedWorkspace>,
 ) -> Result<TopKLogitsPackedOutput> {
     use candle_core::backend::BackendStorage;
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DeviceSlice};
     use candle_core::cuda_backend::CudaStorageSlice;
     use std::ffi::c_void;
 
@@ -1223,8 +1243,8 @@ pub(crate) fn cuda_topk_logits_packed_batched_with_workspace(
     macro_rules! input_ptr {
         ($slice:expr, $ty:ty) => {{
             let (ptr, guard) = $slice.device_ptr(&stream);
-            let ptr =
-                unsafe { (ptr as *const $ty).add(input_layout.start_offset()) as *const c_void };
+            let ptr = cuda_large_topk_address(ptr, input_layout.start_offset(),
+                input.elem_count(), $slice.len(), std::mem::size_of::<$ty>())? as *const c_void;
             (ptr, guard)
         }};
     }
@@ -1243,8 +1263,8 @@ pub(crate) fn cuda_topk_logits_packed_batched_with_workspace(
         unreachable!("CUDA top-k workspace values are F32")
     };
     let (block_values_ptr, block_values_guard) = block_values_slice.device_ptr(&stream);
-    let block_values_ptr =
-        unsafe { (block_values_ptr as *mut f32).add(block_values_layout.start_offset()) };
+    let block_values_ptr = cuda_large_topk_address(block_values_ptr, block_values_layout.start_offset(),
+        workspace_elems, block_values_slice.len(), 4)? as *mut f32;
     let (block_indices_storage_guard, block_indices_layout) = block_indices.storage_and_layout();
     let candle_core::Storage::Cuda(block_indices_storage) = &*block_indices_storage_guard else {
         unreachable!("CUDA top-k workspace indices are CUDA")
@@ -1253,8 +1273,8 @@ pub(crate) fn cuda_topk_logits_packed_batched_with_workspace(
         unreachable!("CUDA top-k workspace indices are U32")
     };
     let (block_indices_ptr, block_indices_guard) = block_indices_slice.device_ptr(&stream);
-    let block_indices_ptr =
-        unsafe { (block_indices_ptr as *mut u32).add(block_indices_layout.start_offset()) };
+    let block_indices_ptr = cuda_large_topk_address(block_indices_ptr, block_indices_layout.start_offset(),
+        workspace_elems, block_indices_slice.len(), 4)? as *mut u32;
     let (block_maxes_storage, block_maxes_layout) = block_maxes.storage_and_layout();
     let candle_core::Storage::Cuda(block_maxes_storage) = &*block_maxes_storage else {
         unreachable!("CUDA top-k workspace maxima are CUDA")
@@ -1263,8 +1283,8 @@ pub(crate) fn cuda_topk_logits_packed_batched_with_workspace(
         unreachable!("CUDA top-k workspace maxima are F32")
     };
     let (block_maxes_ptr, block_maxes_guard) = block_maxes_slice.device_ptr(&stream);
-    let block_maxes_ptr =
-        unsafe { (block_maxes_ptr as *mut f32).add(block_maxes_layout.start_offset()) };
+    let block_maxes_ptr = cuda_large_topk_address(block_maxes_ptr, block_maxes_layout.start_offset(),
+        block_elems, block_maxes_slice.len(), 4)? as *mut f32;
     let (block_sums_storage, block_sums_layout) = block_sums.storage_and_layout();
     let candle_core::Storage::Cuda(block_sums_storage) = &*block_sums_storage else {
         unreachable!("CUDA top-k workspace sums are CUDA")
@@ -1273,8 +1293,8 @@ pub(crate) fn cuda_topk_logits_packed_batched_with_workspace(
         unreachable!("CUDA top-k workspace sums are F32")
     };
     let (block_sums_ptr, block_sums_guard) = block_sums_slice.device_ptr(&stream);
-    let block_sums_ptr =
-        unsafe { (block_sums_ptr as *mut f32).add(block_sums_layout.start_offset()) };
+    let block_sums_ptr = cuda_large_topk_address(block_sums_ptr, block_sums_layout.start_offset(),
+        block_elems, block_sums_slice.len(), 4)? as *mut f32;
     let (packed_storage_guard, packed_layout) = packed_dst.storage_and_layout();
     let candle_core::Storage::Cuda(packed_storage) = &*packed_storage_guard else {
         unreachable!("CUDA top-k packed workspace is CUDA")
@@ -1283,9 +1303,10 @@ pub(crate) fn cuda_topk_logits_packed_batched_with_workspace(
         unreachable!("CUDA top-k packed workspace is F32")
     };
     let (packed_ptr, packed_guard) = packed_slice.device_ptr(&stream);
-    let packed_ptr = unsafe { (packed_ptr as *mut f32).add(packed_layout.start_offset()) };
-    let temperature_ptr =
-        unsafe { (temperature_ptr as *const f32).add(temperature_layout.start_offset()) };
+    let packed_ptr = cuda_large_topk_address(packed_ptr, packed_layout.start_offset(),
+        packed_elems, packed_slice.len(), 4)? as *mut f32;
+    let temperature_ptr = cuda_large_topk_address(temperature_ptr, temperature_layout.start_offset(),
+        batch, temperature_slice.len(), 4)? as *const f32;
 
     #[cfg(not(feature = "dkr-static-closure-probe"))]
     macro_rules! launch {
@@ -1365,7 +1386,7 @@ pub(crate) fn cuda_topk_ranked_packed_batched_with_workspace(
     cache: &mut Option<CudaRankedTopKPackedWorkspace>,
 ) -> Result<RankedTopKPackedOutput> {
     use candle_core::backend::BackendStorage;
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DeviceSlice};
     use candle_core::cuda_backend::CudaStorageSlice;
     use std::ffi::c_void;
 
@@ -1457,8 +1478,8 @@ pub(crate) fn cuda_topk_ranked_packed_batched_with_workspace(
     macro_rules! input_ptr {
         ($slice:expr, $ty:ty) => {{
             let (ptr, guard) = $slice.device_ptr(&stream);
-            let ptr =
-                unsafe { (ptr as *const $ty).add(input_layout.start_offset()) as *const c_void };
+            let ptr = cuda_large_topk_address(ptr, input_layout.start_offset(),
+                input.elem_count(), $slice.len(), std::mem::size_of::<$ty>())? as *const c_void;
             (ptr, guard)
         }};
     }
@@ -1476,8 +1497,8 @@ pub(crate) fn cuda_topk_ranked_packed_batched_with_workspace(
         unreachable!("CUDA ranked top-k workspace values are F32")
     };
     let (block_values_ptr, block_values_guard) = block_values_slice.device_ptr(&stream);
-    let block_values_ptr =
-        unsafe { (block_values_ptr as *mut f32).add(block_values_layout.start_offset()) };
+    let block_values_ptr = cuda_large_topk_address(block_values_ptr, block_values_layout.start_offset(),
+        workspace_elems, block_values_slice.len(), 4)? as *mut f32;
     let (block_indices_storage_guard, block_indices_layout) = block_indices.storage_and_layout();
     let candle_core::Storage::Cuda(block_indices_storage) = &*block_indices_storage_guard else {
         unreachable!("CUDA ranked top-k workspace indices are CUDA")
@@ -1486,8 +1507,8 @@ pub(crate) fn cuda_topk_ranked_packed_batched_with_workspace(
         unreachable!("CUDA ranked top-k workspace indices are U32")
     };
     let (block_indices_ptr, block_indices_guard) = block_indices_slice.device_ptr(&stream);
-    let block_indices_ptr =
-        unsafe { (block_indices_ptr as *mut u32).add(block_indices_layout.start_offset()) };
+    let block_indices_ptr = cuda_large_topk_address(block_indices_ptr, block_indices_layout.start_offset(),
+        workspace_elems, block_indices_slice.len(), 4)? as *mut u32;
     let (packed_storage_guard, packed_layout) = packed_dst.storage_and_layout();
     let candle_core::Storage::Cuda(packed_storage) = &*packed_storage_guard else {
         unreachable!("CUDA ranked top-k packed workspace is CUDA")
@@ -1496,7 +1517,8 @@ pub(crate) fn cuda_topk_ranked_packed_batched_with_workspace(
         unreachable!("CUDA ranked top-k packed workspace is F32")
     };
     let (packed_ptr, packed_guard) = packed_slice.device_ptr(&stream);
-    let packed_ptr = unsafe { (packed_ptr as *mut f32).add(packed_layout.start_offset()) };
+    let packed_ptr = cuda_large_topk_address(packed_ptr, packed_layout.start_offset(),
+        packed_elems, packed_slice.len(), 4)? as *mut f32;
     let (radix_storage_guard, radix_layout) = radix_state.storage_and_layout();
     let candle_core::Storage::Cuda(radix_storage) = &*radix_storage_guard else {
         unreachable!("CUDA ranked top-k radix workspace is CUDA")
@@ -1505,7 +1527,8 @@ pub(crate) fn cuda_topk_ranked_packed_batched_with_workspace(
         unreachable!("CUDA ranked top-k radix workspace is U32")
     };
     let (radix_ptr, radix_guard) = radix_slice.device_ptr(&stream);
-    let radix_ptr = unsafe { (radix_ptr as *mut u32).add(radix_layout.start_offset()) };
+    let radix_ptr = cuda_large_topk_address(radix_ptr, radix_layout.start_offset(),
+        radix_state_elems, radix_slice.len(), 4)? as *mut u32;
 
     #[cfg(not(feature = "dkr-static-closure-probe"))]
     macro_rules! launch {
