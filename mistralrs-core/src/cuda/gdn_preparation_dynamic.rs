@@ -81,7 +81,7 @@ pub(super) unsafe fn launch_shared(device:&Device,op:&'static str,pointers:&[(u6
 }
 /// The explicit stream must belong to the validated device context. The
 /// caller owns all pointer guards on that stream, including output guards.
-pub(super) unsafe fn launch_on_stream(device:&Device,stream:&candle_core::cuda_backend::cudarc::driver::CudaStream,
+pub(super) unsafe fn launch_on_stream(device:&Device,stream:&std::sync::Arc<candle_core::cuda_backend::cudarc::driver::CudaStream>,
     op:&'static str,pointers:&[(u64,usize,E)],scalars:&[S],grid:[u32;3],block:[u32;3],shared:u32,ceiling:u32)->Result<()>{
     let key=make_key(op,pointers,scalars,grid,block,shared,ceiling)?;
     if !std::sync::Arc::ptr_eq(device.as_cuda_device()?.cuda_stream().context(),stream.context()){
