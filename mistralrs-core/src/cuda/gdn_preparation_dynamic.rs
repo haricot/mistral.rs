@@ -54,13 +54,7 @@ fn prepare(key:Key,device:&Device)->Result<PrevalidatedLaunchPlan>{
     }else{p.prevalidate_launch_with_optin(&req,device)}
         .map_err(|e|candle_core::Error::msg(e.to_string()))
 }
-/// Safety: addresses are valid spans of the declared dtype, guards live across
-/// the launch, and operation-specific scalar geometry matches the tensor spans.
-pub(super) unsafe fn launch(device:&Device,op:&'static str,pointers:&[(u64,usize,E)],scalars:&[S],grid:[u32;3],block:[u32;3])->Result<()>{
-    unsafe{launch_shared(device,op,pointers,scalars,grid,block,0,0)}
-}
-/// Same safety contract, plus a validated exact dynamic shared-memory size.
-pub(super) unsafe fn launch_shared(device:&Device,op:&'static str,pointers:&[(u64,usize,E)],scalars:&[S],grid:[u32;3],block:[u32;3],shared:u32,ceiling:u32)->Result<()>{
+fn make_key(op:&'static str,pointers:&[(u64,usize,E)],scalars:&[S],grid:[u32;3],block:[u32;3],shared:u32,ceiling:u32)->Result<Key>{
     if shared>ceiling{candle_core::bail!("GDN dynamic shared memory exceeds ceiling");}
     if pointers.len()>10||scalars.len()>16||pointers.iter().any(|(p,n,_)|*p==0||*n==0){
         candle_core::bail!("invalid GDN preparation ABI");
@@ -68,6 +62,21 @@ pub(super) unsafe fn launch_shared(device:&Device,op:&'static str,pointers:&[(u6
     let mut key=Key{op,tensors:[None;10],scalars:[None;16],grid,block,shared,ceiling};
     for (dst,&(_,n,dt)) in key.tensors.iter_mut().zip(pointers){*dst=Some((n,dt));}
     for (dst,s) in key.scalars.iter_mut().zip(scalars){*dst=Some(s.dtype());}
+    Ok(key)
+}
+/// Resolve a launch before any mutation in a multi-kernel transaction.
+pub(super) fn preflight(device:&Device,op:&'static str,pointers:&[(u64,usize,E)],scalars:&[S],grid:[u32;3],block:[u32;3])->Result<()>{
+    let key=make_key(op,pointers,scalars,grid,block,0,0)?;
+    PLANS.with(|cache|cache.borrow_mut().with_plan(key,device,||prepare(key,device),|_|Ok(())))
+}
+/// Safety: addresses are valid spans of the declared dtype, guards live across
+/// the launch, and operation-specific scalar geometry matches the tensor spans.
+pub(super) unsafe fn launch(device:&Device,op:&'static str,pointers:&[(u64,usize,E)],scalars:&[S],grid:[u32;3],block:[u32;3])->Result<()>{
+    unsafe{launch_shared(device,op,pointers,scalars,grid,block,0,0)}
+}
+/// Same safety contract, plus a validated exact dynamic shared-memory size.
+pub(super) unsafe fn launch_shared(device:&Device,op:&'static str,pointers:&[(u64,usize,E)],scalars:&[S],grid:[u32;3],block:[u32;3],shared:u32,ceiling:u32)->Result<()>{
+    let key=make_key(op,pointers,scalars,grid,block,shared,ceiling)?;
     let stream=device.as_cuda_device()?.cuda_stream();
     PLANS.with(|cache|cache.borrow_mut().with_plan(key,device,||prepare(key,device),|plan|{
         unsafe{plan.with_prevalidated_launch(|fun,cfg|{
