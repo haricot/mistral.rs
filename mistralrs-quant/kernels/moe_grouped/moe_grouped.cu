@@ -629,6 +629,7 @@ vd_q6_K_q8_1(const void *__restrict__ vbq, const block_q8_1 *__restrict__ bq8_1,
 // ============== Dispatch kernels ==============
 
 // Phase 1: Count tokens per expert using atomics
+#ifndef DKR_GGUF_GROUPED_IMAGE
 static __global__ void moe_dispatch_count_kernel(
     const int32_t *__restrict__ topk_ids, // [total_assignments] flattened
     int32_t *__restrict__ expert_counts,  // [num_experts] zero-initialized
@@ -701,6 +702,8 @@ static __global__ void moe_weighted_reduce_flat_kernel(
   }
   outputs[(size_t)token * hidden + h] = (OutputT)acc;
 }
+
+#endif // legacy dispatch/reduce entries
 
 // ============== Tiled MoE GEMM kernel (all quant types) ==============
 //
@@ -1068,6 +1071,7 @@ static __device__ void moe_tiled_gemm_q8_0_impl(
   }
 }
 
+#ifndef DKR_GGUF_GROUPED_IMAGE
 extern "C" __global__ void moe_grouped_gemm_q8_0(
     const void *all_weights, const void *all_inputs,
     const int32_t *expert_bounds, const int32_t *sorted_token_ids,
@@ -1233,3 +1237,4 @@ LAUNCH_MOE_TILED_GEMM(q3k, block_q3_K, QK_K, K_TILE_BLOCKS_SMALL)
 LAUNCH_MOE_TILED_GEMM(q4k, block_q4_K, QK_K, K_TILE_BLOCKS_SMALL)
 LAUNCH_MOE_TILED_GEMM(q5k, block_q5_K, QK_K, K_TILE_BLOCKS_SMALL)
 LAUNCH_MOE_TILED_GEMM(q6k, block_q6_K, QK_K, K_TILE_BLOCKS_SMALL)
+#endif // legacy grouped entries and launchers
