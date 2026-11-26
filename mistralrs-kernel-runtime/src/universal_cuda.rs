@@ -1,12 +1,13 @@
 use crate::{
     cuda::compute_capability,
+    cooperative::{requires_cooperative_launch, resident_group_grid},
     model_scope::{read_scope_receipt, ScopeLatch, ScopeReceipt},
     universal::{KernelCatalog, KernelManifest, LaunchRequest, VerifiedKernel},
 };
 use anyhow::{anyhow, ensure, Context, Result};
 use dkr_kernel_registry::{telemetry::{self,Event,Handle},TYPED_ABI};
 use candle_core::{
-    cuda_backend::cudarc::driver::{CudaFunction, LaunchConfig},
+    cuda_backend::cudarc::driver::{CudaFunction, CudaStream, LaunchArgs, LaunchConfig},
     Device,
 };
 use std::{
@@ -139,6 +140,33 @@ pub struct PrevalidatedLaunchPlan {
     config: LaunchConfig,
 }
 
+/// No ordinary-launch callback or CudaFunction accessor is exposed here.
+pub struct PrevalidatedCooperativeLaunchPlan {
+    kernel: Arc<PreparedKernel>,
+    config: LaunchConfig,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CooperativeDeviceLimits {
+    pub sms: u32,
+    pub max_shared_bytes: u32,
+}
+
+pub fn cooperative_device_limits(device: &Device) -> Result<Option<CooperativeDeviceLimits>> {
+    use candle_core::cuda_backend::cudarc::driver::sys::CUdevice_attribute;
+    let stream = device.as_cuda_device()?.cuda_stream();
+    let context = stream.context();
+    context.bind_to_thread()?;
+    if context.attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COOPERATIVE_LAUNCH)? == 0 {
+        return Ok(None);
+    }
+    let sms = u32::try_from(context.attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)?)?;
+    let max_shared_bytes = u32::try_from(context.attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN)?)?;
+    if sms == 0 || max_shared_bytes == 0 { return Ok(None); }
+    Ok(Some(CooperativeDeviceLimits { sms, max_shared_bytes }))
+}
+
+
 impl PreparedKernel {
     pub fn load_auto(
         catalog: &KernelCatalog,
@@ -198,6 +226,12 @@ impl PreparedKernel {
     }
 
     pub fn launch_config(&self, request: &LaunchRequest, device: &Device) -> Result<LaunchConfig> {
+        ensure!(!requires_cooperative_launch(&self.manifest.operation),
+            "cooperative kernel requires the cooperative launch API");
+        self.launch_config_internal(request, device)
+    }
+
+    fn launch_config_internal(&self, request: &LaunchRequest, device: &Device) -> Result<LaunchConfig> {
         ensure!(
             device.same_device(&self.device),
             "CUDA context mismatch for dynamic kernel"
@@ -222,6 +256,7 @@ impl PreparedKernel {
     /// Matches the historical FlashInfer occupancy policy without a CUDA host shim.
     pub fn persistent_grid_x(&self, work_items: u32, device: &Device) -> Result<u32> {
         use candle_core::cuda_backend::cudarc::driver::sys::CUdevice_attribute;
+        ensure!(!requires_cooperative_launch(&self.manifest.operation), "cooperative kernel requires grouped residency");
         ensure!(device.same_device(&self.device) && work_items > 0,
             "invalid persistent launch device or work count");
         let stream = device.as_cuda_device()?.cuda_stream();
@@ -267,6 +302,48 @@ impl PreparedKernel {
         let total = static_bytes.checked_add(i32::try_from(bytes)?).context("shared memory overflow")?;
         ensure!(static_bytes >= 0 && total <= limit, "kernel shared memory exceeds default device limit");
         Ok(plan)
+    }
+
+    /// Construct a fully resident cooperative grid, using actual function
+    /// occupancy. None means the cooperative algorithm is not eligible BEFORE
+    /// any launch. Driver errors are not a fallback signal.
+    ///
+    /// Safety: the caller proves that each group has exactly ctas_per_group
+    /// CTAs and that all shared and global accesses fit the declared buffers.
+    pub unsafe fn prevalidate_cooperative_grouped(
+        self: &Arc<Self>, request: &LaunchRequest, device: &Device,
+        bytes: u32, rows: u32, ctas_per_group: u32,
+    ) -> Result<Option<PrevalidatedCooperativeLaunchPlan>> {
+        use candle_core::cuda_backend::cudarc::driver::sys::CUfunction_attribute;
+        ensure!(requires_cooperative_launch(&self.manifest.operation),
+            "ordinary kernel cannot be admitted as a cooperative kernel");
+        ensure!(request.grid == [1,1,1] && rows > 0 && ctas_per_group > 0,
+            "invalid cooperative preparation request");
+        let mut config = self.launch_config_internal(request, device)?;
+        ensure!(bytes <= self.manifest.shared_mem_bytes, "cooperative shared-memory ceiling exceeded");
+        let Some(limits) = cooperative_device_limits(device)? else { return Ok(None); };
+        let static_bytes = u32::try_from(self.function.get_attribute(
+            CUfunction_attribute::CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES)?)?;
+        let Some(available) = limits.max_shared_bytes.checked_sub(static_bytes) else { return Ok(None); };
+        // Always set the same maximum for a given function/device, not the
+        // per-shape size: another cached plan must not have its cap reduced.
+        let ceiling = available.min(self.manifest.shared_mem_bytes);
+        if bytes > ceiling { return Ok(None); }
+        self.function.set_attribute(
+            CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+            i32::try_from(ceiling)?)?;
+        let threads = self.manifest.block.iter().product::<u32>();
+        let active = self.function.occupancy_max_active_blocks_per_multiprocessor(
+            threads, usize::try_from(bytes)?, None)?;
+        let Some(grid_x) = resident_group_grid(rows, ctas_per_group, active, limits.sms)? else {
+            return Ok(None);
+        };
+        let mut actual_request = request.clone();
+        actual_request.grid = [grid_x,1,1];
+        self.manifest.admit(&actual_request)?;
+        config.grid_dim = (grid_x,1,1);
+        config.shared_mem_bytes = bytes;
+        Ok(Some(PrevalidatedCooperativeLaunchPlan { kernel: Arc::clone(self), config }))
     }
 
     /// Resource-safe fixed dynamic shared-memory plan. Opt-in is performed
@@ -332,6 +409,29 @@ impl PrevalidatedLaunchPlan {
         };
         let result=launch(&self.kernel.function, config);
         self.kernel.evidence.record(if result.is_ok(){Event::AdapterOk}else{Event::AdapterError});
+        result
+    }
+}
+
+
+impl PrevalidatedCooperativeLaunchPlan {
+    /// Submit only through the cooperative driver entry point. This method
+    /// deliberately never returns the underlying function to an adapter.
+    /// Safety: bindings must match the admitted ABI, and buffer/stream
+    /// lifetimes and group geometry must remain valid for every replay.
+    pub unsafe fn launch_cooperative<'a>(
+        &'a self, stream: &'a CudaStream,
+        bind: impl FnOnce(&mut LaunchArgs<'a>),
+    ) -> Result<()> {
+        let expected = self.kernel.device.as_cuda_device()?.cuda_stream();
+        ensure!(Arc::ptr_eq(expected.context(), stream.context()) &&
+            expected.cu_stream() == stream.cu_stream(), "cooperative launch stream mismatch");
+        let config = LaunchConfig { grid_dim: self.config.grid_dim,
+            block_dim: self.config.block_dim, shared_mem_bytes: self.config.shared_mem_bytes };
+        let mut args = stream.launch_builder(&self.kernel.function);
+        bind(&mut args);
+        let result = unsafe { args.launch_cooperative(config) }.map(|_| ()).map_err(anyhow::Error::from);
+        self.kernel.evidence.record(if result.is_ok() { Event::AdapterOk } else { Event::AdapterError });
         result
     }
 }
