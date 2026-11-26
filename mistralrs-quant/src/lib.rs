@@ -55,6 +55,8 @@ mod hqq;
 mod imatrix;
 mod isq_executor;
 mod lfm3_conv;
+#[cfg(all(feature = "cuda", feature = "dkr-static-closure-probe"))]
+mod lfm3_dynamic;
 pub mod lfm3_spatial_conv;
 mod lora;
 #[cfg(feature = "cuda")]
