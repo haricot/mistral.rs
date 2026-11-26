@@ -1,4 +1,6 @@
 #[cfg(feature = "dkr-static-closure-probe")]
+pub(crate) mod large_topk_dynamic;
+#[cfg(feature = "dkr-static-closure-probe")]
 pub(crate) mod router_topk_dynamic;
 #[cfg(feature = "dkr-static-closure-probe")]
 pub(crate) mod attention_prep_dynamic;
