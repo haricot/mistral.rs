@@ -34,6 +34,7 @@ const PACKAGES: &[Package] = &[
     Package { name: "gdn-preparation", source: "gdn_preparation.cu", fast_math: true },
     Package { name: "gdn-decode", source: "gdn_decode.cu", fast_math: true },
     Package { name: "gdn-transaction", source: "gdn_transaction.cu", fast_math: true },
+    Package { name: "gdn-checkpoint", source: "gdn_checkpoint.cu", fast_math: true },
     Package { name: "dynamic-conv", source: "dynamic_conv.cu", fast_math: false },
     Package { name: "rounded-rope", source: "rounded_rope.cu", fast_math: true },
     Package { name: "dense-gemv", source: "dense_gemv.cu", fast_math: false },
@@ -434,6 +435,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     return Err(format!("GGUF MMVQ shard packaging failed for {id}: {status}").into());
                 }
             }
+        } else if pkg.name == "gdn-checkpoint" {
+            let watched=[root.join("mistralrs-core/src/cuda/gdn_checkpoint_device.cuh"),
+                         root.join("mistralrs-core/src/cuda/gdn_recurrence_conv_device.cuh")];
+            let compiled=compile_ptx(&source,&work.join(pkg.name),cc,pkg.fast_math,None,&watched)?;
+            package(&python,&script,cc,&output,&compiled,false,root)?;
         } else if pkg.name == "gdn-transaction" {
             let watched=[root.join("mistralrs-core/src/cuda/gdn_transition_device.cuh")];
             let compiled=compile_ptx(&source,&work.join(pkg.name),cc,pkg.fast_math,None,&watched)?;
