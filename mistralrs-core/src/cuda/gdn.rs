@@ -6,6 +6,10 @@ use mistralrs_quant::QuantizedActivation;
 #[cfg(any(feature = "cuda", test))]
 use mistralrs_quant::{ActivationQuantizationScheme, ActivationScaleLayout};
 
+#[cfg(feature = "dkr-static-closure-probe")]
+#[path = "gdn_recurrence_dynamic.rs"]
+mod recurrence_dynamic;
+
 use crate::gdn::GdnGateActivation;
 use crate::kv_cache::RecurrentStateLayout;
 #[cfg(feature = "cuda")]
@@ -1367,7 +1371,7 @@ enum RecurrenceKernel {
 
 /// `state` is `[BH, K, V]` or `[BH, V, K]` (gathered), or the matching pooled layout, mutated in place.
 /// Returns output `[BH, S, V]`.
-#[cfg(feature = "cuda")]
+#[cfg(all(feature = "cuda", not(feature = "dkr-static-closure-probe")))]
 fn launch_recurrence(
     kernel: RecurrenceKernel,
     inputs: RecurrenceInputs<'_>,
@@ -1517,6 +1521,16 @@ fn launch_recurrence(
         candle::Storage::Cuda(output_storage),
         (bh, seq_len, v_dim),
     )))
+}
+
+#[cfg(feature = "dkr-static-closure-probe")]
+fn launch_recurrence(
+    kernel: RecurrenceKernel,
+    inputs: RecurrenceInputs<'_>,
+    state: &mut Tensor,
+    slots: GdnStateSlots<'_>,
+) -> Result<Tensor> {
+    recurrence_dynamic::recurrence(kernel, inputs, state, slots)
 }
 
 /// Sequential (one token at a time) gated delta rule recurrence; see `launch_recurrence`.
@@ -1705,7 +1719,7 @@ pub fn vmajor_chunked_gated_delta_rule_recurrence_cuda(
 /// conv_state: [B, conv_dim, kernel_size], or the [cap, conv_dim, kernel_size] pool with `Pooled` slots.
 /// Update mutates `conv_state` in place; full writes a fresh state (gathered) or the pool rows (pooled).
 /// Returns (output [B, S, conv_dim], conv_state after the step).
-#[cfg(feature = "cuda")]
+#[cfg(all(feature = "cuda", not(feature = "dkr-static-closure-probe")))]
 pub fn causal_conv1d_cuda(
     x: &Tensor,
     weight: &Tensor,
@@ -1872,6 +1886,22 @@ pub fn causal_conv1d_cuda(
         }
         other => candle_core::bail!("causal_conv1d_cuda only supports f16/bf16, got {:?}", other),
     }
+}
+
+#[cfg(feature = "dkr-static-closure-probe")]
+pub fn causal_conv1d_cuda(
+    x: &Tensor,
+    weight: &Tensor,
+    conv_state: &Tensor,
+    kernel_size: usize,
+    is_update: bool,
+    slots: GdnStateSlots<'_>,
+) -> Result<(Tensor, Tensor)> {
+    let conv_state = if matches!(slots,GdnStateSlots::Pooled(_)) {
+        if !conv_state.is_contiguous() { candle_core::bail!("pooled conv state must be contiguous"); }
+        conv_state.clone()
+    } else { conv_state.contiguous()? };
+    recurrence_dynamic::convolution(x,weight,&conv_state,kernel_size,is_update,slots)
 }
 
 #[cfg(not(feature = "cuda"))]
