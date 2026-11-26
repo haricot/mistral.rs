@@ -743,3 +743,159 @@ mod decode_tests{
         Ok(())
     }
 }
+
+#[derive(Clone,Copy,PartialEq,Eq)]
+struct RowEncodeKey{dt:DType,rows:usize,k:usize,padded:usize}
+thread_local!{static ROW_ENCODE:RefCell<LaunchPlanCache<RowEncodeKey,PrevalidatedLaunchPlan>>=RefCell::new(LaunchPlanCache::new());}
+pub(crate) fn encode_rows(xs:&Tensor,out:&mut candle_core::cuda::cudarc::driver::CudaSlice<u8>,dev:&candle_core::CudaDevice)->Result<(usize,usize)>{
+    let (rows,k)=xs.dims2()?;
+    let padded=k.checked_add(511).ok_or_else(||candle_core::Error::msg("Q8_1 padding overflow"))?/512*512;
+    let bytes=checked_span(prod(prod(rows,padded/32)?,36)?)?;
+    checked_span(prod(rows,padded)?)?;
+    if rows==0||k==0||rows>65535||bytes>out.len()||out.ordinal()!=dev.cuda_stream().context().ordinal()
+        || !xs.device().same_device(&Device::Cuda(dev.clone())){
+        candle_core::bail!("DKR row encoder shape/device/span");
+    }
+    let dt=dtype(xs.dtype())?;
+    let xs=xs.contiguous()?;let (s,l)=xs.storage_and_layout();
+    let Storage::Cuda(s)=&*s else{candle_core::bail!("DKR row encoder requires CUDA");};
+    let stream=dev.cuda_stream();
+    let (dst,_dg)=slice_ptr_mut_on_stream(out,0,&stream);
+    let (ki,pi)=(k as i32,padded as i32);
+    let key=RowEncodeKey{dt:xs.dtype(),rows,k,padded};
+    macro_rules! run{($t:ty)=>{{
+        let (src,_sg)=slice_ptr_on_stream(s.as_cuda_slice::<$t>()?,l.start_offset(),&stream);
+        ROW_ENCODE.with(|cache|cache.borrow_mut().with_plan(key,xs.device(),||prepare_one(xs.device(),
+            "quant.gguf.q8_1.row.encode.v1".into(),
+            vec![tensor(dt,vec![rows,k],None),tensor(ElementType::U8,vec![rows,padded/32*36],Some("gguf.q8_1.row.v1")),scalar(),scalar()],
+            [padded.div_ceil(256) as u32,rows as u32,1],[256,1,1]),|p|{
+            unsafe{p.with_prevalidated_launch(|fun,cfg|{
+                let mut b=stream.launch_builder(fun);b.arg(&src).arg(&dst).arg(&ki).arg(&pi);b.launch(cfg)?;Ok(())
+            })}.map_err(|e|candle_core::Error::msg(e.to_string()))
+        }))?;
+    }}}
+    match xs.dtype(){DType::F16=>run!(half::f16),DType::BF16=>run!(half::bf16),DType::F32=>run!(f32),_=>unreachable!()}
+    Ok((k,padded))
+}
+
+#[derive(Clone,Copy,PartialEq,Eq)]
+struct LoraKey{fmt:&'static str,dt:DType,e:usize,n:usize,k:usize,b:usize,t:usize,padded:usize,packed:usize,gate:bool}
+thread_local!{static LORA:RefCell<LaunchPlanCache<LoraKey,PrevalidatedLaunchPlan>>=RefCell::new(LaunchPlanCache::new());}
+fn lora_plan(key:LoraKey,dev:&Device)->Result<PrevalidatedLaunchPlan>{
+    let kind=if key.gate{"gate"}else{"down"};
+    let repr=format!("gguf.{}.packed.v1",key.fmt);
+    let weight=||tensor(ElementType::U8,vec![key.e,key.n,key.packed],Some(&repr));
+    let mut args=vec![weight()];if key.gate{args.push(weight());}
+    let rows=if key.gate{key.b}else{key.b*key.t};
+    args.extend([tensor(ElementType::U8,vec![rows,key.padded/32*36],Some("gguf.q8_1.row.v1")),
+        tensor(ElementType::U32,vec![key.b,key.t],None),
+        tensor(dtype(key.dt)?,vec![key.b,key.t,key.n*if key.gate{2}else{1}],None),
+        scalar(),scalar(),scalar(),scalar(),scalar(),scalar()]);
+    prepare_one(dev,format!("quant.gguf.lora.{kind}.{}.v1",key.fmt),args,
+        [key.n.div_ceil(if key.gate{8}else{16}) as u32,key.t as u32,key.b as u32],[32,4,1])
+}
+pub(crate) fn lora_projection(w:&QTensor,up:Option<&QTensor>,xs:&Tensor,ids:&candle_core::cuda::cudarc::driver::CudaSlice<u32>,
+    batch:usize,topk:usize,experts:usize,dev:&candle_core::CudaDevice)->Result<Tensor>{
+    let fmt=fmt_decode(w.dtype()).ok_or_else(||candle_core::Error::msg("DKR LoRA format"))?;
+    let (e,n,k)=w.shape().dims3()?;
+    let a=prod(batch,topk)?;
+    let rows=if up.is_some(){batch}else{a};
+    let device=Device::Cuda(dev.clone());
+    if e!=experts||e==0||n==0||k==0||batch==0||topk==0||rows>65535||batch>65535||topk>65535
+        ||ids.len()<a||ids.ordinal()!=dev.cuda_stream().context().ordinal()
+        ||xs.dims2()? != (rows,k)||k%w.dtype().block_size()!=0
+        ||!w.device().same_device(&device)||!xs.device().same_device(&device)
+        ||up.is_some_and(|u|u.dtype()!=w.dtype()||u.shape()!=w.shape()||!u.device().same_device(&device)){
+        candle_core::bail!("DKR LoRA projection contract");
+    }
+    dtype(xs.dtype())?;
+    let packed=prod(k/w.dtype().block_size(),w.dtype().type_size())?;
+    checked_span(prod(prod(e,n)?,packed)?)?;
+    let count=checked_span(prod(prod(a,n)?,if up.is_some(){2}else{1})?)?;
+    for x in [e,n,k,a]{checked_span(x)?;}
+    let padded=k.checked_add(511).ok_or_else(||candle_core::Error::msg("padding overflow"))?/512*512;
+    let bytes=checked_span(prod(prod(rows,padded/32)?,36)?)?;
+    // Same persistent decode Q8 workspace as the non-LoRA path.
+    let mut ws=super::super::cuda::typed_q8_workspace(dev,bytes)?;
+    encode_rows(xs,&mut ws.slice,dev)?;
+    let stream=dev.cuda_stream();
+    let (q,_qg)=slice_ptr_on_stream(&ws.slice,0,&stream);
+    let (wp,_wg)=w.device_ptr_with_guard(&stream)?;
+    let (up_ptr,_ug)=up.unwrap_or(w).device_ptr_with_guard(&stream)?;
+    let (ip,_ig)=slice_ptr_on_stream(ids,0,&stream);
+    let key=LoraKey{fmt,dt:xs.dtype(),e,n,k,b:batch,t:topk,padded,packed,gate:up.is_some()};
+    let (ni,ki,bi,ti,ei,pi)=(n as i32,k as i32,batch as i32,topk as i32,e as i32,padded as i32);
+    macro_rules! run{($t:ty)=>{{
+        let mut out=unsafe{dev.alloc::<$t>(count)?};
+        {
+            let (op,_og)=slice_ptr_mut_on_stream(&mut out,0,&stream);
+            LORA.with(|cache|cache.borrow_mut().with_plan(key,&device,||lora_plan(key,&device),|p|{
+                unsafe{p.with_prevalidated_launch(|fun,cfg|{
+                    let mut b=stream.launch_builder(fun);b.arg(&wp);if key.gate{b.arg(&up_ptr);}
+                    b.arg(&q).arg(&ip).arg(&op).arg(&ni).arg(&ki).arg(&bi).arg(&ti).arg(&ei).arg(&pi);
+                    b.launch(cfg)?;Ok(())
+                })}.map_err(|e|candle_core::Error::msg(e.to_string()))
+            }))?;
+        }
+        Ok(Tensor::from((Storage::Cuda(CudaStorage::wrap_cuda_slice(out,dev.clone())),(batch,topk,n*if key.gate{2}else{1}))))
+    }}}
+    match xs.dtype(){DType::F16=>run!(half::f16),DType::BF16=>run!(half::bf16),DType::F32=>run!(f32),_=>unreachable!()}
+}
+
+#[derive(Clone,Copy,PartialEq,Eq)]
+struct MixedKey{fmt:&'static str,dt:DType,k:usize,padded:usize,packed:usize,qr:usize,dr:usize,prefetch:bool}
+struct MixedPlans{encode:PrevalidatedLaunchPlan,pair:PrevalidatedLaunchPlan}
+thread_local!{static MIXED:RefCell<LaunchPlanCache<MixedKey,MixedPlans>>=RefCell::new(LaunchPlanCache::new());}
+fn mixed_plans(key:MixedKey,dev:&Device)->Result<MixedPlans>{
+    let dt=dtype(key.dt)?;
+    let q=||tensor(ElementType::U8,vec![1,key.padded/32*36],Some("gguf.q8_1.row.v1"));
+    let x=||tensor(dt,vec![1,key.k],None);
+    let encode=prepare_one(dev,"quant.gguf.q8_1.row.encode.v1".into(),vec![x(),q(),scalar(),scalar()],
+        [key.padded.div_ceil(256) as u32,1,1],[256,1,1])?;
+    let repr=format!("gguf.{}.packed.v1",key.fmt);
+    let mode=if key.prefetch{"prefetch"}else{"direct"};
+    let pair=prepare_one(dev,format!("quant.gguf.mixed.{}.{mode}.v1",key.fmt),
+        vec![tensor(ElementType::U8,vec![key.qr,key.packed],Some(&repr)),q(),
+            tensor(dt,vec![key.dr,key.k],None),x(),tensor(dt,vec![1,key.qr],None),
+            tensor(dt,vec![1,key.dr],None),scalar(),scalar(),scalar()],
+        [(key.dr+if key.prefetch{key.qr}else{key.qr/2}) as u32,1,1],[32,8,1])?;
+    Ok(MixedPlans{encode,pair})
+}
+// Called only after the existing mixed-pair policy/shape checks.
+pub(super) fn mixed_pair(w:&QTensor,dense:&Tensor,xs:&Tensor,prefetch:bool)->Result<(Tensor,Tensor)>{
+    let (qr,k)=w.shape().dims2()?;let (dr,_)=dense.dims2()?;
+    let fmt=format(w.dtype()).ok_or_else(||candle_core::Error::msg("DKR mixed pair format"))?;
+    let dev=xs.device().as_cuda_device()?;
+    let padded=k.checked_add(511).ok_or_else(||candle_core::Error::msg("padding overflow"))?/512*512;
+    let packed=prod(k/w.dtype().block_size(),w.dtype().type_size())?;
+    checked_span(prod(qr,packed)?)?;checked_span(prod(dr,k)?)?;
+    checked_span(qr.checked_add(dr).ok_or_else(||candle_core::Error::msg("mixed grid overflow"))?)?;
+    let bytes=checked_span(prod(padded/32,36)?)?;
+    let key=MixedKey{fmt,dt:xs.dtype(),k,padded,packed,qr,dr,prefetch};
+    let xs=xs.contiguous()?;let (xs_storage,xl)=xs.storage_and_layout();let (ds,dl)=dense.storage_and_layout();
+    let (Storage::Cuda(xst),Storage::Cuda(dst))=(&*xs_storage,&*ds)else{candle_core::bail!("DKR mixed CUDA storage");};
+    let stream=dev.cuda_stream();let mut ws=workspace_ensure(dev,bytes,&stream)?;
+    let (q,_qg)=ws.ptr_mut();let (wp,_wg)=w.device_ptr_with_guard(&stream)?;
+    let (ki,pi,qri,dri)=(k as i32,padded as i32,qr as i32,dr as i32);
+    macro_rules! run{($t:ty)=>{{
+        let (xp,_xg)=slice_ptr_on_stream(xst.as_cuda_slice::<$t>()?,xl.start_offset(),&stream);
+        let (dp,_dg)=slice_ptr_on_stream(dst.as_cuda_slice::<$t>()?,dl.start_offset(),&stream);
+        let mut qo=unsafe{dev.alloc::<$t>(qr)?};let mut dout=unsafe{dev.alloc::<$t>(dr)?};
+        {
+            let (qop,_qog)=slice_ptr_mut_on_stream(&mut qo,0,&stream);
+            let (dop,_dog)=slice_ptr_mut_on_stream(&mut dout,0,&stream);
+            MIXED.with(|cache|cache.borrow_mut().with_plan(key,xs.device(),||mixed_plans(key,xs.device()),|p|{
+                unsafe{p.encode.with_prevalidated_launch(|fun,cfg|{
+                    let mut b=stream.launch_builder(fun);b.arg(&xp).arg(&q).arg(&ki).arg(&pi);b.launch(cfg)?;Ok(())
+                })}.map_err(|e|candle_core::Error::msg(e.to_string()))?;
+                unsafe{p.pair.with_prevalidated_launch(|fun,cfg|{
+                    let mut b=stream.launch_builder(fun);b.arg(&wp).arg(&q).arg(&dp).arg(&xp).arg(&qop).arg(&dop)
+                        .arg(&ki).arg(&qri).arg(&dri);b.launch(cfg)?;Ok(())
+                })}.map_err(|e|candle_core::Error::msg(e.to_string()))
+            }))?;
+        }
+        Ok((Tensor::from((Storage::Cuda(CudaStorage::wrap_cuda_slice(qo,dev.clone())),output_shape(&xs,qr))),
+            Tensor::from((Storage::Cuda(CudaStorage::wrap_cuda_slice(dout,dev.clone())),output_shape(&xs,dr)))))
+    }}}
+    match xs.dtype(){DType::F16=>run!(half::f16),DType::BF16=>run!(half::bf16),DType::F32=>run!(f32),_=>candle_core::bail!("DKR mixed dtype")}
+}

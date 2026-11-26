@@ -119,6 +119,17 @@ impl RoutedExperts<'_> {
         #[cfg(all(feature = "cuda", feature = "dkr-static-closure-probe"))]
         if forward.xs_flat.device().is_cuda()
             && self.members().iter().all(|member| member.get_qtensor().is_some()) {
+            if forward.lora.is_some() && forward.topk_ids.dtype()==DType::U32
+                && crate::group_allowed(forward.xs_flat,&self.members()){
+                let grouped=matches!(self.select_cuda_fast_path(&forward),Some(cuda::CudaRoute::Grouped));
+                if grouped && self.grouped_lora_preserves_route_order()
+                    && self.members().iter().all(|m|m.get_qtensor().is_some_and(|w|crate::supports_mmq(w.dtype())&&w.shape().rank()==3&&w.shape().dims()[2]%256==0))
+                    && forward.activation.fused.is_some_and(|a|!matches!(a,GluActivationType::Sigmoid)){
+                    if let Some(y)=self.forward_grouped(&forward)?{return Ok(y);}
+                } else if !grouped {
+                    if let Some(y)=self.forward_decode_lora(&forward)?{return Ok(y);}
+                }
+            }
             // Preserve the historical grouped/per-assignment policy for
             // bias-free, non-LoRA fused GGUF execution.
             if forward.lora.is_none() && forward.topk_ids.dtype()==DType::U32

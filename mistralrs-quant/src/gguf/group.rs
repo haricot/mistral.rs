@@ -286,6 +286,19 @@ pub(super) fn typed_glu(gate:&Tensor,up:&Tensor,activation:crate::GluActivationT
 #[cfg(all(feature = "cuda", feature = "dkr-static-closure-probe"))]
 fn typed_group(xs:&Tensor,entries:&[GroupEntry<'_>],kind:GroupKind<'_>)->Result<Option<Vec<Tensor>>>{
     use super::{fast_mmq,fast_mmvq};
+    if matches!(kind,GroupKind::Dense) && xs.rank()>0 && xs.elem_count()==xs.dim(candle_core::D::Minus1)? {
+        if let [left,right]=entries {
+            match (weight(left),weight(right)){
+                (Some(q),None)=>if let Some(d)=right.method.unquant_forward_weight(){
+                    return fast_mmvq::try_dense_pair(q,&d,xs).map(|p|p.map(|(q,d)|vec![q,d]));
+                },
+                (None,Some(q))=>if let Some(d)=left.method.unquant_forward_weight(){
+                    return fast_mmvq::try_dense_pair(q,&d,xs).map(|p|p.map(|(q,d)|vec![d,q]));
+                },
+                _=>{}
+            }
+        }
+    }
     let Some(w)=weights(entries) else{return Ok(None);};
     let Some((&k,dims))=xs.dims().split_last() else{return Ok(None);};
     if w.is_empty() || k==0 || !matches!(xs.dtype(),DType::F16|DType::BF16|DType::F32){return Ok(None);}

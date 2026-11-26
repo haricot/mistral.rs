@@ -397,6 +397,8 @@ pub(crate) use dynamic::gated_mix as typed_gated_mix;
 pub(crate) use dynamic::indexed as typed_indexed;
 #[cfg(feature = "dkr-static-closure-probe")]
 pub(crate) use dynamic::fused_moe_decode as typed_fused_moe_decode;
+#[cfg(feature = "dkr-static-closure-probe")]
+pub(crate) use dynamic::{encode_rows as typed_encode_rows,lora_projection as typed_lora_projection};
 
 #[cfg(feature = "dkr-static-closure-probe")]
 pub fn plain(w: &QTensor, xs: &Tensor) -> Result<Tensor> {
@@ -760,6 +762,10 @@ pub(crate) fn try_dense_pair(
     let prefetch = prefetch_device
         && row_bytes >= DENSE_PAIR_PREFETCH_BYTES_PER_THREAD * DENSE_PAIR_THREADS
         && quant_rows >= dense_pair_prefetch_rows(dev);
+    #[cfg(feature = "dkr-static-closure-probe")]
+    {return dynamic::mixed_pair(quant_weight,dense_weight,xs,prefetch).map(Some);}
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
+    {
     let xs = xs.contiguous()?;
     let stream = dev.cuda_stream();
     let stream_ptr = stream.cu_stream() as *mut std::ffi::c_void;
@@ -842,6 +848,7 @@ pub(crate) fn try_dense_pair(
         DType::BF16 => launch!(half::bf16, 1, launch_mmvq_gguf_quantize_q8_1_bf16),
         DType::F32 => launch!(f32, 2, launch_mmvq_gguf_quantize_q8_1_f32),
         _ => Ok(None),
+    }
     }
 }
 

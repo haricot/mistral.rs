@@ -178,6 +178,10 @@ fn f32_workspace_ensure(
 }
 
 #[cfg(feature = "dkr-static-closure-probe")]
+pub(super) fn typed_q8_workspace(dev:&CudaDevice,bytes:usize)->Result<std::sync::MutexGuard<'static,U8WorkspaceSlot>>{
+    u8_workspace_ensure(&MOE_DECODE_Q8_WORKSPACE,dev,bytes)
+}
+#[cfg(feature = "dkr-static-closure-probe")]
 pub(super) fn typed_decode_workspaces(dev:&CudaDevice,bytes:usize,elements:usize)->Result<(
     std::sync::MutexGuard<'static,U8WorkspaceSlot>,
     std::sync::MutexGuard<'static,F32WorkspaceSlot>,
@@ -991,6 +995,15 @@ pub fn quantize_input_q8_1(xs: &Tensor, dev: &CudaDevice) -> Result<(CudaSlice<u
     Ok((input_quant, k, k_padded))
 }
 
+#[cfg(feature = "dkr-static-closure-probe")]
+fn quantize_input_q8_1_into(
+    xs_contig: &Tensor,
+    input_quant: &mut CudaSlice<u8>,
+    dev: &CudaDevice,
+) -> Result<(usize, usize)> {
+    super::fast_mmvq::typed_encode_rows(xs_contig,input_quant,dev)
+}
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 fn quantize_input_q8_1_into(
     xs_contig: &Tensor,
     input_quant: &mut CudaSlice<u8>,
@@ -1176,7 +1189,9 @@ pub struct IndexedMoeLoraDecode<'a> {
     routing: IndexedMoeRouting<'a>,
     hidden: usize,
     intermediate: usize,
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     gate_up_launch: GateUpPairFn,
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     down_launch: LoraDownFn,
 }
 
@@ -1189,9 +1204,13 @@ impl<'a> IndexedMoeLoraDecode<'a> {
         if weights.up.dtype() != gate_dtype {
             return Ok(None);
         }
+        #[cfg(feature = "dkr-static-closure-probe")]
+        if !indexed_moe_weight_dtype(gate_dtype)||!indexed_moe_weight_dtype(weights.down.dtype()){return Ok(None);}
+        #[cfg(not(feature = "dkr-static-closure-probe"))]
         let Some(gate_up_launch) = lora_gate_up_launcher(gate_dtype) else {
             return Ok(None);
         };
+        #[cfg(not(feature = "dkr-static-closure-probe"))]
         let Some(down_launch) = lora_down_launcher(weights.down.dtype()) else {
             return Ok(None);
         };
@@ -1251,7 +1270,9 @@ impl<'a> IndexedMoeLoraDecode<'a> {
             routing,
             hidden,
             intermediate,
+            #[cfg(not(feature = "dkr-static-closure-probe"))]
             gate_up_launch,
+            #[cfg(not(feature = "dkr-static-closure-probe"))]
             down_launch,
         }))
     }
@@ -1269,6 +1290,7 @@ impl<'a> IndexedMoeLoraDecode<'a> {
         input.contiguous()
     }
 
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     fn gate_up_t<T: MoeLoraOutput>(&self, input: &Tensor, output_type: i32) -> Result<Tensor> {
         let input = self.validate_input(input, self.routing.batch, self.hidden)?;
         let k_padded = pad(self.hidden, q8_1::ROW_PADDING);
@@ -1322,6 +1344,14 @@ impl<'a> IndexedMoeLoraDecode<'a> {
         )))
     }
 
+    #[cfg(feature = "dkr-static-closure-probe")]
+    pub fn gate_up(&self, input: &Tensor) -> Result<Option<Tensor>> {
+        if moe_output_type(input.dtype()).is_none(){return Ok(None);}
+        let input=self.validate_input(input,self.routing.batch,self.hidden)?;
+        super::fast_mmvq::typed_lora_projection(self.weights.gate,Some(self.weights.up),&input,
+            self.routing.topk_ids,self.routing.batch,self.routing.topk,self.routing.num_experts,self.routing.dev).map(Some)
+    }
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub fn gate_up(&self, input: &Tensor) -> Result<Option<Tensor>> {
         let Some(output_type) = moe_output_type(input.dtype()) else {
             return Ok(None);
@@ -1334,6 +1364,7 @@ impl<'a> IndexedMoeLoraDecode<'a> {
         }
     }
 
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     fn down_t<T: MoeLoraOutput>(&self, input: &Tensor, output_type: i32) -> Result<Tensor> {
         let routes = self.routing.batch * self.routing.topk;
         let input = self.validate_input(input, routes, self.intermediate)?;
@@ -1382,6 +1413,14 @@ impl<'a> IndexedMoeLoraDecode<'a> {
         )))
     }
 
+    #[cfg(feature = "dkr-static-closure-probe")]
+    pub fn down(&self, input: &Tensor) -> Result<Option<Tensor>> {
+        if moe_output_type(input.dtype()).is_none(){return Ok(None);}
+        let input=self.validate_input(input,self.routing.batch*self.routing.topk,self.intermediate)?;
+        super::fast_mmvq::typed_lora_projection(self.weights.down,None,&input,
+            self.routing.topk_ids,self.routing.batch,self.routing.topk,self.routing.num_experts,self.routing.dev).map(Some)
+    }
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub fn down(&self, input: &Tensor) -> Result<Option<Tensor>> {
         let Some(output_type) = moe_output_type(input.dtype()) else {
             return Ok(None);
