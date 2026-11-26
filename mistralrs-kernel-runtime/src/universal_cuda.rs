@@ -228,6 +228,28 @@ impl PreparedKernel {
         Ok(PrevalidatedLaunchPlan {kernel:Arc::clone(self),config})
     }
 
+    /// Resource-safe fixed dynamic shared-memory plan. Opt-in is performed
+    /// only on a plan miss, before graph capture; no architecture-specific policy.
+    pub fn prevalidate_launch_with_optin(
+        self: &Arc<Self>, request: &LaunchRequest, device: &Device,
+    ) -> Result<PrevalidatedLaunchPlan> {
+        use candle_core::cuda_backend::cudarc::driver::sys::{CUdevice_attribute, CUfunction_attribute};
+        let config = self.launch_config(request, device)?;
+        let stream = device.as_cuda_device()?.cuda_stream();
+        let context = stream.context();
+        context.bind_to_thread()?;
+        let default = context.attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK)?;
+        let static_bytes = self.function.get_attribute(CUfunction_attribute::CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES)?;
+        let dynamic = i32::try_from(config.shared_mem_bytes)?;
+        let total = static_bytes.checked_add(dynamic).context("shared memory overflow")?;
+        if total > default {
+            let optin = context.attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN)?;
+            ensure!(total <= optin, "kernel shared memory exceeds opt-in device limit");
+            self.function.set_attribute(CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,dynamic)?;
+        }
+        Ok(PrevalidatedLaunchPlan {kernel:Arc::clone(self),config})
+    }
+
     pub fn prevalidate_launch(
         self: &Arc<Self>,
         request: &LaunchRequest,
