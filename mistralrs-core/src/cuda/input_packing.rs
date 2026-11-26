@@ -180,6 +180,7 @@ impl CustomOp1 for DecodeInputPadOp {
                 },
             )?;
         }
+        #[cfg(not(feature = "dkr-static-closure-probe"))]
         #[cfg(not(feature = "dkr-input-pad"))]
         {
             let status = unsafe {
