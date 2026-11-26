@@ -109,6 +109,95 @@ pub(super) unsafe fn launch(kind:Kind,device:&Device,activation:DType,state:DTyp
 mod tests{
     use super::*;
     #[test]
+    #[ignore="requires CUDA and GDN typed catalogue"]
+    fn dkr_gdn_transaction_publish_apply_once_gpu()->Result<()>{
+        use super::super::{GdnPendingTransitionPublish,GdnPendingTransitionPublishLayer,
+            GdnPendingTransitionApply,GdnPendingTransitionApplyLayer,
+            pending_transition_publish_batched_cuda,pending_transition_apply_batched_cuda,
+            RecurrentStateLayout};
+        let device=Device::new_cuda(0)?;
+        let (capacity,max_rows,conv_dim,conv_width)=(3usize,2usize,3usize,2usize);
+        for activation in [DType::F16,DType::BF16]{
+            for sd in [DType::F16,DType::BF16,DType::F32]{
+                let pending_conv=Tensor::from_vec((1..=18).map(|v|v as f32).collect::<Vec<_>>(),(capacity,max_rows,conv_dim),&device)?.to_dtype(activation)?;
+                // Bank 0 is all zeros, bank 1 contains the accepted key.
+                let bank0=Tensor::zeros((1,capacity,max_rows,1,128),DType::F32,&device)?;
+                let bank1=Tensor::ones((1,capacity,max_rows,1,128),DType::F32,&device)?;
+                let keys=Tensor::cat(&[&bank0,&bank1],0)?;
+                let delta=Tensor::ones((capacity,max_rows,1,128),DType::F32,&device)?.affine(2.,0.)?;
+                let decay=Tensor::ones((capacity,max_rows,1),DType::F32,&device)?.affine(0.5,0.)?;
+                let keep=Tensor::zeros(capacity,DType::U32,&device)?;
+                let epoch=Tensor::from_vec(vec![u32::MAX,9,7],capacity,&device)?;
+                let bank=Tensor::zeros(capacity,DType::U32,&device)?;
+                let ce=Tensor::zeros((capacity,1),DType::U32,&device)?;
+                let re=Tensor::zeros((capacity,1),DType::U32,&device)?;
+                let conv=Tensor::zeros((capacity,conv_dim,conv_width),activation,&device)?;
+                let state=Tensor::ones((capacity,1,128,128),sd,&device)?;
+                let publish_keep=Tensor::from_vec(vec![1u32,0,3,1],4,&device)?;
+                let publish_slots=Tensor::from_vec(vec![0u32,1,2,u32::MAX],4,&device)?;
+                pending_transition_publish_batched_cuda(GdnPendingTransitionPublish{
+                    layers:&[GdnPendingTransitionPublishLayer{pending_keep_rows:&keep,pending_epochs:&epoch,pending_key_bank:&bank}],
+                    keep_rows:&publish_keep,destination_slots:&publish_slots,max_rows,destination_capacity:capacity})?;
+                assert_eq!(keep.to_vec1::<u32>()?,vec![1,0,0]);
+                assert_eq!(epoch.to_vec1::<u32>()?,vec![1,10,8]);
+                assert_eq!(bank.to_vec1::<u32>()?,vec![1,1,1]);
+                let slots=Tensor::from_vec(vec![0u32,1,2,u32::MAX,3],5,&device)?;
+                let apply=||pending_transition_apply_batched_cuda(GdnPendingTransitionApply{
+                    layers:&[GdnPendingTransitionApplyLayer{pending_conv_input:&pending_conv,pending_key_banks:&keys,
+                        pending_key_bank:&bank,pending_delta:&delta,pending_decay:&decay,pending_keep_rows:&keep,
+                        pending_epochs:&epoch,conv_applied_epochs:&ce,recurrent_applied_epochs:&re,conv_state:&conv,recurrent_state:&state}],
+                    active_slots:&slots,num_k_heads:1,num_v_heads:1,head_k_dim:128,head_v_dim:128,
+                    conv_dim,conv_width,tiled_v_heads:false,state_layout:RecurrentStateLayout::GdnValueMajor});
+                apply()?;
+                let conv_expected=vec![0.,1.,0.,2.,0.,3.,0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,0.,0.];
+                assert_eq!(conv.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,conv_expected);
+                let check_state=||->Result<()>{
+                    let rows=state.to_dtype(DType::F32)?.reshape((capacity,128*128))?.to_vec2::<f32>()?;
+                    assert!(rows[0].iter().all(|&v|v==2.5));
+                    assert!(rows[1..].iter().flatten().all(|&v|v==1.));
+                    assert_eq!(ce.flatten_all()?.to_vec1::<u32>()?,vec![1,0,0]);
+                    assert_eq!(re.flatten_all()?.to_vec1::<u32>()?,vec![1,0,0]);
+                    Ok(())
+                };
+                check_state()?;
+                apply()?;
+                check_state()?;
+                assert_eq!(conv.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,conv_expected);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore="requires CUDA and GDN typed catalogue"]
+    fn dkr_gdn_transaction_commit_invalid_prefix_gpu()->Result<()>{
+        use super::super::{GdnSpeculativeTransitionCommit,GdnSpeculativeTransitionLayer,
+            speculative_transition_commit_batched_cuda,RecurrentStateLayout};
+        let device=Device::new_cuda(0)?;
+        for activation in [DType::F16,DType::BF16]{
+            let input=Tensor::ones((4,2,3),activation,&device)?;
+            let key=Tensor::ones((4,2,1,128),DType::F32,&device)?;
+            let delta=Tensor::ones((4,2,1,128),DType::F32,&device)?;
+            let decay=Tensor::ones((4,2,1),DType::F32,&device)?;
+            let keep=Tensor::from_vec(vec![1u32,3,1,1],4,&device)?;
+            // Row 1 exceeds seq_len; row 2 is out of capacity; row 3 is padding.
+            let slots=Tensor::from_vec(vec![0u32,1,2,u32::MAX],4,&device)?;
+            let conv=Tensor::zeros((2,3,2),activation,&device)?;
+            let state=Tensor::zeros((2,1,128,128),DType::F32,&device)?;
+            speculative_transition_commit_batched_cuda(GdnSpeculativeTransitionCommit{
+                layers:&[GdnSpeculativeTransitionLayer{conv_input:&input,key:&key,delta:&delta,decay:&decay,
+                    conv_state:&conv,recurrent_state:&state}],keep_rows:&keep,active_slots:&slots,
+                num_k_heads:1,num_v_heads:1,head_k_dim:128,head_v_dim:128,conv_dim:3,conv_width:2,
+                tiled_v_heads:false,state_layout:RecurrentStateLayout::GdnKeyMajor})?;
+            assert_eq!(conv.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?,vec![0.,1.,0.,1.,0.,1.,0.,0.,0.,0.,0.,0.]);
+            let data=state.reshape((2,128*128))?.to_vec2::<f32>()?;
+            assert!(data[0].iter().all(|&v|v==1.));
+            assert!(data[1].iter().all(|&v|v==0.));
+        }
+        Ok(())
+    }
+
+    #[test]
     fn dkr_gdn_transaction_geometry(){
         assert_eq!(geometry(Kind::Commit,&[2,3,8,1,4,128,128,768,4,0,1,16]).unwrap(),([7,3,2],[256,1,1]));
         assert_eq!(geometry(Kind::Apply,&[2,3,8,16,1,4,128,128,768,4,0,3]).unwrap(),([7,3,2],[256,1,1]));
