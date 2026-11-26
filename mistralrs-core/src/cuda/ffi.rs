@@ -1010,6 +1010,7 @@ extern "C" {
     );
 
     // GDN (Gated Delta Net) kernels for qwen3_next
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn gdn_packed_to_padded(
         source: *const c_void,
         output: *mut c_void,
@@ -1022,6 +1023,7 @@ extern "C" {
         dtype: i32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn gdn_padded_to_packed(
         source: *const c_void,
         output: *mut c_void,
@@ -1036,6 +1038,7 @@ extern "C" {
         dtype: i32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn gdn_extract_ragged_conv_state(
         padded_input: *const c_void,
         initial_state: *const c_void,
@@ -1228,6 +1231,7 @@ extern "C" {
         dtype: i32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn gdn_rmsnorm_gated_quantized_bf16(
         x: *const c_void,
         gate: *const c_void,
@@ -1252,6 +1256,7 @@ extern "C" {
         sigmoid_gate: i32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn fused_gdn_gating(
         b: *const c_void,
         a: *const c_void,
@@ -1264,6 +1269,7 @@ extern "C" {
         dtype: i32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn gdn_prepare_recurrence(
         mixed_qkv: *const c_void,
         b: *const c_void,
