@@ -10,7 +10,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import tempfile
 from pathlib import Path
 
@@ -101,8 +100,8 @@ def inventory(root):
             require(isinstance(row.get("arguments"),list) and 1<=len(row["arguments"])<=32,"invalid ABI argument count")
             artifact_name(row,"artifact")
             require(isinstance(row.get("sha256"),str) and HEX.fullmatch(row["sha256"]),"invalid PTX digest")
-            require(("cubin_artifact" in row)==("cubin_sha256" in row),"incomplete paired image")
-            if "cubin_artifact" in row:
+            require((row.get("cubin_artifact") is None)==(row.get("cubin_sha256") is None),"incomplete paired image")
+            if row.get("cubin_artifact") is not None:
                 artifact_name(row,"cubin_artifact")
                 require(isinstance(row["cubin_sha256"],str) and HEX.fullmatch(row["cubin_sha256"]),"invalid CUBIN digest")
             records[key]=(path,row)
@@ -148,7 +147,7 @@ def report(root,records,manifests,spec,grouped):
         manifest_rows.append(dict(path=str(path.relative_to(root)),profiles=len(rows),sha256=sha(data)))
         for r in rows:
             for a,h in (("artifact","sha256"),("cubin_artifact","cubin_sha256")):
-                if a not in r:
+                if r.get(a) is None:
                     continue
                 image=path.parent/artifact_name(r,a)
                 expected=r[h].lower()
@@ -209,6 +208,11 @@ def self_test():
         put("a",[row(1),row(2)])
         put("b",[row(3)],False)
         put("c",[row(4,80)])
+        # Exercise the paired-image digest contract on a selected profile.
+        paired=row(5)
+        paired.update(cubin_artifact="image.cubin",cubin_sha256=sha(b"synthetic cubin"))
+        put("d",[paired])
+        (root/"d/image.cubin").write_bytes(b"synthetic cubin")
         base,rec,man=inventory(root)
         def spec(*keys):
             return dict(schema=SELECTION,model="synthetic",device_cc=61,
@@ -217,7 +221,7 @@ def self_test():
         chosen=spec(key1,key3)
         group=selection(chosen,rec,man)
         result,images=report(base,rec,man,chosen,group)
-        assert result["master_profiles"]==4 and result["active_profiles"]==2
+        assert result["master_profiles"]==5 and result["active_profiles"]==2
         dest=Path(tmp)/"active"
         materialize(base,dest,group,man,images)
         _,selected,selected_manifests=inventory(dest)
@@ -240,6 +244,13 @@ def self_test():
         rejects(lambda:selection(chosen,rec,man,(4096,1)))
         rejects(lambda:materialize(base,dest,group,man,images))
         rejects(lambda:materialize(base,root/"nested",group,man,images))
+        paired_spec=spec(identity(paired))
+        paired_group=selection(paired_spec,rec,man)
+        paired_report,_=report(base,rec,man,paired_spec,paired_group)
+        assert paired_report["active_images"]==2
+        (root/"d/image.cubin").write_bytes(b"corrupt")
+        rejects(lambda:report(base,rec,man,paired_spec,paired_group))
+        (root/"d/image.cubin").write_bytes(b"synthetic cubin")
         (root/"a/image.ptx").write_bytes(b"corrupt")
         rejects(lambda:report(base,rec,man,chosen,group))
         (root/"a/image.ptx").write_bytes(b"synthetic PTX only")
