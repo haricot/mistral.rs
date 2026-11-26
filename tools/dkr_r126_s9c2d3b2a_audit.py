@@ -66,13 +66,21 @@ def audit(root):
     producer=(path.parent/"gdn_checkpoint.cu").read_text()
     require(all("gdn_checkpoint_device.cuh" in s for s in (legacy,producer,builder)),"shared device bodies")
     require('name: "gdn-checkpoint"' in builder and 'pkg.name == "gdn-checkpoint"' in builder,"Cudaforge registration")
+    # Count the actual residual fused device signature, not the host FFI.
+    # The ABI limit must not be silently increased to migrate this operation.
+    fused=re.search(r'void gdn_speculative_recurrence_rmsnorm_gate_value_major_128_kernel\s*\((.*?)\)\s*\{',legacy,re.S)
+    require(fused is not None,"residual fused kernel missing")
+    fused_args=len(fused.group(1).split(","))
+    require(fused_args>32,"residual fused ABI changed: re-evaluate packing plan")
+    require("distinct slots. Pending metadata" in a and "for input in inputs.into_iter().chain(reads)" in a,
+            "checkpoint-group and alias contract")
     logical=BASE_LOGICAL+len(rows)
     require(logical<=4096,"logical budget")
     return dict(schema="dkr.r126.s9c2d3b2a.source.v1",status="PARTIAL_SOURCE",profiles=len(rows),images=1,
         max_arguments=max(len(r["arguments"]) for r in rows),migrated_ffi={n:guarded[n] for n in MIGRATED},
         gdn_residual_ffi=residual,arch_provider_refs=arch,projected_physical_upper=BASE_PHYSICAL+1,
         physical_savings_required=BASE_PHYSICAL+1-512,projected_logical=logical,logical_headroom=4096-logical,
-        budget_is_projection=True,compilation=False,link_qualified=False,numeric_qualified=False,full_closure=False,
+        residual_fused_arguments=fused_args,abi_limit=32,budget_is_projection=True,compilation=False,link_qualified=False,numeric_qualified=False,full_closure=False,
         outstanding_contracts=["unique_destination_slots_or_checkpoint_groups","same_stream","epoch_wrap_collision",
             "no_rollback_after_device_execution_failure"])
 
