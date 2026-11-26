@@ -82,6 +82,7 @@ fn bounded_read(path: &Path, limit: u64, label: &str) -> Result<Vec<u8>> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ElementType {
+    F64,
     F32,
     F16,
     Bf16,
@@ -101,7 +102,7 @@ impl ElementType {
             Self::Fp8E4m3 | Self::Fp8E5m2 | Self::I8 | Self::U8 => 1,
             Self::F16 | Self::Bf16 => 2,
             Self::F32 | Self::I32 | Self::U32 => 4,
-            Self::I64 | Self::U64 => 8,
+            Self::F64 | Self::I64 | Self::U64 => 8,
         }
     }
 }
@@ -659,6 +660,35 @@ impl KernelCatalog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dkr_argsort_f64_typed_abi() {
+        assert_eq!(ElementType::F64.size_bytes(), 8);
+        assert_eq!(serde_json::to_string(&ElementType::F64).unwrap(), "\"f64\"");
+        assert_eq!(serde_json::from_str::<ElementType>("\"f64\"").unwrap(), ElementType::F64);
+        let scalar = Parameter::Scalar { name: "value".into(), dtype: ElementType::F64 };
+        assert_eq!(scalar.ptx_width(), 64);
+        assert_eq!(param_bit_width(".param .f64 value"), Some(64));
+        let tensor = Parameter::Tensor { name: "values".into(), dtype: ElementType::F64,
+            rank: 1, access: Access::Read, representation: None };
+        assert_eq!(tensor.ptx_width(), 64);
+        let (dir,path,mut request)=fixture();
+        let mut manifest:KernelManifest=serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let ptx=std::fs::read_to_string(dir.path().join("fused.ptx")).unwrap().replace(".f32 alpha",".f64 alpha");
+        for arg in &mut manifest.arguments {
+            match arg { Parameter::Tensor {dtype,..}|Parameter::Scalar {dtype,..}=>*dtype=ElementType::F64 }
+        }
+        for arg in &mut request.args {
+            match arg { Argument::Tensor {dtype,..}|Argument::Scalar {dtype}=>*dtype=ElementType::F64 }
+        }
+        manifest.sha256=digest(ptx.as_bytes());
+        std::fs::write(dir.path().join("fused.ptx"),ptx).unwrap();
+        std::fs::write(&path,serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let catalog=KernelCatalog::discover(dir.path()).unwrap();
+        assert!(catalog.resolve(&request).is_ok());
+        if let Argument::Tensor {dtype,..}=&mut request.args[0] {*dtype=ElementType::F32;}
+        assert!(catalog.resolve(&request).is_err());
+    }
 
     fn fixture() -> (tempfile::TempDir, PathBuf, LaunchRequest) {
         let dir = tempfile::tempdir().unwrap();

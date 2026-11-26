@@ -30,6 +30,7 @@ const PACKAGES: &[Package] = &[
     Package { name: "reduce-norm", source: "reduce_norm.cu", fast_math: true },
     Package { name: "large-topk", source: "large_topk.cu", fast_math: true },
     Package { name: "sampling", source: "sampling.cu", fast_math: true },
+    Package { name: "argsort", source: "argsort.cu", fast_math: false },
     Package { name: "router-topk", source: "router_topk.cu", fast_math: true },
     Package { name: "rms-variants", source: "rms_variants.cu", fast_math: true },
     Package { name: "ssm", source: "ssm.cu", fast_math: true },
@@ -480,6 +481,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     .arg("--output").arg(&output).arg("--ptx-file").arg(&compiled).current_dir(root).status()?;
                 if !status.success(){return Err(format!("GDN recurrence packaging failed: {status}").into());}
             }
+        } else if pkg.name == "argsort" {
+            let watched=[root.join("mistralrs-core/src/cuda/argsort_device.cuh")];
+            let compiled=compile_ptx(&source,&work.join(pkg.name),cc,pkg.fast_math,None,&watched)?;
+            let status=Command::new(&python).arg(&script).args(["--cc",&cc.to_string(),"--image","1"])
+                .arg("--output").arg(&output).arg("--ptx-file").arg(&compiled).current_dir(root).status()?;
+            if !status.success(){return Err(format!("argsort shard packaging failed: {status}").into());}
         } else if pkg.name == "sampling" {
             let watched=["sampling_device.cuh","large_topk_device.cuh","router_topk_device.cuh",
                 "dflash_selector_device.cuh","speculative_rejection_device.cuh"]

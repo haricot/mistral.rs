@@ -1,0 +1,7 @@
+# S9C.2E.5 — Argsort & F64
+
+Producer source checkpoint. The typed ABI adds F64 as an eight-byte native element (and 64-bit scalar); no change to registry limits. One image per target contains 23 profiles: a U32 index initializer, 14 dtype/direction comparisons, a U32 output stage, and seven typed gather variants for the public sort-values API. All seven existing input dtypes are retained, including F64 and I64 without lossy F32 conversion.
+
+The new device path uses an indirect bitonic network over indices with immutable input and a single padded U32 row workspace. A padded index is ordered after any valid index in the final direction, not by a floating or integer sentinel. This deliberately repairs the legacy descending padding bug (numeric_limits<float/double>::min() is positive), extreme-value ties, and avoids reading padding as a value. Valid/valid comparisons and the bitonic stage order are retained; equal keys remain unstable, and NaN ordering remains unspecified. Fast math is disabled in this family to retain native comparisons including subnormal values. The legacy implementation is unchanged for comparison. Numerical parity and correctness on actual hardware remain S10 obligations.
+
+The scoped projection becomes 4268 logical / 552 physical (4245+23, 551+1), versus unchanged 4096/512 active limits. The producer-only commit does not yet close the 14 FFI. No compile, link, GPU or model fit claim.

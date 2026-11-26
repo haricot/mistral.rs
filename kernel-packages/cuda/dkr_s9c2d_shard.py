@@ -25,7 +25,7 @@ def profile(cc, operation, impl, entry, block, args, artifact, max_cc=None):
                 block=block, shared_mem_bytes=0, arguments=args)
 
 def widths(row):
-    return [64 if a["kind"]=="tensor" or a["dtype"] in ("i64","u64") else 32
+    return [64 if a["kind"]=="tensor" or a["dtype"] in ("i64","u64","f64") else 32
             for a in row["arguments"]]
 
 def verify(data, cc, rows):
