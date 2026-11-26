@@ -41,10 +41,12 @@ SAMPLING_GROUPS={
     "categorical":{"categorical_large_f32_packed_batched"},
 }
 
-def partition(declarations):
+def partition(declarations,closed_reuse=()):
     groups={"already_typed":set().union(*REUSE.values()),"argsort":ARG_SORT,"graph":GRAPH,**SAMPLING_GROUPS}
     require(sum(len(v) for v in groups.values())==len(set().union(*groups.values())),"overlapping symbol partition")
-    require(set(declarations)==set().union(*groups.values()) and len(declarations)==60,"residual inventory drift")
+    closed=set(closed_reuse)
+    require(closed in (set(),groups["already_typed"]),"partial reuse closure")
+    require(set(declarations)==set().union(*groups.values())-closed and len(declarations)==60-len(closed),"residual inventory drift")
     return {k:sorted(v) for k,v in groups.items()}
 
 def evidence(source,markers,label):
@@ -178,10 +180,17 @@ def sampling_budget(root):
 
 def audit(root):
     prior=previous(root)
-    groups=partition(prior["residual_budget"]["remaining_core_ffi_declarations"])
+    declarations=prior["residual_budget"]["remaining_core_ffi_declarations"]
+    reused=set().union(*REUSE.values())
+    closed=reused-set(declarations)
+    groups=partition(declarations,closed)
+    reuse=reuse_evidence(root)
+    for item in reuse.values():
+        item["explicit_closure_guard_pending"]=not bool(closed)
     budget=sampling_budget(root)
     return dict(schema="dkr.r126.s9c2e0.source.v1",status="AUDIT_COMPLETE",
-        residual_groups=groups,reuse=reuse_evidence(root),usage=usage_candidates(root),budget=budget,
+        residual_groups=groups,reuse=reuse,usage=usage_candidates(root),budget=budget,
+        remaining_core_ffi_count=len(declarations),closed_reuse_declarations=sorted(closed),
         current_projected_logical=prior["projected_logical"],
         current_projected_physical_upper=prior["projected_physical_upper"],
         current_logical_headroom=prior["logical_headroom"],profiles_added=0,images_added=0,
@@ -214,7 +223,7 @@ def main():
         a.json_out.parent.mkdir(parents=True,exist_ok=True)
         with a.json_out.open("x") as f:
             json.dump(r,f,indent=2,sort_keys=True);f.write("\n")
-    print("DKR_R126_S9C2E0_SOURCE=COMPLETE residual=60 reuse_candidates=17 argsort=14 sampling=27 graph=2 "
+    print(f"DKR_R126_S9C2E0_SOURCE=COMPLETE residual={r['remaining_core_ffi_count']} reuse_candidates=17 argsort=14 sampling=27 graph=2 "
           f"uncompressed_entry_scenario={r['budget']['scenario_total']} profiles_added=0 images_added=0 "
           f"projected_logical={r['current_projected_logical']} projected_physical={r['current_projected_physical_upper']} "
           "model_scope_fit=UNPROVEN compilation=false link_qualified=false full_closure=false")
