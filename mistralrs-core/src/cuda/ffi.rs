@@ -64,6 +64,7 @@ extern "C" {
         width: i32,
         stream: i64,
     ) -> i32;
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn dynamic_conv_bf16(
         hidden: *const c_void,
         dynamic: *const c_void,
@@ -85,6 +86,7 @@ extern "C" {
         base_stride_h: i64,
         stream: i64,
     ) -> i32;
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn dynamic_conv_f16(
         hidden: *const c_void,
         dynamic: *const c_void,
@@ -106,6 +108,7 @@ extern "C" {
         base_stride_h: i64,
         stream: i64,
     ) -> i32;
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn dynamic_conv_f32(
         hidden: *const c_void,
         dynamic: *const c_void,
@@ -985,6 +988,7 @@ extern "C" {
         stream: i64,
     );
     // Mamba SSM selective scan kernel
+    #[cfg(not(feature = "dkr-ssm"))]
     pub(crate) fn selective_scan_cuda(
         x: *const f32,       // (batch, seq_len, n_heads * head_dim)
         dt: *const f32,      // (batch, seq_len, n_heads)
