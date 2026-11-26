@@ -638,6 +638,7 @@ extern "C" {
 
     // Optimized parallel topk for small k (MoE routing)
     // Single kernel call writes to both values and indices buffers
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn topk_f32(
         input: *const c_void,
         values_out: *mut c_void,  // [nrows, k]
@@ -647,6 +648,7 @@ extern "C" {
         k: i32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn topk_bf16(
         input: *const c_void,
         values_out: *mut c_void,  // [nrows, k]
@@ -656,6 +658,7 @@ extern "C" {
         k: i32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn topk_f16(
         input: *const c_void,
         values_out: *mut c_void,  // [nrows, k]
@@ -666,6 +669,7 @@ extern "C" {
         stream: i64,
     );
 
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn moe_router_topk_f32(
         logits: *const c_void,
         weights: *mut c_void,
@@ -685,6 +689,7 @@ extern "C" {
         output_scale: f32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn moe_router_topk_bf16(
         logits: *const c_void,
         weights: *mut c_void,
@@ -704,6 +709,7 @@ extern "C" {
         output_scale: f32,
         stream: i64,
     );
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn moe_router_topk_f16(
         logits: *const c_void,
         weights: *mut c_void,
