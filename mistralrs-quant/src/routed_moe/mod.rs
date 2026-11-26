@@ -119,6 +119,21 @@ impl RoutedExperts<'_> {
         #[cfg(all(feature = "cuda", feature = "dkr-static-closure-probe"))]
         if forward.xs_flat.device().is_cuda()
             && self.members().iter().all(|member| member.get_qtensor().is_some()) {
+            // Restore the grouped fused pipeline only for eligible, bias-free
+            // prefill without LoRA. Decode and other signatures stay on typed gather.
+            if forward.lora.is_none() && forward.shape.num_tokens>crate::gguf::fast_mmvq::MMVQ_MAX_BATCH
+                && !self.members().iter().any(|m|m.has_bias())
+                && crate::group_allowed(forward.xs_flat,&self.members()){
+                if let (Some(gate),Some(up),Some(down),Some(act))=
+                    (self.gate.get_qtensor(),self.up.get_qtensor(),self.down.get_qtensor(),forward.activation.fused){
+                    if gate.shape().rank()==3 && down.shape().rank()==3 && gate.shape()==up.shape()
+                        && gate.dtype()==up.dtype() && crate::supports_mmq(gate.dtype()) && crate::supports_mmq(down.dtype())
+                        && gate.shape().dims()[2]%256==0 && down.shape().dims()[2]%256==0 {
+                        return crate::gguf::fast_mmq::typed_moe_pipeline(&gate,&up,&down,forward.xs_flat,forward.topk_ids,
+                            forward.topk_weights,act as i32,forward.original_dtype);
+                    }
+                }
+            }
             return self.gather_impl(&forward);
         }
         if crate::group_allowed(forward.xs_flat, &self.members()) {

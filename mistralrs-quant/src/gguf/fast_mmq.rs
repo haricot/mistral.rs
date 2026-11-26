@@ -573,6 +573,8 @@ mod dynamic;
 #[cfg(feature = "dkr-static-closure-probe")]
 #[path = "moe_dynamic.rs"]
 pub(super) mod moe_dynamic;
+#[cfg(feature = "dkr-static-closure-probe")]
+pub(crate) use moe_dynamic::fused_pipeline as typed_moe_pipeline;
 
 #[cfg(feature = "dkr-static-closure-probe")]
 pub(crate) fn shared_lhs(weights: &[&QTensor], xs: &Tensor) -> Result<Vec<Tensor>> {
@@ -1082,6 +1084,12 @@ struct GroupedGluRun<'a> {
     dev: &'a CudaDevice,
 }
 
+#[cfg(feature = "dkr-static-closure-probe")]
+fn grouped_from_glu(run:GroupedGluRun<'_>)->Result<Tensor>{
+    moe_dynamic::grouped_glu(run.weight,run.gate,run.up,run.ids_src,run.ids_dst,run.expert_bounds,
+        run.total_assignments,run.num_experts,run.dev,run.activation)
+}
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 fn grouped_from_glu(run: GroupedGluRun<'_>) -> Result<Tensor> {
     let GroupedGluRun {
         weight,

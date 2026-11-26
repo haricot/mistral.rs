@@ -269,7 +269,11 @@ static __global__ void
 quantize_mmq_q8_1_glu(
     const input_t *__restrict__ gate, const input_t *__restrict__ up,
     const int32_t *__restrict__ ids, void *__restrict__ vy, const int64_t ne00,
-    const int64_t s01, const int64_t ne0, const int ne1, const int activation) {
+    const int64_t s01, const int64_t ne0, const int ne1, const int activation
+#ifdef DKR_GGUF_GLU_IMAGE
+    , const int source_rows = -1
+#endif
+    ) {
 
   constexpr int vals_per_scale = ds_layout == MMQ_Q8_1_DS_LAYOUT_D2S6 ? 64 : 32;
   constexpr int vals_per_sum = ds_layout == MMQ_Q8_1_DS_LAYOUT_D2S6 ? 16 : 32;
@@ -282,7 +286,10 @@ quantize_mmq_q8_1_glu(
 
   const int64_t i1 = blockIdx.x;
   const int64_t i00 = i0;
-  const int64_t i01 = ids ? ids[i1] : i1;
+  int64_t i01 = ids ? ids[i1] : i1;
+#ifdef DKR_GGUF_GLU_IMAGE
+  if(source_rows>=0 && (i01<0 || i01>=source_rows)) i01=0;
+#endif
 
   block_q8_1_mmq *y = (block_q8_1_mmq *)vy;
 

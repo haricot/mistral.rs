@@ -87,7 +87,7 @@ pub(crate) fn dispatch(ids:&CudaSlice<u32>,offset:usize,a:usize,e:usize,topk:usi
 #[derive(Clone,Copy,PartialEq,Eq)]
 struct Key {
     format:&'static str,layout:&'static str,dtype:DType,n:usize,k:usize,blocks:usize,
-    packed:usize,src_rows:usize,routes:usize,experts:usize,padded:usize,cap:usize,shared:usize,
+    packed:usize,src_rows:usize,routes:usize,experts:usize,padded:usize,cap:usize,shared:usize,glu:bool,
 }
 struct Plans{work:PrevalidatedLaunchPlan,encode:PrevalidatedLaunchPlan,fill:PrevalidatedLaunchPlan,mmq:PrevalidatedLaunchPlan}
 thread_local!{static PLANS:RefCell<LaunchPlanCache<Key,Plans>>=RefCell::new(LaunchPlanCache::new());}
@@ -97,9 +97,11 @@ fn prepare(key:Key,device:&Device)->Result<Plans>{
     let q8=||tensor(ElementType::U8,vec![key.padded/128,a*144],Some(&repr));
     let output=||tensor(ElementType::F32,vec![a,n],None);
     let work=launch_plan(device,"worklist",vec![u(e+1),tiles_arg(cap),u(1),scalar(),scalar(),scalar()],[1,1,1],[256,1,1])?;
-    let encode=launch_plan(device,&format!("encode.{}",key.layout),
-        vec![tensor(dtype(key.dtype)?,vec![key.src_rows,key.k],None),u(a),q8(),scalar(),scalar(),scalar(),scalar()],
-        [a as u32,(key.padded/512) as u32,1],[128,1,1])?;
+    let input=||Ok::<Argument,candle_core::Error>(tensor(dtype(key.dtype)?,vec![key.src_rows,key.k],None));
+    let (op,args)=if key.glu{
+        (format!("glu.encode.{}",key.layout),vec![input()?,input()?,u(a),q8(),scalar(),scalar(),scalar(),scalar(),scalar(),scalar()])
+    }else{(format!("encode.{}",key.layout),vec![input()?,u(a),q8(),scalar(),scalar(),scalar(),scalar()])};
+    let encode=launch_plan(device,&op,args,[a as u32,(key.padded/512) as u32,1],[128,1,1])?;
     let fill=launch_plan(device,"fill",vec![output(),scalar()],[(a*n).div_ceil(256) as u32,1,1],[256,1,1])?;
     let weight_repr=format!("gguf.{}.packed.v1",key.format);
     let bounds=if n%64==0{"full"}else{"tail"};
@@ -114,13 +116,25 @@ fn prepare(key:Key,device:&Device)->Result<Plans>{
 // producer; length checks alone do not establish uniqueness of destinations.
 pub(crate) fn grouped(weights:&[&QTensor],xs:&Tensor,src:&CudaSlice<u32>,dst:&CudaSlice<u32>,
     bounds:&CudaSlice<u32>,a:usize,e:usize,dev:&CudaDevice)->Result<Vec<Tensor>>{
+    grouped_run(weights,xs,Some(src),dst,bounds,a,e,dev,None)
+}
+pub(crate) fn grouped_glu(w:&QTensor,gate:&Tensor,up:&Tensor,src:Option<&CudaSlice<u32>>,dst:&CudaSlice<u32>,
+    bounds:&CudaSlice<u32>,a:usize,e:usize,dev:&CudaDevice,activation:i32)->Result<Tensor>{
+    if gate.dims2()?.0!=a || up.shape()!=gate.shape() || up.dtype()!=gate.dtype()
+        || !up.device().same_device(gate.device()) || !(0..=4).contains(&activation){
+        candle_core::bail!("DKR grouped GLU contract");
+    }
+    Ok(grouped_run(&[w],gate,src,dst,bounds,a,e,dev,Some((up,activation)))?.pop().unwrap())
+}
+fn grouped_run(weights:&[&QTensor],xs:&Tensor,src:Option<&CudaSlice<u32>>,dst:&CudaSlice<u32>,
+    bounds:&CudaSlice<u32>,a:usize,e:usize,dev:&CudaDevice,glu:Option<(&Tensor,i32)>)->Result<Vec<Tensor>>{
     device_gate(dev)?;
     let first=weights.first().ok_or_else(||candle_core::Error::msg("DKR grouped MMQ requires weights"))?;
     let quant=first.dtype();
     let fmt=format(quant).ok_or_else(||candle_core::Error::msg("DKR compact MMQ weight format unsupported"))?;
     let (source_rows,k)=xs.dims2()?;
     let device=Device::Cuda(dev.clone());
-    if k==0 || k%256!=0 || source_rows==0 || e==0 || a==0 || src.len()<a || dst.len()<a
+    if k==0 || k%256!=0 || source_rows==0 || e==0 || a==0 || src.is_some_and(|s|s.len()<a) || dst.len()<a
         || bounds.len()<e.checked_add(1).ok_or_else(||candle_core::Error::msg("expert overflow"))?
         || !xs.device().same_device(&device) {
         candle_core::bail!("DKR compact MMQ shape/device/metadata span");
@@ -145,11 +159,13 @@ pub(crate) fn grouped(weights:&[&QTensor],xs:&Tensor,src:&CudaSlice<u32>,dst:&Cu
         i32_span(mul(a,n)?)?;
         i32_span(n.checked_add(64).ok_or_else(||candle_core::Error::msg("row overflow"))?)?;
         keys.push(Key{format:fmt,layout:layout(quant),dtype:xs.dtype(),n,k,blocks,packed,src_rows:source_rows,
-            routes:a,experts:e,padded,cap,shared});
+            routes:a,experts:e,padded,cap,shared,glu:glu.is_some()});
     }
     let xs=xs.contiguous()?;
     let (st,l)=xs.storage_and_layout();
     let Storage::Cuda(st)=&*st else{candle_core::bail!("DKR compact CUDA activation required");};
+    let up=glu.map(|(u,_)|u.contiguous()).transpose()?;
+    let up_storage=up.as_ref().map(|u|u.storage_and_layout());
     let stream=dev.cuda_stream();
     let mut workspace=workspace_ensure(&MMQ_WORKSPACE,dev,main,&stream)?;
     let (scratch,_sg)=workspace.ptr_mut();
@@ -157,13 +173,20 @@ pub(crate) fn grouped(weights:&[&QTensor],xs:&Tensor,src:&CudaSlice<u32>,dst:&Cu
     let mut count=unsafe{dev.alloc::<u32>(1)?};
     let (tp,_tg)=slice_ptr_mut_on_stream(&mut tiles,0,&stream);
     let (cp,_cg)=slice_ptr_mut_on_stream(&mut count,0,&stream);
-    let (sp,_srcg)=slice_ptr_on_stream(src,0,&stream);
+    let (sp,_srcg)=slice_ptr_on_stream(src.unwrap_or(dst),0,&stream);
+    let use_src=i32::from(src.is_some());let act=glu.map(|(_,a)|a).unwrap_or(0);
     let (dp,_dstg)=slice_ptr_on_stream(dst,0,&stream);
     let (bp,_bg)=slice_ptr_on_stream(bounds,0,&stream);
     let (ki,pi,ai,ei,ci,si,bki)=(k as i32,padded as i32,a as i32,e as i32,cap as i32,source_rows as i32,blocks as i32);
     macro_rules! launch {($t:ty)=>{{
         let (xp,_xg)=slice_ptr_on_stream(st.as_cuda_slice::<$t>()?,l.start_offset(),&stream);
         if xp%16!=0 {candle_core::bail!("DKR compact activation alignment");}
+        let up_ptr=if let Some((s,l))=up_storage.as_ref(){
+            let Storage::Cuda(s)=&**s else{candle_core::bail!("DKR compact GLU CUDA");};
+            let (p,g)=slice_ptr_on_stream(s.as_cuda_slice::<$t>()?,l.start_offset(),&stream);
+            if p%16!=0{candle_core::bail!("DKR compact GLU alignment");}
+            Some((p,g))
+        }else{None};
         let mut results=Vec::with_capacity(weights.len());
         for (index,(w,key)) in weights.iter().zip(keys.iter().copied()).enumerate(){
             let (wp,_wg)=w.device_ptr_with_guard(&stream)?;
@@ -178,7 +201,10 @@ pub(crate) fn grouped(weights:&[&QTensor],xs:&Tensor,src:&CudaSlice<u32>,dst:&Cu
                     })}.map_err(|e|candle_core::Error::msg(e.to_string()))?}}
                     if index==0 {
                         run!(p.work,bp,tp,cp,ei,ai,ci);
-                        run!(p.encode,xp,sp,scratch,ki,pi,ai,si);
+                        if let Some((p,_))=&up_ptr{
+                            let up=*p;
+                            run!(p.encode,xp,up,sp,scratch,ki,pi,ai,si,act,use_src);
+                        }else{run!(p.encode,xp,sp,scratch,ki,pi,ai,si);}
                     }
                     run!(p.fill,yp,elements);
                     run!(p.mmq,wp,scratch,dp,bp,tp,cp,yp,ni,ai,bki,ei,ci);
@@ -289,4 +315,30 @@ mod tests{
         }
         Ok(())
     }
+}
+
+// Explicit no-LoRA, no-bias prefill pipeline. All route metadata remains
+// on device. The same dispatch is used for gate/up and down; each stage
+// independently builds its bounded worklist.
+pub(crate) fn fused_pipeline(gate:&QTensor,up:&QTensor,down:&QTensor,x:&Tensor,ids:&Tensor,
+    routing:&Tensor,activation:i32,out_dtype:DType)->Result<Tensor>{
+    let (batch,k)=x.dims2()?;let (ib,topk)=ids.dims2()?;
+    let (e,inter,gk)=gate.shape().dims3()?;let (de,n,dk)=down.shape().dims3()?;
+    if ib!=batch||batch==0||topk==0||e==0||gk!=k||dk!=inter||de!=e||n!=k
+        || up.shape()!=gate.shape()||gate.dtype()!=up.dtype()||ids.dtype()!=DType::U32
+        || routing.shape()!=ids.shape()||!routing.device().same_device(x.device())
+        || !ids.device().same_device(x.device()){
+        candle_core::bail!("DKR fused MoE pipeline contract");
+    }
+    let dev=x.device().as_cuda_device()?;
+    let a=mul(batch,topk)?;capacity(a,e)?;
+    let ids=ids.contiguous()?;let (st,l)=ids.storage_and_layout();
+    let Storage::Cuda(st)=&*st else{candle_core::bail!("DKR fused MoE ids CUDA");};
+    let (bounds,dst,src)=dispatch(st.as_cuda_slice::<u32>()?,l.start_offset(),a,e,topk,1,dev)?;
+    let pair=grouped(&[gate,up],x,&src,&dst,&bounds,a,e,dev)?;
+    let out=grouped_glu(down,&pair[0],&pair[1],Some(&dst),&dst,&bounds,a,e,dev,activation)?;
+    // Explicit tensor reduction until the remaining fused weighted reduce
+    // consumers are audited; no static GGUF FFI or full weight dequantization.
+    out.reshape((batch,topk,n))?.broadcast_mul(&routing.to_dtype(DType::F32)?.unsqueeze(2)?)?
+        .sum(1)?.to_dtype(out_dtype)
 }

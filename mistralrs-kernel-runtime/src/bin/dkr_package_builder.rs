@@ -61,6 +61,7 @@ const PACKAGES: &[Package] = &[
     Package { name: "gguf-glu-encode", source: "gguf_glu_encode.cu", fast_math: false },
     Package { name: "gguf-gated-mix", source: "gguf_gated_mix.cu", fast_math: false },
     Package { name: "gguf-mmvq-fused", source: "gguf_mmvq_fused.cu", fast_math: false },
+    Package { name: "gguf-moe-glu-encode", source: "gguf_moe_glu_encode.cu", fast_math: false },
 ];
 
 fn parse_args() -> Result<(usize, PathBuf, String, bool, bool, Option<String>), Box<dyn std::error::Error>> {
@@ -303,7 +304,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let work = output.join(format!("sm{cc}/_cudaforge_cache"));
     if !pair_existing {
     for pkg in PACKAGES.iter().filter(|p| family.as_ref().is_none_or(|name| p.name == name.as_str())) {
-        if matches!(pkg.name, "gguf-mmq" | "gguf-moe-compact" | "gguf-glu-encode" | "gguf-gated-mix") && cc != 61 {
+        if matches!(pkg.name, "gguf-mmq" | "gguf-moe-compact" | "gguf-glu-encode" | "gguf-gated-mix" | "gguf-moe-glu-encode") && cc != 61 {
             if family.is_some() { return Err("GGUF MMQ typed package is qualified for source target SM61 only".into()); }
             println!("DKR_GGUF_MMQ_SKIPPED target_cc={cc} reason=sm61_source_only");
             continue;
@@ -351,7 +352,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let status=Command::new(&python).arg(&script).args(["--cc",&cc.to_string(),"--image","1"])
                 .arg("--output").arg(&output).arg("--ptx-file").arg(&compiled).current_dir(root).status()?;
             if !status.success(){return Err(format!("GGUF gated mix packaging failed: {status}").into());}
-        } else if pkg.name == "gguf-glu-encode" {
+        } else if matches!(pkg.name,"gguf-glu-encode" | "gguf-moe-glu-encode") {
             let kernels = root.join("mistralrs-quant/kernels/mmq_gguf");
             let watched = ["mmq_common.cuh","mmq_gguf.cuh","mmq_vecdotq.cuh","mmq_mma.cuh","mmq_quantize.cu"].map(|n|kernels.join(n));
             let compiled=compile_ptx(&source,&work.join(pkg.name),cc,pkg.fast_math,None,&watched)?;
