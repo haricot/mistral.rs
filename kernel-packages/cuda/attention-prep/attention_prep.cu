@@ -4,8 +4,8 @@
 #include "../../../mistralrs-core/src/cuda/attention_prep.cu"
 #define DKR_ROTARY_IMAGE 1
 #include "../../../mistralrs-quant/kernels/rotary/rotary.cu"
-#define STRIDES(p) int64_t p##_b,int64_t p##_h,int64_t p##_s,int64_t p##_d
-#define S(p) p##_b,p##_h,p##_s,p##_d
+#define STRIDES(p) uint64_t p##_bh,uint64_t p##_sd
+#define S(p) int64_t(uint32_t(p##_bh)),int64_t(p##_bh>>32),int64_t(uint32_t(p##_sd)),int64_t(p##_sd>>32)
 #define DIMS int batch,int q_heads,int k_heads,int seq_len,int head_dim,int rot_dim
 #define D batch,q_heads,k_heads,seq_len,head_dim,rot_dim
 #define QK_ARGS(T) const T* q,const T* k,const T* qw,const T* kw,const T* cos,const T* sin
@@ -41,6 +41,12 @@ extern "C" __global__ void dkr_rotary_pos_##tag(T* q,const T* cos,const T* sin,c
     if(neox)vllm::rotary_embedding_positions_kernel<T,true>(q,nullptr,cos,sin,pos,rot,cache_rows,stride,0,heads,0,head); \
     else vllm::rotary_embedding_positions_kernel<T,false>(q,nullptr,cos,sin,pos,rot,cache_rows,stride,0,heads,0,head); \
 }
+#if DKR_AP_DTYPE==1
 DTYPE(f16,half)
+#elif DKR_AP_DTYPE==2
 DTYPE(bf16,__nv_bfloat16)
+#elif DKR_AP_DTYPE==3
 DTYPE(f32,float)
+#else
+#error "select DKR_AP_DTYPE"
+#endif

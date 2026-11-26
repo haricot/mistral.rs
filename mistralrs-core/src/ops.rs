@@ -6029,6 +6029,72 @@ pub(crate) fn try_cuda_qk_rms_norm_rope(
                 std::ptr::null_mut()
             };
 
+            #[cfg(feature = "dkr-static-closure-probe")]
+            {
+                use crate::cuda::attention_prep_dynamic as ap;
+                use candle_core::cuda_backend::cudarc::driver::PushKernelArg;
+                let (grid,block)=ap::geometry(batch,q_heads,k_heads,seq_len,head_dim,false)?;
+                let q_packed=ap::strides(q_stride)?;
+                let k_packed=ap::strides(k_stride)?;
+                
+                
+                if cos_rows==0 {candle_core::bail!("empty RoPE cache");}
+                let spans=[ap::span(q_layout)?,k_storage_and_layout.as_ref().map(|(_,l)|ap::span(l)).transpose()?.unwrap_or(1),
+                    head_dim,head_dim,cos.elem_count(),sin.elem_count(),q_elem_count,k_elem_count.max(1)];
+                ap::with_plan(ap::Kind::Qk,dtype,&spans,grid,block,q.device(),|plan|{
+                    unsafe{plan.with_prevalidated_launch(|fun,cfg|{
+                        let mut builder=stream.launch_builder(fun);
+                        let a0=q_ptr as u64;
+                        let a1=k_ptr as u64;
+                        let a2=q_weight_ptr as u64;
+                        let a3=k_weight_ptr as u64;
+                        let a4=cos_ptr as u64;
+                        let a5=sin_ptr as u64;
+                        let a6=q_out_ptr as u64;
+                        let a7=k_out_ptr as u64;
+                        let a8=q_packed[0];
+                        let a9=q_packed[1];
+                        let a10=k_packed[0];
+                        let a11=k_packed[1];
+                        let a12=batch_i32;
+                        let a13=q_heads_i32;
+                        let a14=k_heads_i32;
+                        let a15=seq_len_i32;
+                        let a16=head_dim_i32;
+                        let a17=rot_dim_i32;
+                        let a18=cos_batch_stride_i32;
+                        let a19=q_eps;
+                        let a20=k_eps;
+                        let a21=i32::from(is_neox);
+                        let a22=i32::from(output_layout == QkRopeOutputLayout::TokensFirst);
+                        builder.arg(&a0);
+                        builder.arg(&a1);
+                        builder.arg(&a2);
+                        builder.arg(&a3);
+                        builder.arg(&a4);
+                        builder.arg(&a5);
+                        builder.arg(&a6);
+                        builder.arg(&a7);
+                        builder.arg(&a8);
+                        builder.arg(&a9);
+                        builder.arg(&a10);
+                        builder.arg(&a11);
+                        builder.arg(&a12);
+                        builder.arg(&a13);
+                        builder.arg(&a14);
+                        builder.arg(&a15);
+                        builder.arg(&a16);
+                        builder.arg(&a17);
+                        builder.arg(&a18);
+                        builder.arg(&a19);
+                        builder.arg(&a20);
+                        builder.arg(&a21);
+                        builder.arg(&a22);
+                        builder.launch(cfg)?;Ok(())
+                    })}.map_err(|e|candle_core::Error::msg(e.to_string()))
+                })?;
+            }
+            #[cfg(not(feature = "dkr-static-closure-probe"))]
             unsafe {
                 ffi::qk_rms_norm_rope(
                     q_ptr as *const c_void,
@@ -6169,6 +6235,33 @@ pub(crate) fn try_cuda_rope_sincos_positions(
             let mut sin_buf = unsafe { dev.alloc::<$ty>(elements) }?;
             let (cos_ptr, cos_guard) = cos_buf.device_ptr_mut(&stream);
             let (sin_ptr, sin_guard) = sin_buf.device_ptr_mut(&stream);
+            #[cfg(feature = "dkr-static-closure-probe")]
+            {
+                use crate::cuda::attention_prep_dynamic as ap;
+                use candle_core::cuda_backend::cudarc::driver::PushKernelArg;
+                let grid=u32::try_from(elements.div_ceil(256)).map_err(candle_core::Error::wrap)?;
+                let block=256;
+                let spans=[rows,width,elements,elements];
+                ap::with_plan(ap::Kind::Sincos,dtype,&spans,grid,block,positions.device(),|plan|{
+                    unsafe{plan.with_prevalidated_launch(|fun,cfg|{
+                        let mut builder=stream.launch_builder(fun);
+                        let a0=positions_ptr as u64;
+                        let a1=inv_freq_ptr as u64;
+                        let a2=cos_ptr as u64;
+                        let a3=sin_ptr as u64;
+                        let a4=rows_i32;
+                        let a5=width_i32;
+                        builder.arg(&a0);
+                        builder.arg(&a1);
+                        builder.arg(&a2);
+                        builder.arg(&a3);
+                        builder.arg(&a4);
+                        builder.arg(&a5);
+                        builder.launch(cfg)?;Ok(())
+                    })}.map_err(|e|candle_core::Error::msg(e.to_string()))
+                })?;
+            }
+            #[cfg(not(feature = "dkr-static-closure-probe"))]
             unsafe {
                 ffi::rope_sincos_positions(
                     positions_ptr as *const c_void,
@@ -6465,6 +6558,74 @@ pub(crate) fn try_cuda_qk_rms_norm_rope_positions(
                 std::ptr::null_mut()
             };
 
+            #[cfg(feature = "dkr-static-closure-probe")]
+            {
+                use crate::cuda::attention_prep_dynamic as ap;
+                use candle_core::cuda_backend::cudarc::driver::PushKernelArg;
+                let (grid,block)=ap::geometry(batch,q_heads,k_heads,seq_len,head_dim,false)?;
+                let q_packed=ap::strides(q_stride)?;
+                let k_packed=ap::strides(k_stride)?;
+                
+                let cache_rows_i32=i32::try_from(cos_rows).map_err(candle_core::Error::wrap)?;
+                if cos_rows==0 {candle_core::bail!("empty RoPE cache");}
+                let spans=[ap::span(q_layout)?,k_storage_and_layout.as_ref().map(|(_,l)|ap::span(l)).transpose()?.unwrap_or(1),
+                    head_dim,head_dim,cos.elem_count(),sin.elem_count(),positions.elem_count(),q_elem_count,k_elem_count.max(1)];
+                ap::with_plan(ap::Kind::QkPos,dtype,&spans,grid,block,q.device(),|plan|{
+                    unsafe{plan.with_prevalidated_launch(|fun,cfg|{
+                        let mut builder=stream.launch_builder(fun);
+                        let a0=q_ptr as u64;
+                        let a1=k_ptr as u64;
+                        let a2=q_weight_ptr as u64;
+                        let a3=k_weight_ptr as u64;
+                        let a4=cos_ptr as u64;
+                        let a5=sin_ptr as u64;
+                        let a6=positions_ptr as u64;
+                        let a7=q_out_ptr as u64;
+                        let a8=k_out_ptr as u64;
+                        let a9=q_packed[0];
+                        let a10=q_packed[1];
+                        let a11=k_packed[0];
+                        let a12=k_packed[1];
+                        let a13=batch_i32;
+                        let a14=q_heads_i32;
+                        let a15=k_heads_i32;
+                        let a16=seq_len_i32;
+                        let a17=head_dim_i32;
+                        let a18=rot_dim_i32;
+                        let a19=q_eps;
+                        let a20=k_eps;
+                        let a21=i32::from(is_neox);
+                        let a22=i32::from(output_token_major);
+                        let a23=cache_rows_i32;
+                        builder.arg(&a0);
+                        builder.arg(&a1);
+                        builder.arg(&a2);
+                        builder.arg(&a3);
+                        builder.arg(&a4);
+                        builder.arg(&a5);
+                        builder.arg(&a6);
+                        builder.arg(&a7);
+                        builder.arg(&a8);
+                        builder.arg(&a9);
+                        builder.arg(&a10);
+                        builder.arg(&a11);
+                        builder.arg(&a12);
+                        builder.arg(&a13);
+                        builder.arg(&a14);
+                        builder.arg(&a15);
+                        builder.arg(&a16);
+                        builder.arg(&a17);
+                        builder.arg(&a18);
+                        builder.arg(&a19);
+                        builder.arg(&a20);
+                        builder.arg(&a21);
+                        builder.arg(&a22);
+                        builder.arg(&a23);
+                        builder.launch(cfg)?;Ok(())
+                    })}.map_err(|e|candle_core::Error::msg(e.to_string()))
+                })?;
+            }
+            #[cfg(not(feature = "dkr-static-closure-probe"))]
             unsafe {
                 ffi::qk_rms_norm_rope_positions(
                     q_ptr as *const c_void,
@@ -6784,6 +6945,84 @@ pub(crate) fn try_cuda_qkv_rms_norm_rope_positions(
             let (k_out_ptr, k_out_guard) = k_out_buf.device_ptr_mut(&stream);
             let (v_out_ptr, v_out_guard) = v_out_buf.device_ptr_mut(&stream);
 
+            #[cfg(feature = "dkr-static-closure-probe")]
+            {
+                use crate::cuda::attention_prep_dynamic as ap;
+                use candle_core::cuda_backend::cudarc::driver::PushKernelArg;
+                let (grid,block)=ap::geometry(batch,q_heads,k_heads,seq_len,head_dim,true)?;
+                let q_packed=ap::strides(q_stride)?;
+                let k_packed=ap::strides(k_stride)?;
+                let v_packed=ap::strides(v_stride)?;
+                let cache_rows_i32=i32::try_from(cos_rows).map_err(candle_core::Error::wrap)?;
+                if cos_rows==0 {candle_core::bail!("empty RoPE cache");}
+                let spans=[ap::span(q_layout)?,ap::span(k_layout)?,ap::span(v_layout)?,head_dim,head_dim,head_dim,
+                    cos.elem_count(),sin.elem_count(),positions.elem_count(),q_elem_count,kv_elem_count,kv_elem_count];
+                ap::with_plan(ap::Kind::QkvPos,dtype,&spans,grid,block,q.device(),|plan|{
+                    unsafe{plan.with_prevalidated_launch(|fun,cfg|{
+                        let mut builder=stream.launch_builder(fun);
+                        let a0=q_ptr as u64;
+                        let a1=k_ptr as u64;
+                        let a2=v_ptr as u64;
+                        let a3=q_weight_ptr as u64;
+                        let a4=k_weight_ptr as u64;
+                        let a5=v_weight_ptr as u64;
+                        let a6=cos_ptr as u64;
+                        let a7=sin_ptr as u64;
+                        let a8=positions_ptr as u64;
+                        let a9=q_out_ptr as u64;
+                        let a10=k_out_ptr as u64;
+                        let a11=v_out_ptr as u64;
+                        let a12=q_packed[0];
+                        let a13=q_packed[1];
+                        let a14=k_packed[0];
+                        let a15=k_packed[1];
+                        let a16=v_packed[0];
+                        let a17=v_packed[1];
+                        let a18=batch_i32;
+                        let a19=q_heads_i32;
+                        let a20=k_heads_i32;
+                        let a21=seq_len_i32;
+                        let a22=head_dim_i32;
+                        let a23=rot_dim_i32;
+                        let a24=q_eps;
+                        let a25=k_eps;
+                        let a26=v_eps;
+                        let a27=i32::from(is_neox);
+                        let a28=cache_rows_i32;
+                        builder.arg(&a0);
+                        builder.arg(&a1);
+                        builder.arg(&a2);
+                        builder.arg(&a3);
+                        builder.arg(&a4);
+                        builder.arg(&a5);
+                        builder.arg(&a6);
+                        builder.arg(&a7);
+                        builder.arg(&a8);
+                        builder.arg(&a9);
+                        builder.arg(&a10);
+                        builder.arg(&a11);
+                        builder.arg(&a12);
+                        builder.arg(&a13);
+                        builder.arg(&a14);
+                        builder.arg(&a15);
+                        builder.arg(&a16);
+                        builder.arg(&a17);
+                        builder.arg(&a18);
+                        builder.arg(&a19);
+                        builder.arg(&a20);
+                        builder.arg(&a21);
+                        builder.arg(&a22);
+                        builder.arg(&a23);
+                        builder.arg(&a24);
+                        builder.arg(&a25);
+                        builder.arg(&a26);
+                        builder.arg(&a27);
+                        builder.arg(&a28);
+                        builder.launch(cfg)?;Ok(())
+                    })}.map_err(|e|candle_core::Error::msg(e.to_string()))
+                })?;
+            }
+            #[cfg(not(feature = "dkr-static-closure-probe"))]
             unsafe {
                 ffi::qkv_rms_norm_rope_positions(
                     q_ptr as *const c_void,

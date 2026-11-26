@@ -29,13 +29,14 @@ def profile(cc, op, impl, entry, block, args):
                 block=block,shared_mem_bytes=0,arguments=args)
 
 def plan(cc):
-    rows=[]
-    for dt in DTYPES:
+    images={}
+    for image,dt in enumerate(DTYPES,1):
+        rows=[]
         def t(name,access="read",dtype=dt):return tensor(name,dtype,1,access)
         def s(name,dtype="i32"):return dict(kind="scalar",name=name,dtype=dtype)
         def add(op,entry,block,args):
             r=profile(cc,op,"cuda."+entry+".v1",entry,[block,1,1],args)
-            r["artifact"]="attention_prep.ptx";rows.append(r)
+            r["artifact"]=f"attention_prep_{image}.ptx";rows.append(r)
         for b in (32,64,128,256,512,1024):
             for kind in ("qk","qk_pos","qkv_pos"):
                 triple=kind=="qkv_pos";indexed=kind!="qk"
@@ -43,7 +44,7 @@ def plan(cc):
                 args=[t(n) for n in names]+[t(n+"_weight") for n in names]+[t("cos"),t("sin")]
                 if indexed:args.append(t("positions",dtype="u32"))
                 args += [t(n+"_out","write") for n in names]
-                args += [s(n+"_"+d,"i64") for n in names for d in ("b","h","s","d")]
+                args += [s(n+"_"+d,"u64") for n in names for d in ("bh","sd")]
                 args += [s(n) for n in ("batch","q_heads","k_heads","seq_len","head_dim","rot_dim")]
                 if not indexed:args.append(s("cos_stride"))
                 args += [s(n+"_eps","f32") for n in names]+[s("neox")]
@@ -59,11 +60,13 @@ def plan(cc):
             if indexed:args.append(s("cache_rows"))
             suffix="rotary_pos" if indexed else "rotary"
             add(f"attention.prep.{suffix}.v1",f"dkr_{suffix}_{dt}",256,args)
-    assert len(rows)==63 and len({r["entry"] for r in rows})==63
-    return {1:rows}
+        assert len(rows)==21 and len({r["entry"] for r in rows})==21
+        assert all(len(r["arguments"])<=32 for r in rows)
+        images[image]=rows
+    return images
 
 def widths(row):
-    return [64 if p["kind"]=="tensor" or p["dtype"]=="i64" else 32 for p in row["arguments"]]
+    return [64 if p["kind"]=="tensor" or p["dtype"] in ("i64","u64") else 32 for p in row["arguments"]]
 
 def verify(data, rows, cc):
     if len(data)>MAX_IMAGE:
@@ -133,8 +136,8 @@ def self_test(cc,images):
                     pass
                 else:
                     raise AssertionError("invalid PTX accepted")
-        assert len(list(root.rglob("manifest.json")))==1
-    print(f"DKR_R126_S9C2C_ATTENTION_PREP_SELF_TEST=PASS cc={cc} images=1 profiles=63 synthetic_ptx=true")
+        assert len(list(root.rglob("manifest.json")))==3
+    print(f"DKR_R126_S9C2C_ATTENTION_PREP_SELF_TEST=PASS cc={cc} images=3 profiles=63 synthetic_ptx=true")
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
@@ -153,12 +156,12 @@ def main():
     elif a.json_out:
         # The SM61 base is the previously audited upper bound, not a new real inventory.
         report=dict(schema="dkr.r126.attention.prep.plan.v1",cc=a.cc,images=images,
-                    profiles=63,physical_manifests=1,compilation=False,link_qualified=False)
+                    profiles=63,physical_manifests=3,compilation=False,link_qualified=False)
         if a.cc==61:
-            report.update(prospective_physical_upper=524,prospective_logical=3824)
+            report.update(prospective_physical_upper=526,prospective_logical=3824)
         a.json_out.parent.mkdir(parents=True,exist_ok=True)
         a.json_out.write_text(json.dumps(report,indent=2)+"\n")
-        print(f"DKR_R126_S9C2C_ATTENTION_PREP_PLAN=COMPLETE cc={a.cc} images=1 profiles=63 compilation=false")
+        print(f"DKR_R126_S9C2C_ATTENTION_PREP_PLAN=COMPLETE cc={a.cc} images=3 profiles=63 compilation=false")
     elif a.image in images and a.output is not None and a.ptx_file is not None:
         package(a.output,a.cc,a.image,images[a.image],a.ptx_file.read_bytes())
         print(f"DKR_GGUF_MMVQ_SHARD=STAGED cc={a.cc} image={a.image} profiles={len(images[a.image])}")

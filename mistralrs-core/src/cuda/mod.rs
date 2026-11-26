@@ -1,3 +1,5 @@
+#[cfg(feature = "dkr-static-closure-probe")]
+pub(crate) mod attention_prep_dynamic;
 #[cfg(feature = "dkr-add-rms-norm")]
 pub(crate) mod add_rms_norm_dynamic;
 #[cfg(feature = "dkr-causal-mask")]
