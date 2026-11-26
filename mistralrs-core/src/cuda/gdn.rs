@@ -4744,6 +4744,12 @@ pub fn deferred_recurrence_rmsnorm_gate_cuda(
         }
     }
 
+    #[cfg(feature = "dkr-static-closure-probe")]
+    speculative_dynamic::reject_storage_aliases(&[
+        (mixed_qkv,false),(b,false),(a,false),(a_log,false),(dt_bias,false),
+        (state_pool,true),(active_slots,false),(deferred_key,true),(deferred_delta,true),
+        (deferred_decay,true),(deferred_cursor,true),(gate,false),(norm_weight,false),
+    ])?;
     let mixed_qkv = mixed_qkv.contiguous()?;
     let a_log = a_log.to_dtype(DType::F32)?.contiguous()?;
     let dt_bias = dt_bias.to_dtype(DType::F32)?.contiguous()?;
@@ -5101,6 +5107,11 @@ fn launch_deferred_state_cuda(
             );
         }
     }
+    #[cfg(feature = "dkr-static-closure-probe")]
+    speculative_dynamic::reject_storage_aliases(&[
+        (state_pool,true),(active_slots,false),(deferred_key,false),
+        (deferred_delta,false),(deferred_decay,false),(deferred_cursor,true),
+    ])?;
     macro_rules! cuda_read_ptr {
         ($ptr:ident, $guard:ident, $storage:ident, $layout:ident, $tensor:expr, $ty:ty, $name:literal) => {
             let ($storage, $layout) = $tensor.storage_and_layout();
