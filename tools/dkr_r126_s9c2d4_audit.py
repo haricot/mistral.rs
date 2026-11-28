@@ -113,14 +113,14 @@ def budget_inventory(root,prior):
     # Scan exact symbol tokens, including macro invocations. This is an
     # inventory of lexical candidates, not a claim about Rust cfg expansion.
     mentions={n:[] for n in declarations}
-    pattern=re.compile(r'\b(?:'+"|".join(map(re.escape,declarations))+r')\b')
+    pattern=re.compile(r'\b(?:'+"|".join(map(re.escape,declarations))+r')\b') if declarations else None
     for path in sorted(core.rglob("*.rs")):
         if path==core/"cuda/ffi.rs":
             continue
         source=path.read_text()
         code=mask(source)
         guarded=guarded_ranges(strip_comments(source))
-        for m in pattern.finditer(code):
+        for m in (pattern.finditer(code) if pattern is not None else ()):
             mentions[m.group()].append(dict(path=str(path.relative_to(root)),line=source.count("\n",0,m.start())+1,
                 explicit_negative_closure_guard=any(a<=m.start()<b for a,b in guarded)))
     sort=(core/"cuda/sort.cu").read_text()

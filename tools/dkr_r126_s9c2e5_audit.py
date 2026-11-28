@@ -226,7 +226,7 @@ def producer(root,negative=False):
 
 def audit(root):
     prior=previous(root)
-    require(prior["residual_ffi"]==2 and set(prior["closed_argsort_declarations"])==ARG_SORT,"cumulative argsort closure")
+    require(prior["residual_ffi"] in (2,0) and set(prior["closed_argsort_declarations"])==ARG_SORT,"cumulative argsort closure")
     result=producer(root)
     ffi=(root/CORE/"cuda/ffi.rs").read_text()
     check_declarations(ffi,ARG_SORT)
@@ -234,7 +234,8 @@ def audit(root):
     spans=guarded_ranges(clean)
     residual={m.group(1) for m in re.finditer(r'\bpub\(crate\)\s+fn\s+(\w+)\s*\(',mask(clean))
               if not any(a<=m.start()<b for a,b in spans)}
-    require(residual==GRAPH,"remaining FFI must be exactly graph copies")
+    closed_graph=set(prior["closed_graph_declarations"])
+    require(closed_graph in (set(),GRAPH) and residual==GRAPH-closed_graph and len(residual)==prior["residual_ffi"],"remaining FFI must be exactly unclosed graph copies")
     pattern=re.compile(r"\bffi::("+"|".join(sorted(ARG_SORT))+r")\b")
     found=[]
     for path in (root/CORE).rglob("*.rs"):
@@ -261,7 +262,7 @@ def audit(root):
         require(marker in adapter,"adapter contract "+marker)
     require("pub use cuda::argsort_dynamic::dkr_argsort_requirements;" in (root/CORE/"lib.rs").read_text(),"capability export")
     require(prior["projected_master_logical"]+23==4268 and prior["projected_master_physical_upper"]+1==552,"master budget")
-    return dict(result,status="SOURCE_COMPLETE",guarded_ffi=14,residual_ffi=2,
+    return dict(result,status="SOURCE_COMPLETE",guarded_ffi=14,residual_ffi=len(residual),closed_graph_declarations=sorted(closed_graph),
                 projected_master_logical=4268,projected_master_physical_upper=552,
                 padding_policy="explicit_valid_index",f64_native=True,nan_order_unspecified=True,
                 active_limits_unchanged=True,model_scope_fit_proven=False,
@@ -285,7 +286,7 @@ def main():
         a.json_out.parent.mkdir(parents=True,exist_ok=True)
         with a.json_out.open("x") as f:
             json.dump(r,f,indent=2,sort_keys=True);f.write("\n")
-    print("DKR_R126_S9C2E5_SOURCE=COMPLETE guarded_ffi=14 residual=2 profiles=23 images=1 max_args=6 f64_native=true padding=explicit_valid_index projected_master_logical=4268 projected_master_physical=552 model_scope_fit=UNPROVEN compilation=false link_qualified=false full_closure=false")
+    print(f"DKR_R126_S9C2E5_SOURCE=COMPLETE guarded_ffi=14 residual={r['residual_ffi']} profiles=23 images=1 max_args=6 f64_native=true padding=explicit_valid_index projected_master_logical=4268 projected_master_physical=552 model_scope_fit=UNPROVEN compilation=false link_qualified=false full_closure=false")
 
 if __name__=="__main__":
     main()

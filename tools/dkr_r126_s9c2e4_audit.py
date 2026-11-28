@@ -21,7 +21,7 @@ def require(ok,msg):
 
 def audit(root):
     p=previous(root)
-    require(p["residual_declarations"] in (16,2) and set(p["closed_sampling_declarations"])==NAMES,"cumulative closure")
+    require(p["residual_declarations"] in (16,2,0) and set(p["closed_sampling_declarations"])==NAMES,"cumulative closure")
     result=producer(root)
     check_declarations((root/CORE/"cuda/ffi.rs").read_text(),NAMES)
     found=set()
@@ -51,7 +51,7 @@ def audit(root):
         require(marker in adapter,"adapter contract "+marker)
     require("pub use cuda::sampling_dynamic::{dkr_sampling_requirements, DkrSamplingMode};" in (root/CORE/"lib.rs").read_text(),"capability export")
     require(p["projected_master_logical"]+32==4245 and p["projected_master_physical_upper"]+3==551,"budget")
-    return dict(result,status="SOURCE_COMPLETE",guarded_ffi=12,residual_ffi=p["residual_declarations"],closed_argsort_declarations=p["closed_argsort_declarations"],
+    return dict(result,status="SOURCE_COMPLETE",guarded_ffi=12,residual_ffi=p["residual_declarations"],closed_argsort_declarations=p["closed_argsort_declarations"],closed_graph_declarations=p["closed_graph_declarations"],
                 ffi_closed=True,model_scope_fit_proven=False,compilation=False,link_qualified=False,
                 numeric_qualified=False,full_closure=False)
 

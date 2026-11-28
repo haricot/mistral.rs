@@ -4,10 +4,10 @@ use anyhow::{ensure, Context, Result};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CopyGeometry {
-    pub width: usize,
-    pub rows: usize,
-    pub src_pitch: usize,
-    pub dst_pitch: usize,
+    width: usize,
+    rows: usize,
+    src_pitch: usize,
+    dst_pitch: usize,
     src_offset: usize,
     dst_offset: usize,
     src_span: usize,
@@ -30,6 +30,8 @@ fn contiguous(dims: &[usize], strides: &[usize]) -> Result<bool> {
     Ok(true)
 }
 impl CopyGeometry {
+    pub fn is_empty(&self) -> bool { self.rows == 0 }
+
     /// All strides, offsets and allocation lengths are in elements.
     /// Returned geometry and addresses are in bytes.
     #[allow(clippy::too_many_arguments)]

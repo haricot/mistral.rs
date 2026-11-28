@@ -269,7 +269,7 @@ def contract(root):
 
 def audit(root):
     prev=previous(root)
-    require(prev["residual_declarations"] in (28,16,2) and set(prev["closed_large_topk_declarations"])==NAMES,
+    require(prev["residual_declarations"] in (28,16,2,0) and set(prev["closed_large_topk_declarations"])==NAMES,
             "cumulative residual closure")
     m,_=plans(root)
     guards=guard_audit(root)
@@ -280,7 +280,7 @@ def audit(root):
     require(logical==4213 and physical==548,"master budget projection")
     return dict(schema="dkr.r126.s9c2e3.source.v1",status="SOURCE_COMPLETE",guards=guards,
                 contract=contracts,ordinary_profiles=15,cooperative_select_profiles=11,sort_pack_profiles=1,
-                profiles_added=27,images_added=2,max_args=9,residual_declarations=prev["residual_declarations"],closed_sampling_declarations=prev["closed_sampling_declarations"],closed_argsort_declarations=prev["closed_argsort_declarations"],
+                profiles_added=27,images_added=2,max_args=9,residual_declarations=prev["residual_declarations"],closed_sampling_declarations=prev["closed_sampling_declarations"],closed_argsort_declarations=prev["closed_argsort_declarations"],closed_graph_declarations=prev["closed_graph_declarations"],
                 projected_master_logical=logical,projected_master_physical_upper=physical,
                 scope_example=scoped,active_limits_unchanged=True,actual_model_scope_fit_proven=False,
                 compilation=False,link_qualified=False,numeric_qualified=False,full_closure=False)

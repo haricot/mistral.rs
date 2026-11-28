@@ -1,5 +1,7 @@
 use candle_core::cuda_backend::cudarc::driver::DevicePtr;
-use candle_core::{DType, Layout, Result, Storage, Tensor};
+use candle_core::{DType, Result, Storage, Tensor};
+#[cfg(not(feature = "dkr-static-closure-probe"))]
+use candle_core::Layout;
 
 #[cfg(not(feature = "dkr-static-closure-probe"))]
 fn launch(
@@ -244,7 +246,7 @@ pub fn copy_tensor(src: &Tensor, dst: &Tensor) -> Result<()> {
                 src_layout.start_offset(), dst_layout.start_offset(),
                 s.len(), d.len(), std::mem::size_of::<$ty>(),
             ).map_err(|e| candle_core::Error::msg(e.to_string()))?;
-            if geometry.rows == 0 { return Ok(()); }
+            if geometry.is_empty() { return Ok(()); }
             // The graph buffer owner retains the destination allocation and
             // exclusively schedules writes on this stream, including replay.
             // DevicePtr guards remain live through submission. In capture,

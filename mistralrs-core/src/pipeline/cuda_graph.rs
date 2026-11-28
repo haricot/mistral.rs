@@ -5151,6 +5151,38 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "dkr-static-closure-probe")]
+    #[test]
+    #[ignore = "requires a CUDA device"]
+    fn dkr_graph_copy_contiguous_offset_capture() -> anyhow::Result<()> {
+        let device = Device::new_cuda(0)?;
+        let stream = device.as_cuda_device()?.cuda_stream();
+        let _memory_pool_guard = prepare_cuda_graph_memory_pool(&stream)?;
+        let input = Var::from_tensor(&Tensor::from_vec(vec![11u32, 1, 2, 3, 99], 5, &device)?)?;
+        let output = Var::from_tensor(&Tensor::from_vec(vec![77u32, 0, 0, 0, 88], 5, &device)?)?;
+        let source = input.as_detached_tensor().narrow(0, 1, 3)?;
+        let dest = output.as_detached_tensor().narrow(0, 1, 3)?;
+        let restore = disable_event_tracking_for_capture(&stream);
+        stream.begin_capture(sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED)?;
+        if let Err(e) = crate::cuda::graph::copy_tensor(&source, &dest) {
+            end_cuda_capture_discard(&stream);
+            restore_event_tracking_after_capture(&stream, restore);
+            return Err(e.into());
+        }
+        let graph = CudaGraphHandle::end_capture(&stream);
+        restore_event_tracking_after_capture(&stream, restore);
+        let graph = graph?.ok_or_else(|| anyhow::anyhow!("CUDA graph capture returned no graph"))?;
+        graph.upload()?;
+        graph.launch()?;
+        stream.synchronize()?;
+        assert_eq!(output.as_detached_tensor().to_vec1::<u32>()?, vec![77, 1, 2, 3, 88]);
+        input.set(&Tensor::from_vec(vec![11u32, 9, 8, 7, 99], 5, &device)?)?;
+        graph.launch()?;
+        stream.synchronize()?;
+        assert_eq!(output.as_detached_tensor().to_vec1::<u32>()?, vec![77, 9, 8, 7, 88]);
+        Ok(())
+    }
+
     #[test]
     #[ignore = "requires a CUDA device"]
     fn graph_copy_supports_dense_row_source() -> anyhow::Result<()> {

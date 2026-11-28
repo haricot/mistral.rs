@@ -41,7 +41,7 @@ SAMPLING_GROUPS={
     "categorical":{"categorical_large_f32_packed_batched"},
 }
 
-def partition(declarations,closed_reuse=(),closed_router=(),closed_large=(),closed_sampling=(),closed_argsort=()):
+def partition(declarations,closed_reuse=(),closed_router=(),closed_large=(),closed_sampling=(),closed_argsort=(),closed_graph=()):
     groups={"already_typed":set().union(*REUSE.values()),"argsort":ARG_SORT,"graph":GRAPH,**SAMPLING_GROUPS}
     require(sum(len(v) for v in groups.values())==len(set().union(*groups.values())),"overlapping symbol partition")
     closed=set(closed_reuse)
@@ -60,7 +60,10 @@ def partition(declarations,closed_reuse=(),closed_router=(),closed_large=(),clos
     argsort=set(closed_argsort)
     require(argsort in (set(),groups["argsort"]),"partial argsort closure")
     require(not argsort or sampling==all_sampling,"argsort closure before sampling closure")
-    require(set(declarations)==set().union(*groups.values())-closed-router-large-sampling-argsort and len(declarations)==60-len(closed)-len(router)-len(large)-len(sampling)-len(argsort),"residual inventory drift")
+    graph=set(closed_graph)
+    require(graph in (set(),GRAPH),"partial graph closure")
+    require(not graph or argsort==ARG_SORT,"graph closure before argsort closure")
+    require(set(declarations)==set().union(*groups.values())-closed-router-large-sampling-argsort-graph and len(declarations)==60-len(closed)-len(router)-len(large)-len(sampling)-len(argsort)-len(graph),"residual inventory drift")
     return {k:sorted(v) for k,v in groups.items()}
 
 def evidence(source,markers,label):
@@ -201,16 +204,18 @@ def audit(root):
     closed_large=(SAMPLING_GROUPS["large_topk"]|SAMPLING_GROUPS["ranked"]|SAMPLING_GROUPS["workspace_query"])-set(declarations)
     closed_sampling=set().union(*(SAMPLING_GROUPS[key] for key in ("sample","dflash","rejection","top1","categorical")))-set(declarations)
     closed_argsort=ARG_SORT-set(declarations)
-    groups=partition(declarations,closed,closed_router,closed_large,closed_sampling,closed_argsort)
+    closed_graph=GRAPH-set(declarations)
+    groups=partition(declarations,closed,closed_router,closed_large,closed_sampling,closed_argsort,closed_graph)
     reuse=reuse_evidence(root)
     for item in reuse.values():
         item["explicit_closure_guard_pending"]=not bool(closed)
     budget=sampling_budget(root)
+    budget['graph']['driver_copy_migration_required']=not bool(closed_graph)
     return dict(schema="dkr.r126.s9c2e0.source.v1",status="AUDIT_COMPLETE",
         residual_groups=groups,reuse=reuse,usage=usage_candidates(root),budget=budget,
         remaining_core_ffi_count=len(declarations),closed_reuse_declarations=sorted(closed),
         closed_router_declarations=sorted(closed_router),
-        closed_large_topk_declarations=sorted(closed_large),closed_sampling_declarations=sorted(closed_sampling),closed_argsort_declarations=sorted(closed_argsort),
+        closed_large_topk_declarations=sorted(closed_large),closed_sampling_declarations=sorted(closed_sampling),closed_argsort_declarations=sorted(closed_argsort),closed_graph_declarations=sorted(closed_graph),
         current_projected_logical=prior["projected_logical"],
         current_projected_physical_upper=prior["projected_physical_upper"],
         current_logical_headroom=prior["logical_headroom"],profiles_added=0,images_added=0,
@@ -234,6 +239,14 @@ def self_test():
     large=SAMPLING_GROUPS["large_topk"]|SAMPLING_GROUPS["ranked"]|SAMPLING_GROUPS["workspace_query"]
     sampling=set().union(*(SAMPLING_GROUPS[k] for k in ("sample","dflash","rejection","top1","categorical")))
     partition(sorted(GRAPH),closed,router,large,sampling,ARG_SORT)
+    partition([],closed,router,large,sampling,ARG_SORT,GRAPH)
+    graph_one=next(iter(sorted(GRAPH)))
+    try:
+        partition([graph_one],closed,router,large,sampling,ARG_SORT,GRAPH-{graph_one})
+    except ValueError:
+        failures+=1
+    else:
+        raise AssertionError('partial graph closure accepted')
     one=next(iter(sorted(ARG_SORT)))
     try:
         partition(sorted(GRAPH|{one}),closed,router,large,sampling,ARG_SORT-{one})
