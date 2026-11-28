@@ -24,7 +24,7 @@ SEEDS = {
 EXCLUDED_FEATURES = {"metal", "flash-attn", "flash-attn-v3", "cutile", "nccl",
                      "cuda-legacy", "cuda-legacy-bf16", "cuda-legacy-fp8", "cuda-legacy-fp4"}
 NATIVE = {".cu", ".cuh", ".cpp", ".cc", ".c", ".h", ".hpp", ".ptx", ".cubin", ".a", ".so", ".lib", ".o", ".fatbin"}
-TOKEN = re.compile(r'r(?:#*)\"|b?r(?:#+)\"|(?:b|c)?\"|//|/\*|(?:b)?\x27(?:\\.|[^\x27\\\n])\x27|[A-Za-z_][A-Za-z_0-9]*|::|=>|[^\s]')
+TOKEN = re.compile(r'(?:br|cr|r)#*\"|(?:b|c)?\"|//|/\*|(?:b)?\x27(?:\\(?:u\{[0-9a-fA-F_]+\}|x[0-9a-fA-F]{2}|[^\n])|[^\x27\\\n])\x27|[A-Za-z_][A-Za-z_0-9]*|::|=>|[^\s]')
 IDENT = re.compile(r"[A-Za-z_]\w*\Z")
 PRODUCER = re.compile(r"\b(?:KernelBuilder|CudaBuilder|build_lib|source_glob|source_files|nvcc|ptxas|cc::Build|compile_ptx|compile_cuda|rustc-link-lib|rustc-link-search|link_name)\b")
 LIB_LINK = re.compile(r"cargo::?rustc-link-lib=([^\"\s]+)")
@@ -200,27 +200,28 @@ class Rust:
         ts=self.ts
         rows=[]
         for i in range(len(ts)-2):
-            if ts[i]!="extern" or not ts[i+1].startswith('"'): continue
-            # extern "C" fn definitions (including exported functions) are
-            # not imported symbols. Record blocks, including non-C ABIs.
-            if ts[i+2]!="{" or i+2 not in self.pairs: continue
-            end=self.pairs[i+2]
-            block=ts[i+3:end]
+            if ts[i]!="extern": continue
+            # extern fn definitions are not imports. Omitted ABI defaults to C.
+            abi=ts[i+1] if ts[i+1].startswith('"') else '"C"'
+            opening=i+2 if ts[i+1].startswith('"') else i+1
+            if ts[opening]!="{" or opening not in self.pairs: continue
+            end=self.pairs[opening]
+            block=ts[opening+1:end]
             macros=("$" in block or "!" in block)
-            for j in range(i+3,end-1):
+            for j in range(opening+1,end-1):
                 if ts[j]=="fn" and IDENT.fullmatch(ts[j+1]) and ts[j+2:j+3]==["("]:
                     attrs=[a for a in self.attrs if a[0]<=j<a[1] and j-a[0]<=8]
                     alias=next((x.split('"')[1] for a in attrs for x in a[2]
                                 if x.startswith("link_name = \"")),None)
                     rows.append(dict(kind="symbol",name=ts[j+1],link_name=alias or ts[j+1],
-                                     abi=ts[i+1],site=self.loc(j),guard=self.guard(j)))
-                elif ts[j]=="static":
-                    name=ts[j+2] if ts[j+1]=="mut" and j+2<end else ts[j+1]
+                                     abi=abi,site=self.loc(j),guard=self.guard(j)))
+                elif ts[j] in ("static","type"):
+                    name=ts[j+2] if ts[j]=="static" and ts[j+1]=="mut" and j+2<end else ts[j+1]
                     if IDENT.fullmatch(name):
-                        rows.append(dict(kind="static",name=name,link_name=name,abi=ts[i+1],
+                        rows.append(dict(kind=ts[j],name=name,link_name=name,abi=abi,
                                          site=self.loc(j),guard=self.guard(j)))
             if macros:
-                rows.append(dict(kind="macro_block",name=None,link_name=None,abi=ts[i+1],
+                rows.append(dict(kind="macro_block",name=None,link_name=None,abi=abi,
                                  site=self.loc(i),guard=self.guard(i),
                                  macro_invocations=sorted(set(block[k-1] for k,t in enumerate(block)
                                                               if t=="!" and k and IDENT.fullmatch(block[k-1])))))
@@ -280,7 +281,7 @@ def build_inventory(path,source,features,declared):
     rows=[]
     # Enumerate call/directive candidates independently of legacy archive list.
     for i,(t,start,_) in enumerate(r.tok):
-        if not PRODUCER.search(t): continue
+        if not PRODUCER.search(t) and not (t=="Build" and r.ts[max(0,i-2):i]==["cc","::"]): continue
         if t.startswith('"') and not ("rustc-link-" in t or t.strip('"') in ("nvcc","ptxas")): continue
         if t not in ("KernelBuilder","CudaBuilder","build_lib","source_glob","source_files","nvcc","ptxas",
                      "compile_ptx","compile_cuda","Build","link_name") and not t.startswith('"'): continue
@@ -318,8 +319,10 @@ extern "C" {
     pub(crate) fn closed2();
     #[link_name="native_alias"] pub fn alias();
     fn ordinary();
+    static FLAG: i32;
     declare!(generated);
 }
+extern { fn implicit_abi(); }
 #[cfg(unknown_flag)]
 extern "C" { pub fn unknown(); }
 #[cfg(any(not(feature="strict"),unknown_flag))]
@@ -330,7 +333,8 @@ mod open;
     r=Rust("crate/src/lib.rs",sample,{"strict"},{"strict"})
     rows=r.externs()
     symbols={x["name"]:x for x in rows if x["kind"]=="symbol"}
-    require(set(symbols)=={"closed","closed2","alias","ordinary","unknown","maybe"},"literal extern inventory")
+    require(set(symbols)=={"closed","closed2","alias","ordinary","unknown","maybe","implicit_abi"},"literal extern inventory")
+    require(any(x["kind"]=="static" and x["name"]=="FLAG" for x in rows),"extern static inventory")
     require(symbols["closed"]["guard"] and symbols["closed2"]["guard"],"negative guard")
     require(all(symbols[x]["guard"] is None for x in ("alias","ordinary","unknown","maybe")),"unproven cfg is not exclusion")
     require(symbols["alias"]["link_name"]=="native_alias" and any(x["kind"]=="macro_block" for x in rows),"alias/macro")
@@ -358,9 +362,15 @@ def audit(root):
     ws=tomllib.loads((root/"Cargo.toml").read_text())
     members=ws["workspace"]["members"]
     require(all((root/c/"Cargo.toml").is_file() for c in members),"workspace member inventory")
-    selected=[p for p in tracked if p=="Cargo.toml" or p.startswith("tools/dkr_r126_") and p.endswith(".py")
-              or any(p.startswith(c+"/") for c in members) and (p.endswith((".rs",".toml")) or Path(p).suffix in NATIVE)
-              or p.startswith("kernel-packages/") and p.endswith((".py",".cu",".cuh",".rs"))]
+    def in_scope(p):
+        return (p=="Cargo.toml" or p.startswith(".cargo/") and p.endswith(".toml")
+                or p.startswith("tools/") and p.endswith((".py",".rs"))
+                or any(p.startswith(c+"/") for c in members) and
+                   (p.endswith((".rs",".toml")) or Path(p).suffix in NATIVE)
+                or p.startswith("kernel-packages/") and (p.endswith((".py",".rs",".toml")) or Path(p).suffix in NATIVE))
+    selected=[p for p in tracked if in_scope(p)]
+    untracked=[p.decode() for p in git(root,"ls-files","--others","--exclude-standard","-z").split(b"\0") if p]
+    require(not any(in_scope(p) for p in untracked),"untracked source in audit scope")
     require(not git(root,"status","--porcelain","--untracked-files=no","--",*selected).strip(),"audited tracked source dirty")
     prior=previous(root)
     require(prior["closed_inventory"]==60 and prior["residual_ffi"]==0,"S9C.2E cumulative gate")
@@ -387,11 +397,17 @@ def audit(root):
             fenced=[r.loc(i) for i in sites]
         builds[c]=dict(static_build_link_sites=fenced,candidates=rows,producer_cfgs_absent_in_scenario=sorted(provider_flags[c]))
     parsed={}
+    supplemental={}
     for p in selected:
         c=p.split("/",1)[0]
-        if c not in members or not p.endswith(".rs") or not p.startswith(c+"/src/"): continue
+        if not p.endswith(".rs"): continue
         try:
-            parsed[p]=Rust(p,(root/p).read_text(),active[c],tables[c],provider_flags[c])
+            declared=tables.get(c,{}) if c in active else {}
+            r=Rust(p,(root/p).read_text(),active.get(c,set()),declared,provider_flags[c])
+            if c in members and p.startswith(c+"/src/"):
+                parsed[p]=r
+            else:
+                supplemental[p]=r
         except ValueError as exc:
             raise ValueError(f"{p}: {exc}") from exc
     excluded,edges=module_exclusions(parsed)
@@ -436,12 +452,28 @@ def audit(root):
     # Also inventory other Rust native link attributes, build helper calls,
     # nonstandard producer source files, and separate host tooling.
     additional=[]
-    for p,r in parsed.items():
+    qualified=[]
+    generated=[]
+    supplemental_externs=[]
+    for p,r in supplemental.items():
+        supplemental_externs.extend(dict(x,path=p,classification="review_non_library_target") for x in r.externs())
+    for p,r in {**parsed,**supplemental}.items():
         for i,t in enumerate(r.ts):
             if t in ("link","link_name") and i>0 and r.ts[i-1]=="[":
                 additional.append(dict(site=r.loc(i),kind="link_attribute",guard=r.guard(i),module_excluded=p in excluded))
-            if t in ("build_lib","compile_ptx","compile_cuda","KernelBuilder"):
+            if t in ("build_lib","compile_ptx","compile_cuda","KernelBuilder") or (t=="Build" and r.ts[max(0,i-2):i]==["cc","::"]):
                 additional.append(dict(site=r.loc(i),kind="producer_candidate",guard=r.guard(i),module_excluded=p in excluded))
+            if t in ("include","include_bytes","include_str") and r.ts[i+1:i+2]==["!"]:
+                generated.append(dict(site=r.loc(i),kind=t,guard=r.guard(i),module_excluded=p in excluded))
+            if (t=="ffi" or t.endswith("_ffi")) and r.ts[i+1:i+2]==["::"] and i+2<len(r.ts):
+                if i>=2 and r.ts[i-2] in ("std","core") and r.ts[i-1]=="::":
+                    continue
+                name=r.ts[i+2]
+                if not IDENT.fullmatch(name): continue
+                c=p.split("/",1)[0]
+                qualified.append(dict(site=r.loc(i),module=t,name=name,literal_declared_in_component=name in names[c],
+                                      guard=r.guard(i),module_excluded=p in excluded,
+                                      scope="library_source" if p in parsed else "supplemental_target"))
     native=[p for p in selected if Path(p).suffix in NATIVE]
     counts=Counter(x["classification"] for x in rows)
     per_component={}
@@ -455,7 +487,10 @@ def audit(root):
     require(head==git(root,"rev-parse","HEAD").decode().strip() and
             not git(root,"status","--porcelain","--untracked-files=no","--",*selected).strip(),"source changed during audit")
     return dict(schema="dkr.r126.s9c3a.source.v1",status="INVENTORY_COMPLETE_REVIEW_REQUIRED" if review else "INVENTORY_COMPLETE",
-                source_head=head,workspace_members=members,scanned_rust_files=len(parsed),
+                source_head=head,workspace_members=members,scanned_rust_files=len(parsed)+len(supplemental),
+                library_rust_files=len(parsed),supplemental_rust_files=len(supplemental),
+                supplemental_extern_inventory=supplemental_externs,
+                qualified_ffi_inventory=qualified,generated_input_sites=generated,
                 tracked_source_paths=len(selected),native_source_inventory=native,
                 source_feature_intent={c:sorted(active[c]) for c in sorted(active)},
                 external_feature_intent={c:sorted(v) for c,v in sorted(external.items())},
@@ -492,8 +527,9 @@ def main():
         print(f"DKR_R126_S9C3A_COMPONENT component={c} extern_records={sum(counts.values())} review={sum(v for k,v in counts.items() if k.startswith('review_'))}")
     for family,count in r["review_families"].items():
         print(f"DKR_R126_S9C3A_REVIEW family={family} records={count}")
+    print(f"DKR_R126_S9C3A_NATIVE_SITES supplemental_extern_records={len(r['supplemental_extern_inventory'])} qualified_ffi_sites={len(r['qualified_ffi_inventory'])} generated_input_sites={len(r['generated_input_sites'])}")
     print(f"DKR_R126_S9C3A_SOURCE=INVENTORY_COMPLETE producers_guarded=3 previous_residual=0 review_candidates={r['review_candidates']} rust_files={r['scanned_rust_files']} cargo_lock_dirty={str(r['cargo_lock_dirty']).lower()} compilation=false link_qualified=false full_closure=false")
-    if a.require_closed and r["review_candidates"]:
+    if a.require_closed and (r["review_candidates"] or r["supplemental_extern_inventory"]):
         raise SystemExit("DKR_R126_S9C3A_CLOSURE_GATE=BLOCKED unresolved source review candidates")
 
 if __name__=="__main__":
