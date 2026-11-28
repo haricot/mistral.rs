@@ -1,0 +1,14 @@
+# S9C.3A — Exhaustive Static Producer & FFI Closure Audit
+
+S9C.2E's 60/60 inventory was a deliberately scoped set of pub(crate) declarations. It is not a proof of all Rust extern blocks, public declarations, aliases, macro-generated declarations, modules or cross-crate dependencies. S9C.3A inventories the complete tracked workspace Rust source trees, Cargo build scripts, link attributes and native source paths, and repeats S9C.2E.6. Source features are the intended strict Linux CUDA scenario seeded by the core qualified and closure features; unknown predicates are not treated as false. No Cargo/compiler invocation, no cache inspection.
+
+Initial manual source observations at 33b6c69e:
+- Core ffi.rs also has four public MoE imports (including link_name mistralrs_moe_gemm_hfma2). moe.rs selects moe_dynamic.rs under dkr-moe, excluding moe_legacy.rs. Declarations alone do not prove a live link requirement.
+- Quant AFQ and HQQ have macro-based extern declarations. HQQ bitpack, bitsandbytes, GPTQ/Marlin and utils have additional explicit externs. Their enabled CUDA modules need review outside the 60-symbol inventory.
+- Dynamic LoRA has two explicit dense CUDA imports and thirteen routed CUDA imports, with literal calls in cuda.rs and moe_cuda.rs not fenced by the strict feature in those files. This is a concrete remaining source migration/exclusion candidate, not an actual link failure claim.
+- Paged FFI module has a negative catalogue-only guard. The separate FlashAttention crate is outside the intended strict feature set, but the resolved graph must be checked in 3B.
+- Core and quant archive build/link directives are cfg-fenced; paged exits before archive generation in catalog-only mode. Cudaforge external package production and embedded catalogue generation are not legacy runtime producers.
+
+Run the self-test and source inventory (JSON is write-once). Exit zero is completion of an audit, not closure. --require-closed is a separate fail-closed review gate. The audit lists unexcluded literal/macro records and qualified identifier candidates; it does not claim name resolution, exhaustive macro expansion, generated binding coverage or that each candidate is reachable. Unknown and external ABI entries must be classified before promotion. Source feature intent and build-generated cfg assumptions must be confirmed by actual Cargo metadata/build evidence; do not inject cfg through RUSTFLAGS. Local Cargo.lock changes are reported and hashed, not reverted. The master projection remains 4268/552; active limits remain 4096/512. No source production changes or package additions in this phase.
+
+Follow-up: triage source candidates by family (typed existing route, explicit fail-closed unsupported route, driver/vendor ABI, or migration needed); resolve the real dependency graph in 3B, demonstrate model scope in 3C, and prepare exact-build symbol/producer evidence in 3D/S10. Do not equate source inventory with full closure.
