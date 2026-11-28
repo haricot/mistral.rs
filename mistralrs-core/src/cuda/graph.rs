@@ -1,6 +1,7 @@
 use candle_core::cuda_backend::cudarc::driver::DevicePtr;
 use candle_core::{DType, Layout, Result, Storage, Tensor};
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 fn launch(
     src: *const core::ffi::c_void,
     dst: *mut core::ffi::c_void,
@@ -14,6 +15,7 @@ fn launch(
     Ok(())
 }
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 fn launch_2d(
     src: *const core::ffi::c_void,
     dst: *mut core::ffi::c_void,
@@ -40,6 +42,7 @@ fn launch_2d(
     Ok(())
 }
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 fn dense_row_geometry(layout: &Layout) -> Option<(usize, usize, usize)> {
     let dims = layout.dims();
     let strides = layout.stride();
@@ -62,6 +65,7 @@ fn dense_row_geometry(layout: &Layout) -> Option<(usize, usize, usize)> {
     Some((width, layout.shape().elem_count() / width, pitch))
 }
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 fn launch_layout(
     src: *const core::ffi::c_void,
     dst: *mut core::ffi::c_void,
@@ -91,6 +95,7 @@ fn launch_layout(
     )
 }
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 macro_rules! copy_dtype {
     ($storage:expr, $layout:expr, $out_storage:expr, $out_layout:expr, $ty:ty, $stream:expr) => {{
         let src_slice = $storage.as_cuda_slice::<$ty>()?;
@@ -110,6 +115,7 @@ macro_rules! copy_dtype {
     }};
 }
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 pub fn copy_tensor(src: &Tensor, dst: &Tensor) -> Result<()> {
     if src.shape() != dst.shape()
         || src.dtype() != dst.dtype()
@@ -197,6 +203,87 @@ pub fn copy_tensor(src: &Tensor, dst: &Tensor) -> Result<()> {
             f64,
             stream
         )?,
+        dtype => candle_core::bail!("CUDA graph copy unsupported dtype {dtype:?}"),
+    }
+    Ok(())
+}
+
+
+// The strict route intentionally uses only DtoD driver copies. Arbitrary
+// Candle pitches do not carry a cuMemAllocPitch provenance guarantee.
+// No attempt/retry with cuMemcpy2DAsync inside a live graph capture.
+#[cfg(feature = "dkr-static-closure-probe")]
+pub fn copy_tensor(src: &Tensor, dst: &Tensor) -> Result<()> {
+    use candle_core::cuda_backend::cudarc::driver::{result, DeviceSlice};
+    use mistralrs_kernel_runtime::graph_copy_geometry::CopyGeometry;
+
+    if src.shape() != dst.shape() || src.dtype() != dst.dtype() ||
+        !src.device().is_cuda() || !src.device().same_device(dst.device()) {
+        candle_core::bail!("CUDA graph copy expected matching tensors on the same CUDA device");
+    }
+    let stream = src.device().as_cuda_device()?.cuda_stream();
+    let dst_stream = dst.device().as_cuda_device()?.cuda_stream();
+    if !std::sync::Arc::ptr_eq(stream.context(), dst_stream.context()) ||
+        stream.cu_stream() != dst_stream.cu_stream() {
+        candle_core::bail!("CUDA graph copy requires the same context and stream");
+    }
+    let (src_storage, src_layout) = src.storage_and_layout();
+    let (dst_storage, dst_layout) = dst.storage_and_layout();
+    let Storage::Cuda(src_storage) = &*src_storage else {
+        candle_core::bail!("CUDA graph copy expected CUDA source storage");
+    };
+    let Storage::Cuda(dst_storage) = &*dst_storage else {
+        candle_core::bail!("CUDA graph copy expected CUDA destination storage");
+    };
+    macro_rules! copy_checked {
+        ($ty:ty) => {{
+            let s = src_storage.as_cuda_slice::<$ty>()?;
+            let d = dst_storage.as_cuda_slice::<$ty>()?;
+            let geometry = CopyGeometry::new(
+                src_layout.dims(), src_layout.stride(), dst_layout.stride(),
+                src_layout.start_offset(), dst_layout.start_offset(),
+                s.len(), d.len(), std::mem::size_of::<$ty>(),
+            ).map_err(|e| candle_core::Error::msg(e.to_string()))?;
+            if geometry.rows == 0 { return Ok(()); }
+            // The graph buffer owner retains the destination allocation and
+            // exclusively schedules writes on this stream, including replay.
+            // DevicePtr guards remain live through submission. In capture,
+            // the existing caller disables event tracking and owns lifetimes.
+            if !std::sync::Arc::ptr_eq(s.stream().context(), stream.context()) ||
+                !std::sync::Arc::ptr_eq(d.stream().context(), stream.context()) ||
+                s.stream().cu_stream() != stream.cu_stream() ||
+                d.stream().cu_stream() != stream.cu_stream() {
+                candle_core::bail!("CUDA graph copy allocation stream/context mismatch");
+            }
+            stream.context().bind_to_thread().map_err(candle_core::Error::wrap)?;
+            let (src_ptr, src_guard) = s.device_ptr(&stream);
+            let (dst_ptr, dst_guard) = d.device_ptr(&stream);
+            let bound = geometry.bind(src_ptr, dst_ptr)
+                .map_err(|e| candle_core::Error::msg(e.to_string()))?;
+            if let Some(bound) = bound {
+                for (src_addr, dst_addr, bytes) in bound.rows() {
+                    // SAFETY: checked complete allocation/address ranges,
+                    // non-overlap, same context/stream, and caller-owned graph
+                    // buffer lifetime. On error, return immediately; capture
+                    // owner must discard the graph, never retry a partial copy.
+                    unsafe { result::memcpy_dtod_async(dst_addr, src_addr, bytes, stream.cu_stream()) }
+                        .map_err(candle_core::Error::wrap)?;
+                }
+            }
+            drop(dst_guard);
+            drop(src_guard);
+        }};
+    }
+    match src.dtype() {
+        DType::U8 => copy_checked!(u8),
+        DType::U32 => copy_checked!(u32),
+        DType::I16 => copy_checked!(i16),
+        DType::I32 => copy_checked!(i32),
+        DType::I64 => copy_checked!(i64),
+        DType::BF16 => copy_checked!(half::bf16),
+        DType::F16 => copy_checked!(half::f16),
+        DType::F32 => copy_checked!(f32),
+        DType::F64 => copy_checked!(f64),
         dtype => candle_core::bail!("CUDA graph copy unsupported dtype {dtype:?}"),
     }
     Ok(())

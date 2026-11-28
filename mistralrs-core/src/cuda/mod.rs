@@ -32,7 +32,7 @@ pub(crate) mod gated_add;
 pub mod gdn;
 #[cfg(all(
     feature = "cuda",
-    any(test, all(feature = "flash-attn", target_family = "unix"))
+    any(test, feature = "dkr-static-closure-probe", all(feature = "flash-attn", target_family = "unix"))
 ))]
 pub mod graph;
 #[cfg(feature = "cuda")]

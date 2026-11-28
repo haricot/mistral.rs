@@ -10,12 +10,14 @@ extern "C" {
     #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn gdn_mma_fused_prefill(params: *const c_void) -> i32;
 
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn cuda_graph_copy_bytes(
         src: *const c_void,
         dst: *mut c_void,
         n: i64,
         stream: i64,
     ) -> i32;
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn cuda_graph_copy_2d_bytes(
         src: *const c_void,
         dst: *mut c_void,

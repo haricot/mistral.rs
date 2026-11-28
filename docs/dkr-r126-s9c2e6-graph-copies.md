@@ -1,0 +1,7 @@
+# S9C.2E.6 — CUDA Graph Copies
+
+Strict source implementation: replace the two historical C++ copy wrappers with Cudarc driver DtoD copies. Preserve the legacy route and source for non-strict comparison. The strict graph module is compiled even without flash-attn so S9C.3 can qualify the driver path; this does not enable the existing flash-attn-gated production graph callers.
+
+Use a pure checked geometry helper: contiguous input becomes one copy; arbitrary dense-by-row input becomes one DtoD copy per row. NVIDIA documents that cuMemcpy2DAsync may fail for intra-device pitches not produced by cuMemAllocPitch. Candle tensor views have no such provenance. Do not retry a failed 2D call during capture or use synchronous cuMemcpy2DUnaligned. Row-wise copies may add graph nodes and overhead; compare on S10, not a performance promotion. Require same device/context/stream, checked source and destination span and pointer arithmetic, contiguous destination, and non-overlap (exact identity/empty is a no-op). Capture owner retains buffers through replay and discards capture on error. The inherited graph buffer ownership/write contract is unchanged; this is not a general-purpose tensor mutation API.
+
+No new producer, CUBIN, profile, dependency or lockfile change. Master projection remains 4268/552; active limits 4096/512. GPU capture/replay and link qualification remain pending.

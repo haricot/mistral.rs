@@ -424,3 +424,5 @@ mod tests {
         Ok(())
     }
 }
+
+pub mod graph_copy_geometry;
