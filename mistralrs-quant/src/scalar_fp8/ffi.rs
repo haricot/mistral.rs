@@ -5,6 +5,7 @@ use half::{bf16, f16};
 
 pub(crate) const HAVE_SCALAR_FP8_KERNELS: bool = cfg!(has_scalar_fp8_kernels);
 
+#[cfg(not(feature = "dkr-static-closure-probe"))]
 extern "C" {
     pub(crate) fn launch_fp8_to_f32_kernel(
         d_input: *const F8E4M3,

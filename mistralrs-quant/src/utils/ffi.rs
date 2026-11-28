@@ -232,6 +232,7 @@ extern "C" {
     );
 
     // Fused softmax with sinks for GPT-OSS attention
+    #[cfg(not(feature = "dkr-reduce-norm"))]
     pub fn softmax_with_sinks_f16(
         logits: *const c_void,
         sinks: *const c_void,
@@ -244,6 +245,7 @@ extern "C" {
         scale: f32,
         stream: CUstream,
     );
+    #[cfg(not(feature = "dkr-reduce-norm"))]
     pub fn softmax_with_sinks_bf16(
         logits: *const c_void,
         sinks: *const c_void,
@@ -256,6 +258,7 @@ extern "C" {
         scale: f32,
         stream: CUstream,
     );
+    #[cfg(not(feature = "dkr-reduce-norm"))]
     pub fn softmax_with_sinks_f32(
         logits: *const c_void,
         sinks: *const c_void,

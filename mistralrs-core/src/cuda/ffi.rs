@@ -583,6 +583,7 @@ extern "C" {
     );
 
     // for unquntized models (decoding)
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub fn moe_gemm(
         input: *const c_void,   // input [size_m, size_k]
         weights: *const c_void, // weights [num_experts, size_n, size_k]
@@ -600,6 +601,7 @@ extern "C" {
     );
 
     // for unquntized models (prefill)
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub fn moe_gemm_wmma(
         input: *const c_void,         // device pointer [size_m, size_k]
         weights: *const c_void,       // device pointer [num_experts, size_n, size_k]
@@ -618,6 +620,7 @@ extern "C" {
 
     // Pascal grouped SIMT fallback; the implementation is in moe_gemm_hfma2.cu.
     #[link_name = "mistralrs_moe_gemm_hfma2"]
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub fn moe_gemm_hfma2(
         input: *const c_void,
         weights: *const c_void,
@@ -636,6 +639,7 @@ extern "C" {
     );
 
     // MoE GEMV for decode phase (optimized for small batch sizes M <= 8)
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub fn moe_gemv(
         input: *const c_void,   // input [size_m or size_m / topk, size_k]
         weights: *const c_void, // weights [num_experts, size_n, size_k]

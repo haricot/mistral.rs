@@ -1,0 +1,9 @@
+# S9C.3A.1A.1 — Existing Typed Routes, first source tranche
+
+Baseline: S9C.3A at 3751ddd9, 491 extern records, 158 review candidates, 88 in group A (54 utils, 4 core MoE, 5 quant MoE, 9 MXFP4, 6 scalar FP8, 10 blockwise FP8).
+
+This tranche fences 32 historical declarations, without new profiles: core MoE 4 (legacy provider selected by negative dkr-moe), MXFP4 9 (typed dense GEMV/GEMM and routed path), scalar FP8 6 (typed cast), blockwise FP8 4 dense/routed GEMM and 6 quant/dequant, softmax-with-sinks 3 (existing reduce-norm route). The 6 blockwise quant/dequant operations already explicitly reject strict CUDA requests; fencing their externs is NOT functional migration. Unsupported strict signatures continue to reject. No fake functions, no CPU fallback, no removal of legacy non-strict implementations. Fix MXFP4 loader eligibility which previously relied solely on a producer-generated flag that is absent in strict mode; actual typed signatures are checked by forward dispatch. No claim of model admission.
+
+Remaining 56 group-A records: 18 nonzero/count, 12 bitwise binary, 4 shifts, 6 GPT-OSS SwiGLU (split and interleaved), 6 GLU (ordinary and split), 2 GLU+quantize, 3 softcap, 5 quant MoE (alignment, act-and-mul twice, sum, HunYuan capacity). These are not treated as covered by a merely similar operation: semantics, layout, dtype, ABI, and capture behavior must be checked first. In particular legacy nonzero uses I64 call for I32 in both CCCL branches and reads the base pointer without layout offset; do not copy this behavior into a typed implementation. Nonzero dynamic shape inherently needs a count before output allocation. Quant MoE alignment and HunYuan capacity are not generic weighted reduce.
+
+Expected global review 126, group-A review 56, no profile/image growth (4268/552 projected master; active limits 4096/512). Source audit and GPU qualification pending. This is a partial tranche, not full A.1A closure.

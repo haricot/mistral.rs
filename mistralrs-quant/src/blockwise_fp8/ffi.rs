@@ -193,6 +193,7 @@ extern "C" {
 }
 
 extern "C" {
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn launch_dequant_fp8_blockwise_kernel_f32(
         d_weight: *const F8E4M3,
         d_scale: *const f32,
@@ -206,6 +207,7 @@ extern "C" {
         stream: candle_core::cuda::cudarc::driver::sys::CUstream,
     );
 
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn launch_dequant_fp8_blockwise_kernel_f16(
         d_weight: *const F8E4M3,
         d_scale: *const f32,
@@ -219,6 +221,7 @@ extern "C" {
         stream: candle_core::cuda::cudarc::driver::sys::CUstream,
     );
 
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn launch_dequant_fp8_blockwise_kernel_bf16(
         d_weight: *const F8E4M3,
         d_scale: *const f32,
@@ -232,6 +235,7 @@ extern "C" {
         stream: candle_core::cuda::cudarc::driver::sys::CUstream,
     );
 
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn launch_quant_fp8_blockwise_kernel_f32(
         d_input: *const f32,
         d_weight: *mut F8E4M3,
@@ -245,6 +249,7 @@ extern "C" {
         stream: candle_core::cuda::cudarc::driver::sys::CUstream,
     );
 
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn launch_quant_fp8_blockwise_kernel_f16(
         d_input: *const f16,
         d_weight: *mut F8E4M3,
@@ -258,6 +263,7 @@ extern "C" {
         stream: candle_core::cuda::cudarc::driver::sys::CUstream,
     );
 
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn launch_quant_fp8_blockwise_kernel_bf16(
         d_input: *const bf16,
         d_weight: *mut F8E4M3,
@@ -332,6 +338,7 @@ extern "C" {
     ) -> i32;
 
     // FP8 Matmul kernels (for forward method)
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn launch_fp8_matmul_f16(
         input: *const f16,
         weight: *const F8E4M3,
@@ -346,6 +353,7 @@ extern "C" {
         stream: candle_core::cuda::cudarc::driver::sys::CUstream,
     );
 
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn launch_fp8_matmul_bf16(
         input: *const bf16,
         weight: *const F8E4M3,
@@ -361,6 +369,7 @@ extern "C" {
     );
 
     // FP8 Indexed MoE GEMM kernels (for gather_forward method)
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn launch_fp8_indexed_moe_gemm_f16(
         input: *const f16,
         weights: *const F8E4M3,
@@ -379,6 +388,7 @@ extern "C" {
         stream: candle_core::cuda::cudarc::driver::sys::CUstream,
     );
 
+    #[cfg(not(feature = "dkr-static-closure-probe"))]
     pub(crate) fn launch_fp8_indexed_moe_gemm_bf16(
         input: *const bf16,
         weights: *const F8E4M3,

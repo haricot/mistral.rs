@@ -345,7 +345,9 @@ impl MXFP4Layer {
     fn device_supported(_device: &Device) -> bool {
         #[cfg(feature = "cuda")]
         if matches!(_device, Device::Cuda(_)) {
-            return ffi::HAVE_MXFP4_GEMM_KERNELS;
+            // This is loader eligibility, not catalogue admission. The strict
+            // route validates the actual typed signature on every forward.
+            return cfg!(feature = "dkr-static-closure-probe") || ffi::HAVE_MXFP4_GEMM_KERNELS;
         }
         #[cfg(feature = "metal")]
         if _device.is_metal() {
